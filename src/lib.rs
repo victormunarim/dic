@@ -15,6 +15,8 @@
 //! | [`media`] | Chamada de voz: E2E, pacote fixo de 200 B, buffer de jitter, codec |
 //! | `audio` | Microfone e alto-falante (8 kHz mono) via `cpal` (feature `audio`) |
 //! | `timer` | Temporizadores de 1 ms no Windows (feature `net`) |
+//! | `directory` | Diretório de primeiro contato: publicar e achar o relay de uma chave (feature `net`) |
+//! | `node` | `Node`: relay + telefone + publicação no diretório; liga só com a chave do outro (feature `net`) |
 //! | `phone` | Chamado (`Phone`) e chamador (`call`) sobre o circuito (feature `net`) |
 //! | [`path`] | Modos de caminho: 2 saltos (padrão), 1 salto, direto |
 //!
@@ -62,6 +64,10 @@ pub mod pairing;
 #[cfg(feature = "net")]
 pub mod net;
 pub mod path;
+#[cfg(feature = "net")]
+pub mod directory;
+#[cfg(feature = "net")]
+pub mod node;
 #[cfg(feature = "net")]
 pub mod phone;
 #[cfg(feature = "net")]
