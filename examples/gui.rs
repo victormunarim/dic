@@ -2,12 +2,13 @@
 //! Roteiro no README, seção "Interface gráfica mínima".
 //!
 //! ```text
-//! cargo run --release --features gui --example gui
+//! cargo run --release --features gui,audio --example gui
 //! ```
-//! Sem `--features audio` (ou sem a opção marcada na janela), cada lado envia um tom
-//! (440 Hz quem liga, 660 Hz quem atende). Com ela, usa o microfone e o alto-falante padrão:
-//! `cargo run --release --features gui,audio --example gui`.
-//! Os campos são gravados em `~/.clam-gui.conf` ao ligar/atender.
+//! Você informa a identidade, o endereço do diretório e os contatos; "Ficar online" sobe relay e
+//! telefone e publica no diretório; "Ligar" só precisa da chave pública do outro. Chamadas de
+//! contatos da lista são atendidas sozinhas. Sem `--features audio` (ou sem a opção marcada),
+//! cada lado envia um tom (440 Hz quem liga, 660 Hz quem atende).
+//! Os campos são gravados em `~/.clam-gui.conf` (inclui a chave secreta).
 
 use std::{
     collections::HashMap,
@@ -19,16 +20,18 @@ use std::{
     time::Duration,
 };
 
-use clam::circuit::manager::{Candidate, CircuitManager, ManagerConfig};
 use clam::media::codec::Mulaw;
-use clam::phone::{ActiveCall, Phone, call};
-use clam::transport::{CircuitClient, ClientOptions};
+use clam::node::{Node, NodeConfig};
+use clam::phone::ActiveCall;
 use clam::{
     rand_core::OsRng,
     x25519_dalek::{PublicKey, StaticSecret},
 };
 use eframe::egui;
-use tokio::time::{Instant, MissedTickBehavior, interval};
+use tokio::{
+    sync::mpsc,
+    time::{MissedTickBehavior, interval},
+};
 
 fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
@@ -44,14 +47,6 @@ fn unhex(s: &str) -> Result<[u8; 32], String> {
         *o = u8::from_str_radix(&s[2 * i..2 * i + 2], 16).map_err(|e| e.to_string())?;
     }
     Ok(out)
-}
-
-fn parse_candidate(spec: &str) -> Result<Candidate, String> {
-    let mut p = spec.trim().split(',');
-    let (Some(addr), Some(onion), Some(link)) = (p.next(), p.next(), p.next()) else {
-        return Err(format!("relay '{spec}': esperado endereço,onion,link"));
-    };
-    Ok(Candidate { addr: addr.trim().into(), public: unhex(onion)?.into(), link_public: unhex(link)?, score: 1.0 })
 }
 
 #[cfg(feature = "audio")]
@@ -93,22 +88,32 @@ fn tone(hz: f64, n: usize) -> Vec<i16> {
     (0..160).map(|i| (6000.0 * (std::f64::consts::TAU * hz * (n * 160 + i) as f64 / 8000.0).sin()) as i16).collect()
 }
 
-#[derive(Clone, Copy, PartialEq)]
-enum Mode {
-    Dial,
-    Answer,
-}
-
 #[derive(Default, Clone)]
 struct Form {
     secret: String,
-    peer: String,
-    relay_a: String,
-    relay_b: String,
-    listen: String,
+    directory: String,
+    /// Uma linha por contato: `[nome] chave-pública-hex`.
     contacts: String,
-    seconds: String,
+    peer: String,
+    public_addr: String,
     use_audio: bool,
+}
+
+/// Contatos da lista: `(nome, chave)`. Linhas sem uma chave de 64 hex são ignoradas.
+fn parse_contacts(text: &str) -> Vec<(String, [u8; 32])> {
+    text.lines()
+        .filter_map(|l| {
+            let mut name = vec![];
+            let mut key = None;
+            for t in l.split_whitespace() {
+                match unhex(t) {
+                    Ok(k) => key = Some(k),
+                    Err(_) => name.push(t),
+                }
+            }
+            key.map(|k| (if name.is_empty() { hex(&k)[..8].to_string() } else { name.join(" ") }, k))
+        })
+        .collect()
 }
 
 fn conf_path() -> PathBuf {
@@ -118,32 +123,28 @@ fn conf_path() -> PathBuf {
 
 impl Form {
     fn load() -> Self {
-        let mut f = Form { listen: "0.0.0.0:7000".into(), seconds: "15".into(), ..Default::default() };
-        let Ok(text) = std::fs::read_to_string(conf_path()) else { return f };
+        let Ok(text) = std::fs::read_to_string(conf_path()) else { return Form::default() };
         let kv: HashMap<_, _> = text.lines().filter_map(|l| l.split_once('=')).map(|(k, v)| (k.to_string(), v.to_string())).collect();
-        let get = |k: &str, d: &str| kv.get(k).cloned().unwrap_or_else(|| d.to_string());
-        f.secret = get("secret", "");
-        f.peer = get("peer", "");
-        f.relay_a = get("relay_a", "");
-        f.relay_b = get("relay_b", "");
-        f.listen = get("listen", &f.listen);
-        f.contacts = get("contacts", "");
-        f.seconds = get("seconds", &f.seconds);
-        f.use_audio = get("audio", "0") == "1";
-        f
+        let get = |k: &str| kv.get(k).cloned().unwrap_or_default();
+        Form {
+            secret: get("secret"),
+            directory: get("directory"),
+            contacts: get("contacts").replace(';', "\n"),
+            peer: get("peer"),
+            public_addr: get("public_addr"),
+            use_audio: get("audio") == "1",
+        }
     }
 
     fn save(&self) {
         let text = format!(
-            "audio={}\nsecret={}\npeer={}\nrelay_a={}\nrelay_b={}\nlisten={}\ncontacts={}\nseconds={}\n",
+            "audio={}\nsecret={}\ndirectory={}\ncontacts={}\npeer={}\npublic_addr={}\n",
             u8::from(self.use_audio),
             self.secret.trim(),
+            self.directory.trim(),
+            self.contacts.trim().replace('\n', ";"),
             self.peer.trim(),
-            self.relay_a.trim(),
-            self.relay_b.trim(),
-            self.listen.trim(),
-            self.contacts.replace('\n', ";").trim(),
-            self.seconds.trim()
+            self.public_addr.trim()
         );
         let path = conf_path();
         // Contém a chave secreta: no Unix, só o dono lê.
@@ -158,6 +159,19 @@ impl Form {
 
     fn identity(&self) -> Result<StaticSecret, String> {
         unhex(&self.secret).map(StaticSecret::from).map_err(|e| format!("identidade: {e}"))
+    }
+
+    /// Resolve o campo "ligar para": uma chave de 64 hex ou o nome de um contato.
+    fn target(&self) -> Result<[u8; 32], String> {
+        let p = self.peer.trim();
+        if let Ok(k) = unhex(p) {
+            return Ok(k);
+        }
+        parse_contacts(&self.contacts)
+            .into_iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(p))
+            .map(|(_, k)| k)
+            .ok_or_else(|| "informe a chave pública (64 hex) ou o nome de um contato".to_string())
     }
 }
 
@@ -182,12 +196,12 @@ impl Sink {
     }
 }
 
-/// Envia um tom a cada 20 ms e relata, por segundo, o que chegou. `secs = None`: até o outro lado desligar.
-async fn talk(mut c: ActiveCall, hz: f64, secs: Option<u64>, stop: Arc<AtomicBool>, out: Sink, sound: Option<Sound>) {
+/// Envia um tom (ou o microfone) a cada 20 ms e relata, por segundo, o que chegou. Termina ao desligar
+/// (`stop`) ou quando o outro lado desliga.
+async fn talk(mut c: ActiveCall, hz: f64, stop: Arc<AtomicBool>, out: Sink, sound: Option<Sound>) {
     let mut tick = interval(Duration::from_millis(20));
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut report = interval(Duration::from_secs(1));
-    let end = secs.map(|s| Instant::now() + Duration::from_secs(s));
     let (mut n, mut frames, mut energy) = (0usize, 0u64, 0f64);
     let mut prev = c.stats();
     loop {
@@ -195,17 +209,16 @@ async fn talk(mut c: ActiveCall, hz: f64, secs: Option<u64>, stop: Arc<AtomicBoo
             _ = tick.tick() => {
                 if stop.load(Ordering::Relaxed) { break; }
                 // Com microfone: manda o que já foi capturado (até 2 quadros, para absorver atraso do relógio).
-                let frames: Vec<Vec<i16>> = match &sound {
+                let sent: Vec<Vec<i16>> = match &sound {
                     Some(s) => std::iter::from_fn(|| s.mic_frame()).take(2).collect(),
                     None => vec![tone(hz, n)],
                 };
                 let mut closed = false;
-                for f in frames {
+                for f in sent {
                     closed |= c.send(f).await.is_err();
                 }
                 if closed { break; }
                 n += 1;
-                if end.is_some_and(|e| Instant::now() >= e) { break; }
             }
             f = c.next_pcm() => match f {
                 Some(f) => {
@@ -219,8 +232,8 @@ async fn talk(mut c: ActiveCall, hz: f64, secs: Option<u64>, stop: Arc<AtomicBoo
                 let s = c.stats();
                 let rms = if frames > 0 { (energy / frames as f64).sqrt() } else { 0.0 };
                 out.line(format!(
-                    "recebidos +{:<3} (total {})  rejeitados {}  escondidos +{}  atraso {} ms  volume {:.0}",
-                    s.received - prev.received, s.received, s.rejected, s.concealed - prev.concealed, s.delay_ms, rms
+                    "recebidos +{:<3} (total {})  escondidos +{}  atraso {} ms  volume {:.0}",
+                    s.received - prev.received, s.received, s.concealed - prev.concealed, s.delay_ms, rms
                 ));
                 prev = s;
                 (frames, energy) = (0, 0.0);
@@ -233,97 +246,148 @@ async fn talk(mut c: ActiveCall, hz: f64, secs: Option<u64>, stop: Arc<AtomicBoo
     tokio::time::sleep(Duration::from_millis(500)).await;
 }
 
-async fn run_dial(form: Form, stop: Arc<AtomicBool>, out: Sink) -> Result<(), String> {
-    let me = form.identity()?;
-    let peer = PublicKey::from(unhex(&form.peer).map_err(|e| format!("chave do contato: {e}"))?);
-    let a = parse_candidate(&form.relay_a)?;
-    let b = parse_candidate(&form.relay_b)?;
-    let secs: u64 = form.seconds.trim().parse().map_err(|_| "segundos: número inválido")?;
-    let mgr = CircuitManager::new(ManagerConfig::default(), "contato:9", vec![a, b]);
-    let client = CircuitClient::spawn_with(mgr, Duration::from_secs(3), ClientOptions::default());
-    out.line("ligando...");
-    let c = call(client, &me, &peer, Mulaw::new(), Duration::from_secs(15)).await.map_err(|e| format!("não completou: {e}"))?;
-    let sound = open_sound(form.use_audio, &out);
-    out.line(format!("atendida; {secs} s"));
-    talk(c, 440.0, Some(secs), stop, out, sound).await;
-    Ok(())
+enum Cmd {
+    Dial([u8; 32]),
 }
 
-async fn run_answer(form: Form, stop: Arc<AtomicBool>, out: Sink) -> Result<(), String> {
-    let me = form.identity()?;
-    let contacts = form
-        .contacts
-        .split([';', '\n', ' ', ','])
-        .filter(|s| !s.trim().is_empty())
-        .map(unhex)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("contatos: {e}"))?;
-    if contacts.is_empty() {
-        return Err("liste ao menos uma chave de contato: sem contatos ninguém toca".into());
+/// Estado compartilhado entre a janela e a tarefa do nó.
+#[derive(Default)]
+struct Shared {
+    /// Há uma chamada em andamento (entrando ou saindo).
+    in_call: AtomicBool,
+    /// Pedido de desligar a chamada atual.
+    hangup: AtomicBool,
+    /// Texto de estado do nó ("online em ...").
+    status: Mutex<String>,
+}
+
+/// Roda o nó até `stop`: atende contatos sozinho e disca quando a janela pede.
+async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, shared: Arc<Shared>, stop: Arc<AtomicBool>, out: Sink) -> Result<(), String> {
+    let secret = form.identity()?;
+    let contacts: Vec<_> = parse_contacts(&form.contacts);
+    let mut cfg = NodeConfig::new(secret, form.directory.trim(), contacts.iter().map(|(_, k)| *k).collect());
+    if !form.public_addr.trim().is_empty() {
+        cfg.public_addr = Some(form.public_addr.trim().to_string());
     }
-    let listen = form.listen.trim().parse().map_err(|e| format!("endereço de escuta: {e}"))?;
-    let mut phone = Phone::bind(listen, me, contacts).await.map_err(|e| format!("não abriu a porta: {e}"))?;
-    out.line(format!("telefone ouvindo em {}", phone.local_addr()));
+    out.line("conectando ao diretório...");
+    let mut node = Node::start(cfg).await.map_err(|e| format!("não ficou online: {e}"))?;
+    *shared.status.lock().unwrap() = format!("online em {}", node.published_addr());
+    out.line(format!("online; os outros chegam em {}", node.published_addr()));
     loop {
-        tokio::select! {
-            inc = phone.next_incoming() => {
-                let Some(inc) = inc else { break };
-                out.line(format!("chamada de {}", &hex(inc.caller().as_bytes())[..16]));
-                match inc.accept(Mulaw::new()).await {
-                    Ok(c) => {
-                        let sound = open_sound(form.use_audio, &out);
-                        talk(c, 660.0, None, stop.clone(), out.clone(), sound).await
-                    }
-                    Err(e) => out.line(format!("não atendeu: {e}")),
-                }
-            }
-            _ = tokio::time::sleep(Duration::from_millis(200)) => {}
-        }
         if stop.load(Ordering::Relaxed) {
             break;
         }
+        tokio::select! {
+            inc = node.next_incoming() => {
+                let Some(inc) = inc else { break };
+                let name = contacts.iter().find(|(_, k)| k == inc.caller().as_bytes()).map(|(n, _)| n.clone()).unwrap_or_else(|| hex(inc.caller().as_bytes())[..8].to_string());
+                if shared.in_call.swap(true, Ordering::Relaxed) {
+                    out.line(format!("{name} ligou, mas já há uma chamada; recusada"));
+                    inc.reject().await;
+                    continue;
+                }
+                out.line(format!("chamada de {name}"));
+                shared.hangup.store(false, Ordering::Relaxed);
+                match inc.accept(Mulaw::new()).await {
+                    Ok(c) => start_talk(c, 660.0, &shared, &out, form.use_audio),
+                    Err(e) => {
+                        out.line(format!("não atendeu: {e}"));
+                        shared.in_call.store(false, Ordering::Relaxed);
+                    }
+                }
+            }
+            cmd = rx.recv() => match cmd {
+                Some(Cmd::Dial(peer)) => {
+                    if shared.in_call.swap(true, Ordering::Relaxed) {
+                        out.line("já há uma chamada em andamento");
+                        continue;
+                    }
+                    shared.hangup.store(false, Ordering::Relaxed);
+                    out.line("ligando...");
+                    match node.dial(peer, Mulaw::new(), Duration::from_secs(15)).await {
+                        Ok(c) => {
+                            out.line("atendida");
+                            start_talk(c, 440.0, &shared, &out, form.use_audio);
+                        }
+                        Err(e) => {
+                            out.line(format!("não completou: {e}"));
+                            shared.in_call.store(false, Ordering::Relaxed);
+                        }
+                    }
+                }
+                None => break,
+            },
+            _ = tokio::time::sleep(Duration::from_millis(200)) => {}
+        }
     }
-    phone.stop();
+    shared.hangup.store(true, Ordering::Relaxed);
     Ok(())
+}
+
+/// Inicia a conversa numa tarefa própria; `hangup` (da janela) encerra.
+fn start_talk(c: ActiveCall, hz: f64, shared: &Arc<Shared>, out: &Sink, want_audio: bool) {
+    let sound = open_sound(want_audio, out);
+    let (shared, out) = (shared.clone(), out.clone());
+    // `talk` olha este sinalizador local; um vigia o liga quando a janela pede para desligar.
+    let stop = Arc::new(AtomicBool::new(false));
+    let (watch, sh) = (stop.clone(), shared.clone());
+    tokio::spawn(async move {
+        while !watch.load(Ordering::Relaxed) {
+            if sh.hangup.load(Ordering::Relaxed) {
+                watch.store(true, Ordering::Relaxed);
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    });
+    tokio::spawn(async move {
+        talk(c, hz, stop.clone(), out, sound).await;
+        stop.store(true, Ordering::Relaxed);
+        shared.in_call.store(false, Ordering::Relaxed);
+    });
+}
+
+struct Running {
+    cmds: mpsc::UnboundedSender<Cmd>,
+    stop: Arc<AtomicBool>,
 }
 
 struct App {
     rt: tokio::runtime::Runtime,
     form: Form,
-    mode: Mode,
     log: Log,
-    running: Option<Arc<AtomicBool>>,
+    shared: Arc<Shared>,
+    running: Option<Running>,
     done: Arc<AtomicBool>,
     error: String,
 }
 
 impl App {
-    fn start(&mut self, ctx: &egui::Context) {
+    fn go_online(&mut self, ctx: &egui::Context) {
         self.error.clear();
         if let Err(e) = self.form.identity() {
             self.error = e;
             return;
         }
+        if self.form.directory.trim().is_empty() {
+            self.error = "informe o endereço do diretório (host:porta)".into();
+            return;
+        }
         self.form.save();
         self.log.lock().unwrap().clear();
+        let (tx, rx) = mpsc::unbounded_channel();
         let stop = Arc::new(AtomicBool::new(false));
         let done = Arc::new(AtomicBool::new(false));
         let out = Sink { log: self.log.clone(), ctx: ctx.clone() };
-        let (form, mode) = (self.form.clone(), self.mode);
-        let (stop2, done2) = (stop.clone(), done.clone());
+        let (form, shared, stop2, done2) = (self.form.clone(), self.shared.clone(), stop.clone(), done.clone());
         self.rt.spawn(async move {
-            let r = match mode {
-                Mode::Dial => run_dial(form, stop2, out.clone()).await,
-                Mode::Answer => run_answer(form, stop2, out.clone()).await,
-            };
-            if let Err(e) = r {
+            if let Err(e) = run_node(form, rx, shared, stop2, out.clone()).await {
                 out.line(format!("ERRO: {e}"));
             }
-            out.line("parado");
+            out.line("offline");
             done2.store(true, Ordering::Relaxed);
             out.ctx.request_repaint();
         });
-        self.running = Some(stop);
+        self.running = Some(Running { cmds: tx, stop });
         self.done = done;
     }
 }
@@ -336,23 +400,17 @@ fn field(ui: &mut egui::Ui, label: &str, text: &mut String, enabled: bool) {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
-        if self.done.load(Ordering::Relaxed) {
+        if self.done.swap(false, Ordering::Relaxed) {
             self.running = None;
-            self.done.store(false, Ordering::Relaxed);
+            self.shared.in_call.store(false, Ordering::Relaxed);
+            self.shared.status.lock().unwrap().clear();
         }
-        let idle = self.running.is_none();
+        let offline = self.running.is_none();
+        let in_call = self.shared.in_call.load(Ordering::Relaxed);
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("Clam: chamada de voz");
-            ui.horizontal(|ui| {
-                ui.add_enabled_ui(idle, |ui| {
-                    ui.checkbox(&mut self.form.use_audio, "Microfone e alto-falante");
-                    ui.separator();
-                    ui.radio_value(&mut self.mode, Mode::Dial, "Ligar");
-                    ui.radio_value(&mut self.mode, Mode::Answer, "Atender");
-                });
-            });
             egui::Grid::new("form").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
-                field(ui, "Identidade (chave secreta, 64 hex)", &mut self.form.secret, idle);
+                field(ui, "Identidade (chave secreta, 64 hex)", &mut self.form.secret, offline);
                 ui.label("Minha chave pública");
                 ui.horizontal(|ui| {
                     match self.form.identity() {
@@ -367,37 +425,64 @@ impl eframe::App for App {
                             ui.weak("(informe ou gere a identidade)");
                         }
                     }
-                    if ui.add_enabled(idle, egui::Button::new("Gerar nova")).clicked() {
+                    if ui.add_enabled(offline, egui::Button::new("Gerar nova")).clicked() {
                         self.form.secret = hex(&StaticSecret::random_from_rng(OsRng).to_bytes());
                     }
                 });
                 ui.end_row();
-                match self.mode {
-                    Mode::Dial => {
-                        field(ui, "Chave pública de quem vou chamar", &mut self.form.peer, idle);
-                        field(ui, "Relay A (endereço,onion,link)", &mut self.form.relay_a, idle);
-                        field(ui, "Relay B (endereço,onion,link)", &mut self.form.relay_b, idle);
-                        field(ui, "Duração (segundos)", &mut self.form.seconds, idle);
-                    }
-                    Mode::Answer => {
-                        field(ui, "Escutar em (ip:porta)", &mut self.form.listen, idle);
-                        field(ui, "Chaves públicas permitidas (separe por ;)", &mut self.form.contacts, idle);
-                    }
-                }
+                field(ui, "Diretório (host:porta)", &mut self.form.directory, offline);
+                ui.label("Contatos (um por linha:\n[nome] chave pública)");
+                ui.add_enabled(offline, egui::TextEdit::multiline(&mut self.form.contacts).desired_rows(3).desired_width(f32::INFINITY));
+                ui.end_row();
+                ui.label("Opções");
+                ui.vertical(|ui| {
+                    ui.add_enabled(offline, egui::Checkbox::new(&mut self.form.use_audio, "Microfone e alto-falante (use fones)"));
+                    ui.add_enabled_ui(offline, |ui| {
+                        ui.collapsing("Avançado", |ui| {
+                            ui.label("Endereço público ip:porta (só se o diretório vir um IP que não serve, como em NAT):");
+                            ui.text_edit_singleline(&mut self.form.public_addr);
+                        });
+                    });
+                });
+                ui.end_row();
             });
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                let label = if self.mode == Mode::Dial { "Ligar" } else { "Atender" };
-                if ui.add_enabled(idle, egui::Button::new(label)).clicked() {
-                    self.start(ctx);
-                }
-                if ui.add_enabled(!idle, egui::Button::new("Desligar")).clicked()
-                    && let Some(s) = &self.running
+                if offline {
+                    if ui.button("Ficar online").clicked() {
+                        self.go_online(ctx);
+                    }
+                } else if ui.add_enabled(!in_call, egui::Button::new("Ficar offline")).clicked()
+                    && let Some(r) = &self.running
                 {
-                    s.store(true, Ordering::Relaxed);
+                    r.stop.store(true, Ordering::Relaxed);
+                }
+                let st = self.shared.status.lock().unwrap().clone();
+                if !st.is_empty() {
+                    ui.label(st);
                 }
                 if !self.error.is_empty() {
                     ui.colored_label(egui::Color32::LIGHT_RED, &self.error);
+                }
+            });
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.label("Ligar para:");
+                ui.add_enabled(!offline && !in_call, egui::TextEdit::singleline(&mut self.form.peer).hint_text("nome ou chave pública").desired_width(420.0));
+                if ui.add_enabled(!offline && !in_call, egui::Button::new("Ligar")).clicked() {
+                    match self.form.target() {
+                        Ok(k) => {
+                            self.error.clear();
+                            self.form.save();
+                            if let Some(r) = &self.running {
+                                let _ = r.cmds.send(Cmd::Dial(k));
+                            }
+                        }
+                        Err(e) => self.error = e,
+                    }
+                }
+                if ui.add_enabled(in_call, egui::Button::new("Desligar")).clicked() {
+                    self.shared.hangup.store(true, Ordering::Relaxed);
                 }
             });
             ui.separator();
@@ -407,13 +492,14 @@ impl eframe::App for App {
                 }
             });
         });
+        ctx.request_repaint_after(Duration::from_millis(300));
     }
 }
 
 fn main() -> eframe::Result {
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("runtime");
     let opts = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([760.0, 520.0]).with_title("Clam"),
+        viewport: egui::ViewportBuilder::default().with_inner_size([820.0, 560.0]).with_title("Clam"),
         ..Default::default()
     };
     eframe::run_native(
@@ -423,8 +509,8 @@ fn main() -> eframe::Result {
             Ok(Box::new(App {
                 rt,
                 form: Form::load(),
-                mode: Mode::Dial,
                 log: Arc::default(),
+                shared: Arc::default(),
                 running: None,
                 done: Arc::default(),
                 error: String::new(),

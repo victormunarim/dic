@@ -370,7 +370,11 @@ impl Phone {
         self.incoming.recv().await
     }
 
-    pub fn stop(self) {
+    pub fn stop(self) {}
+}
+
+impl Drop for Phone {
+    fn drop(&mut self) {
         for t in &self.tasks {
             t.abort();
         }

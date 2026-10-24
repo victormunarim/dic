@@ -41,7 +41,7 @@ pub struct Candidate {
     pub score: f32,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct ManagerConfig {
     /// Ping ao circuito ativo. Padrão: 100 ms.
     pub ping_interval_ms: u64,
@@ -66,6 +66,9 @@ pub struct ManagerConfig {
     /// ativo, e a troca no failover não muda o padrão de tráfego. Custa o dobro de banda
     /// do cover. Sem efeito se `cover_ms` é `None`. Padrão: `true`.
     pub standby_cover: bool,
+    /// Endereço do relay que deve ser sempre o segundo salto (o de saída). Útil quando só um relay
+    /// conhece o destino (o nó do chamado). Os demais ficam como primeiro salto. `None`: ambos sorteados.
+    pub exit_addr: Option<String>,
 }
 
 impl Default for ManagerConfig {
@@ -80,6 +83,7 @@ impl Default for ManagerConfig {
             cooldown_ms: 30_000,
             cover_ms: None,
             standby_cover: true,
+            exit_addr: None,
         }
     }
 }
@@ -473,8 +477,14 @@ impl CircuitManager {
         if pool.len() < 2 {
             return None;
         }
+        let second = match &self.cfg.exit_addr {
+            Some(x) => {
+                let i = pool.iter().position(|c| &c.addr == x)?;
+                pool.remove(i).clone()
+            }
+            None => take_one(&mut pool).clone(),
+        };
         let first = take_one(&mut pool).clone();
-        let second = take_one(&mut pool).clone();
 
         let circ = self.next_circ;
         self.next_circ = self.next_circ.wrapping_add(1).max(1);

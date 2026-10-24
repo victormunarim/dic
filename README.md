@@ -772,46 +772,37 @@ let mut chamada = call(cliente, &minha_chave, &chave_do_contato, Mulaw::new(), D
 - `tests/phone.rs` cobre: chamada por relays reais com áudio nos dois sentidos e desligar; recusa; desconhecido sem resposta; troca de conexão (failover) sem convite; e queda do primeiro relay do circuito ativo no meio da chamada (6 relays, voz nos dois sentidos): a voz volta sozinha com lacuna de ~400 ms em 127.0.0.1 (limite do teste 800 ms), sem novo convite.
 - Limites: o `Phone` aceita TCP de qualquer origem (não só dos relays), então protege-se só pela autenticação dos pacotes: quem não é contato é ignorado, mas pode gastar CPU com lixo. Uma chamada por contato e por vez não é imposta. Não há toque/ocupado, e a chamada em grupo não existe.
 
-### Testar uma chamada entre Linux e Windows
+### Conexão simples: diretório só para o primeiro contato
 
-`examples/call.rs` faz uma chamada real sem placa de som: cada lado manda um tom (440 Hz quem liga, 660 Hz quem atende) e imprime, por segundo, pacotes recebidos, rejeitados, quadros escondidos, atraso do jitter e o `rms` do que tocaria (`rms 0` = silêncio/perda, ~4200 = tom chegando). Os scripts montam o cenário: o Windows roda o telefone e o relay B; o Linux roda o relay A e liga.
+Só o **primeiro contato** usa servidor. Um diretório (`src/directory.rs`) guarda, por 120 s, "chave pública → relay" de quem está online; cada `Node` (`src/node.rs`) republica a sua entrada a cada 40 s. Para ligar, você consulta a chave do contato uma vez, monta o circuito de 2 saltos até o relay dele e o resto (convite, voz) segue P2P pelos relays, sem passar pelo diretório.
 
-1. Nas duas máquinas: Rust instalado e o projeto clonado. Libere as portas TCP 4001 (relays) e 7000 (telefone) no firewall. A porta 4001 precisa estar aberta **nas duas** (o relay B pode ser o primeiro salto e chega ao A).
-2. **Linux**: `scripts/call.sh pub` imprime a sua chave pública (cria `call-identity.key`; guarde).
-3. **Windows** (PowerShell, administrador se usar `-OpenFirewall`):
+- Quem publica prova a posse da chave sem assinatura (DH com a chave do servidor + HMAC do pedido); ninguém publica por outra chave.
+- O diretório vê IPs e chaves de quem publica e consulta, nunca o conteúdo das chamadas.
+- Cada pessoa é relay de si mesma. Com só duas pessoas, o primeiro salto é o relay do chamador e o chamado vê o IP dele; com mais gente online, o primeiro salto é sorteado do diretório.
+- Atrás de NAT, abra a porta 4001 ou informe `public_addr`.
 
-   ```powershell
-   .\scripts\call-windows.ps1 -PublicIp 192.168.0.20 -CallerPub <chave do passo 2> -OpenFirewall
-   ```
+Servidor (uma máquina alcançável pelos dois lados):
 
-   Compila, gera a identidade do telefone, sobe telefone e relay B, e imprime o comando do passo 4 já preenchido (falta só o IP do Linux).
-4. **Linux**:
-
-   ```sh
-   scripts/call.sh dial <IP-DO-LINUX> 192.168.0.20 '192.168.0.20:4001,<onion>,<link>' <chave do telefone> 15 7000
-   ```
-
-Esperado: `ligando...`, `atendida`, e ~50 pacotes recebidos por segundo nos dois lados com `rejeitados 0`. Failover com 2 relays não foi testado; o teste de queda automático usa 6 relays (`tests/phone.rs`).
-
-Se `ligando...` não passa: circuito não montou (firewall/IP/chave do relay trocada) ou o relay de saída não tem rota para o telefone (`contato:9=...`; o script já passa). Se `atendida` nunca aparece: a chave de quem liga não é a de `-CallerPub`; o telefone ignora desconhecidos sem responder. Testado: o lado Linux e o telefone em Linux, com tudo em 127.0.0.1. **O `call-windows.ps1` e o Windows nunca foram executados.**
+```text
+cargo run --release --features net --example directory -- 0.0.0.0:7777
+```
 
 ### Interface gráfica mínima
 
 Guias passo a passo por sistema: [`docs/LINUX.md`](docs/LINUX.md) e [`docs/WINDOWS.md`](docs/WINDOWS.md).
 
-Uma janela para ligar e atender sem digitar nada no terminal (só o comando que abre a janela):
-
 ```text
 cargo run --release --features gui --example gui
 ```
 
-- **Identidade**: cole a chave secreta (64 hex) ou clique em *Gerar nova*. A chave pública aparece ao lado, com botão *Copiar*; passe-a a quem vai te chamar.
-- **Ligar**: chave pública de quem você chama, as linhas dos dois relays (`endereço,onion,link`, como o `measure relay` imprime) e a duração.
-- **Atender**: endereço de escuta (`ip:porta`) e as chaves públicas permitidas, separadas por `;`. Quem não estiver na lista não recebe resposta.
-- O log mostra, por segundo, pacotes recebidos, escondidos e atraso. *Desligar* encerra a chamada.
-- Os campos são gravados em `~/.clam-gui.conf` (`%USERPROFILE%` no Windows), **inclusive a chave secreta**; no Unix o arquivo fica com permissão `0600`.
-- **Áudio real** (feature `audio`, `src/audio.rs`): `cargo run --release --features gui,audio --example gui` e marque *Microfone e alto-falante*. Usa os dispositivos padrão do sistema via `cpal`, converte para 8 kHz mono (média de caixa na descida, interpolação linear na subida) e limita cada fila a 400 ms. **Use fones**: não há cancelamento de eco. Sem a opção marcada, ou se os dispositivos não abrirem, cai para o tom (440 Hz quem liga, 660 Hz quem atende, como no `examples/call.rs`). No Linux a compilação exige `pkg-config` e `libasound2-dev`; no Windows não exige nada extra. Os relays continuam sendo iniciados por `measure relay` / `scripts/`.
-- Dependência de GUI (`eframe`) fica atrás da feature `gui`; o crate principal não a puxa. Fixada em 0.32 por conflito de `js-sys` da 0.37 com o libp2p.
+1. **Identidade**: cole a chave secreta (64 hex) ou *Gerar nova*; a chave pública aparece com *Copiar*. Passe-a a quem vai te chamar.
+2. **Diretório**: `host:porta` do servidor. **Contatos**: chaves públicas que podem ligar para você, separadas por `;` (quem não estiver na lista não recebe resposta; contatos são atendidos automaticamente).
+3. **Ficar online** publica você no diretório. **Ligar** pede a chave pública do outro; **Desligar** encerra.
+4. Os campos são gravados em `~/.clam-gui.conf` (`%USERPROFILE%` no Windows), **inclusive a chave secreta**; no Unix o arquivo fica `0600`.
+5. **Áudio real** (feature `audio`): `--features gui,audio` e marque *Microfone e alto-falante*. Usa `cpal`, 8 kHz mono, filas de 400 ms. **Use fones**: sem cancelamento de eco. Sem a opção, cai para tom (440 Hz quem liga, 660 Hz quem atende). No Linux a compilação exige `pkg-config` e `libasound2-dev`.
+6. `eframe` fica atrás da feature `gui`, fixado em 0.32 (a 0.37 conflita com o libp2p por `js-sys`).
+
+O fluxo antigo, com relays manuais, continua em `examples/call.rs` e `examples/measure.rs`.
 
 ## Windows
 
