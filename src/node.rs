@@ -23,14 +23,12 @@ use crate::{
         manager::{Candidate, CircuitManager, ManagerConfig},
         relay::{RelayConfig, RelayNode},
     },
-    directory::{self, REPUBLISH, RelayInfo},
+    directory::{self, REPUBLISH, RelayInfo, dest_for},
     media::codec::Codec,
     phone::{ActiveCall, CallError, IncomingCall, Phone, call},
     transport::{CircuitClient, ClientOptions, RelayServer, ServerConfig, allow_list},
 };
 
-/// Nome lógico do destino que o relay de saída mapeia para o telefone local.
-const DEST: &str = "contato:9";
 /// Porta de relay preferida; se estiver ocupada, o sistema escolhe outra.
 pub const DEFAULT_RELAY_PORT: u16 = 4001;
 
@@ -45,11 +43,14 @@ pub struct NodeConfig {
     /// Endereço `ip:porta` que os outros devem usar para chegar ao relay, se o IP que o diretório
     /// enxerga não serve (NAT com redirecionamento de porta, VPN). `None`: o diretório decide.
     pub public_addr: Option<String>,
+    /// Atrás de NAT, sem porta aberta: usa o relay do próprio servidor (o servidor precisa ter sido
+    /// iniciado com relay). O servidor passa a ver o seu IP e o tráfego cifrado das suas chamadas.
+    pub via_server: bool,
 }
 
 impl NodeConfig {
     pub fn new(secret: StaticSecret, directory: impl Into<String>, contacts: Vec<[u8; 32]>) -> Self {
-        Self { secret, directory: directory.into(), contacts, relay_port: DEFAULT_RELAY_PORT, public_addr: None }
+        Self { secret, directory: directory.into(), contacts, relay_port: DEFAULT_RELAY_PORT, public_addr: None, via_server: false }
     }
 }
 
@@ -81,7 +82,7 @@ impl Node {
         let relay_node = RelayNode::new(StaticSecret::random_from_rng(rand_core::OsRng), RelayConfig::default(), 0);
         let onion = relay_node.public_key();
         let mut scfg = ServerConfig::new(SocketAddr::from(([0, 0, 0, 0], cfg.relay_port)));
-        scfg.exit = allow_list(vec![(DEST.to_string(), phone.local_addr().to_string())]);
+        scfg.exit = allow_list(vec![(dest_for(&me.to_bytes()), phone.local_addr().to_string())]);
         let relay = match RelayServer::spawn(relay_node, scfg.clone()).await {
             Ok(r) => r,
             // Porta ocupada: o sistema escolhe outra. `RelayNode` foi consumido, então recria.
@@ -90,26 +91,31 @@ impl Node {
                 let onion = n.public_key();
                 scfg.listen = SocketAddr::from(([0, 0, 0, 0], 0));
                 let r = RelayServer::spawn(n, scfg).await?;
-                return Self::finish(cfg.secret, cfg.directory, cfg.public_addr, phone, r, onion, me).await;
+                return Self::finish(cfg.secret, cfg.directory, cfg.public_addr, cfg.via_server, phone, r, onion).await;
             }
             Err(e) => return Err(e),
         };
-        Self::finish(cfg.secret, cfg.directory, cfg.public_addr, phone, relay, onion, me).await
+        Self::finish(cfg.secret, cfg.directory, cfg.public_addr, cfg.via_server, phone, relay, onion).await
     }
 
     async fn finish(
         secret: StaticSecret,
         directory: String,
         public_addr: Option<String>,
+        via_server: bool,
         phone: Phone,
         relay: RelayServer,
         onion: [u8; 32],
-        _me: PublicKey,
     ) -> io::Result<Self> {
         let (port, link) = (relay.local_addr().port(), relay.link_public_key());
+        let last_error = Arc::new(Mutex::new(None));
+        if via_server {
+            let (addr, task) = directory::host(&directory, &secret, phone.local_addr(), last_error.clone()).await?;
+            let mine = RelayInfo { addr, onion, link };
+            return Ok(Self { secret, directory, phone, relay, mine, last_error, republish: task });
+        }
         let addr = directory::publish(&directory, &secret, port, onion, link, public_addr.as_deref()).await?;
         let mine = RelayInfo { addr, onion, link };
-        let last_error = Arc::new(Mutex::new(None));
         let republish = {
             let (directory, secret, last_error, public_addr) = (directory.clone(), secret.clone(), last_error.clone(), public_addr);
             tokio::spawn(async move {
@@ -152,7 +158,7 @@ impl Node {
         relays.push(Candidate { addr: format!("127.0.0.1:{port}"), public: self.mine.onion.into(), link_public: self.mine.link, score: 0.5 });
         relays.push(exit.candidate());
         let cfg = ManagerConfig { exit_addr: Some(exit.addr.clone()), ..Default::default() };
-        let client = CircuitClient::spawn_with(CircuitManager::new(cfg, DEST, relays), Duration::from_secs(3), ClientOptions::default());
+        let client = CircuitClient::spawn_with(CircuitManager::new(cfg, &dest_for(&peer), relays), Duration::from_secs(3), ClientOptions::default());
         Ok(call(client, &self.secret, &PublicKey::from(peer), codec, wait).await?)
     }
 

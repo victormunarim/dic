@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use clam::directory::{self, DirectoryServer};
+use clam::directory::{self, DirectoryServer, HostConfig};
 use clam::media::codec::Mulaw;
 use clam::node::{DialError, Node, NodeConfig};
 use clam::{
@@ -152,4 +152,87 @@ async fn third_node_serves_as_first_hop() {
     let ca = a.dial(pb, Mulaw::new(), Duration::from_secs(15)).await.unwrap();
     let _ = answer.await.unwrap();
     ca.hangup();
+}
+
+async fn hosted_call(a_hosted: bool, b_hosted: bool) {
+    let d = DirectoryServer::spawn_with(
+        "127.0.0.1:0".parse().unwrap(),
+        Some(HostConfig { relay_listen: "127.0.0.1:0".parse().unwrap(), relay_public: None }),
+    )
+    .await
+    .unwrap();
+    let addr = d.local_addr().to_string();
+    let (sa, sb) = (key(), key());
+    let (pa, pb) = (*PublicKey::from(&sa).as_bytes(), *PublicKey::from(&sb).as_bytes());
+    let a = Node::start(NodeConfig { via_server: a_hosted, ..cfg(sa, &addr, vec![]) }).await.unwrap();
+    let mut b = Node::start(NodeConfig { via_server: b_hosted, ..cfg(sb, &addr, vec![pa]) }).await.unwrap();
+    if b_hosted {
+        assert_eq!(b.published_addr(), d.relay_addr().unwrap().to_string());
+    }
+    let answer = tokio::spawn(async move {
+        let inc = timeout(Duration::from_secs(15), b.next_incoming()).await.unwrap().unwrap();
+        (inc.accept(Mulaw::new()).await.unwrap(), b)
+    });
+    let mut ca = a.dial(pb, Mulaw::new(), Duration::from_secs(15)).await.unwrap();
+    let (mut cb, _b) = answer.await.unwrap();
+    let end = Instant::now() + Duration::from_millis(1500);
+    let (mut n, mut got_a, mut got_b) = (0, 0, 0);
+    while Instant::now() < end {
+        ca.send(tone(n)).await.unwrap();
+        cb.send(tone(n)).await.unwrap();
+        n += 1;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        while let Ok(Some(f)) = timeout(Duration::from_millis(1), cb.next_pcm()).await {
+            got_b += f.iter().any(|x| x.abs() > 1000) as usize;
+        }
+        while let Ok(Some(f)) = timeout(Duration::from_millis(1), ca.next_pcm()).await {
+            got_a += f.iter().any(|x| x.abs() > 1000) as usize;
+        }
+    }
+    assert!(got_a >= 20 && got_b >= 20, "a {got_a} b {got_b}");
+    ca.hangup();
+}
+
+/// Quem atende está atrás de NAT (sem porta aberta): o relay do servidor emenda a conexão por uma saída do nó.
+#[tokio::test]
+async fn hosted_callee_talks_through_server_relay() {
+    hosted_call(false, true).await;
+}
+
+#[tokio::test]
+async fn both_hosted_talk() {
+    hosted_call(true, true).await;
+}
+
+#[tokio::test]
+async fn host_needs_proof_and_server_support() {
+    // Servidor sem relay recusa.
+    let (_d, addr) = dir().await;
+    let err = directory::host(&addr, &key(), "127.0.0.1:1".parse().unwrap(), Default::default()).await.unwrap_err();
+    assert!(err.to_string().contains("sem relay"), "{err}");
+
+    // Prova de posse falsa: pede para hospedar a chave de `me` com a prova de outra secreta.
+    let d = DirectoryServer::spawn_with(
+        "127.0.0.1:0".parse().unwrap(),
+        Some(HostConfig { relay_listen: "127.0.0.1:0".parse().unwrap(), relay_public: None }),
+    )
+    .await
+    .unwrap();
+    let me = *PublicKey::from(&key()).as_bytes();
+    let mut t = tokio::net::TcpStream::connect(d.local_addr()).await.unwrap();
+    let hello = read_frame(&mut t).await;
+    let e: [u8; 32] = hello[..32].try_into().unwrap();
+    let mut req = vec![4u8];
+    req.extend_from_slice(&me);
+    let shared = key().diffie_hellman(&PublicKey::from(e));
+    let mut m = <Hmac<Sha256> as Mac>::new_from_slice(shared.as_bytes()).unwrap();
+    m.update(b"clam-dir-v1");
+    m.update(&e);
+    m.update(&req);
+    req.extend_from_slice(&m.finalize().into_bytes());
+    let mut f = (req.len() as u16).to_be_bytes().to_vec();
+    f.extend_from_slice(&req);
+    t.write_all(&f).await.unwrap();
+    assert_eq!(read_frame(&mut t).await[0], 0x81);
+    assert!(directory::lookup(&d.local_addr().to_string(), &me).await.unwrap().is_none());
 }
