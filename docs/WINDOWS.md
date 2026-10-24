@@ -15,7 +15,13 @@ Uma máquina só, acessível pelos dois lados (pode ser a do Linux):
 cargo run --release --features net --example directory -- 0.0.0.0:7777
 ```
 
-Libere a porta TCP 7777 no Firewall do Windows.
+Libere a porta TCP 7777 (e a 4000, se usar o relay abaixo) no Firewall do Windows.
+
+Para quem estiver atrás de NAT sem poder abrir porta, suba o servidor com relay:
+
+```
+cargo run --release --features net --example directory -- 0.0.0.0:7777 --relay 0.0.0.0:4000 IP-PUBLICO:4000
+```
 
 ## 3. Cada pessoa
 
@@ -31,7 +37,7 @@ cargo run --release --features gui,audio --example gui
 4. *Ficar online*.
 5. Para ligar, cole a chave pública do outro em *Ligar*. Use fones.
 
-Atrás de NAT: redirecione a porta 4001 e preencha o endereço público (`ip:4001`).
+Atrás de NAT: ou redirecione a porta 4001 e preencha o endereço público (`ip:4001`), ou, se o servidor foi iniciado com `--relay`, marque *Atrás de NAT: usar o relay do servidor* (não precisa abrir porta; o servidor passa a ver seu IP).
 Config em `%USERPROFILE%\.clam-gui.conf` (contém a chave secreta).
 O programa pede timers de 1 ms ao Windows (`timeBeginPeriod`) para manter a cadência da voz.
 

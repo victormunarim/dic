@@ -97,6 +97,7 @@ struct Form {
     peer: String,
     public_addr: String,
     use_audio: bool,
+    via_server: bool,
 }
 
 /// Contatos da lista: `(nome, chave)`. Linhas sem uma chave de 64 hex são ignoradas.
@@ -133,18 +134,20 @@ impl Form {
             peer: get("peer"),
             public_addr: get("public_addr"),
             use_audio: get("audio") == "1",
+            via_server: get("via_server") == "1",
         }
     }
 
     fn save(&self) {
         let text = format!(
-            "audio={}\nsecret={}\ndirectory={}\ncontacts={}\npeer={}\npublic_addr={}\n",
+            "audio={}\nsecret={}\ndirectory={}\ncontacts={}\npeer={}\npublic_addr={}\nvia_server={}\n",
             u8::from(self.use_audio),
             self.secret.trim(),
             self.directory.trim(),
             self.contacts.trim().replace('\n', ";"),
             self.peer.trim(),
-            self.public_addr.trim()
+            self.public_addr.trim(),
+            u8::from(self.via_server)
         );
         let path = conf_path();
         // Contém a chave secreta: no Unix, só o dono lê.
@@ -266,6 +269,7 @@ async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, shared: Arc<
     let secret = form.identity()?;
     let contacts: Vec<_> = parse_contacts(&form.contacts);
     let mut cfg = NodeConfig::new(secret, form.directory.trim(), contacts.iter().map(|(_, k)| *k).collect());
+    cfg.via_server = form.via_server;
     if !form.public_addr.trim().is_empty() {
         cfg.public_addr = Some(form.public_addr.trim().to_string());
     }
@@ -437,6 +441,7 @@ impl eframe::App for App {
                 ui.label("Opções");
                 ui.vertical(|ui| {
                     ui.add_enabled(offline, egui::Checkbox::new(&mut self.form.use_audio, "Microfone e alto-falante (use fones)"));
+                    ui.add_enabled(offline, egui::Checkbox::new(&mut self.form.via_server, "Atrás de NAT: usar o relay do servidor (sem abrir porta)"));
                     ui.add_enabled_ui(offline, |ui| {
                         ui.collapsing("Avançado", |ui| {
                             ui.label("Endereço público ip:porta (só se o diretório vir um IP que não serve, como em NAT):");

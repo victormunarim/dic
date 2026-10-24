@@ -14,7 +14,13 @@ git clone git@github.com:victormunarim/dic.git && cd dic
 cargo run --release --features net --example directory -- 0.0.0.0:7777
 ```
 
-Libere a porta TCP 7777. O diretório só guarda "chave pública → relay" por 120 s.
+Libere a porta TCP 7777 (e a 4000, se usar o relay abaixo). O diretório só guarda "chave pública → relay" por 120 s.
+
+Para quem estiver atrás de NAT sem poder abrir porta, suba o servidor com relay:
+
+```
+cargo run --release --features net --example directory -- 0.0.0.0:7777 --relay 0.0.0.0:4000 IP-PUBLICO:4000
+```
 
 ## 3. Cada pessoa
 
@@ -30,5 +36,5 @@ cargo run --release --features gui,audio --example gui     # sem áudio: --featu
 4. *Ficar online*.
 5. Para ligar, cole a chave pública do outro em *Ligar*. Use fones.
 
-Atrás de NAT: redirecione a porta 4001 e preencha o endereço público (`ip:4001`).
+Atrás de NAT: ou redirecione a porta 4001 e preencha o endereço público (`ip:4001`), ou, se o servidor foi iniciado com `--relay`, marque *Atrás de NAT: usar o relay do servidor* (não precisa abrir porta; o servidor passa a ver seu IP).
 Config em `~/.clam-gui.conf` (contém a chave secreta, modo 0600).

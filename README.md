@@ -780,11 +780,14 @@ Só o **primeiro contato** usa servidor. Um diretório (`src/directory.rs`) guar
 - O diretório vê IPs e chaves de quem publica e consulta, nunca o conteúdo das chamadas.
 - Cada pessoa é relay de si mesma. Com só duas pessoas, o primeiro salto é o relay do chamador e o chamado vê o IP dele; com mais gente online, o primeiro salto é sorteado do diretório.
 - Atrás de NAT, abra a porta 4001 ou informe `public_addr`.
+- **Atrás de NAT sem abrir porta**: o servidor pode rodar também um relay (`--relay`). O nó marca "usar o relay do servidor" (`NodeConfig.via_server`): fica com uma conexão de controle de saída aberta e o diretório publica o relay do servidor como o dele. A cada circuito para você, o servidor avisa pelo controle, você abre uma conexão de saída com uma ficha de 16 bytes e o servidor emenda as duas (`REQ_HOST`/`REQ_ATTACH` em `src/directory.rs`). Custo: o servidor vê seu IP e o tráfego cifrado das suas chamadas; ele é o último salto. Cobertura: `tests/node.rs`.
 
 Servidor (uma máquina alcançável pelos dois lados):
 
 ```text
 cargo run --release --features net --example directory -- 0.0.0.0:7777
+# com relay para quem está atrás de NAT (porta TCP 4000 também liberada):
+cargo run --release --features net --example directory -- 0.0.0.0:7777 --relay 0.0.0.0:4000 IP-PUBLICO:4000
 ```
 
 ### Interface gráfica mínima
