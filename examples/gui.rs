@@ -323,6 +323,9 @@ async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, shared: Arc<
             },
             _ = tokio::time::sleep(Duration::from_millis(200)) => {}
         }
+        if let Some(n) = node.take_notice() {
+            out.line(n);
+        }
     }
     shared.hangup.store(true, Ordering::Relaxed);
     Ok(())
