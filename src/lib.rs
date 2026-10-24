@@ -14,6 +14,7 @@
 //! | [`circuit`] | Circuito de 2 saltos: handshake por salto, camadas AEAD, relay e cliente |
 //! | [`media`] | Chamada de voz: E2E, pacote fixo de 200 B, buffer de jitter, codec |
 //! | `audio` | Microfone e alto-falante (8 kHz mono) via `cpal` (feature `audio`) |
+//! | `timer` | Temporizadores de 1 ms no Windows (feature `net`) |
 //! | `phone` | Chamado (`Phone`) e chamador (`call`) sobre o circuito (feature `net`) |
 //! | [`path`] | Modos de caminho: 2 saltos (padrão), 1 salto, direto |
 //!
@@ -63,6 +64,8 @@ pub mod net;
 pub mod path;
 #[cfg(feature = "net")]
 pub mod phone;
+#[cfg(feature = "net")]
+pub mod timer;
 #[cfg(feature = "net")]
 pub mod runner;
 pub mod presence;
