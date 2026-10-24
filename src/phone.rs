@@ -335,6 +335,7 @@ impl Phone {
     /// Escuta em `listen`. Só convites de `contacts` (chaves estáticas do pareamento) tocam;
     /// os outros são descartados sem resposta, para não revelar que o telefone existe.
     pub async fn bind(listen: SocketAddr, my_static: StaticSecret, contacts: Vec<[u8; 32]>) -> io::Result<Self> {
+        crate::timer::fine_timers();
         let listener = TcpListener::bind(listen).await?;
         let addr = listener.local_addr()?;
         let (actor_tx, actor_rx) = mpsc::channel(1024);

@@ -91,6 +91,8 @@ Ctrl+C encerra os processos e remove as regras de firewall. Este script ainda n�
 
 ## 5. Problemas comuns
 
+- **Testes `profile_switch_changes_link_cadence_live` / `relay_profile_sets_and_switches_link_cadence` falhando** (`standard 64`, `economy 31`): o relógio padrão do Windows tem passo de ~15,6 ms e a cadência de 10/20 ms saía a ~60%. O crate agora pede temporizadores de 1 ms (`clam::timer::fine_timers`, `timeBeginPeriod`) ao criar relay, cliente e telefone. Se ainda falhar, avise com a saída.
+
 - **`link.exe` não encontrado**: faltam as Build Tools do Visual Studio; reinstale pelo `rustup-init.exe`.
 - **Script bloqueado** ("execução de scripts desabilitada"): rode `Set-ExecutionPolicy -Scope Process Bypass` na mesma janela.
 - **"sem microfone padrão"** ou silêncio: defina o microfone padrão em Configurações > Sistema > Som e permita o acesso em Privacidade.

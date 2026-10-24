@@ -281,6 +281,7 @@ pub struct RelayServer {
 impl RelayServer {
     /// Abre o socket e inicia o relay. Devolve o endereço efetivo (útil com porta 0).
     pub async fn spawn(node: RelayNode, mut cfg: ServerConfig) -> io::Result<Self> {
+        crate::timer::fine_timers();
         let listener = TcpListener::bind(cfg.listen).await?;
         let addr = listener.local_addr()?;
         let link = cfg.link_secret.take().unwrap_or_else(|| StaticSecret::random_from_rng(OsRng));
@@ -578,6 +579,7 @@ impl CircuitClient {
 
     /// Inicia o gerente com opções (reputação, cover traffic).
     pub fn spawn_with(mut manager: CircuitManager, connect_timeout: Duration, options: ClientOptions) -> Self {
+        crate::timer::fine_timers();
         let ClientOptions { reputation: rep, mut cover, mut circuit_cover, profile } = options;
         if let Some(p) = profile {
             (cover, circuit_cover) = (p.link_interval(), p.circuit_interval());
