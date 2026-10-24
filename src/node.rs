@@ -143,6 +143,11 @@ impl Node {
         self.last_error.lock().unwrap().clone()
     }
 
+    /// Motivo de um convite descartado em silêncio, se houve (veja [`Phone::take_notice`]).
+    pub fn take_notice(&self) -> Option<String> {
+        self.phone.take_notice()
+    }
+
     pub async fn next_incoming(&mut self) -> Option<IncomingCall> {
         self.phone.next_incoming().await
     }

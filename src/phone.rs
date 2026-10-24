@@ -328,6 +328,7 @@ impl IncomingCall {
 pub struct Phone {
     addr: SocketAddr,
     incoming: mpsc::Receiver<IncomingCall>,
+    notice: Arc<Mutex<Option<String>>>,
     tasks: Vec<JoinHandle<()>>,
 }
 
@@ -341,6 +342,7 @@ impl Phone {
         let (actor_tx, actor_rx) = mpsc::channel(1024);
         let (inc_tx, inc_rx) = mpsc::channel(8);
         let ids = Arc::new(AtomicU64::new(1));
+        let notice: Arc<Mutex<Option<String>>> = Arc::default();
 
         let accept_tx = actor_tx.clone();
         let accept = tokio::spawn(async move {
@@ -362,12 +364,18 @@ impl Phone {
                 tokio::spawn(read_frames(rd, conn, accept_tx.clone()));
             }
         });
-        let actor = tokio::spawn(run_actor(actor_rx, actor_tx, inc_tx, my_static, contacts, ids));
-        Ok(Self { addr, incoming: inc_rx, tasks: vec![accept, actor] })
+        let actor = tokio::spawn(run_actor(actor_rx, actor_tx, inc_tx, my_static, contacts, ids, notice.clone()));
+        Ok(Self { addr, incoming: inc_rx, notice, tasks: vec![accept, actor] })
     }
 
     pub fn local_addr(&self) -> SocketAddr {
         self.addr
+    }
+
+    /// Motivo do último convite descartado em silêncio (remetente fora dos contatos, ou relógios
+    /// diferentes), uma vez só. Só para diagnóstico local: o remetente não recebe resposta.
+    pub fn take_notice(&self) -> Option<String> {
+        self.notice.lock().unwrap().take()
     }
 
     /// Próximo convite de um contato. `None` = o telefone parou.
@@ -418,6 +426,7 @@ async fn run_actor(
     secret: StaticSecret,
     contacts: Vec<[u8; 32]>,
     ids: Arc<AtomicU64>,
+    notice: Arc<Mutex<Option<String>>>,
 ) {
     let mut writers: HashMap<u64, mpsc::Sender<Vec<u8>>> = HashMap::new();
     let mut binds: HashMap<u64, Bind> = HashMap::new();
@@ -459,7 +468,18 @@ async fn run_actor(
                 }
                 Some(Bind::Pending) => {}
                 None => {
-                    let invite = Incoming::parse(&secret, unix_secs(), &data).ok().filter(|i| contacts.contains(i.caller().as_bytes()));
+                    let parsed = Incoming::parse(&secret, unix_secs(), &data);
+                    if matches!(parsed, Err(crate::media::MediaError::Stale)) {
+                        *notice.lock().unwrap() = Some("convite ignorado: relógio desta máquina difere em mais de 60 s do de quem ligou".into());
+                    }
+                    let invite = parsed.ok().filter(|i| {
+                        let known = contacts.contains(i.caller().as_bytes());
+                        if !known {
+                            let hex: String = i.caller().as_bytes()[..4].iter().map(|b| format!("{b:02x}")).collect();
+                            *notice.lock().unwrap() = Some(format!("convite de {hex}... ignorado: essa chave não está em Contatos"));
+                        }
+                        known
+                    });
                     if let Some(invite) = invite {
                         let call = IncomingCall { invite, secret: secret.clone(), conn, actor: me.clone(), ids: ids.clone() };
                         if incoming.try_send(call).is_ok() {
