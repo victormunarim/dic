@@ -166,10 +166,13 @@ pub struct HostConfig {
     /// `ip:porta` que os outros usam para chegar ao relay. `None`: o IP de `relay_listen` e a porta efetiva
     /// (serve para testes locais; em produção informe o IP público).
     pub relay_public: Option<String>,
+    /// Escreve em stderr cada nó hospedado, circuito recebido e conexão emendada (para diagnóstico).
+    pub verbose: bool,
 }
 
 struct Host {
     info: RelayInfo,
+    verbose: bool,
     routes: Arc<Mutex<HashMap<String, SocketAddr>>>,
     pending: Mutex<HashMap<[u8; 16], (TcpStream, Instant)>>,
 }
@@ -196,7 +199,7 @@ impl DirectoryServer {
                 let relay = RelayServer::spawn(node, scfg).await?;
                 let public = cfg.relay_public.unwrap_or_else(|| format!("{}:{}", cfg.relay_listen.ip(), relay.local_addr().port()));
                 let info = RelayInfo { addr: public, onion, link: relay.link_public_key() };
-                (Some(Arc::new(Host { info, routes, pending: Mutex::default() })), Some(relay))
+                (Some(Arc::new(Host { info, verbose: cfg.verbose, routes, pending: Mutex::default() })), Some(relay))
             }
         };
         let relay_addr = relay.as_ref().map(RelayServer::local_addr);
@@ -241,7 +244,7 @@ async fn serve(mut s: TcpStream, peer: SocketAddr, table: Table, host: Option<Ar
             Err(_) => return Ok(()),
         };
         match req.first() {
-            Some(&REQ_HOST) => return host_control(s, &eph, e_pub.as_bytes(), &req, &table, host).await,
+            Some(&REQ_HOST) => return host_control(s, peer, &eph, e_pub.as_bytes(), &req, &table, host).await,
             Some(&REQ_ATTACH) => return attach(s, &req, host).await,
             _ => {}
         }
@@ -252,7 +255,7 @@ async fn serve(mut s: TcpStream, peer: SocketAddr, table: Table, host: Option<Ar
 }
 
 /// Conexão de controle de um nó hospedado: registra a rota, publica a entrada e avisa a cada circuito novo.
-async fn host_control(mut s: TcpStream, eph: &StaticSecret, e_pub: &[u8; 32], req: &[u8], table: &Table, host: Option<Arc<Host>>) -> io::Result<()> {
+async fn host_control(mut s: TcpStream, peer: SocketAddr, eph: &StaticSecret, e_pub: &[u8; 32], req: &[u8], table: &Table, host: Option<Arc<Host>>) -> io::Result<()> {
     let refuse = |m: &str| [&[RES_ERR][..], m.as_bytes()].concat();
     let Some(host) = host else { return write_frame(&mut s, &refuse("servidor sem relay hospedado")).await };
     if req.len() != 1 + 32 + 32 {
@@ -283,6 +286,9 @@ async fn host_control(mut s: TcpStream, eph: &StaticSecret, e_pub: &[u8; 32], re
         t.insert(pubkey, Entry { info: host.info.clone(), seen: Instant::now() });
     };
     set_entry();
+    if host.verbose {
+        eprintln!("[servidor] {key} hospedado, conexão de {peer}");
+    }
     write_frame(&mut s, &[&[RES_OK][..], host.info.addr.as_bytes()].concat()).await?;
     let mut tick = interval(REPUBLISH);
     tick.tick().await;
@@ -300,6 +306,9 @@ async fn host_control(mut s: TcpStream, eph: &StaticSecret, e_pub: &[u8; 32], re
                         continue;
                     }
                     p.insert(tok, (c, Instant::now()));
+                }
+                if host.verbose {
+                    eprintln!("[servidor] circuito para {key}: avisando o nó");
                 }
                 if write_frame(&mut s, &[&[CTL_OPEN][..], &tok].concat()).await.is_err() {
                     break;
@@ -319,6 +328,9 @@ async fn host_control(mut s: TcpStream, eph: &StaticSecret, e_pub: &[u8; 32], re
             }
         }
     }
+    if host.verbose {
+        eprintln!("[servidor] {key} saiu");
+    }
     // Só desfaz se a rota ainda é desta conexão (o nó pode ter reconectado).
     let mut r = host.routes.lock().unwrap();
     if r.get(&key) == Some(&faddr) {
@@ -333,7 +345,15 @@ async fn host_control(mut s: TcpStream, eph: &StaticSecret, e_pub: &[u8; 32], re
 async fn attach(mut s: TcpStream, req: &[u8], host: Option<Arc<Host>>) -> io::Result<()> {
     let (Some(host), Ok(tok)) = (host, <[u8; 16]>::try_from(&req[1..])) else { return Ok(()) };
     let taken = host.pending.lock().unwrap().remove(&tok);
-    let Some((mut c, _)) = taken.filter(|(_, t)| t.elapsed() < PENDING_TTL) else { return Ok(()) };
+    let Some((mut c, _)) = taken.filter(|(_, t)| t.elapsed() < PENDING_TTL) else {
+        if host.verbose {
+            eprintln!("[servidor] ficha de anexo desconhecida ou vencida");
+        }
+        return Ok(());
+    };
+    if host.verbose {
+        eprintln!("[servidor] nó anexou; emendando");
+    }
     let _ = copy_bidirectional(&mut s, &mut c).await;
     Ok(())
 }

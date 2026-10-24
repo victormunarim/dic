@@ -157,7 +157,7 @@ async fn third_node_serves_as_first_hop() {
 async fn hosted_call(a_hosted: bool, b_hosted: bool) {
     let d = DirectoryServer::spawn_with(
         "127.0.0.1:0".parse().unwrap(),
-        Some(HostConfig { relay_listen: "127.0.0.1:0".parse().unwrap(), relay_public: None }),
+        Some(HostConfig { relay_listen: "127.0.0.1:0".parse().unwrap(), relay_public: None, verbose: false }),
     )
     .await
     .unwrap();
@@ -214,7 +214,7 @@ async fn host_needs_proof_and_server_support() {
     // Prova de posse falsa: pede para hospedar a chave de `me` com a prova de outra secreta.
     let d = DirectoryServer::spawn_with(
         "127.0.0.1:0".parse().unwrap(),
-        Some(HostConfig { relay_listen: "127.0.0.1:0".parse().unwrap(), relay_public: None }),
+        Some(HostConfig { relay_listen: "127.0.0.1:0".parse().unwrap(), relay_public: None, verbose: false }),
     )
     .await
     .unwrap();

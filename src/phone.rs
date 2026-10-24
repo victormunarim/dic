@@ -345,7 +345,12 @@ impl Phone {
         let accept_tx = actor_tx.clone();
         let accept = tokio::spawn(async move {
             let mut conn = 0u64;
-            while let Ok((stream, _)) = listener.accept().await {
+            loop {
+                // No Windows o accept pode falhar por uma conexão que já caiu; isso não encerra o telefone.
+                let Ok((stream, _)) = listener.accept().await else {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    continue;
+                };
                 conn += 1;
                 let _ = stream.set_nodelay(true);
                 let (rd, wr) = stream.into_split();
