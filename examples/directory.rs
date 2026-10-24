@@ -19,6 +19,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(i) => Some(HostConfig {
             relay_listen: args.get(i + 1).ok_or("--relay precisa de <escuta> <ip:porta público>")?.parse()?,
             relay_public: Some(args.get(i + 2).ok_or("--relay precisa de <escuta> <ip:porta público>")?.clone()),
+            verbose: true,
         }),
         None => None,
     };
