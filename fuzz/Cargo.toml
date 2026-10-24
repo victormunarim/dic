@@ -1,0 +1,56 @@
+[package]
+name = "clam-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+clam = { path = ".." }
+
+[workspace]
+
+[[bin]]
+name = "cell"
+path = "fuzz_targets/cell.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "descriptor"
+path = "fuzz_targets/descriptor.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "reputation"
+path = "fuzz_targets/reputation.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "presence"
+path = "fuzz_targets/presence.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "relay"
+path = "fuzz_targets/relay.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "manager"
+path = "fuzz_targets/manager.rs"
+test = false
+doc = false
+bench = false
