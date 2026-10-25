@@ -61,3 +61,11 @@ required-features = ["net"]
 [[example]]
 name = "call"
 required-features = ["net"]
+
+# Em desenvolvimento (sem --release) o egui, o openh264 e a criptografia ficam lentos demais para
+# uma chamada: ver tela repinta a 60 Hz e a janela deixa de responder. As dependências saem otimizadas.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
