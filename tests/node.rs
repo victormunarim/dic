@@ -669,3 +669,52 @@ async fn relay_keys_survive_a_restart() {
     assert_ne!(first.0, third.0);
     assert_ne!(first.1, third.1);
 }
+
+/// Os dois lados reiniciam e o diretório não volta: com as chaves do relay guardadas, o endereço
+/// que A tinha de B ainda vale e a ligação sai sem consultar o diretório.
+#[tokio::test]
+async fn both_restarted_and_directory_gone_still_dials_stored_address() {
+    use clam::node::RelayKeys;
+    let (d, addr) = dir().await;
+    let (sa, sb) = (key(), key());
+    let (pa, pb) = (*PublicKey::from(&sa).as_bytes(), *PublicKey::from(&sb).as_bytes());
+    let (ka, kb) = (RelayKeys::random(), RelayKeys::random());
+    let port = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    };
+    let with = |s: &StaticSecret, k: &RelayKeys, contacts: Vec<[u8; 32]>, relay_port: u16, dir: &str| NodeConfig {
+        relay_port,
+        relay_keys: Some(k.clone()),
+        ..cfg(s.clone(), dir, contacts)
+    };
+
+    let mut b = Node::start(with(&sb, &kb, vec![pa], port, &addr)).await.unwrap();
+    let a = Node::start(with(&sa, &ka, vec![], 0, &addr)).await.unwrap();
+    let first = tokio::spawn(async move {
+        let inc = timeout(Duration::from_secs(15), b.next_incoming()).await.unwrap().unwrap();
+        (inc.accept(Mulaw::new()).await.unwrap(), b)
+    });
+    let ca = a.dial(pb, Mulaw::new(), Duration::from_secs(15)).await.unwrap();
+    let (cb, b) = first.await.unwrap();
+    let known = a.known();
+    ca.hangup();
+    drop(cb);
+    a.stop();
+    b.stop();
+
+    // Tudo reinicia, o diretório não volta.
+    let dead = addr.clone();
+    drop(d);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let mut b2 = Node::start(with(&sb, &kb, vec![pa], port, &dead)).await.unwrap();
+    let a2 = Node::start(NodeConfig { known, ..with(&sa, &ka, vec![], 0, &dead) }).await.unwrap();
+    assert!(a2.directory_error().is_some());
+    let second = tokio::spawn(async move {
+        let inc = timeout(Duration::from_secs(15), b2.next_incoming()).await.unwrap().unwrap();
+        (inc.accept(Mulaw::new()).await.unwrap(), b2)
+    });
+    let ca = a2.dial(pb, Mulaw::new(), Duration::from_secs(15)).await.unwrap();
+    let (_cb, _b2) = second.await.unwrap();
+    ca.hangup();
+}
