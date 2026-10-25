@@ -286,6 +286,22 @@ fn format_known(known: &Stored, hints: &Stored) -> String {
     known.iter().map(|e| line(e, "")).chain(hints.iter().map(|e| line(e, " dica"))).collect()
 }
 
+/// Contato removido com o nó parado: tira o endereço dele de `.clam-gui.known`.
+pub(crate) fn forget_known(key: &[u8; 32]) -> std::io::Result<()> {
+    let (mut known, mut hints) = load_known();
+    known.retain(|(k, _)| k != key);
+    hints.retain(|(k, _)| k != key);
+    save_known(&known, &hints)
+}
+
+/// Contato adicionado com o nó parado: o relay do código direto dele entra em `.clam-gui.known` como dica.
+pub(crate) fn remember_hint(key: [u8; 32], relay: clam::directory::RelayInfo) -> std::io::Result<()> {
+    let (known, mut hints) = load_known();
+    hints.retain(|(k, _)| *k != key);
+    hints.push((key, relay));
+    save_known(&known, &hints)
+}
+
 /// Chaves do relay deste computador, num arquivo à parte (`onion link`, em hex). Mantê-las entre execuções
 /// faz o endereço que os contatos guardaram de você continuar valendo depois de reabrir ou recompilar.
 pub(crate) fn relay_keys_path() -> PathBuf {

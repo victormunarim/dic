@@ -196,6 +196,14 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
                         Err(e) => out.line(format!("não deu para remover: {e}")),
                     }
                 }
+                Some(Cmd::Contact(key, relay)) => {
+                    node.add_contact(key, relay);
+                    saver.sync(&node.known(), &node.hints(), &out);
+                }
+                Some(Cmd::Forget(key)) => {
+                    node.forget(&key);
+                    saver.sync(&node.known(), &node.hints(), &out);
+                }
                 Some(Cmd::MicTest) => {
                     if shared.in_call.swap(true, Ordering::Relaxed) {
                         out.line("encerre a chamada antes de testar o microfone");

@@ -359,7 +359,21 @@ impl App {
             });
         }
         if let Some(i) = remove {
+            let key = contacts[i].1;
             self.form.contacts = remove_contact(&self.form.contacts, i);
+            // O endereço guardado do contato vai junto (a menos que a mesma chave ainda esteja na lista).
+            if !parse_contacts(&self.form.contacts).iter().any(|(_, k)| *k == key) {
+                match &self.running {
+                    Some(r) => {
+                        let _ = r.cmds.send(Cmd::Forget(key));
+                    }
+                    None => {
+                        if let Err(e) = forget_known(&key) {
+                            self.error = format!("não deu para tirar o endereço do contato de {}: {e}", known_path().display());
+                        }
+                    }
+                }
+            }
             self.form.save();
         }
         ui.separator();
@@ -376,6 +390,19 @@ impl App {
                         && let Some((_, Some(dir), _)) = split_direct(&self.form.new_code)
                     {
                         self.form.directory = dir;
+                    }
+                    if let Some((key, _, relay)) = split_direct(&self.form.new_code) {
+                        match (&self.running, relay) {
+                            (Some(r), relay) => {
+                                let _ = r.cmds.send(Cmd::Contact(key, relay));
+                            }
+                            (None, Some(relay)) => {
+                                if let Err(e) = remember_hint(key, relay) {
+                                    self.error = format!("não deu para guardar o endereço do contato em {}: {e}", known_path().display());
+                                }
+                            }
+                            (None, None) => {}
+                        }
                     }
                     let line = format!("{} {}", name.trim(), self.form.new_code.trim());
                     if !self.form.contacts.trim().is_empty() {

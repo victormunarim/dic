@@ -873,3 +873,18 @@ async fn dead_direct_code_without_directory_says_so() {
     assert!(matches!(err, DialError::NoDirectory { tried_stored: true }), "{err}");
     assert!(a.known().is_empty());
 }
+
+/// Contato novo entra com o endereço do código; contato removido leva o endereço guardado junto.
+#[tokio::test]
+async fn adding_and_forgetting_a_contact_moves_its_address_too() {
+    use clam::directory::RelayInfo;
+    let pb = *PublicKey::from(&key()).as_bytes();
+    let relay = RelayInfo { addr: "127.0.0.1:1".into(), onion: [7; 32], link: [8; 32] };
+    let a = Node::start(NodeConfig { relay_port: 0, punch: false, upnp: false, ..NodeConfig::new(key(), "", vec![]) }).await.unwrap();
+    a.add_contact(pb, Some(relay.clone()));
+    assert_eq!(a.hints(), vec![(pb, relay.clone())]);
+    assert_eq!(a.dialer().stored_address(&pb), Some(relay.addr.clone()));
+    a.forget(&pb);
+    assert!(a.hints().is_empty() && a.known().is_empty());
+    assert_eq!(a.dialer().stored_address(&pb), None);
+}

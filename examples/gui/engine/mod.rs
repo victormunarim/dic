@@ -62,6 +62,10 @@ impl Sink {
 pub(crate) enum Cmd {
     /// Contato a ligar e, se o código dele veio com o relay (código direto), onde achá-lo sem diretório.
     Dial([u8; 32], Option<clam::directory::RelayInfo>),
+    /// Contato novo (e o relay do código dele, se veio um código direto): atender e guardar o endereço.
+    Contact([u8; 32], Option<clam::directory::RelayInfo>),
+    /// Contato removido: parar de atender e esquecer o endereço guardado.
+    Forget([u8; 32]),
     /// Segredo, dono da sala (se conhecido) e nome.
     Join([u8; 32], Option<[u8; 32]>, String),
     /// O dono tira um membro: troca o segredo e avisa só quem fica.

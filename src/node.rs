@@ -471,6 +471,21 @@ impl Node {
         }
     }
 
+    /// Novo contato: passa a ser atendido e, se o código dele trouxe o relay, esse é o primeiro endereço para ligar a ele.
+    pub fn add_contact(&self, peer: [u8; 32], relay: Option<RelayInfo>) {
+        self.allow(&[peer]);
+        if let Some(r) = relay {
+            self.add_hint(peer, r);
+        }
+    }
+
+    /// Contato removido: deixa de ser atendido e some o endereço dele guardado (`known` e `hints`).
+    pub fn forget(&self, peer: &[u8; 32]) {
+        self.phone.contacts().lock().unwrap().retain(|k| k != peer);
+        self.known.lock().unwrap().remove(peer);
+        self.hints.lock().unwrap().remove(peer);
+    }
+
     pub fn directory(&self) -> &str {
         &self.directory
     }
