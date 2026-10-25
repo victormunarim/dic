@@ -185,8 +185,8 @@ pub(crate) async fn share_task(dialer: Dialer, peer: [u8; 32], keys: clam::media
             }
             let t = share.stats();
             *flag.screen.tx_info.lock().unwrap() = format!(
-                "enviados {pushed}, pulados {skipped} ({} pelo codificador, {} largados da camada alta), descartados na fila {}, codificar leva {:.0} ms",
-                enc.skipped, enc.layer_dropped, t.frames_dropped, enc.encode_ms
+                "enviados {pushed}, pulados {skipped} ({} pelo codificador, {} adiados com o circuito cheio, {} largados da camada alta), descartados na fila {}, QP {}, imagem 1/{}, codificar leva {:.0} ms",
+                enc.skipped, enc.held, enc.layer_dropped, t.frames_dropped, enc.qp(), enc.scale(), enc.encode_ms
             );
             next += every;
             std::thread::sleep(next.saturating_duration_since(std::time::Instant::now()));
