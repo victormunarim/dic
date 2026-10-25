@@ -348,6 +348,7 @@ async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, shared: Arc<
     if let Some(n) = node.network_note() {
         out.line(n);
     }
+    let dialer = node.dialer();
     let mut room: Option<RoomRun> = None;
     let mut room_tick = interval(Duration::from_millis(20));
     room_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -416,6 +417,7 @@ async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, shared: Arc<
                         view: None,
                         sound: open_sound(form.use_audio, &out),
                         next_sync: tokio::time::Instant::now(),
+                        next_dial: tokio::time::Instant::now(),
                         shown: (0, 0, [0; 32]),
                         n: 0,
                     });
@@ -442,11 +444,18 @@ async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, shared: Arc<
                 {
                     s.play(&f);
                 }
+                // Discagem em segundo plano e em paralelo; repete a cada 2 s, o que religa sozinho quem caiu.
+                if tokio::time::Instant::now() >= r.next_dial {
+                    r.next_dial = tokio::time::Instant::now() + Duration::from_secs(2);
+                    if let Some(view) = &r.view {
+                        room::connect_missing(&dialer, view, &r.mesh, Duration::from_secs(8));
+                    }
+                }
                 if tokio::time::Instant::now() >= r.next_sync {
                     r.next_sync = tokio::time::Instant::now() + Duration::from_secs(10);
                     match room::sync(&node, &r.key).await {
                         Ok(view) => {
-                            room::connect_missing(&node, &view, &r.mesh, Duration::from_secs(8)).await;
+                            room::connect_missing(&dialer, &view, &r.mesh, Duration::from_secs(8));
                             let shown = (view.members.len(), r.mesh.count(), view.host);
                             if shown != r.shown {
                                 r.shown = shown;
@@ -482,6 +491,7 @@ struct RoomRun {
     view: Option<RoomView>,
     sound: Option<Sound>,
     next_sync: tokio::time::Instant,
+    next_dial: tokio::time::Instant,
     /// O que o último resumo mostrou (membros, conectados, anfitrião), para só repetir quando mudar.
     shown: (usize, usize, [u8; 32]),
     n: usize,

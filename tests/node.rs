@@ -242,7 +242,7 @@ async fn three_nodes_form_a_mesh_room() {
             let end = Instant::now() + Duration::from_secs(25);
             while Instant::now() < end && mesh.count() < 2 {
                 let view = room::sync(&node, &rkey).await.unwrap();
-                room::connect_missing(&node, &view, &mesh, Duration::from_secs(10)).await;
+                room::connect_missing(&node.dialer(), &view, &mesh, Duration::from_secs(10));
                 while let Ok(Some(inc)) = timeout(Duration::from_millis(300), node.next_incoming()).await {
                     room::accept_member(inc, &view, &mesh).await;
                 }
@@ -331,4 +331,60 @@ async fn punch_falls_back_to_circuit() {
     let ca = a.dial(pb, Mulaw::new(), Duration::from_secs(15)).await.unwrap();
     let (cb, _b) = answer.await.unwrap();
     talk(ca, cb).await;
+}
+
+/// Discagem não bloqueia por membro ausente, e uma chamada derrubada volta sozinha na tentativa seguinte.
+#[tokio::test]
+async fn room_dials_in_background_and_reconnects() {
+    use clam::room::{self, Mesh};
+    let (_d, addr) = dir().await;
+    let rkey = room::room_key(&room::new_secret());
+    let (mut a, mut b) = (Node::start(cfg(key(), &addr, vec![])).await.unwrap(), Node::start(cfg(key(), &addr, vec![])).await.unwrap());
+    // Quem tem a chave menor disca.
+    if a.public_key() > b.public_key() {
+        std::mem::swap(&mut a, &mut b);
+    }
+    let (ma, mb) = (Mesh::new(), Mesh::new());
+    room::sync(&a, &rkey).await.unwrap();
+    room::sync(&b, &rkey).await.unwrap();
+    let mut view_a = room::sync(&a, &rkey).await.unwrap();
+    assert_eq!(view_a.members.len(), 2);
+    // Um membro fantasma com chave maior: a discagem a ele não pode segurar a chamada.
+    view_a.members.push([0xff; 32]);
+    let t = Instant::now();
+    let started = room::connect_missing(&a.dialer(), &view_a, &ma, Duration::from_secs(10));
+    assert!(t.elapsed() < Duration::from_millis(200), "connect_missing bloqueou: {:?}", t.elapsed());
+    assert_eq!(started, 2, "b e o fantasma, em paralelo");
+    let view_b = room::sync(&b, &rkey).await.unwrap();
+
+    async fn until_connected(b: &mut Node, view_b: &room::RoomView, ma: &Mesh, mb: &Mesh) {
+        let end = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < end && !(ma.count() == 1 && mb.count() == 1) {
+            if let Ok(Some(inc)) = timeout(Duration::from_millis(200), b.next_incoming()).await {
+                room::accept_member(inc, view_b, mb).await;
+            }
+        }
+        assert!(ma.count() == 1 && mb.count() == 1, "a {} b {}", ma.count(), mb.count());
+    }
+    until_connected(&mut b, &view_b, &ma, &mb).await;
+
+    // A chamada cai do lado de quem disca; a próxima rodada religa.
+    ma.hangup();
+    let end = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < end && mb.count() > 0 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(mb.count(), 0, "o outro lado percebe o fim");
+    let mut redialed = 0;
+    let end = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < end && !(ma.count() == 1 && mb.count() == 1) {
+        redialed += room::connect_missing(&a.dialer(), &view_a, &ma, Duration::from_secs(10));
+        if let Ok(Some(inc)) = timeout(Duration::from_millis(200), b.next_incoming()).await {
+            room::accept_member(inc, &view_b, &mb).await;
+        }
+    }
+    assert!(redialed >= 1 && ma.count() == 1 && mb.count() == 1, "religou? a {} b {}", ma.count(), mb.count());
+    ma.send(&wide_tone(0));
+    ma.hangup();
+    mb.hangup();
 }

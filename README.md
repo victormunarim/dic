@@ -796,7 +796,8 @@ Como uma sala do Discord: a sala é um **segredo de 32 bytes** (64 hex) que fica
 
 - O diretório identifica a sala por uma chave Ed25519 derivada do segredo (HKDF). Entrar, sair e listar são pedidos assinados por ela (com a `E` da conexão, sem repetição): sem o segredo não se entra nem se vê quem está lá.
 - A lista é de quem está presente (renovada a cada sincronização, vence em `TTL`). O **primeiro membro vivo é o anfitrião**; se ele sai, o próximo assume. Até `MAX_ROOM_MEMBERS` (8) por sala.
-- **Malha completa**: o menor `chave pública` de cada par liga para o outro; a voz segue de ponta a ponta entre cada par. `room::Mesh` envia o microfone a todos e mistura (soma saturada) o que chega.
+- **Malha completa**: o menor `chave pública` de cada par liga para o outro; a voz segue de ponta a ponta entre cada par. `room::Mesh` envia o microfone a todos e mistura o que chega com um limitador (acima de pico 30000 o ganho cai na hora, sem cortar a onda, e volta em ~200 ms). `room::connect_missing` disca em segundo plano e em paralelo (um membro ausente não trava ninguém), com espera crescente de 2 a 16 s após falhas; a GUI repete a cada 2 s, então uma chamada que cai volta sozinha.
+- Áudio: a troca de taxa do dispositivo usa filtro sinc com janela de Blackman (corte em 45% da menor taxa, avaliado na posição fracionária exata), em vez de média de caixa e interpolação linear.
 - Os membros listados são liberados no telefone (`Node::allow`), então ninguém precisa estar na lista de Contatos.
 - Na GUI: "Criar / entrar" (código vazio cria uma sala nova), "Copiar código", "Entrar" nas salas salvas, "Sair da sala". As salas ficam em `~/.clam-gui.conf` (campo `rooms`, contém segredos).
 - Limite: o diretório vê quem entra em cada sala (chaves e IPs), não a voz.

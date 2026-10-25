@@ -12,7 +12,7 @@ use std::{
     collections::{HashMap, VecDeque},
     io,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use ed25519_dalek::SigningKey;
@@ -24,7 +24,7 @@ use tokio::sync::mpsc;
 use crate::{
     directory,
     media::codec::G722,
-    node::Node,
+    node::{Dialer, Node},
     phone::{ActiveCall, IncomingCall},
 };
 
@@ -69,21 +69,32 @@ pub async fn leave(node: &Node, key: &SigningKey) -> io::Result<()> {
     directory::room_leave(node.directory(), key, &node.public_key()).await
 }
 
-/// Liga para os membros que faltam e que são de quem tem a chave pública maior (o menor disca).
-/// Devolve quantas chamadas completou.
-pub async fn connect_missing(node: &Node, view: &RoomView, mesh: &Mesh, wait: Duration) -> usize {
-    let me = node.public_key();
-    let mut made = 0;
+/// Liga, em segundo plano e em paralelo, para os membros que faltam e que são de quem tem a chave pública
+/// maior (o menor disca). Devolve quantas discagens iniciou; as chamadas completas entram em `mesh` sozinhas.
+///
+/// Nunca bloqueia: um membro ausente não atrasa os outros nem a sincronização. Cada membro tem uma discagem
+/// por vez, e depois de uma falha só se tenta de novo após uma espera que cresce (2, 4, 8, 16 s). Por isso dá
+/// para chamar a cada poucos segundos: uma chamada que cai volta logo, sem martelar o diretório.
+pub fn connect_missing(dialer: &Dialer, view: &RoomView, mesh: &Mesh, wait: Duration) -> usize {
+    let me = dialer.public_key();
+    let mut started = 0;
     for m in &view.members {
-        if *m == me || me > *m || mesh.has(m) {
+        if *m == me || me > *m || mesh.has(m) || !mesh.begin_dial(m) {
             continue;
         }
-        if let Ok(call) = node.dial(*m, G722::new(), wait).await {
-            mesh.add(*m, call);
-            made += 1;
-        }
+        started += 1;
+        let (dialer, mesh, m) = (dialer.clone(), mesh.clone(), *m);
+        tokio::spawn(async move {
+            match dialer.dial(m, G722::new(), wait).await {
+                Ok(call) => {
+                    mesh.add(m, call);
+                    mesh.end_dial(&m, true);
+                }
+                Err(_) => mesh.end_dial(&m, false),
+            }
+        });
     }
-    made
+    started
 }
 
 /// Atende um convite de um membro da sala e põe na malha. `false` se `inc` não é de um membro.
@@ -101,13 +112,28 @@ pub async fn accept_member(inc: IncomingCall, view: &RoomView, mesh: &Mesh) -> b
     }
 }
 
+/// Espera inicial entre discagens a um membro que não atendeu; dobra a cada falha até 16 s.
+const RETRY_BASE: Duration = Duration::from_secs(2);
+/// Pico (de 32767) a partir do qual a mixagem reduz o ganho.
+const LIMIT: f32 = 30000.0;
+
 type Queues = Arc<Mutex<HashMap<[u8; 32], VecDeque<Vec<i16>>>>>;
 
 /// Chamadas ativas de uma sala: envia o microfone a todas e mistura o que chega.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Mesh {
-    peers: Mutex<HashMap<[u8; 32], mpsc::Sender<Vec<i16>>>>,
+    peers: Arc<Mutex<HashMap<[u8; 32], mpsc::Sender<Vec<i16>>>>>,
     queues: Queues,
+    /// Ganho do limitador da mixagem (1,0 = sem redução).
+    gain: Arc<Mutex<f32>>,
+    dials: Arc<Mutex<HashMap<[u8; 32], Dial>>>,
+}
+
+/// Estado da discagem a um membro: em andamento, ou esperando para tentar de novo depois de falhar.
+struct Dial {
+    busy: bool,
+    failures: u32,
+    retry_at: Instant,
 }
 
 impl Mesh {
@@ -145,6 +171,28 @@ impl Mesh {
         });
     }
 
+    /// Reserva a discagem a `key`; `false` se já há uma em andamento ou se ainda é cedo para repetir.
+    fn begin_dial(&self, key: &[u8; 32]) -> bool {
+        let mut d = self.dials.lock().unwrap();
+        let e = d.entry(*key).or_insert(Dial { busy: false, failures: 0, retry_at: Instant::now() });
+        if e.busy || Instant::now() < e.retry_at {
+            return false;
+        }
+        e.busy = true;
+        true
+    }
+
+    fn end_dial(&self, key: &[u8; 32], ok: bool) {
+        let mut d = self.dials.lock().unwrap();
+        if ok {
+            d.remove(key);
+        } else if let Some(e) = d.get_mut(key) {
+            e.busy = false;
+            e.failures += 1;
+            e.retry_at = Instant::now() + RETRY_BASE * (1 << e.failures.min(4).saturating_sub(1));
+        }
+    }
+
     /// Há chamada viva com `key`?
     pub fn has(&self, key: &[u8; 32]) -> bool {
         let mut p = self.peers.lock().unwrap();
@@ -165,18 +213,37 @@ impl Mesh {
         }
     }
 
-    /// Um quadro misturado (soma saturada) com o próximo de cada membro que tem algo. `None` se ninguém falou.
+    /// Um quadro misturado com o próximo de cada membro que tem algo. `None` se ninguém falou.
+    ///
+    /// A soma passa por um limitador: se o pico passaria de [`LIMIT`], o ganho cai na hora para caber (sem
+    /// cortar a onda) e volta devagar, em cerca de 200 ms, quando a soma baixa.
     pub fn mix(&self) -> Option<Vec<i16>> {
         let mut q = self.queues.lock().unwrap();
         let frames: Vec<Vec<i16>> = q.values_mut().filter_map(VecDeque::pop_front).collect();
+        drop(q);
         let len = frames.iter().map(Vec::len).max()?;
-        let mut out = vec![0i32; len];
+        let mut sum = vec![0i32; len];
         for f in &frames {
-            for (o, s) in out.iter_mut().zip(f) {
+            for (o, s) in sum.iter_mut().zip(f) {
                 *o += *s as i32;
             }
         }
-        Some(out.into_iter().map(|x| x.clamp(i16::MIN as i32, i16::MAX as i32) as i16).collect())
+        let peak = sum.iter().map(|x| x.unsigned_abs()).max().unwrap_or(0) as f32;
+        let mut g = self.gain.lock().unwrap();
+        let from = if *g == 0.0 { 1.0 } else { *g };
+        let needed = if peak > LIMIT { LIMIT / peak } else { 1.0 };
+        // Ataque instantâneo; solta por interpolação ao longo do quadro.
+        let (start, end) = if needed < from { (needed, needed) } else { (from, from + (1.0 - from) * 0.1) };
+        *g = end;
+        let out = sum
+            .into_iter()
+            .enumerate()
+            .map(|(i, x)| {
+                let gain = start + (end - start) * i as f32 / len as f32;
+                (x as f32 * gain).round().clamp(i16::MIN as f32, i16::MAX as f32) as i16
+            })
+            .collect();
+        Some(out)
     }
 
     /// Desliga todas as chamadas.
@@ -197,15 +264,44 @@ mod tests {
     }
 
     #[test]
-    fn mix_sums_with_saturation() {
+    fn mix_sums_quiet_voices_untouched() {
         let mesh = Mesh::new();
         assert!(mesh.mix().is_none());
         {
             let mut q = mesh.queues.lock().unwrap();
-            q.entry([1; 32]).or_default().push_back(vec![100, i16::MAX, -5]);
-            q.entry([2; 32]).or_default().push_back(vec![23, 10, i16::MIN]);
+            q.entry([1; 32]).or_default().push_back(vec![100, 2000, -5]);
+            q.entry([2; 32]).or_default().push_back(vec![23, 10, -4000]);
         }
-        assert_eq!(mesh.mix().unwrap(), vec![123, i16::MAX, i16::MIN]);
+        assert_eq!(mesh.mix().unwrap(), vec![123, 2010, -4005]);
         assert!(mesh.mix().is_none());
+    }
+
+    #[test]
+    fn mix_limits_loud_sum_without_clipping_then_recovers() {
+        let mesh = Mesh::new();
+        let wave = |a: f64, n: usize| -> Vec<i16> { (0..320).map(|i| (a * (std::f64::consts::TAU * 440.0 * (n * 320 + i) as f64 / 16000.0).sin()) as i16).collect() };
+        // Quatro vozes a 20000 somam 80000: sem limitador, achataria a onda.
+        {
+            let mut q = mesh.queues.lock().unwrap();
+            for k in 0..4u8 {
+                q.entry([k; 32]).or_default().push_back(wave(20000.0, 0));
+            }
+        }
+        let out = mesh.mix().unwrap();
+        let peak = out.iter().map(|x| x.unsigned_abs()).max().unwrap();
+        assert!((29000..=30001).contains(&peak), "{peak}");
+        // A forma da onda se preserva: razão constante com a soma ideal.
+        let ideal: Vec<i32> = wave(20000.0, 0).iter().map(|x| *x as i32 * 4).collect();
+        let k = ideal.iter().zip(&out).filter(|(i, _)| i.abs() > 40000).map(|(i, o)| *o as f64 / *i as f64);
+        let k: Vec<f64> = k.collect();
+        assert!(k.iter().all(|r| (r - k[0]).abs() < 0.01));
+        // Voz baixa depois: o ganho volta a 1 em poucos quadros.
+        let mut last = 0.0;
+        for n in 1..40 {
+            mesh.queues.lock().unwrap().entry([9; 32]).or_default().push_back(wave(1000.0, n));
+            let o = mesh.mix().unwrap();
+            last = o.iter().map(|x| x.unsigned_abs()).max().unwrap() as f64 / 1000.0;
+        }
+        assert!(last > 0.97, "{last}");
     }
 }
