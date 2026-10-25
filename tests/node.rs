@@ -333,6 +333,29 @@ async fn direct_code_keeps_a_hostname_public_address() {
     assert_eq!(a.relay_info().unwrap().addr, "casa.exemplo.com:4001");
 }
 
+/// O endereço muda com o programa aberto: o código direto o acompanha e o contato recebe o aviso, sem reiniciar.
+#[tokio::test]
+async fn an_address_that_changes_while_running_reaches_the_contact() {
+    let (sa, sb) = (key(), key());
+    let (pa, pb) = (*PublicKey::from(&sa).as_bytes(), *PublicKey::from(&sb).as_bytes());
+    let (port_a, port_b) = (free_port(), free_port());
+    let a = Node::start(fixed(sa, port_a, vec![pb])).await.unwrap();
+    let b = Node::start(fixed(sb, port_b, vec![pa])).await.unwrap();
+    a.add_hint(pb, b.relay_info().unwrap());
+    let before = a.relay_info().unwrap();
+
+    // O mesmo relay por outro nome: o que muda é o endereço que A informa.
+    let moved = format!("localhost:{port_a}");
+    a.set_public_addr(&moved);
+    let now = a.relay_info().unwrap();
+    assert_eq!(now.addr, moved);
+    assert_eq!((now.onion, now.link), (before.onion, before.link));
+    assert_eq!(a.published_addr(), moved);
+    assert!(a.take_notice().is_some_and(|n| n.contains(&moved)));
+
+    until("B recebe o endereço novo de A", || b.known().iter().any(|(k, r)| *k == pa && *r == now).then_some(())).await;
+}
+
 /// A muda de endereço com B desligado; quando B volta, a fila de saída de A entrega o endereço novo e a chamada funciona.
 #[tokio::test]
 async fn a_new_address_reaches_the_contact_that_was_offline() {

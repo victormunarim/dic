@@ -41,8 +41,10 @@ use crate::{
     transport::{CircuitClient, ClientOptions, RelayServer, ServerConfig, allow_list},
 };
 
-/// De quanto em quanto tempo a porta aberta no roteador (UPnP) é renovada.
+/// De quanto em quanto tempo o nó renova a porta aberta no roteador (UPnP) e confere se o endereço dele mudou.
 const RENEW_EVERY: Duration = Duration::from_secs(40);
+/// Sem porta aberta, o UPnP é tentado de novo a cada tantas conferências (o roteador pode ter demorado a subir).
+const MAP_RETRY_EVERY: u32 = 3;
 
 /// Nome do destino que o relay de saída mapeia para o telefone de `key`.
 pub fn dest_for(key: &[u8; 32]) -> String {
@@ -637,6 +639,67 @@ impl Dialer {
     }
 }
 
+/// O endereço pelo qual os outros chegam a este relay, que pode mudar com o programa aberto (o provedor troca
+/// o IP, a máquina troca de rede). Quem muda o endereço passa por aqui: o código de contato direto, o que os
+/// convites levam e o aviso aos contatos (`track_address`) seguem o novo.
+#[derive(Clone)]
+struct Reachability {
+    onion: [u8; 32],
+    link: [u8; 32],
+    port: u16,
+    addr: Arc<Mutex<String>>,
+    own: Arc<Mutex<Option<RelayInfo>>>,
+    phone: PhoneLink,
+    notice: Arc<Mutex<Option<String>>>,
+}
+
+impl Reachability {
+    /// Passa a usar `addr` (`published`: alguém de fora o alcança; falso, é o IP da rede local). Devolve se mudou.
+    fn set(&self, addr: String, published: bool) -> bool {
+        let mine = RelayInfo { addr: addr.clone(), onion: self.onion, link: self.link };
+        let own = own_relay(&mine, published);
+        let mut now = self.own.lock().unwrap();
+        if *now == own {
+            return false;
+        }
+        if let Some(r) = &own {
+            *self.notice.lock().unwrap() = Some(format!("seu endereço mudou: agora {}", r.addr));
+        }
+        *now = own;
+        *self.addr.lock().unwrap() = addr;
+        self.phone.set_relay_hint(relay_hint(&mine, published));
+        true
+    }
+}
+
+/// Renova a porta no roteador e confere o endereço do nó de tempos em tempos: com a porta aberta por UPnP, o IP
+/// externo do roteador; sem ela, tenta abrir de novo e acompanha o IP da máquina na rede local. Só roda quando o
+/// endereço público não foi informado (um endereço informado é do usuário, que o corrige se precisar).
+async fn watch_address(reach: Reachability, mut mapping: Option<upnp::Mapping>, upnp_on: bool) {
+    let mut round = 0u32;
+    loop {
+        tokio::time::sleep(RENEW_EVERY).await;
+        round += 1;
+        if let Some(m) = &mapping {
+            let _ = m.renew().await;
+            // Roteador sem resposta ou IP que ninguém de fora alcança: fica o endereço de antes.
+            if let Ok(addr) = m.external_addr().await {
+                reach.set(addr, true);
+            }
+            continue;
+        }
+        if upnp_on
+            && round.is_multiple_of(MAP_RETRY_EVERY)
+            && let Ok(m) = upnp::map(reach.port).await
+        {
+            reach.set(m.external.clone(), true);
+            mapping = Some(m);
+            continue;
+        }
+        reach.set(format!("127.0.0.1:{}", reach.port), false);
+    }
+}
+
 /// Mantém em `current` o registro do endereço deste relay: um `seq` novo (a hora em ms, nunca menor que o
 /// anterior) cada vez que o endereço muda. A fila de saída e a gravação na DHT entregam o mesmo registro,
 /// então o contato vê o mesmo `seq` por qualquer caminho e descarta o que não for mais novo.
@@ -754,8 +817,9 @@ pub struct Node {
     _relay: RelayServer,
     /// Endereço informado ou aberto por UPnP; na falta, o local.
     addr: Arc<Mutex<String>>,
-    /// Renova a porta aberta no roteador, se houve.
+    /// Renova a porta aberta no roteador e acompanha o endereço do nó, se ele não foi informado.
     renew: Option<JoinHandle<()>>,
+    reach: Reachability,
     note: Option<String>,
     dialer: Dialer,
     known: Known,
@@ -847,6 +911,7 @@ impl Node {
         let history: History = Arc::new(Mutex::new(by_peer));
         let (port, link) = (relay.local_addr().port(), relay.link_public_key());
         // Nenhum endereço público informado: tenta abrir a porta no roteador.
+        let informed = public_addr.is_some();
         let (mut public_addr, mut mapping, mut note) = (public_addr, None, None);
         if upnp && public_addr.is_none() {
             match upnp::map(port).await {
@@ -859,6 +924,8 @@ impl Node {
             }
         }
         let published = public_addr.is_some();
+        // Informado pela pessoa, o endereço fica como está; senão o nó o vigia (UPnP ou IP local).
+        let watched = !informed;
         let addr = public_addr.unwrap_or_else(|| format!("127.0.0.1:{port}"));
         let addr_now = Arc::new(Mutex::new(addr.clone()));
         let mine = RelayInfo { addr, onion, link };
@@ -871,15 +938,9 @@ impl Node {
         let link_to_phone = phone.link();
         let own = Arc::new(Mutex::new(own_relay(&mine, published)));
         link_to_phone.set_relay_hint(relay_hint(&mine, published));
-        let renew = mapping.map(|m| {
-            tokio::spawn(async move {
-                loop {
-                    tokio::time::sleep(RENEW_EVERY).await;
-                    let _ = m.renew().await;
-                }
-            })
-        });
         let update_notice: Arc<Mutex<Option<String>>> = Arc::default();
+        let reach = Reachability { onion, link, port, addr: addr_now.clone(), own: own.clone(), phone: link_to_phone, notice: update_notice.clone() };
+        let renew = watched.then(|| tokio::spawn(watch_address(reach.clone(), mapping, upnp)));
         let mut background = Vec::new();
         if let Some(mut rx) = phone.take_updates() {
             let (dialer, notice) = (dialer.clone(), update_notice.clone());
@@ -917,7 +978,7 @@ impl Node {
                 }
             }));
         }
-        Ok(Self { secret, name, retry: update_retry, phone, _relay: relay, renew, note, dialer, known, hints, history, own, update_notice, background, addr: addr_now, introduced, introducing: Arc::default() })
+        Ok(Self { secret, name, retry: update_retry, phone, _relay: relay, renew, reach, note, dialer, known, hints, history, own, update_notice, background, addr: addr_now, introduced, introducing: Arc::default() })
     }
 
     /// Aceita convites de `keys` além dos contatos.
@@ -1004,6 +1065,16 @@ impl Node {
         *PublicKey::from(&self.secret).as_bytes()
     }
 
+    /// O app avisa que o endereço público mudou (um nome ou `ip:porta` que os outros alcançam): o código direto, os
+    /// convites e o aviso aos contatos passam a usá-lo. O nó já acompanha sozinho o IP aberto por UPnP; isto serve
+    /// a quem informou o endereço à mão.
+    pub fn set_public_addr(&self, addr: &str) {
+        let addr = addr.trim();
+        if !addr.is_empty() {
+            self.reach.set(addr.to_string(), true);
+        }
+    }
+
     /// Endereço do relay como foi informado ou aberto por UPnP (na falta, o local).
     pub fn published_addr(&self) -> String {
         self.addr.lock().unwrap().clone()
@@ -1042,8 +1113,8 @@ impl Node {
         self.history.lock().unwrap().iter().flat_map(|(k, v)| v.iter().map(|r| (*k, r.clone()))).collect()
     }
 
-    /// Motivo de um convite descartado em silêncio (veja [`Phone::take_notice`]) ou aviso de que um contato
-    /// mandou o endereço novo dele, se houve; uma vez só.
+    /// Motivo de um convite descartado em silêncio (veja [`Phone::take_notice`]), aviso de que um contato
+    /// mandou o endereço novo dele ou de que o endereço deste nó mudou, se houve; uma vez só.
     pub fn take_notice(&self) -> Option<String> {
         self.phone.take_notice().or_else(|| self.update_notice.lock().unwrap().take())
     }

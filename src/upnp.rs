@@ -38,6 +38,15 @@ pub fn is_private(ip: IpAddr) -> bool {
     }
 }
 
+/// IP externo do roteador, se alguém de fora puder usá-lo.
+async fn external_ip(gateway: &igd_next::aio::Gateway<igd_next::aio::tokio::Tokio>) -> Result<IpAddr, String> {
+    let ext = gateway.get_external_ip().await.map_err(|e| format!("roteador não informou o IP externo: {e}"))?;
+    if is_private(ext) {
+        return Err(format!("o IP externo do roteador é {ext} (CGNAT ou outro roteador na frente): ele não aceita conexões de fora"));
+    }
+    Ok(ext)
+}
+
 /// Pede ao roteador que encaminhe a porta TCP `port` para esta máquina.
 pub async fn map(port: u16) -> Result<Mapping, String> {
     let mut opts = SearchOptions::default();
@@ -52,10 +61,7 @@ pub async fn map(port: u16) -> Result<Mapping, String> {
     probe.connect(gateway.addr).map_err(|e| e.to_string())?;
     let local_ip = probe.local_addr().map_err(|e| e.to_string())?.ip();
     let local = SocketAddr::new(local_ip, port);
-    let ext = gateway.get_external_ip().await.map_err(|e| format!("roteador não informou o IP externo: {e}"))?;
-    if is_private(ext) {
-        return Err(format!("o IP externo do roteador é {ext} (CGNAT ou outro roteador na frente): ele não aceita conexões de fora"));
-    }
+    let ext = external_ip(&gateway).await?;
     gateway
         .add_port(PortMappingProtocol::TCP, port, local, LEASE_SECS, DESCRIPTION)
         .await
@@ -67,6 +73,11 @@ impl Mapping {
     /// Renova a concessão. Erro ignorado de propósito: a próxima renovação tenta de novo.
     pub async fn renew(&self) -> Result<(), String> {
         self.gateway.add_port(PortMappingProtocol::TCP, self.port, self.local, LEASE_SECS, DESCRIPTION).await.map_err(|e| e.to_string())
+    }
+
+    /// `ip:porta` público de agora: o IP externo do roteador muda quando o provedor troca o do roteador.
+    pub async fn external_addr(&self) -> Result<String, String> {
+        Ok(SocketAddr::new(external_ip(&self.gateway).await?, self.port).to_string())
     }
 
     /// Fecha a porta no roteador.
