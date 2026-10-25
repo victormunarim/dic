@@ -9,8 +9,9 @@ use std::{
     io::Read,
     os::fd::AsRawFd,
     process::{Child, Command, Stdio},
-    sync::{Arc, Mutex},
+    sync::{Arc, Condvar, Mutex},
     thread::JoinHandle,
+    time::Duration,
 };
 
 use ashpd::desktop::{
@@ -20,6 +21,9 @@ use ashpd::desktop::{
 use thiserror::Error;
 
 use crate::video::{FPS, RawFrame, ScreenSource};
+
+/// Quanto `grab` espera por um quadro novo antes de desistir (menos que um quadro a 15/s).
+const GRAB_WAIT: Duration = Duration::from_millis(50);
 
 /// Largura máxima enviada; telas maiores são reduzidas (a banda do circuito é pequena).
 pub const MAX_WIDTH: usize = 1920;
@@ -76,15 +80,19 @@ pub fn pipeline_args(fd: i32, node: u32, (w, h): (usize, usize)) -> Vec<String> 
     .to_vec()
 }
 
+/// Quadro mais novo ainda não entregue, com aviso a quem espera por ele.
+type Latest = (Mutex<Option<RawFrame>>, Condvar);
+
 /// Lê quadros RGBA de `src` e guarda sempre o mais novo em `slot`. Termina no fim do fluxo.
-fn read_frames(mut src: impl Read, (w, h): (usize, usize), slot: &Mutex<Option<RawFrame>>) {
+fn read_frames(mut src: impl Read, (w, h): (usize, usize), slot: &Latest) {
     loop {
         let mut rgba = vec![0u8; w * h * 4];
         if src.read_exact(&mut rgba).is_err() {
             return;
         }
         if let Ok(f) = RawFrame::new(w, h, rgba) {
-            *slot.lock().unwrap() = Some(f);
+            *slot.0.lock().unwrap() = Some(f);
+            slot.1.notify_one();
         }
     }
 }
@@ -92,7 +100,7 @@ fn read_frames(mut src: impl Read, (w, h): (usize, usize), slot: &Mutex<Option<R
 /// Tela capturada pelo portal. Largar o valor encerra a captura.
 pub struct PortalScreen {
     child: Child,
-    latest: Arc<Mutex<Option<RawFrame>>>,
+    latest: Arc<Latest>,
     reader: Option<JoinHandle<()>>,
     size: (usize, usize),
     // O portal fecha a captura quando a sessão acaba.
@@ -130,7 +138,7 @@ impl PortalScreen {
             .spawn()
             .map_err(|e| PortalError::Gstreamer(e.to_string()))?;
         drop(inherited);
-        let latest = Arc::new(Mutex::new(None));
+        let latest: Arc<Latest> = Arc::new((Mutex::new(None), Condvar::new()));
         let (out, slot) = (child.stdout.take().expect("stdout"), latest.clone());
         let reader = std::thread::spawn(move || read_frames(out, size, &slot));
         Ok(Self { child, latest, reader: Some(reader), size, _session: session })
@@ -143,9 +151,13 @@ impl PortalScreen {
 }
 
 impl ScreenSource for PortalScreen {
-    /// O quadro mais novo ainda não entregue; `None` se nada mudou desde a última chamada.
+    /// O quadro mais novo ainda não entregue. Se não há, espera um pouco por ele (o quadro costuma
+    /// chegar logo depois do instante da consulta); `None` se nada mudou nesse tempo.
     fn grab(&mut self) -> Option<RawFrame> {
-        self.latest.lock().unwrap().take()
+        let (slot, news) = &*self.latest;
+        let guard = slot.lock().unwrap();
+        let (mut guard, _) = news.wait_timeout_while(guard, GRAB_WAIT, |f| f.is_none()).unwrap();
+        guard.take()
     }
 }
 
@@ -185,11 +197,11 @@ mod tests {
         let mut bytes = vec![1u8; w * h * 4];
         bytes.extend(vec![2u8; w * h * 4]);
         bytes.extend(vec![3u8; 5]); // quadro cortado no fim do fluxo
-        let slot = Mutex::new(None);
+        let slot: Latest = (Mutex::new(None), Condvar::new());
         read_frames(&bytes[..], (w, h), &slot);
-        let f = slot.lock().unwrap().take().expect("quadro");
+        let f = slot.0.lock().unwrap().take().expect("quadro");
         assert!(f.rgba.iter().all(|b| *b == 2));
-        assert!(slot.lock().unwrap().is_none());
+        assert!(slot.0.lock().unwrap().is_none());
     }
 
     /// Manual: abre o diálogo do portal de verdade. `cargo test --features portal -- --ignored real_portal`.
