@@ -44,6 +44,8 @@ pub(crate) struct Form {
     pub(crate) room_code: String,
     pub(crate) new_name: String,
     pub(crate) new_code: String,
+    /// O arquivo de configuração existia e foi lido ao abrir (para a janela mostrar de onde veio).
+    pub(crate) loaded: bool,
 }
 
 /// Código de contato: a chave pública (64 hex), com o diretório opcional depois de `@`
@@ -214,6 +216,7 @@ impl Form {
             output_dev: get("output_dev"),
             nicks: get("nicks").replace(';', "\n"),
             rooms: get("rooms").replace(';', "\n"),
+            loaded: true,
             ..Form::default()
         }
     }

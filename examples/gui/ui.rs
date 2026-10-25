@@ -481,6 +481,11 @@ impl eframe::App for App {
                             egui::TextEdit::singleline(&mut self.form.directory).hint_text("exemplo: meu-servidor.com:7000").desired_width(260.0),
                         );
                     });
+                    ui.weak(format!(
+                        "Configuração: {} ({})",
+                        conf_path().display(),
+                        if self.form.loaded { "lida ao abrir" } else { "não encontrada ao abrir; será criada" }
+                    ));
                     ui.add_enabled(offline, egui::Checkbox::new(&mut self.form.use_audio, "Usar microfone e alto-falante (use fones para não dar eco)"));
                     #[cfg(feature = "audio")]
                     self.devices_ui(ui, offline);
