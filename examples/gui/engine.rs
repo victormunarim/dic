@@ -188,6 +188,7 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
     let contacts: Vec<_> = parse_contacts(&form.contacts);
     let names = form.names();
     let mut cfg = NodeConfig::new(secret, form.directory_addr(), contacts.iter().map(|(_, k)| *k).collect());
+    cfg.known = load_known();
     if !form.public_addr.trim().is_empty() {
         cfg.public_addr = Some(form.public_addr.trim().to_string());
     }
@@ -242,7 +243,9 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
                     }
                     shared.hangup.store(false, Ordering::Relaxed);
                     out.line("ligando...");
-                    match node.dial(peer, G722::new(), Duration::from_secs(15)).await {
+                    let dialed = node.dial(peer, G722::new(), Duration::from_secs(15)).await;
+                    save_known(&node.known());
+                    match dialed {
                         Ok(c) => {
                             out.line("atendida");
                             start_talk(c, 440.0, &shared, &out, &form);

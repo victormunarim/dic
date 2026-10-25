@@ -495,3 +495,43 @@ async fn restarted_directory_keeps_rooms_and_publications() {
     assert_eq!(members, vec![a.public_key(), b.public_key()]);
     let _ = std::fs::remove_file(&state);
 }
+
+/// Diretório fora do ar: o nó sobe mesmo assim e liga para quem tem endereço guardado.
+#[tokio::test]
+async fn node_without_directory_dials_stored_address() {
+    let (d, addr) = dir().await;
+    let (sa, sb) = (key(), key());
+    let (pa, pb) = (*PublicKey::from(&sa).as_bytes(), *PublicKey::from(&sb).as_bytes());
+    let mut b = Node::start(cfg(sb, &addr, vec![pa])).await.unwrap();
+
+    // Com o diretório no ar, ligar guarda o endereço de `b`.
+    let a = Node::start(cfg(sa.clone(), &addr, vec![])).await.unwrap();
+    let first = tokio::spawn(async move {
+        let inc = timeout(Duration::from_secs(15), b.next_incoming()).await.unwrap().unwrap();
+        let c = inc.accept(Mulaw::new()).await.unwrap();
+        (c, b)
+    });
+    let ca = a.dial(pb, Mulaw::new(), Duration::from_secs(15)).await.unwrap();
+    let (cb, mut b) = first.await.unwrap();
+    let known = a.known();
+    assert_eq!(known.len(), 1);
+    assert_eq!(known[0].0, pb);
+    ca.hangup();
+    drop(cb);
+    a.stop();
+
+    // Derruba o diretório; um nó novo, só com o endereço guardado, sobe e liga.
+    let dead = addr.clone();
+    drop(d);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let a2 = Node::start(NodeConfig { known, ..cfg(sa, &dead, vec![]) }).await.unwrap();
+    assert!(a2.directory_error().is_some());
+    assert!(a2.network_note().unwrap().contains("diretório fora do ar"));
+    let second = tokio::spawn(async move {
+        let inc = timeout(Duration::from_secs(15), b.next_incoming()).await.unwrap().unwrap();
+        (inc.accept(Mulaw::new()).await.unwrap(), b)
+    });
+    let ca = a2.dial(pb, Mulaw::new(), Duration::from_secs(15)).await.unwrap();
+    let (_cb, _b) = second.await.unwrap();
+    ca.hangup();
+}

@@ -902,3 +902,12 @@ Ainda **não** existem: TLS/QUIC e travessia de NAT no adaptador (só TCP + Nois
 - O dono vê **Remover** ao lado de cada membro, com confirmação ("Sim, remover" / "Cancelar"). Remover troca o segredo (`room::rotate`) e deixa o aviso cifrado só para quem fica; a chamada com o removido cai na hora.
 - Os outros membros conferem o aviso a cada sincronização (10 s) e ao entrar (`room::follow`, até 8 trocas seguidas), passam para o segredo novo e a janela o salva no lugar do antigo. O removido fica no segredo velho, sem ver nem ser alcançado pelos que ficaram.
 - Limite: um membro desconectado por mais de 3 dias perde o aviso (expira no diretório) e precisa de um convite novo.
+
+## Sem diretório
+
+O diretório só é indispensável no primeiro contato. Depois disso:
+
+- **Endereço guardado.** O `Node` lembra o último relay de cada contato para quem ligou (`Node::known()`, devolvido em `NodeConfig::known`). Ao discar, se esse relay ainda aceita conexão, a chamada vai direto, sem consultar o diretório. Se não responde, cai na busca normal e atualiza o endereço. A GUI guarda a lista em `~/.clam-gui.known`.
+- **Subir com o diretório fora do ar.** `Node::start` não falha mais: registra o problema em `network_note()`/`directory_error()` e tenta publicar de novo a cada 40 s. Enquanto isso, recebe chamadas de quem já tem o seu endereço e liga para quem está em `known`.
+
+Limites: sem diretório não há furo de NAT nem sorteio de primeiro salto (usa o próprio relay por loopback), e o endereço publicado fica sendo o local até o diretório voltar. Quem muda de IP só é achado de novo pelo diretório.
