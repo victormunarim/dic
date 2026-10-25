@@ -781,13 +781,13 @@ Só o **primeiro contato** usa servidor. Um diretório (`src/directory.rs`) guar
 - Cada pessoa é relay de si mesma. Com só duas pessoas, o primeiro salto é o relay do chamador e o chamado vê o IP dele; com mais gente online, o primeiro salto é sorteado do diretório.
 - **Relógio:** o diretório manda a hora dele no primeiro contato e todos usam essa hora nos convites (`src/clock.rs`). Computadores com a hora errada deixam de recusar chamadas (o convite vale 60 s).
 - **Atrás de roteador:** com o diretório na internet, o nó pede ao roteador para encaminhar a porta do relay por UPnP (`src/upnp.rs`, renovado a cada 40 s) e publica o IP externo. Sem UPnP, ou com CGNAT, a janela avisa o motivo; então abra a porta 4001 ou informe `public_addr`. Se o diretório está na LAN (IP privado), o UPnP não é usado.
-- **Atrás de NAT sem abrir porta**: o servidor pode rodar também um relay (`--relay`). O nó marca "usar o relay do servidor" (`NodeConfig.via_server`): fica com uma conexão de controle de saída aberta e o diretório publica o relay do servidor como o dele. A cada circuito para você, o servidor avisa pelo controle, você abre uma conexão de saída com uma ficha de 16 bytes e o servidor emenda as duas (`REQ_HOST`/`REQ_ATTACH` em `src/directory.rs`). Custo: o servidor vê seu IP e o tráfego cifrado das suas chamadas; ele é o último salto. Cobertura: `tests/node.rs`.
+- **Atrás de NAT sem abrir porta** (só pela biblioteca; a GUI não oferece, pois a chamada tem de ser p2p): o servidor pode rodar também um relay (`--relay`). O nó marca "usar o relay do servidor" (`NodeConfig.via_server`): fica com uma conexão de controle de saída aberta e o diretório publica o relay do servidor como o dele. A cada circuito para você, o servidor avisa pelo controle, você abre uma conexão de saída com uma ficha de 16 bytes e o servidor emenda as duas (`REQ_HOST`/`REQ_ATTACH` em `src/directory.rs`). Custo: o servidor vê seu IP e o tráfego cifrado das suas chamadas; ele é o último salto. Cobertura: `tests/node.rs`.
 
 Servidor (uma máquina alcançável pelos dois lados):
 
 ```text
 cargo run --release --features net --example directory -- 0.0.0.0:7777
-# com relay para quem está atrás de NAT (porta TCP 4000 também liberada):
+# (biblioteca) com relay para nós atrás de NAT; a GUI não usa, pois a chamada tem de ser p2p:
 cargo run --release --features net --example directory -- 0.0.0.0:7777 --relay 0.0.0.0:4000 IP-PUBLICO:4000
 ```
 

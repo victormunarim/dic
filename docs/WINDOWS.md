@@ -17,12 +17,6 @@ cargo run --release --features net --example directory -- 0.0.0.0:7777
 
 Libere a porta TCP 7777 (e a 4000, se usar o relay abaixo) no Firewall do Windows.
 
-Para quem estiver atrás de NAT sem poder abrir porta, suba o servidor com relay:
-
-```
-cargo run --release --features net --example directory -- 0.0.0.0:7777 --relay 0.0.0.0:4000 IP-PUBLICO:4000
-```
-
 ## 3. Cada pessoa
 
 Libere a porta TCP 4001 (seu relay). Abra a janela:
@@ -37,7 +31,7 @@ cargo run --release --features gui,audio --example gui
 4. *Ficar online*.
 5. Para ligar, cole a código do outro em *Ligar*. Use fones.
 
-Atrás de roteador: com o diretório na internet, o programa tenta abrir a porta 4001 sozinho por UPnP e avisa o resultado no log. Se não der, ou redirecione a porta 4001 e preencha o endereço público (`ip:4001`), ou, se o servidor foi iniciado com `--relay`, marque *Atrás de NAT: usar o relay do servidor* (não precisa abrir porta; o servidor passa a ver seu IP).
+Atrás de roteador: com o diretório na internet, o programa tenta abrir a porta 4001 sozinho por UPnP e avisa o resultado no log. Se não der, ou redirecione a porta 4001 e preencha o endereço público (`ip:4001`). A chamada é sempre p2p: sem porta acessível (CGNAT, por exemplo) ninguém consegue ligar para você.
 Config em `%USERPROFILE%\.clam-gui.conf` (contém a chave secreta).
 O programa pede timers de 1 ms ao Windows (`timeBeginPeriod`) para manter a cadência da voz.
 
