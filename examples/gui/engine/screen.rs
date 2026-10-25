@@ -6,7 +6,7 @@ use super::*;
 use clam::{
     node::Dialer,
     phone::ScreenEvent,
-    video::{FPS, H264Decoder, H264Encoder, RawFrame, ScreenSource, pump, pump_all},
+    video::{FPS, H264Decoder, H264Encoder, RawFrame, ScreenSource, pump},
 };
 
 /// Estado da tela compartilhada, visto pela janela e pela chamada.
@@ -43,11 +43,6 @@ impl ScreenState {
         }
     }
 
-    /// Só ficam imagens de quem está em `keep` (saiu da sala ou desligou).
-    pub(crate) fn retain(&self, keep: impl Fn(&[u8; 32]) -> bool) {
-        self.images.lock().unwrap().retain(|k, _| keep(k));
-    }
-
     /// Linha de diagnóstico da janela: lado que recebe e lado que envia.
     pub(crate) fn diagnostics(&self) -> String {
         let n = |i: usize| self.rx[i].load(Ordering::Relaxed);
@@ -61,7 +56,7 @@ impl ScreenState {
         out
     }
 
-    /// Fim da chamada ou da sala: somem as imagens e a transmissão é interrompida.
+    /// Fim da chamada: somem as imagens e a transmissão é interrompida.
     pub(crate) fn reset(&self) {
         for c in &self.rx {
             c.store(0, Ordering::Relaxed);
@@ -209,101 +204,6 @@ pub(crate) async fn share_task(dialer: Dialer, peer: [u8; 32], keys: clam::media
     st.share_task.store(false, Ordering::Relaxed);
 }
 
-/// Transmite a tela a todos os membros da sala: um circuito de tela por membro conectado, o mesmo
-/// quadro codificado em todos. Membros que entram ganham o circuito sozinhos e um quadro-chave.
-pub(crate) async fn room_share_task(dialer: Dialer, mesh: Mesh, shared: Arc<Shared>, out: Sink) {
-    use std::collections::{HashMap, HashSet};
-    use std::time::Instant;
-    let st = &shared.screen;
-    let started = match open_source().await {
-        Ok(src) => H264Encoder::new(H264Encoder::default_bitrate()).map(|e| (src, e)).map_err(|e| e.to_string()),
-        Err(e) => Err(e),
-    };
-    let (mut src, mut enc) = match started {
-        Ok(x) => x,
-        Err(e) => {
-            out.line(format!("tela: não deu para capturar a tela ({e})"));
-            *st.note.lock().unwrap() = format!("não deu para capturar a tela ({e})");
-            st.want_share.store(false, Ordering::Relaxed);
-            st.share_task.store(false, Ordering::Relaxed);
-            return;
-        }
-    };
-    out.line("tela: transmitindo para a sala");
-    st.note.lock().unwrap().clear();
-    let handle = tokio::runtime::Handle::current();
-    let flag = shared.clone();
-    let _ = tokio::task::spawn_blocking(move || {
-        let (tx, mut rx) = mpsc::unbounded_channel::<([u8; 32], Option<clam::phone::ScreenShare>)>();
-        let mut shares: HashMap<[u8; 32], clam::phone::ScreenShare> = HashMap::new();
-        let mut opening: HashSet<[u8; 32]> = HashSet::new();
-        let mut retry: HashMap<[u8; 32], Instant> = HashMap::new();
-        let every = Duration::from_secs_f32(1.0 / FPS);
-        let mut next = Instant::now();
-        let (mut pushed, mut skipped) = (0u64, 0u64);
-        while flag.screen.want_share.load(Ordering::Relaxed) && !flag.hangup.load(Ordering::Relaxed) {
-            let keys = mesh.screen_keys();
-            for (who, k) in &keys {
-                if shares.contains_key(who) || opening.contains(who) || retry.get(who).is_some_and(|t| *t > Instant::now()) {
-                    continue;
-                }
-                opening.insert(*who);
-                let (dialer, tx, who, k) = (dialer.clone(), tx.clone(), *who, k.clone());
-                handle.spawn(async move {
-                    let r = dialer.share_screen_keys(who, &k, Duration::from_secs(15)).await.ok();
-                    let _ = tx.send((who, r));
-                });
-            }
-            let mut joined = false;
-            while let Ok((who, r)) = rx.try_recv() {
-                opening.remove(&who);
-                match r {
-                    Some(share) if keys.iter().any(|(k, _)| *k == who) => {
-                        shares.insert(who, share);
-                        joined = true;
-                    }
-                    Some(share) => {
-                        handle.block_on(share.stop());
-                    }
-                    None => {
-                        retry.insert(who, Instant::now() + Duration::from_secs(5));
-                    }
-                }
-            }
-            let gone: Vec<_> = shares.keys().filter(|k| !keys.iter().any(|(w, _)| w == *k)).copied().collect();
-            for who in gone {
-                if let Some(share) = shares.remove(&who) {
-                    handle.block_on(share.stop());
-                }
-            }
-            flag.screen.sharing.store(!shares.is_empty(), Ordering::Relaxed);
-            let refs: Vec<_> = shares.values().collect();
-            match pump_all(src.as_mut(), &mut enc, &refs, joined) {
-                Ok(0) => skipped += 1,
-                Ok(_) => pushed += 1,
-                Err(e) => *flag.screen.note.lock().unwrap() = format!("codec: {e}"),
-            }
-            *flag.screen.tx_info.lock().unwrap() = format!(
-                "enviados {pushed}, pulados {skipped} ({} pelo codificador, {} largados da camada alta), para {} pessoas, codificar leva {:.0} ms",
-                enc.skipped,
-                enc.layer_dropped,
-                refs.len(),
-                enc.encode_ms
-            );
-            next += every;
-            std::thread::sleep(next.saturating_duration_since(Instant::now()));
-        }
-        for (_, share) in shares {
-            handle.block_on(share.stop());
-        }
-    })
-    .await;
-    st.sharing.store(false, Ordering::Relaxed);
-    st.want_share.store(false, Ordering::Relaxed);
-    out.line("tela: transmissão para a sala encerrada");
-    st.share_task.store(false, Ordering::Relaxed);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -353,15 +253,5 @@ mod tests {
         st.reset();
         assert!(!st.want_share.load(Ordering::Relaxed));
         assert!(st.images.lock().unwrap().is_empty());
-    }
-
-    #[test]
-    fn retain_drops_images_of_people_who_left() {
-        let st = ScreenState::default();
-        st.set_image([1; 32], Some(frame(2, 2, [0; 3])));
-        st.set_image([2; 32], Some(frame(2, 2, [0; 3])));
-        st.retain(|k| *k == [2; 32]);
-        let m = st.images.lock().unwrap();
-        assert!(!m.contains_key(&[1; 32]) && m.contains_key(&[2; 32]));
     }
 }

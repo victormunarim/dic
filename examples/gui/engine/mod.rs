@@ -1,6 +1,6 @@
-//! Motor: nó, chamadas e salas. Não conhece a janela; só recebe comandos e escreve no log.
+//! Motor: nó e chamadas. Não conhece a janela; só recebe comandos e escreve no log.
 //!
-//! `sound` (áudio e controles), `screen` (tela compartilhada), `call` (conversa 1:1), `rooms` (salas), `node` (laço do nó que recebe os comandos).
+//! `sound` (áudio e controles), `screen` (tela compartilhada), `call` (conversa 1:1), `node` (laço do nó que recebe os comandos).
 
 use std::{
     sync::{
@@ -13,26 +13,21 @@ use std::{
 use clam::media::codec::G722;
 use clam::node::{Node, NodeConfig};
 use clam::phone::ActiveCall;
-use clam::room::{self, Mesh, RoomView};
 use tokio::{
     sync::mpsc,
     time::{MissedTickBehavior, interval},
 };
 
-use clam::x25519_dalek::StaticSecret;
-
 use crate::conf::*;
 
 mod call;
 mod node;
-mod rooms;
 mod screen;
 mod sound;
 mod voice;
 
 pub(crate) use call::*;
-pub(crate) use node::run_node;
-pub(crate) use rooms::*;
+pub(crate) use node::{member_name, run_node};
 pub(crate) use screen::*;
 pub(crate) use sound::*;
 pub(crate) use voice::*;
@@ -60,17 +55,12 @@ impl Sink {
 }
 
 pub(crate) enum Cmd {
-    /// Contato a ligar e, se o código dele veio com o relay (código direto), onde achá-lo sem diretório.
-    Dial([u8; 32], Option<clam::directory::RelayInfo>),
+    /// Contato a ligar e, se o código dele veio com o relay (código direto), onde achá-lo.
+    Dial([u8; 32], Option<clam::node::RelayInfo>),
     /// Contato novo (e o relay do código dele, se veio um código direto): atender e guardar o endereço.
-    Contact([u8; 32], Option<clam::directory::RelayInfo>),
+    Contact([u8; 32], Option<clam::node::RelayInfo>),
     /// Contato removido: parar de atender e esquecer o endereço guardado.
     Forget([u8; 32]),
-    /// Segredo, dono da sala (se conhecido) e nome.
-    Join([u8; 32], Option<[u8; 32]>, String),
-    /// O dono tira um membro: troca o segredo e avisa só quem fica.
-    Remove([u8; 32]),
-    Leave,
     /// Liga o microfone ao alto-falante para a pessoa conferir som e nível.
     MicTest,
 }
@@ -93,19 +83,7 @@ pub(crate) struct Shared {
     /// Texto de estado do nó ("online em ...").
     pub(crate) status: Mutex<String>,
     /// Relay desta máquina como os outros o alcançam (vai no código de contato direto); vazio offline.
-    pub(crate) relay: Mutex<Option<clam::directory::RelayInfo>>,
-    /// Está numa sala (as chamadas da sala não usam `in_call`, mas ele fica ligado).
-    pub(crate) in_room: AtomicBool,
-    /// Resumo da sala atual.
-    pub(crate) room: Mutex<String>,
-    /// Sala atual: a malha (volume e quem fala) e os membros vivos, você incluído.
-    pub(crate) mesh: Mutex<Option<Mesh>>,
-    pub(crate) members: Mutex<Vec<[u8; 32]>>,
-    pub(crate) me: Mutex<[u8; 32]>,
-    /// Sou o dono da sala atual (posso remover membros).
-    pub(crate) owner: AtomicBool,
-    /// Segredos de sala trocados pelo dono, `(antigo, novo)`, para a janela atualizar o que está salvo.
-    pub(crate) rekeyed: Mutex<Vec<([u8; 32], [u8; 32])>>,
+    pub(crate) relay: Mutex<Option<clam::node::RelayInfo>>,
     /// Quem adicionou esta pessoa e se apresentou; a janela põe cada um na lista de contatos.
     pub(crate) introduced: Mutex<Vec<clam::node::Introduced>>,
 }

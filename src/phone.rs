@@ -96,7 +96,7 @@ impl From<MediaError> for CallError {
 }
 
 fn unix_secs() -> u64 {
-    crate::clock::now_secs()
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
 /// Uma chamada em andamento. Largar o valor (ou chamar [`hangup`](Self::hangup)) desliga.
@@ -412,7 +412,7 @@ pub struct PhoneLink {
 
 impl PhoneLink {
     /// Relay desta máquina que os convites das chamadas ligadas a este telefone passam a levar, para o
-    /// outro lado poder ligar de volta sem diretório (`None`: não leva). Vale também para o que já foi criado
+    /// outro lado poder ligar de volta (`None`: não leva). Vale também para o que já foi criado
     /// por [`Phone::link`].
     pub fn set_relay_hint(&self, hint: Option<RelayHint>) {
         *self.hint.lock().unwrap() = hint;
@@ -560,8 +560,8 @@ impl IncomingCall {
         self.invite.caller()
     }
 
-    /// Relay de quem ligou, se o convite o trouxe (veja [`RelayHint`]): serve para ligar de volta sem
-    /// diretório. Não é autenticado; use só como último recurso.
+    /// Relay de quem ligou, se o convite o trouxe (veja [`RelayHint`]): serve para ligar de volta.
+    /// Não é autenticado; use só como último recurso.
     pub fn relay_hint(&self) -> Option<&RelayHint> {
         self.invite.relay_hint()
     }
@@ -592,116 +592,12 @@ impl IncomingCall {
     }
 }
 
-/// Conexões por datagrama usam ids acima dos do TCP, que contam de 1.
-const DATAGRAM_CONN_BASE: u64 = 1 << 40;
-
-/// Entrada do telefone para ligações que não vêm por TCP: cada par UDP vira uma conexão virtual,
-/// tratada como qualquer outra (convite, atender, voz).
-#[derive(Clone)]
-pub struct DatagramPort {
-    actor: mpsc::Sender<Msg>,
-    next: Arc<AtomicU64>,
-}
-
-impl DatagramPort {
-    /// Abre uma conexão virtual; o que o telefone responder sai por `writer`.
-    pub async fn open(&self, writer: mpsc::Sender<Vec<u8>>) -> Option<DatagramConn> {
-        let id = self.next.fetch_add(1, Ordering::Relaxed);
-        self.actor.send(Msg::Open(id, writer)).await.ok()?;
-        Some(DatagramConn { id, actor: self.actor.clone() })
-    }
-}
-
-pub struct DatagramConn {
-    id: u64,
-    actor: mpsc::Sender<Msg>,
-}
-
-impl DatagramConn {
-    /// Entrega ao telefone um pacote que chegou. `false`: o telefone parou.
-    pub async fn deliver(&self, data: Vec<u8>) -> bool {
-        self.actor.send(Msg::Frame(self.id, data)).await.is_ok()
-    }
-
-    pub async fn close(self) {
-        let _ = self.actor.send(Msg::Closed(self.id)).await;
-    }
-}
-
-/// Liga para `peer` por um canal de datagramas já aberto (`tx` envia, `rx` recebe), sem circuito.
-pub async fn call_over<C: Codec + Send + 'static>(
-    tx: mpsc::Sender<Vec<u8>>,
-    rx: mpsc::Receiver<Vec<u8>>,
-    my_static: &StaticSecret,
-    peer: &PublicKey,
-    codec: C,
-    wait: Duration,
-) -> Result<ActiveCall, CallError> {
-    call_over_linked(tx, rx, my_static, peer, codec, wait, None).await
-}
-
-/// Como [`call_over`], registrada no telefone desta máquina (veja [`call_linked`]).
-pub async fn call_over_linked<C: Codec + Send + 'static>(
-    tx: mpsc::Sender<Vec<u8>>,
-    mut rx: mpsc::Receiver<Vec<u8>>,
-    my_static: &StaticSecret,
-    peer: &PublicKey,
-    codec: C,
-    wait: Duration,
-    link: Option<&PhoneLink>,
-) -> Result<ActiveCall, CallError> {
-    let (caller, invite) = Caller::invite_with_hint(my_static, peer, unix_secs(), PhoneLink::current_hint(link).as_ref())?;
-    // O convite pode se perder no caminho: repete até chegar a resposta.
-    let keys = timeout(wait, async {
-        let mut resend = tokio::time::interval(Duration::from_millis(700));
-        loop {
-            tokio::select! {
-                _ = resend.tick() => { let _ = tx.send(invite.to_vec()).await; }
-                d = rx.recv() => match d {
-                    Some(d) => match caller.answer(my_static, &d) {
-                        Ok(Answer::Accepted(k)) => return Ok(k),
-                        Ok(Answer::Rejected) => return Err(CallError::Rejected),
-                        Err(_) => {}
-                    },
-                    None => return Err(CallError::Closed),
-                },
-            }
-        }
-    })
-    .await
-    .map_err(|_| CallError::NoAnswer)??;
-
-    let frame_ms = codec.frame_ms();
-    let (active, in_tx, mut out_rx) = start_call(VoiceCall::new(&keys, codec), &keys, true, frame_ms, 0);
-    let linked = link.cloned().map(|l| (l.ids.fetch_add(1, Ordering::Relaxed), l));
-    if let Some((id, l)) = &linked {
-        let _ = l.actor.send(Msg::Listen { call: *id, tx: in_tx.clone() }).await;
-    }
-    tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                out = out_rx.recv() => match out {
-                    Some(WireOut::Frame { conn: 0, data }) => { if tx.send(data).await.is_err() { break; } }
-                    Some(o) => forward_extra(&linked, o).await,
-                    None => break,
-                },
-                d = rx.recv() => match d {
-                    Some(d) => { if in_tx.send((0, d)).await.is_err() { break; } }
-                    None => break,
-                },
-            }
-        }
-    });
-    Ok(active)
-}
-
 /// Ponta de destino: recebe os circuitos e atende as chamadas.
 pub struct Phone {
     addr: SocketAddr,
     incoming: mpsc::Receiver<IncomingCall>,
     notice: Arc<Mutex<Option<String>>>,
     contacts: Contacts,
-    port: DatagramPort,
     ids: Arc<AtomicU64>,
     link_tx: mpsc::Sender<Msg>,
     hint: Arc<Mutex<Option<RelayHint>>>,
@@ -729,7 +625,7 @@ pub struct AddressUpdate {
     pub record: AddressRecord,
 }
 
-/// Chaves aceitas pelo telefone; pode mudar com ele ligado (membros de salas entram e saem).
+/// Chaves aceitas pelo telefone; pode mudar com ele ligado (contatos entram e saem).
 pub type Contacts = Arc<Mutex<Vec<[u8; 32]>>>;
 
 impl Phone {
@@ -765,18 +661,12 @@ impl Phone {
                 tokio::spawn(read_frames(rd, conn, accept_tx.clone()));
             }
         });
-        let port = DatagramPort { actor: actor_tx.clone(), next: Arc::new(AtomicU64::new(DATAGRAM_CONN_BASE)) };
         let (upd_tx, upd_rx) = mpsc::channel(64);
         let (intro_tx, intro_rx) = mpsc::channel(64);
         let accept_intros = Arc::new(AtomicBool::new(true));
         let out = ActorOut { incoming: inc_tx, updates: upd_tx, introductions: intro_tx, accept_intros: accept_intros.clone(), notice: notice.clone() };
         let actor = tokio::spawn(run_actor(actor_rx, actor_tx.clone(), out, my_static, contacts.clone(), ids.clone()));
-        Ok(Self { addr, incoming: inc_rx, notice, contacts, port, ids, link_tx: actor_tx, hint: Arc::default(), updates: Some(upd_rx), introductions: Some(intro_rx), accept_intros, tasks: vec![accept, actor] })
-    }
-
-    /// Porta para ligações que chegam por datagramas (furo de NAT) em vez de TCP.
-    pub fn datagram_port(&self) -> DatagramPort {
-        self.port.clone()
+        Ok(Self { addr, incoming: inc_rx, notice, contacts, ids, link_tx: actor_tx, hint: Arc::default(), updates: Some(upd_rx), introductions: Some(intro_rx), accept_intros, tasks: vec![accept, actor] })
     }
 
     /// Para registrar neste telefone as chamadas que esta máquina faz ([`call_linked`]).

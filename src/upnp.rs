@@ -26,7 +26,7 @@ pub struct Mapping {
     gateway: igd_next::aio::Gateway<igd_next::aio::tokio::Tokio>,
     local: SocketAddr,
     port: u16,
-    /// `ip:porta` público, para publicar no diretório.
+    /// `ip:porta` público, para os contatos usarem.
     pub external: String,
 }
 
@@ -75,16 +75,6 @@ impl Mapping {
     }
 }
 
-/// O host do diretório (`host:porta`) é da rede local (IP privado, loopback ou nome que resolve para isso)?
-/// Então todos estão na mesma LAN e abrir porta no roteador só atrapalharia (o IP público talvez nem seja
-/// alcançável de dentro).
-pub async fn directory_is_local(directory: &str) -> bool {
-    match tokio::net::lookup_host(directory).await {
-        Ok(mut it) => it.next().is_some_and(|a| is_private(a.ip())),
-        Err(_) => false,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -97,12 +87,5 @@ mod tests {
         for s in ["8.8.8.8", "100.63.0.1", "100.128.0.1", "203.0.113.5"] {
             assert!(!is_private(s.parse().unwrap()), "{s}");
         }
-    }
-
-    #[tokio::test]
-    async fn local_directory_detected() {
-        assert!(directory_is_local("127.0.0.1:7777").await);
-        assert!(directory_is_local("192.168.0.20:7777").await);
-        assert!(!directory_is_local("203.0.113.5:7777").await);
     }
 }

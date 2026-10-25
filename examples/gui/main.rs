@@ -1,13 +1,13 @@
 //! Janela mínima para ligar e atender sem usar o terminal.
-//! Código em `examples/gui/`: `conf` (formulário e arquivo), `engine` (nó, chamadas e salas, sem janela), `ui` (egui).
+//! Código em `examples/gui/`: `conf` (formulário e arquivo), `engine` (nó e chamadas, sem janela), `ui` (egui).
 //! Roteiro em `docs/CHAMADAS.md`, seção "Interface gráfica mínima".
 //!
 //! ```text
 //! cargo run --release --features gui,audio --example gui
 //! ```
-//! Você informa a identidade, o endereço do diretório e os contatos; "Ficar online" sobe relay e
-//! telefone e publica no diretório; "Ligar" só precisa da chave pública do outro. Chamadas de
-//! contatos da lista são atendidas sozinhas. Sem `--features audio` (ou sem a opção marcada),
+//! Você informa a identidade e os contatos; "Ficar online" sobe relay e telefone; "Ligar" usa o código de
+//! contato do outro (a chave e, na primeira vez, o relay dele). Chamadas de contatos da lista são atendidas
+//! sozinhas. Sem `--features audio` (ou sem a opção marcada),
 //! cada lado envia um tom (440 Hz quem liga, 660 Hz quem atende).
 //! Os campos são gravados em `~/.clam-gui.conf`; a chave secreta vai para o chaveiro do sistema
 //! (ou, se não houver um, para o arquivo, que só o dono lê).
@@ -44,7 +44,6 @@ fn main() -> eframe::Result {
                 running: None,
                 done: Arc::default(),
                 error: String::new(),
-                confirm_remove: None,
                 audio_dirty: false,
                 screen_tex: Default::default(),
                 zoom: None,

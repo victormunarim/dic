@@ -1,4 +1,4 @@
-//! Atualização de endereço: um contato avisa o novo relay dele, sem diretório. *Sans-IO*; cada
+//! Atualização de endereço: um contato avisa o novo relay dele. *Sans-IO*; cada
 //! mensagem é um quadro de **200 bytes**, como a sinalização da chamada.
 //!
 //! ```text
@@ -18,7 +18,7 @@
 //! - O mesmo registro, sem o quadro em volta, é o que o ponto de encontro guarda na DHT
 //!   ([`seal_record`], [`open_record`]); a chave de assinatura e o sal do item vêm de [`rendezvous`].
 //! - A **apresentação** (tag 7) é o aviso de "adicionei você": quem adiciona um contato entrega o próprio
-//!   cartão (nome e como alcançá-lo: o diretório ou o relay) para o outro ter o contato na lista também. O
+//!   cartão (nome e o relay dele) para o outro ter o contato na lista também. O
 //!   quadro leva a chave pública de quem apresenta em claro (o destinatário ainda não o conhece, então não
 //!   tem como tentar chave por chave), e o conteúdo vai cifrado com `DH(apresentador, destinatário)`: só
 //!   quem tem a chave secreta da identidade que se diz autora consegue formar um quadro que abre. O
@@ -42,7 +42,7 @@ pub const TAG_ACK: u8 = 5;
 pub const TAG_INTRO: u8 = 7;
 /// Só separa o domínio da cifra do registro guardado na DHT (entra como dado associado, não vai a nenhum quadro).
 const TAG_RECORD: u8 = 6;
-/// Tamanho máximo do endereço (`host:porta`) no registro, o mesmo que o diretório aceita.
+/// Tamanho máximo do endereço (`host:porta`) no registro, o que cabe no quadro.
 pub const MAX_ADDR: usize = 60;
 const VERSION: u8 = 1;
 const NONCE_LEN: usize = 12;
@@ -211,13 +211,12 @@ fn parse(plain: &[u8]) -> Option<AddressRecord> {
     })
 }
 
-/// Como o apresentador pode ser alcançado por quem o adiciona.
+/// Como o apresentador pode ser alcançado por quem o adiciona: o relay dele (o código dele é `chave#addr#onion#link`).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Reach {
-    /// Pelo diretório `host:porta` (o código dele é `chave@host:porta`).
-    Directory(String),
-    /// Direto, pelo relay dele (o código dele é `chave#addr#onion#link`).
-    Relay { addr: String, onion: [u8; 32], link: [u8; 32] },
+pub struct Reach {
+    pub addr: String,
+    pub onion: [u8; 32],
+    pub link: [u8; 32],
 }
 
 /// O cartão que quem adiciona um contato entrega a ele.
@@ -232,10 +231,7 @@ pub struct Intro {
 
 /// Quadro de apresentação de `my_static` para `peer`. Falha se o endereço for vazio ou passar de [`MAX_ADDR`].
 pub fn seal_intro(my_static: &StaticSecret, peer: &PublicKey, intro: &Intro) -> Result<Frame, MediaError> {
-    let (kind, addr, onion, link) = match &intro.reach {
-        Reach::Directory(d) => (0u8, d.as_str(), [0u8; 32], [0u8; 32]),
-        Reach::Relay { addr, onion, link } => (1u8, addr.as_str(), *onion, *link),
-    };
+    let Reach { addr, onion, link } = &intro.reach;
     if addr.is_empty() || addr.len() > MAX_ADDR {
         return Err(MediaError::Malformed);
     }
@@ -243,11 +239,10 @@ pub fn seal_intro(my_static: &StaticSecret, peer: &PublicKey, intro: &Intro) -> 
     let mut plain = [0u8; INTRO_PLAIN_LEN];
     plain[0] = VERSION;
     plain[1..9].copy_from_slice(&intro.seq.to_be_bytes());
-    plain[9] = kind;
     plain[10] = addr.len() as u8;
     plain[11] = name.len() as u8;
-    plain[12..44].copy_from_slice(&onion);
-    plain[44..76].copy_from_slice(&link);
+    plain[12..44].copy_from_slice(onion);
+    plain[44..76].copy_from_slice(link);
     plain[INTRO_HEAD..INTRO_HEAD + addr.len()].copy_from_slice(addr.as_bytes());
     plain[INTRO_HEAD + addr.len()..INTRO_HEAD + addr.len() + name.len()].copy_from_slice(name.as_bytes());
     let me = PublicKey::from(my_static);
@@ -284,11 +279,7 @@ pub fn open_intro(my_static: &StaticSecret, frame: &[u8]) -> Option<([u8; 32], I
     let text = &plain[INTRO_HEAD..INTRO_HEAD + addr_len + name_len];
     let addr = String::from_utf8(text[..addr_len].to_vec()).ok()?;
     let name = String::from_utf8(text[addr_len..].to_vec()).ok()?;
-    let reach = match plain[9] {
-        0 => Reach::Directory(addr),
-        1 => Reach::Relay { addr, onion: plain[12..44].try_into().ok()?, link: plain[44..76].try_into().ok()? },
-        _ => return None,
-    };
+    let reach = Reach { addr, onion: plain[12..44].try_into().ok()?, link: plain[44..76].try_into().ok()? };
     Some((author, Intro { seq: u64::from_be_bytes(plain[1..9].try_into().ok()?), name, reach }))
 }
 
@@ -412,7 +403,7 @@ mod tests {
     }
 
     fn intro(seq: u64) -> Intro {
-        Intro { seq, name: "Ana".into(), reach: Reach::Relay { addr: "203.0.113.7:4001".into(), onion: [3; 32], link: [4; 32] } }
+        Intro { seq, name: "Ana".into(), reach: Reach { addr: "203.0.113.7:4001".into(), onion: [3; 32], link: [4; 32] } }
     }
 
     #[test]
@@ -447,20 +438,20 @@ mod tests {
     }
 
     #[test]
-    fn the_introduction_carries_a_directory_and_trims_the_name_to_fit() {
+    fn the_introduction_trims_the_name_to_fit() {
         let (a, b) = ids();
         let pb = PublicKey::from(&b);
-        let long = Intro { seq: 2, name: "é".repeat(40), reach: Reach::Directory("dir.exemplo.com:7000".into()) };
+        let long = Intro { seq: 2, name: "é".repeat(40), reach: Reach { addr: "casa.exemplo.com:4001".into(), onion: [5; 32], link: [6; 32] } };
         let (_, got) = open_intro(&b, &seal_intro(&a, &pb, &long).unwrap()).unwrap();
         assert_eq!(got.reach, long.reach);
         assert!(got.name.len() <= MAX_NAME && got.name.chars().all(|c| c == 'é') && !got.name.is_empty());
         // Endereço no limite: o nome encolhe para caber, o endereço não perde nada.
-        let tight = Intro { seq: 3, name: "x".repeat(MAX_NAME), reach: Reach::Relay { addr: "h".repeat(MAX_ADDR), onion: [1; 32], link: [2; 32] } };
+        let tight = Intro { seq: 3, name: "x".repeat(MAX_NAME), reach: Reach { addr: "h".repeat(MAX_ADDR), onion: [1; 32], link: [2; 32] } };
         let (_, got) = open_intro(&b, &seal_intro(&a, &pb, &tight).unwrap()).unwrap();
         assert_eq!(got.reach, tight.reach);
         assert_eq!(got.name.len(), INTRO_TEXT - MAX_ADDR);
         for addr in ["", &"x".repeat(MAX_ADDR + 1)] {
-            let bad = Intro { reach: Reach::Directory(addr.to_string()), ..intro(1) };
+            let bad = Intro { reach: Reach { addr: addr.to_string(), onion: [3; 32], link: [4; 32] }, ..intro(1) };
             assert_eq!(seal_intro(&a, &pb, &bad), Err(MediaError::Malformed));
         }
     }

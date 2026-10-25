@@ -292,7 +292,7 @@ pub fn pump(source: &mut dyn ScreenSource, encoder: &mut H264Encoder, share: &Sc
     Ok(pump_all(source, encoder, &[share], false)? > 0)
 }
 
-/// Como [`pump`], para vários espectadores (sala): o mesmo quadro codificado vai a todos os circuitos.
+/// Como [`pump`], para vários espectadores: o mesmo quadro codificado vai a todos os circuitos.
 /// `force_key` pede quadro-chave (por exemplo, entrou um espectador). Devolve para quantos o quadro seguiu.
 pub fn pump_all(source: &mut dyn ScreenSource, encoder: &mut H264Encoder, shares: &[&ScreenShare], force_key: bool) -> Result<usize, VideoError> {
     // Todos precisam ser consultados: `any` pararia no primeiro e deixaria pedidos pendentes.

@@ -7,17 +7,7 @@
 - Rust (`rustup`) com `stable-x86_64-pc-windows-msvc` e as Build Tools do Visual Studio (C++).
 - Git, e `git clone git@github.com:victormunarim/dic.git`.
 
-## 2. Servidor do diretório
-
-Uma máquina só, acessível pelos dois lados (pode ser a do Linux):
-
-```powershell
-cargo run --release --features net --example directory -- 0.0.0.0:7777
-```
-
-Libere a porta TCP 7777 (e a 4000, se usar o relay abaixo) no Firewall do Windows.
-
-## 3. Cada pessoa
+## 2. Cada pessoa
 
 Libere a porta TCP 4001 (seu relay). Abra a janela:
 
@@ -25,13 +15,12 @@ Libere a porta TCP 4001 (seu relay). Abra a janela:
 cargo run --release --features gui,audio --example gui
 ```
 
-1. *Gerar nova* na identidade e envie seu **código de contato** (botão *Copiar*; é a chave pública + `@diretório`) à outra pessoa.
-2. Diretório: `IP-DO-SERVIDOR:7777`.
-3. Contatos: o código de contato de quem pode ligar para você. Se o campo Diretório estiver vazio, ele é preenchido pelo código.
-4. *Ficar online*.
-5. Para ligar, cole a código do outro em *Ligar*. Use fones.
+1. *Ficar online* (a identidade já nasce pronta; *Gerar nova* troca por outra).
+2. Envie seu **código de contato** (botão *Copiar*; leva a chave pública e o seu relay, que só existe com o nó online) à outra pessoa.
+3. Contatos: o código de contato de quem pode ligar para você (os dois lados se adicionam; quem é adicionado aparece sozinho na lista do outro).
+4. Para ligar, cole o código do outro em *Ligar* ou use o botão do contato. Use fones.
 
-Atrás de roteador: com o diretório na internet, o programa tenta abrir a porta 4001 sozinho por UPnP e avisa o resultado no log. Se não der, ou redirecione a porta 4001 e preencha o endereço público (`ip:4001`). A chamada é sempre p2p: sem porta acessível (CGNAT, por exemplo) ninguém consegue ligar para você.
+Atrás de roteador: o programa tenta abrir a porta 4001 sozinho por UPnP e avisa o resultado no log. Se não der, redirecione a porta 4001 e preencha o endereço público (`ip:4001`, ou um nome) em *Configurações avançadas*. A chamada é sempre p2p: sem porta acessível (CGNAT, por exemplo) ninguém consegue ligar para você.
 Config em `%USERPROFILE%\.clam-gui.conf` (contém a chave secreta).
 O programa pede timers de 1 ms ao Windows (`timeBeginPeriod`) para manter a cadência da voz.
 

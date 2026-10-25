@@ -9,8 +9,6 @@ use clam::{rand_core::OsRng, x25519_dalek::StaticSecret};
 use eframe::egui;
 use tokio::sync::mpsc;
 
-use clam::room;
-
 use crate::{conf::*, engine::*};
 
 
@@ -22,8 +20,6 @@ pub(crate) struct App {
     pub(crate) running: Option<Running>,
     pub(crate) done: Arc<AtomicBool>,
     pub(crate) error: String,
-    /// Membro cujo "Remover" espera confirmação.
-    pub(crate) confirm_remove: Option<[u8; 32]>,
     /// Ajustes de áudio mudaram e ainda não foram salvos (salva ao soltar o controle).
     pub(crate) audio_dirty: bool,
     /// Microfones e alto-falantes que o sistema listou (atualizável na janela).
@@ -36,93 +32,6 @@ pub(crate) struct App {
 }
 
 impl App {
-    /// Salas guardadas neste computador: entrar de novo é um clique, sem combinar nada.
-    pub(crate) fn rooms_ui(&mut self, ui: &mut egui::Ui, offline: bool, in_room: bool, in_call: bool) {
-        ui.weak("Ficam salvas neste computador. Entre de novo quando quiser; o primeiro a entrar é o anfitrião.");
-        // O dono trocou o segredo de alguma sala (alguém foi removido): guarda o novo.
-        let changed: Vec<_> = std::mem::take(&mut *self.shared.rekeyed.lock().unwrap());
-        if !changed.is_empty() {
-            for (old, new) in changed {
-                self.form.replace_room_secret(&old, &new);
-            }
-            self.form.save();
-        }
-        let rooms = parse_rooms(&self.form.rooms);
-        let me = self.form.my_key();
-        let mut forget = None;
-        for (i, room) in rooms.iter().enumerate() {
-            let SavedRoom { name, secret, owner } = room;
-            ui.horizontal(|ui| {
-                ui.label(name);
-                if owner.is_some() && *owner == me {
-                    ui.weak("(você é o dono)");
-                }
-                if ui.add_enabled(!offline && !in_call, egui::Button::new("Entrar")).clicked()
-                    && let Some(r) = &self.running
-                {
-                    let _ = r.cmds.send(Cmd::Join(*secret, *owner, name.clone()));
-                }
-                if ui.button("Copiar código").clicked() {
-                    let dir = self.form.directory_addr();
-                    let code = room.code();
-                    ui.ctx().copy_text(if dir.is_empty() { code } else { format!("{code}@{dir}") });
-                }
-                if ui.add_enabled(!in_room, egui::Button::new("Esquecer")).clicked() {
-                    forget = Some(i);
-                }
-            });
-        }
-        if let Some(i) = forget {
-            let kept: Vec<SavedRoom> = rooms.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, r)| r.clone()).collect();
-            self.form.rooms = format_rooms(&kept);
-            self.form.save();
-        }
-        ui.horizontal(|ui| {
-            ui.label("Nova sala:");
-            ui.add(egui::TextEdit::singleline(&mut self.form.room_name).hint_text("nome").desired_width(110.0));
-            ui.label("Código:");
-            ui.add(egui::TextEdit::singleline(&mut self.form.room_code).hint_text("vazio = criar; ou cole o código de uma sala").desired_width(280.0));
-            if ui.add_enabled(!offline && !in_call, egui::Button::new("Criar / entrar")).clicked() {
-                // Sala nova: você é o dono. Com código: o dono vem no código (se o código tiver um).
-                let fresh = if self.form.room_code.trim().is_empty() {
-                    me.map(|m| (room::new_secret(), Some(m)))
-                } else {
-                    split_room_code(&self.form.room_code)
-                };
-                match fresh {
-                    Some((secret, owner)) => {
-                        let name: String = self.form.room_name.chars().filter(|c| !matches!(c, ';' | '\n')).collect();
-                        let name = if name.trim().is_empty() { format!("sala {}", rooms.len() + 1) } else { name.trim().to_string() };
-                        if !rooms.iter().any(|r| r.secret == secret) {
-                            if !self.form.rooms.trim().is_empty() {
-                                self.form.rooms.push('\n');
-                            }
-                            self.form.rooms.push_str(&format!("{name} {}", SavedRoom { name: String::new(), secret, owner }.code()));
-                        }
-                        self.form.room_name.clear();
-                        self.form.room_code.clear();
-                        self.error.clear();
-                        self.form.save();
-                        if let Some(r) = &self.running {
-                            let _ = r.cmds.send(Cmd::Join(secret, owner, name));
-                        }
-                    }
-                    None => self.error = "código de sala inválido (64 hex, com @host:porta opcional)".into(),
-                }
-            }
-            if ui.add_enabled(in_room, egui::Button::new("Sair da sala")).clicked()
-                && let Some(r) = &self.running
-            {
-                let _ = r.cmds.send(Cmd::Leave);
-            }
-        });
-        let status = self.shared.room.lock().unwrap().clone();
-        if !status.is_empty() {
-            ui.label(status);
-        }
-        self.members_ui(ui);
-    }
-
     /// Escolha de microfone e alto-falante (vazio = padrão do sistema); vale na próxima chamada.
     #[cfg(feature = "audio")]
     fn devices_ui(&mut self, ui: &mut egui::Ui, offline: bool) {
@@ -148,83 +57,6 @@ impl App {
         }
     }
 
-    /// Quem está na sala: indicador de fala, apelido e volume de cada pessoa.
-    fn members_ui(&mut self, ui: &mut egui::Ui) {
-        let members = self.shared.members.lock().unwrap().clone();
-        let mesh = self.shared.mesh.lock().unwrap().clone();
-        let me = *self.shared.me.lock().unwrap();
-        if members.is_empty() {
-            return;
-        }
-        let names = self.form.names();
-        let i_own = self.shared.owner.load(Ordering::Relaxed);
-        let mut nick_changes = Vec::new();
-        let mut remove = None;
-        for key in members {
-            ui.horizontal(|ui| {
-                let (live, speaking) = match (&mesh, key == me) {
-                    (_, true) => (true, false),
-                    (Some(m), false) => (m.has(&key), m.is_speaking(&key)),
-                    _ => (false, false),
-                };
-                let color = if speaking {
-                    egui::Color32::from_rgb(60, 190, 90)
-                } else if live {
-                    egui::Color32::GRAY
-                } else {
-                    egui::Color32::from_rgb(200, 150, 60)
-                };
-                let (dot, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
-                ui.painter().circle_filled(dot.center(), if speaking { 6.0 } else { 4.0 }, color);
-                if key == me {
-                    ui.label("você");
-                    return;
-                }
-                let mut nick = self.form.nick(&key);
-                let hint = member_name(&names, &key);
-                if ui.add(egui::TextEdit::singleline(&mut nick).hint_text(hint).desired_width(130.0)).changed() {
-                    nick_changes.push((key, nick));
-                }
-                if let Some(m) = &mesh {
-                    let mut v = m.volume(&key);
-                    if ui.add(egui::Slider::new(&mut v, 0.0..=room::MAX_VOLUME).show_value(false)).changed() {
-                        m.set_volume(&key, v);
-                    }
-                    ui.label(if v == 0.0 { "mudo".to_string() } else { format!("{:.0}%", v * 100.0) });
-                }
-                if !live {
-                    ui.label("conectando...");
-                }
-                if i_own {
-                    if self.confirm_remove == Some(key) {
-                        let who = member_name(&names, &key);
-                        ui.colored_label(egui::Color32::from_rgb(200, 70, 60), format!("Remover {who}?"));
-                        if ui.button("Sim, remover").clicked() {
-                            remove = Some(key);
-                        }
-                        if ui.button("Cancelar").clicked() {
-                            self.confirm_remove = None;
-                        }
-                    } else if ui.button("Remover").on_hover_text("Troca o segredo da sala: só quem fica recebe o novo").clicked() {
-                        self.confirm_remove = Some(key);
-                    }
-                }
-            });
-        }
-        if let Some(key) = remove {
-            self.confirm_remove = None;
-            if let Some(r) = &self.running {
-                let _ = r.cmds.send(Cmd::Remove(key));
-            }
-        }
-        if !nick_changes.is_empty() {
-            for (k, n) in nick_changes {
-                self.form.set_nick(&k, &n);
-            }
-            self.form.save();
-        }
-    }
-
     pub(crate) fn go_online(&mut self, ctx: &egui::Context) {
         self.error.clear();
         if let Err(e) = self.form.identity() {
@@ -232,7 +64,7 @@ impl App {
             return;
         }
         if let Err(e) = self.form.save_checked() {
-            self.error = format!("não deu para gravar a configuração em {}: {e}; o servidor e os contatos não ficam salvos", conf_path().display());
+            self.error = format!("não deu para gravar a configuração em {}: {e}; os contatos não ficam salvos", conf_path().display());
         }
         self.log.lock().unwrap().clear();
         let (tx, rx) = mpsc::unbounded_channel();
@@ -294,7 +126,7 @@ impl App {
         ui.checkbox(&mut p.denoise, "Remover ruído (rede neural)")
             .on_hover_text("Tira teclado, ventilador, estática e vozes ao fundo (RNNoise). Com ela ligada, a porta e o indicador \"voz\" só contam o que a rede reconhece como fala. Adiciona ~10 ms de atraso.");
         ui.checkbox(&mut p.echo_cancel, "Cancelar eco do alto-falante")
-            .on_hover_text("Tira do microfone o que saiu pelo alto-falante, para o outro lado não se ouvir de volta. Leva alguns segundos de conversa para aprender a sala. Com fones não é preciso.");
+            .on_hover_text("Tira do microfone o que saiu pelo alto-falante, para o outro lado não se ouvir de volta. Leva alguns segundos de conversa para aprender o ambiente. Com fones não é preciso.");
         ui.checkbox(&mut p.echo_suppress, "Abaixar o microfone enquanto só há eco")
             .on_hover_text("Reforço para o eco que o cancelador deixa passar: com o outro lado falando, o microfone cai 18 dB enquanto estiver mais de 20 dB abaixo do que sai pelo alto-falante. Quem fala baixinho por cima do outro pode ser cortado; com fones, desligue.");
         if let Some(erle) = a.echo_erle().filter(|_| p.echo_cancel && (in_call || testing)) {
@@ -400,13 +232,7 @@ impl App {
                     self.error = "Esse código de contato não parece certo (são 64 letras e números, e o que vem depois deles tem de estar inteiro).".into();
                 } else {
                     let name: String = self.form.new_name.chars().filter(|c| !matches!(c, ';' | '\n')).collect();
-                    // Servidor ainda vazio e o código traz um (`chave@host:porta`): passa a valer, à vista no campo.
-                    if self.form.directory.trim().is_empty()
-                        && let Some((_, Some(dir), _)) = split_direct(&self.form.new_code)
-                    {
-                        self.form.directory = dir;
-                    }
-                    if let Some((key, _, relay)) = split_direct(&self.form.new_code) {
+                    if let Some((key, relay)) = split_direct(&self.form.new_code) {
                         match (&self.running, relay) {
                             (Some(r), relay) => {
                                 let _ = r.cmds.send(Cmd::Contact(key, relay));
@@ -435,7 +261,7 @@ impl App {
 }
 
 impl App {
-    /// Compartilhar a própria tela e ver a dos outros, na chamada ou na sala.
+    /// Compartilhar a própria tela e ver a dos outros, na chamada .
     fn screen_ui(&mut self, ui: &mut egui::Ui) {
         let st = &self.shared.screen;
         let (wanted, sharing) = (st.want_share.load(Ordering::Relaxed), st.sharing.load(Ordering::Relaxed));
@@ -481,7 +307,7 @@ impl App {
         for (who, (_, tex)) in order {
             ui.separator();
             ui.horizontal(|ui| {
-                ui.label(format!("Tela de {}:", crate::engine::member_name(&names, who)));
+                ui.label(format!("Tela de {}:", member_name(&names, who)));
                 if ui.button("🔍 Ampliar").on_hover_text("Abre a tela numa janela maior").clicked() {
                     self.zoom = Some(*who);
                 }
@@ -499,7 +325,7 @@ impl App {
             self.zoom = None;
             return;
         };
-        let title = format!("Tela de {}", crate::engine::member_name(&self.form.names(), &who));
+        let title = format!("Tela de {}", member_name(&self.form.names(), &who));
         let size = tex.size_vec2();
         let mut close = false;
         ctx.show_viewport_immediate(
@@ -523,15 +349,12 @@ impl eframe::App for App {
         if self.done.swap(false, Ordering::Relaxed) {
             self.running = None;
             self.shared.in_call.store(false, Ordering::Relaxed);
-            self.shared.in_room.store(false, Ordering::Relaxed);
             self.shared.status.lock().unwrap().clear();
             *self.shared.relay.lock().unwrap() = None;
-            self.shared.room.lock().unwrap().clear();
         }
         self.zoom_window(ctx);
         let offline = self.running.is_none();
         let in_call = self.shared.in_call.load(Ordering::Relaxed);
-        let in_room = self.shared.in_room.load(Ordering::Relaxed);
         let status = self.shared.status.lock().unwrap().clone();
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
@@ -554,13 +377,6 @@ impl eframe::App for App {
                         if !status.is_empty() {
                             ui.weak(&status);
                         }
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Servidor (diretório):");
-                        ui.add_enabled(
-                            offline,
-                            egui::TextEdit::singleline(&mut self.form.directory).hint_text("exemplo: meu-servidor.com:7000").desired_width(260.0),
-                        );
                     });
                     ui.weak(format!(
                         "Configuração: {} ({})",
@@ -586,7 +402,7 @@ impl eframe::App for App {
                 });
 
                 let testing = self.shared.mic_test.load(Ordering::Relaxed);
-                if in_call && !in_room && !testing {
+                if in_call && !testing {
                     card(ui, "Em chamada", |ui| {
                         ui.label("Conversando agora.");
                         let link = self.shared.link.lock().unwrap().clone();
@@ -648,13 +464,6 @@ impl eframe::App for App {
                     }
                 });
 
-                card(ui, "Salas", |ui| {
-                    self.rooms_ui(ui, offline, in_room, in_call);
-                    if in_room {
-                        self.screen_ui(ui);
-                    }
-                });
-
                 egui::CollapsingHeader::new("Configurações avançadas").show(ui, |ui| {
                     ui.add_enabled_ui(offline, |ui| {
                         ui.label("Identidade (chave secreta, 64 hex). Não compartilhe com ninguém.");
@@ -663,7 +472,7 @@ impl eframe::App for App {
                             self.form.secret = hex(&StaticSecret::random_from_rng(OsRng).to_bytes());
                         }
                         ui.separator();
-                        ui.label("Endereço público ip:porta (só se o servidor enxergar um IP que não serve, como atrás de NAT; a porta precisa estar aberta no roteador):");
+                        ui.label("Endereço público ip:porta (só se o IP que os outros enxergam não serve, como atrás de NAT; a porta precisa estar aberta no roteador; pode ser um nome):");
                         ui.text_edit_singleline(&mut self.form.public_addr);
                         ui.separator();
                         ui.checkbox(&mut self.form.use_dht, "Usar a DHT (BitTorrent) para reencontrar contatos")

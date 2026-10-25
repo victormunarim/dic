@@ -15,15 +15,15 @@
 //!   tem a chave secreta de `s_i` não deriva as chaves da chamada ([`CallKeys`]): o aceite
 //!   vai para o vazio e a voz nunca autentica.
 //! - O convite não depende do relógio de quem recebe: duas máquinas com a hora desencontrada
-//!   (ou sem diretório para acertá-la) ainda se ligam. A repetição de um convite gravado é
+//!   ainda se ligam. A repetição de um convite gravado é
 //!   barrada por quem recebe, que lembra as efêmeras já vistas ([`Incoming::nonce`]); sem
 //!   essa memória (telefone reiniciado) o replay só faz o telefone tocar, não dá acesso à
 //!   chamada. A hora de quem liga segue no convite só para telefones de versão anterior, que a conferem.
 //! - O convite pode levar uma **dica de relay** ([`RelayHint`]): o endereço e as chaves do relay de
 //!   quem liga, num segundo bloco cifrado com a mesma chave (nonce diferente). Quem atende guarda a
-//!   dica para ligar de volta sem consultar o diretório. Telefones de versão anterior não olham esses
+//!   dica para ligar de volta. Telefones de versão anterior não olham esses
 //!   bytes; sem dica o bloco é aleatório e [`Incoming::relay_hint`] devolve `None`. Como `s_i`, a dica
-//!   não é autenticada: quem a recebe só a usa depois do endereço guardado e do diretório falharem, e só a
+//!   não é autenticada: quem a recebe só a usa depois do endereço guardado, da DHT e das âncoras falharem, e só a
 //!   promove a endereço guardado depois de uma chamada autenticada por ela.
 
 use std::net::{IpAddr, SocketAddr};
@@ -52,7 +52,7 @@ const HINT_LEN: usize = 32 + 32 + 1 + 16 + 2;
 const HINT_SEALED_LEN: usize = HINT_LEN + 16;
 const HINT_AT: usize = 33 + SEALED_LEN;
 
-/// Onde chegar ao relay de quem liga: o que o chamado precisa para ligar de volta sem diretório.
+/// Onde chegar ao relay de quem liga: o que o chamado precisa para ligar de volta.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RelayHint {
     pub addr: SocketAddr,

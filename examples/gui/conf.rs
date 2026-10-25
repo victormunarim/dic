@@ -1,4 +1,4 @@
-//! Configuração salva, formulário e funções puras (códigos, contatos, salas, chaveiro).
+//! Configuração salva, formulário e funções puras (códigos, contatos, chaveiro).
 
 use std::{collections::HashMap, path::PathBuf};
 
@@ -100,7 +100,6 @@ impl Default for AudioPrefs {
 #[derive(Default, Clone)]
 pub(crate) struct Form {
     pub(crate) secret: String,
-    pub(crate) directory: String,
     /// Uma linha por contato: `[nome] chave-pública-hex`.
     pub(crate) contacts: String,
     pub(crate) peer: String,
@@ -122,29 +121,22 @@ pub(crate) struct Form {
     /// Microfone e alto-falante escolhidos (vazio = padrão do sistema).
     pub(crate) input_dev: String,
     pub(crate) output_dev: String,
-    /// Apelidos, um por linha: `chave-hex apelido`. Valem só neste computador.
-    pub(crate) nicks: String,
-    /// Salas guardadas, uma por linha: `nome segredo-hex`.
-    pub(crate) rooms: String,
-    pub(crate) room_name: String,
-    pub(crate) room_code: String,
     pub(crate) new_name: String,
     pub(crate) new_code: String,
     /// O arquivo de configuração existia e foi lido ao abrir (para a janela mostrar de onde veio).
     pub(crate) loaded: bool,
 }
 
-/// Código de contato: a chave pública (64 hex), com o diretório opcional depois de `@`
-/// (`<chave>@host:porta`). Devolve a chave e o diretório, se houver.
-pub(crate) fn split_code(t: &str) -> Option<([u8; 32], Option<String>)> {
-    split_direct(t).map(|(k, d, _)| (k, d))
+/// Código de contato: a chave pública (64 hex), com o relay de quem o gerou depois de `#` (veja
+/// [`split_direct`]). Devolve só a chave.
+pub(crate) fn split_code(t: &str) -> Option<[u8; 32]> {
+    split_direct(t).map(|(k, _)| k)
 }
 
-/// Código de contato direto: o de [`split_code`] seguido do relay de quem o gerou,
-/// `<chave>[@host:porta]#ip:porta#chave-do-circuito#chave-do-link` (as duas chaves em 64 hex). Com ele a
-/// primeira ligação não precisa de diretório. Um `#` com o resto torto invalida o código inteiro, para um
-/// código cortado na colagem não ser aceito pela metade.
-pub(crate) fn split_direct(t: &str) -> Option<([u8; 32], Option<String>, Option<clam::directory::RelayInfo>)> {
+/// Código de contato direto: `<chave>#ip:porta#chave-do-circuito#chave-do-link` (as duas chaves em 64 hex;
+/// o endereço pode ser um nome). Com ele a primeira ligação já sabe onde achar o contato. Um `#` com o resto
+/// torto invalida o código inteiro, para um código cortado na colagem não ser aceito pela metade.
+pub(crate) fn split_direct(t: &str) -> Option<([u8; 32], Option<clam::node::RelayInfo>)> {
     let t = t.trim();
     let (head, relay) = match t.split_once('#') {
         None => (t, None),
@@ -154,19 +146,17 @@ pub(crate) fn split_direct(t: &str) -> Option<([u8; 32], Option<String>, Option<
             if p.next().is_some() || addr.is_empty() || addr.len() > 60 || !addr.contains(':') || addr.contains(char::is_whitespace) {
                 return None;
             }
-            (h, Some(clam::directory::RelayInfo { addr: addr.to_string(), onion: unhex(onion).ok()?, link: unhex(link).ok()? }))
+            (h, Some(clam::node::RelayInfo { addr: addr.to_string(), onion: unhex(onion).ok()?, link: unhex(link).ok()? }))
         }
     };
-    let (key, dir) = match head.split_once('@') {
-        Some((k, d)) => (k, Some(d.trim().to_string()).filter(|d| !d.is_empty())),
-        None => (head, None),
-    };
-    unhex(key).ok().map(|k| (k, dir, relay))
+    // Código antigo, `<chave>@servidor`: o servidor não existe mais, fica só a chave.
+    let key = head.split_once('@').map_or(head, |(k, _)| k);
+    unhex(key).ok().map(|k| (k, relay))
 }
 
 /// Relays que os códigos diretos da lista de contatos trazem, por chave.
-pub(crate) fn contact_relays(text: &str) -> Vec<([u8; 32], clam::directory::RelayInfo)> {
-    text.split_whitespace().filter_map(split_direct).filter_map(|(k, _, r)| Some((k, r?))).collect()
+pub(crate) fn contact_relays(text: &str) -> Vec<([u8; 32], clam::node::RelayInfo)> {
+    text.split_whitespace().filter_map(split_direct).filter_map(|(k, r)| Some((k, r?))).collect()
 }
 
 /// Contatos da lista: `(nome, chave)`. Linhas sem uma chave de 64 hex são ignoradas.
@@ -177,66 +167,13 @@ pub(crate) fn parse_contacts(text: &str) -> Vec<(String, [u8; 32])> {
             let mut key = None;
             for t in l.split_whitespace() {
                 match split_code(t) {
-                    Some((k, _)) => key = Some(k),
+                    Some(k) => key = Some(k),
                     None => name.push(t),
                 }
             }
             key.map(|k| (if name.is_empty() { hex(&k)[..8].to_string() } else { name.join(" ") }, k))
         })
         .collect()
-}
-
-/// Apelidos: `chave-hex apelido` por linha.
-pub(crate) fn parse_nicks(text: &str) -> Vec<(String, [u8; 32])> {
-    text.lines()
-        .filter_map(|l| {
-            let (key, nick) = l.trim().split_once(' ')?;
-            Some((nick.trim().to_string(), unhex(key).ok()?)).filter(|(n, _)| !n.is_empty())
-        })
-        .collect()
-}
-
-/// Sala guardada: o dono (quem criou) é quem pode remover membros; salas antigas não têm dono registrado.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SavedRoom {
-    pub(crate) name: String,
-    pub(crate) secret: [u8; 32],
-    pub(crate) owner: Option<[u8; 32]>,
-}
-
-/// Código de sala: `segredo[:dono][@host:porta]`, tudo em hex. Devolve o segredo e o dono, se houver.
-pub(crate) fn split_room_code(t: &str) -> Option<([u8; 32], Option<[u8; 32]>)> {
-    let t = t.trim();
-    let t = t.split_once('@').map_or(t, |(k, _)| k);
-    match t.split_once(':') {
-        Some((s, o)) => Some((unhex(s).ok()?, Some(unhex(o).ok()?))),
-        None => Some((unhex(t).ok()?, None)),
-    }
-}
-
-/// Salas guardadas, uma por linha: `nome segredo[:dono]`. Linhas sem um segredo de 64 hex são ignoradas.
-pub(crate) fn parse_rooms(text: &str) -> Vec<SavedRoom> {
-    text.lines()
-        .filter_map(|l| {
-            let (name, code) = l.trim().rsplit_once(' ')?;
-            let (secret, owner) = split_room_code(code)?;
-            Some(SavedRoom { name: name.trim().to_string(), secret, owner })
-        })
-        .collect()
-}
-
-pub(crate) fn format_rooms(rooms: &[SavedRoom]) -> String {
-    rooms.iter().map(|r| format!("{} {}", r.name, r.code())).collect::<Vec<_>>().join("\n")
-}
-
-impl SavedRoom {
-    /// `segredo[:dono]`, o que vai para o arquivo e para quem recebe o convite.
-    pub(crate) fn code(&self) -> String {
-        match &self.owner {
-            Some(o) => format!("{}:{}", hex(&self.secret), hex(o)),
-            None => hex(&self.secret),
-        }
-    }
 }
 
 /// Valor de `secret=` no arquivo quando a chave de verdade está no chaveiro do sistema.
@@ -270,12 +207,12 @@ pub(crate) fn known_path() -> PathBuf {
     conf_path().with_file_name(".clam-gui.known")
 }
 
-pub(crate) type Stored = Vec<([u8; 32], clam::directory::RelayInfo)>;
+pub(crate) type Stored = Vec<([u8; 32], clam::node::RelayInfo)>;
 
 /// O que o arquivo de endereços guarda.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Book {
-    /// Confirmados por uma chamada, pelo diretório ou pelo aviso do próprio contato.
+    /// Confirmados por uma chamada, pela DHT ou pelo aviso do próprio contato.
     pub known: Stored,
     pub hints: Stored,
     pub history: Stored,
@@ -304,7 +241,7 @@ fn parse_known(text: &str) -> Book {
         let mut p = l.split_whitespace();
         let entry = (|| {
             let (k, addr, o, link) = (p.next()?, p.next()?, p.next()?, p.next()?);
-            Some((unhex(k).ok()?, clam::directory::RelayInfo { addr: addr.to_string(), onion: unhex(o).ok()?, link: unhex(link).ok()? }))
+            Some((unhex(k).ok()?, clam::node::RelayInfo { addr: addr.to_string(), onion: unhex(o).ok()?, link: unhex(link).ok()? }))
         })();
         let tail = p.next();
         match entry {
@@ -318,7 +255,7 @@ fn parse_known(text: &str) -> Book {
 }
 
 fn format_known(book: &Book) -> String {
-    let line = |(k, r): &([u8; 32], clam::directory::RelayInfo), tail: &str| format!("{} {} {} {}{tail}\n", hex(k), r.addr, hex(&r.onion), hex(&r.link));
+    let line = |(k, r): &([u8; 32], clam::node::RelayInfo), tail: &str| format!("{} {} {} {}{tail}\n", hex(k), r.addr, hex(&r.onion), hex(&r.link));
     let all = book.known.iter().map(|e| line(e, "")).chain(book.hints.iter().map(|e| line(e, " dica"))).chain(book.history.iter().map(|e| line(e, " antigo")));
     all.collect()
 }
@@ -333,7 +270,7 @@ pub(crate) fn forget_known(key: &[u8; 32]) -> std::io::Result<()> {
 }
 
 /// Contato adicionado com o nó parado: o relay do código direto dele entra em `.clam-gui.known` como dica.
-pub(crate) fn remember_hint(key: [u8; 32], relay: clam::directory::RelayInfo) -> std::io::Result<()> {
+pub(crate) fn remember_hint(key: [u8; 32], relay: clam::node::RelayInfo) -> std::io::Result<()> {
     let mut book = load_known();
     book.hints.retain(|(k, _)| *k != key);
     book.hints.push((key, relay));
@@ -368,7 +305,7 @@ pub(crate) fn mark_pending(key: [u8; 32], pending: bool) -> std::io::Result<()> 
 }
 
 /// Âncoras do campo de texto: `ip:porta#chave-do-circuito#chave-do-link` por linha (linhas tortas são ignoradas).
-pub(crate) fn parse_anchors(text: &str) -> Vec<clam::directory::RelayInfo> {
+pub(crate) fn parse_anchors(text: &str) -> Vec<clam::node::RelayInfo> {
     text.split_whitespace()
         .filter_map(|t| {
             let mut p = t.split('#');
@@ -376,13 +313,13 @@ pub(crate) fn parse_anchors(text: &str) -> Vec<clam::directory::RelayInfo> {
             if p.next().is_some() || addr.is_empty() || addr.len() > 60 || !addr.contains(':') {
                 return None;
             }
-            Some(clam::directory::RelayInfo { addr: addr.to_string(), onion: unhex(onion).ok()?, link: unhex(link).ok()? })
+            Some(clam::node::RelayInfo { addr: addr.to_string(), onion: unhex(onion).ok()?, link: unhex(link).ok()? })
         })
         .collect()
 }
 
 /// O texto que outra pessoa cola em "Âncoras" para usar o relay `r` como âncora.
-pub(crate) fn anchor_code(r: &clam::directory::RelayInfo) -> String {
+pub(crate) fn anchor_code(r: &clam::node::RelayInfo) -> String {
     format!("{}#{}#{}", r.addr, hex(&r.onion), hex(&r.link))
 }
 
@@ -392,10 +329,8 @@ pub(crate) fn intro_line(name: &str, key: &[u8; 32], reach: &clam::media::update
     let name: String = name.chars().filter(|c| !c.is_control() && !matches!(c, ';' | '#' | '@')).collect();
     let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
     let name = if name.is_empty() { hex(key)[..8].to_string() } else { name };
-    match reach {
-        Reach::Directory(d) => format!("{name} {}@{d}", hex(key)),
-        Reach::Relay { addr, onion, link } => format!("{name} {}#{addr}#{}#{}", hex(key), hex(onion), hex(link)),
-    }
+    let Reach { addr, onion, link } = reach;
+    format!("{name} {}#{addr}#{}#{}", hex(key), hex(onion), hex(link))
 }
 
 /// Chaves do relay deste computador, num arquivo à parte (`onion link`, em hex). Mantê-las entre execuções
@@ -460,7 +395,6 @@ impl Form {
         };
         Form {
             secret,
-            directory: get("directory"),
             contacts: get("contacts").replace(';', "\n"),
             peer: get("peer"),
             public_addr: get("public_addr"),
@@ -475,8 +409,6 @@ impl Form {
             input_dev: get("input_dev"),
             output_dev: get("output_dev"),
             audio: AudioPrefs::from_kv(&kv),
-            nicks: get("nicks").replace(';', "\n"),
-            rooms: get("rooms").replace(';', "\n"),
             loaded: true,
             ..Form::default()
         }
@@ -493,10 +425,9 @@ impl Form {
         // Chave de identidade no chaveiro do sistema; só cai para o arquivo se ele não estiver disponível.
         let secret = if vault_set(self.secret.trim()) { KEYRING_MARK } else { self.secret.trim() };
         let text = format!(
-            "audio={}\nsecret={}\ndirectory={}\ncontacts={}\npeer={}\npublic_addr={}\ndht={}\ndht_circuit={}\nname={}\nintros={}\nanchor={}\nanchors={}\nrooms={}\ninput_dev={}\noutput_dev={}\nnicks={}\n{}",
+            "audio={}\nsecret={}\ncontacts={}\npeer={}\npublic_addr={}\ndht={}\ndht_circuit={}\nname={}\nintros={}\nanchor={}\nanchors={}\ninput_dev={}\noutput_dev={}\n{}",
             u8::from(self.use_audio),
             secret,
-            self.directory.trim(),
             self.contacts.trim().replace('\n', ";"),
             self.peer.trim(),
             self.public_addr.trim(),
@@ -506,35 +437,17 @@ impl Form {
             u8::from(self.intros),
             u8::from(self.anchor),
             self.anchors.trim().replace('\n', ";"),
-            self.rooms.trim().replace('\n', ";"),
             self.input_dev.trim(),
             self.output_dev.trim(),
-            self.nicks.trim().replace('\n', ";"),
             self.audio.to_conf()
         );
         // Contém a chave secreta: só o dono lê.
         write_private(&conf_path(), &text)
     }
 
-    /// Nomes conhecidos: contatos e apelidos (o apelido vale para quem não é contato).
+    /// Nomes dos contatos, para mostrar quem liga ou transmite a tela.
     pub(crate) fn names(&self) -> Vec<(String, [u8; 32])> {
-        let mut v = parse_contacts(&self.contacts);
-        v.extend(parse_nicks(&self.nicks));
-        v
-    }
-
-    pub(crate) fn nick(&self, key: &[u8; 32]) -> String {
-        parse_nicks(&self.nicks).into_iter().find(|(_, k)| k == key).map(|(n, _)| n).unwrap_or_default()
-    }
-
-    /// Define (ou, vazio, remove) o apelido de `key`.
-    pub(crate) fn set_nick(&mut self, key: &[u8; 32], nick: &str) {
-        let mut v: Vec<(String, [u8; 32])> = parse_nicks(&self.nicks).into_iter().filter(|(_, k)| k != key).collect();
-        let nick = nick.trim().replace(['\n', ';'], " ");
-        if !nick.is_empty() {
-            v.push((nick, *key));
-        }
-        self.nicks = v.iter().map(|(n, k)| format!("{} {n}", hex(k))).collect::<Vec<_>>().join("\n");
+        parse_contacts(&self.contacts)
     }
 
     #[cfg(feature = "audio")]
@@ -542,51 +455,30 @@ impl Form {
         clam::audio::Devices { input: self.input_dev.trim().to_string(), output: self.output_dev.trim().to_string() }
     }
 
-    /// Minha chave pública (a identidade que o diretório e as salas conhecem).
-    pub(crate) fn my_key(&self) -> Option<[u8; 32]> {
-        Some(PublicKey::from(&self.identity().ok()?).to_bytes())
-    }
-
-    /// O dono trocou o segredo de uma sala: guarda o novo no lugar do antigo.
-    pub(crate) fn replace_room_secret(&mut self, old: &[u8; 32], new: &[u8; 32]) {
-        let mut rooms = parse_rooms(&self.rooms);
-        for r in rooms.iter_mut().filter(|r| r.secret == *old) {
-            r.secret = *new;
-        }
-        self.rooms = format_rooms(&rooms);
-    }
-
     pub(crate) fn identity(&self) -> Result<StaticSecret, String> {
         unhex(&self.secret).map(StaticSecret::from).map_err(|e| format!("identidade: {e}"))
     }
 
-    /// Diretório a usar: só o campo "servidor". Vazio é de propósito: sem diretório, só o código direto liga.
-    pub(crate) fn directory_addr(&self) -> String {
-        self.directory.trim().to_string()
-    }
-
-    /// Meu código de contato: chave pública e, se conhecido, o diretório. Sem diretório, o código leva o
-    /// relay `relay` desta máquina (veja [`split_direct`]); `None` enquanto ele não existe (offline).
-    pub(crate) fn my_code(&self, relay: Option<&clam::directory::RelayInfo>) -> Option<String> {
+    /// Meu código de contato: a chave pública e, com o nó online, o relay `relay` desta máquina (veja
+    /// [`split_direct`]); `None` no relay enquanto ele não existe (offline).
+    pub(crate) fn my_code(&self, relay: Option<&clam::node::RelayInfo>) -> Option<String> {
         let key = hex(PublicKey::from(&self.identity().ok()?).as_bytes());
-        let dir = self.directory_addr();
-        Some(match (dir.is_empty(), relay) {
-            (false, _) => format!("{key}@{dir}"),
-            (true, Some(r)) => format!("{key}#{}#{}#{}", r.addr, hex(&r.onion), hex(&r.link)),
-            (true, None) => key,
+        Some(match relay {
+            Some(r) => format!("{key}#{}#{}#{}", r.addr, hex(&r.onion), hex(&r.link)),
+            None => key,
         })
     }
 
     /// Relay que um código direto (nos contatos ou no campo "ligar para") informa para `key`.
-    pub(crate) fn relay_for(&self, key: &[u8; 32]) -> Option<clam::directory::RelayInfo> {
+    pub(crate) fn relay_for(&self, key: &[u8; 32]) -> Option<clam::node::RelayInfo> {
         let from_peer = self.peer.split_whitespace().filter_map(split_direct);
         let from_contacts = self.contacts.split_whitespace().filter_map(split_direct);
-        from_peer.chain(from_contacts).find(|(k, ..)| k == key).and_then(|(_, _, r)| r)
+        from_peer.chain(from_contacts).find(|(k, _)| k == key).and_then(|(_, r)| r)
     }
 
     pub(crate) fn target(&self) -> Result<[u8; 32], String> {
         let p = self.peer.trim();
-        if let Some((k, _)) = split_code(p) {
+        if let Some(k) = split_code(p) {
             return Ok(k);
         }
         parse_contacts(&self.contacts)
@@ -637,7 +529,7 @@ mod tests {
 
     #[test]
     fn known_addresses_hints_and_history_round_trip_and_stay_apart() {
-        let r = |addr: &str, n: u8| clam::directory::RelayInfo { addr: addr.into(), onion: [n; 32], link: [n + 1; 32] };
+        let r = |addr: &str, n: u8| clam::node::RelayInfo { addr: addr.into(), onion: [n; 32], link: [n + 1; 32] };
         let book = Book {
             known: vec![([1; 32], r("10.0.0.1:4001", 5))],
             hints: vec![([2; 32], r("[::1]:4001", 8))],
@@ -664,27 +556,28 @@ mod tests {
     #[test]
     fn contact_code_parses() {
         let k = "ab".repeat(32);
-        assert_eq!(split_code(&k).unwrap().1, None);
-        let (key, dir) = split_code(&format!(" {k}@10.0.0.1:7777 ")).unwrap();
-        assert_eq!((key, dir.as_deref()), ([0xab; 32], Some("10.0.0.1:7777")));
+        assert_eq!(split_code(&k), Some([0xab; 32]));
+        assert_eq!(split_code(&format!(" {k} ")), Some([0xab; 32]));
         assert!(split_code("nome").is_none());
         // O código direto passa por split_code sem o relay.
-        let direct = format!("{k}@h:1#203.0.113.7:4001#{}#{}", "11".repeat(32), "22".repeat(32));
-        assert_eq!(split_code(&direct), Some(([0xab; 32], Some("h:1".to_string()))));
-        let c = parse_contacts(&format!("ana {k}@h:1"));
-        assert_eq!(c, vec![("ana".to_string(), [0xab; 32])]);
+        let direct = format!("{k}#203.0.113.7:4001#{}#{}", "11".repeat(32), "22".repeat(32));
+        assert_eq!(split_code(&direct), Some([0xab; 32]));
+        // Código antigo, com o servidor que não existe mais: fica a chave.
+        assert_eq!(parse_contacts(&format!("ana {k}@h:1")), vec![("ana".to_string(), [0xab; 32])]);
     }
 
     #[test]
     fn direct_code_round_trips_and_rejects_bad_tails() {
         let k = "ab".repeat(32);
         let (onion, link) = ("11".repeat(32), "22".repeat(32));
-        let (key, dir, relay) = split_direct(&format!(" {k}#203.0.113.7:4001#{onion}#{link} ")).unwrap();
-        assert_eq!((key, dir), ([0xab; 32], None));
-        assert_eq!(relay, Some(clam::directory::RelayInfo { addr: "203.0.113.7:4001".into(), onion: [0x11; 32], link: [0x22; 32] }));
-        let (_, dir, relay) = split_direct(&format!("{k}@d:7#[::1]:4001#{onion}#{link}")).unwrap();
-        assert_eq!((dir.as_deref(), relay.unwrap().addr.as_str()), (Some("d:7"), "[::1]:4001"));
-        assert_eq!(split_direct(&k), Some(([0xab; 32], None, None)));
+        let (key, relay) = split_direct(&format!(" {k}#203.0.113.7:4001#{onion}#{link} ")).unwrap();
+        assert_eq!(key, [0xab; 32]);
+        assert_eq!(relay, Some(clam::node::RelayInfo { addr: "203.0.113.7:4001".into(), onion: [0x11; 32], link: [0x22; 32] }));
+        let (_, relay) = split_direct(&format!("{k}#[::1]:4001#{onion}#{link}")).unwrap();
+        assert_eq!(relay.unwrap().addr, "[::1]:4001");
+        let (_, relay) = split_direct(&format!("{k}#casa.exemplo.com:4001#{onion}#{link}")).unwrap();
+        assert_eq!(relay.unwrap().addr, "casa.exemplo.com:4001");
+        assert_eq!(split_direct(&k), Some(([0xab; 32], None)));
         // Cortado, sobrando pedaço, endereço sem porta ou chave torta: nada de aceitar pela metade.
         for bad in [format!("{k}#203.0.113.7:4001#{onion}"), format!("{k}#203.0.113.7:4001#{onion}#{link}#x"), format!("{k}#203.0.113.7#{onion}#{link}"), format!("{k}#1.2.3.4:5#{onion}#zz"), format!("{k}#")] {
             assert!(split_direct(&bad).is_none(), "{bad}");
@@ -696,22 +589,13 @@ mod tests {
     }
 
     #[test]
-    fn my_code_carries_the_relay_only_without_a_directory() {
-        let mut f = Form { secret: "07".repeat(32), ..Default::default() };
+    fn my_code_carries_the_relay_once_online() {
+        let f = Form { secret: "07".repeat(32), ..Default::default() };
         let key = f.my_code(None).unwrap();
-        let relay = clam::directory::RelayInfo { addr: "10.0.0.2:4001".into(), onion: [1; 32], link: [2; 32] };
+        let relay = clam::node::RelayInfo { addr: "10.0.0.2:4001".into(), onion: [1; 32], link: [2; 32] };
         let direct = f.my_code(Some(&relay)).unwrap();
-        assert_eq!(split_direct(&direct).unwrap().2, Some(relay.clone()));
+        assert_eq!(split_direct(&direct).unwrap().1, Some(relay));
         assert!(direct.starts_with(&key));
-        f.directory = "d:7".into();
-        assert_eq!(f.my_code(Some(&relay)).unwrap(), format!("{key}@d:7"));
-    }
-
-    #[test]
-    fn rooms_parse_with_spaces_in_names() {
-        let k = hex(&[7u8; 32]);
-        let rooms = parse_rooms(&format!("noite de jogo {k}\nlixo\nsala {}", &k[..60]));
-        assert_eq!(rooms, vec![SavedRoom { name: "noite de jogo".into(), secret: [7u8; 32], owner: None }]);
     }
 
     #[test]
@@ -723,48 +607,21 @@ mod tests {
     }
 
     #[test]
-    fn nicknames_set_replace_and_clear() {
-        let mut f = Form::default();
-        let k = [9u8; 32];
-        f.set_nick(&k, " Zé da Silva ");
-        f.set_nick(&[8u8; 32], "bia");
-        assert_eq!(f.nick(&k), "Zé da Silva");
-        f.set_nick(&k, "Zé");
-        assert_eq!((f.nick(&k), f.nick(&[8u8; 32])), ("Zé".to_string(), "bia".to_string()));
-        f.set_nick(&k, "");
-        assert_eq!(f.nick(&k), "");
-        assert_eq!(f.names(), vec![("bia".to_string(), [8u8; 32])]);
-    }
-
-    #[test]
-    fn room_codes_carry_the_owner_and_rotate() {
-        let (s, o) = (hex(&[1u8; 32]), hex(&[2u8; 32]));
-        assert_eq!(split_room_code(&format!("{s}:{o}@10.0.0.1:7777")), Some(([1; 32], Some([2; 32]))));
-        assert_eq!(split_room_code(&s), Some(([1; 32], None)));
-        assert!(split_room_code(&format!("{s}:zz")).is_none());
-        let mut f = Form { rooms: format!("a {s}:{o}\nb {}", hex(&[3u8; 32])), ..Form::default() };
-        f.replace_room_secret(&[1; 32], &[9; 32]);
-        let r = parse_rooms(&f.rooms);
-        assert_eq!((r[0].secret, r[0].owner, r[1].secret), ([9; 32], Some([2; 32]), [3; 32]));
-    }
-
-    #[test]
     fn an_introduction_becomes_a_contact_line_that_parses_back() {
         use clam::media::update::Reach;
         let key = [9u8; 32];
-        let relay = Reach::Relay { addr: "203.0.113.7:4001".into(), onion: [1; 32], link: [2; 32] };
+        let relay = Reach { addr: "203.0.113.7:4001".into(), onion: [1; 32], link: [2; 32] };
         let line = intro_line("Ana  Maria; #x", &key, &relay);
         assert_eq!(parse_contacts(&line), vec![("Ana Maria x".to_string(), key)]);
-        let (k, _, r) = split_direct(line.split_whitespace().last().unwrap()).unwrap();
+        let (k, r) = split_direct(line.split_whitespace().last().unwrap()).unwrap();
         assert_eq!((k, r.unwrap().addr), (key, "203.0.113.7:4001".to_string()));
-        let line = intro_line("", &key, &Reach::Directory("dir.exemplo.com:7000".into()));
+        let line = intro_line("", &key, &relay);
         assert_eq!(parse_contacts(&line), vec![(hex(&key)[..8].to_string(), key)]);
-        assert_eq!(split_code(line.split_whitespace().last().unwrap()), Some((key, Some("dir.exemplo.com:7000".into()))));
     }
 
     #[test]
     fn anchors_round_trip_and_skip_bad_lines() {
-        let r = clam::directory::RelayInfo { addr: "198.51.100.2:4001".into(), onion: [3; 32], link: [4; 32] };
+        let r = clam::node::RelayInfo { addr: "198.51.100.2:4001".into(), onion: [3; 32], link: [4; 32] };
         let text = format!("{}\nlixo\n198.51.100.3:4001#curto#curto\n", anchor_code(&r));
         assert_eq!(parse_anchors(&text), vec![r]);
     }

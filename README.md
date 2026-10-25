@@ -30,10 +30,10 @@ O crate reexporta `ed25519_dalek`, `x25519_dalek` e `rand_core` (`clam::ed25519_
 |---|---|
 | [docs/PRIVACIDADE.md](docs/PRIVACIDADE.md) | Pareamento, presença cifrada, busca, círculos (Fases 1 e 2) |
 | [docs/CIRCUITO.md](docs/CIRCUITO.md) | Circuito de 2 saltos, transporte, reputação, cover traffic, fuzzing (Fase 3) |
-| [docs/CHAMADAS.md](docs/CHAMADAS.md) | Mídia, telefone, diretório de primeiro contato, salas, GUI mínima |
-| [docs/GUI.md](docs/GUI.md) | GUI: sala, volume, apelidos, remover membro, modo sem diretório |
-| [docs/ENCONTRO.md](docs/ENCONTRO.md) | Reencontrar contatos sem diretório: aviso de endereço novo e ponto de encontro na DHT, âncoras e contato de duas vias (fases 1 a 4 prontas) |
-| [docs/SEGURANCA.md](docs/SEGURANCA.md) | Garantias, limites, limite de taxa, troca de segredo, estado em disco |
+| [docs/CHAMADAS.md](docs/CHAMADAS.md) | Mídia, telefone, conexão sem servidor, GUI mínima |
+| [docs/GUI.md](docs/GUI.md) | GUI: áudio, dispositivos, como os contatos se acham |
+| [docs/ENCONTRO.md](docs/ENCONTRO.md) | Reencontrar contatos sem servidor: aviso de endereço novo e ponto de encontro na DHT, âncoras e contato de duas vias (fases 1 a 4 prontas) |
+| [docs/SEGURANCA.md](docs/SEGURANCA.md) | Garantias, limites, chaveiro |
 | [docs/LINUX.md](docs/LINUX.md) / [docs/WINDOWS.md](docs/WINDOWS.md) | Instalação por sistema |
 
 Para ligar a alguém: rode o `examples/gui` (veja [docs/GUI.md](docs/GUI.md)) ou, em código, `Node::start` e `Node::dial` ([docs/CHAMADAS.md](docs/CHAMADAS.md)).

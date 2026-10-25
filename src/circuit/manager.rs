@@ -28,7 +28,7 @@ use super::{
     client::{ClientCircuit, Event as CircuitEvent},
 };
 
-/// Relay candidato, vindo do descritor/diretório.
+/// Relay candidato, vindo do descritor ou de um contato.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Candidate {
     /// Endereço onde o relay é alcançado (primeiro salto: para onde o cliente envia).

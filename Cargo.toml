@@ -61,7 +61,3 @@ required-features = ["net"]
 [[example]]
 name = "call"
 required-features = ["net"]
-
-[[example]]
-name = "directory"
-required-features = ["net"]

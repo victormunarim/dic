@@ -13,7 +13,7 @@
 //! - [`jitter`]: reordena, detecta perda e adapta o atraso de reprodução.
 //! - [`codec`]: trait do codec; vem o G.711 µ-law (sem dependência de C). Opus entra pela mesma trait.
 //! - [`signal`]: convite, aceite e recusa, em quadros de 200 B (a identidade de quem liga vai cifrada).
-//! - [`update`]: aviso de endereço novo de um contato para outro, sem diretório (quadros de 200 B).
+//! - [`update`]: aviso de endereço novo de um contato para outro (quadros de 200 B).
 //! - [`screen`]: vídeo da tela em fragmentos de 200 B num circuito próprio, com taxa fixa.
 //! - [`VoiceCall`]: junta tudo.
 //!

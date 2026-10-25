@@ -18,7 +18,7 @@
 //! # Âncoras
 //!
 //! Para quem a DHT está bloqueada ou não basta, um nó com endereço estável pode guardar os registros dos outros:
-//! a *âncora* ([`Anchor`], `NodeConfig::anchor`). É o papel do diretório, mas voluntário e federado: cada pessoa
+//! a *âncora* ([`Anchor`], `NodeConfig::anchor`). Voluntário e federado: cada pessoa
 //! escolhe em quais âncoras confia para estar no ar, e quem opera uma não precisa ser ninguém especial. O dono grava o
 //! mesmo item assinado da DHT (mesmo alvo, mesma cifra) em cada âncora que ele usa (as réplicas), e quem liga lê as
 //! mesmas três datas. A âncora fala o protocolo do gateway pelo destino [`ANCHOR_DEST`]; só guarda, não consulta nada
