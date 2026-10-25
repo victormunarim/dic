@@ -18,7 +18,10 @@
 //! - Fila do emissor limitada: se o codec produz mais do que o circuito leva, os quadros
 //!   mais velhos são descartados e a fila só volta a aceitar a partir de um quadro-chave.
 
-use std::collections::VecDeque;
+use std::{
+    collections::VecDeque,
+    time::{Duration, Instant},
+};
 
 use super::{
     MediaError,
@@ -35,6 +38,10 @@ pub const MAX_FRAME: usize = 255 * FRAGMENT_PAYLOAD;
 pub const MAX_QUEUE: usize = 400;
 /// Quadros em remontagem ao mesmo tempo; passou disso, o mais velho é abandonado.
 const MAX_PENDING: usize = 4;
+
+/// Depois de enfileirar um quadro-chave, pedidos do receptor são ignorados por este tempo: o quadro
+/// leva mais de um segundo para sair e os pedidos já em trânsito não valem para o que está a caminho.
+const KEY_COOLDOWN: Duration = Duration::from_secs(3);
 
 const KEYFRAME: u8 = 1;
 const IDLE: u8 = 2;
@@ -87,6 +94,8 @@ pub struct ScreenStream {
     /// Faltou quadro: descarta até chegar um quadro-chave.
     broken: bool,
     peer_wants_key: bool,
+    last_key: Option<Instant>,
+    key_cooldown: Duration,
     peer_stopped: bool,
     stats: ScreenStats,
 }
@@ -104,6 +113,8 @@ impl ScreenStream {
             last_id: None,
             broken: false,
             peer_wants_key: false,
+            last_key: None,
+            key_cooldown: KEY_COOLDOWN,
             peer_stopped: false,
             stats: ScreenStats::default(),
         }
@@ -128,6 +139,7 @@ impl ScreenStream {
             // Quadro-chave dispensa tudo que está na fila: quem decodificar começa dele.
             self.queue.clear();
             self.need_key_out = false;
+            self.last_key = Some(Instant::now());
         } else if self.queue.len() + total > MAX_QUEUE {
             self.queue.clear();
             self.need_key_out = true;
@@ -173,7 +185,7 @@ impl ScreenStream {
 
     /// O emissor deve forçar um quadro-chave no codec (o outro lado pediu, ou a fila estourou).
     pub fn take_keyframe_request(&mut self) -> bool {
-        let wanted = std::mem::take(&mut self.peer_wants_key);
+        let wanted = std::mem::take(&mut self.peer_wants_key) && self.last_key.is_none_or(|t| t.elapsed() >= self.key_cooldown);
         // Um quadro-chave ainda saindo já atende o pedido; outro o esvaziaria no meio e, como ele
         // leva centenas de ms para sair, os pedidos repetidos do receptor nunca o deixariam chegar.
         if self.queue.iter().any(|q| q.0 & KEYFRAME != 0) {
@@ -391,8 +403,21 @@ mod tests {
     }
 
     #[test]
+    fn key_requests_right_after_a_keyframe_are_ignored() {
+        let (mut a, _) = pair();
+        a.push_frame(&frame(100, 0), true).unwrap();
+        a.peer_wants_key = true;
+        assert!(!a.take_keyframe_request());
+        a.queue.clear();
+        a.last_key = Some(Instant::now() - KEY_COOLDOWN);
+        a.peer_wants_key = true;
+        assert!(a.take_keyframe_request());
+    }
+
+    #[test]
     fn lost_fragment_blocks_delta_frames_and_asks_for_a_keyframe() {
         let (mut a, mut b) = pair();
+        a.key_cooldown = Duration::ZERO;
         a.push_frame(&frame(100, 0), true).unwrap();
         a.push_frame(&frame(400, 1), false).unwrap(); // 3 fragmentos
         a.push_frame(&frame(100, 2), false).unwrap();
