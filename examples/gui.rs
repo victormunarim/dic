@@ -105,7 +105,6 @@ struct Form {
     peer: String,
     public_addr: String,
     use_audio: bool,
-    via_server: bool,
     /// Salas guardadas, uma por linha: `nome segredo-hex`.
     rooms: String,
     room_name: String,
@@ -173,7 +172,6 @@ impl Form {
             peer: get("peer"),
             public_addr: get("public_addr"),
             use_audio: get("audio") == "1",
-            via_server: get("via_server") == "1",
             rooms: get("rooms").replace(';', "\n"),
             ..Form::default()
         }
@@ -181,14 +179,13 @@ impl Form {
 
     fn save(&self) {
         let text = format!(
-            "audio={}\nsecret={}\ndirectory={}\ncontacts={}\npeer={}\npublic_addr={}\nvia_server={}\nrooms={}\n",
+            "audio={}\nsecret={}\ndirectory={}\ncontacts={}\npeer={}\npublic_addr={}\nrooms={}\n",
             u8::from(self.use_audio),
             self.secret.trim(),
             self.directory.trim(),
             self.contacts.trim().replace('\n', ";"),
             self.peer.trim(),
             self.public_addr.trim(),
-            u8::from(self.via_server),
             self.rooms.trim().replace('\n', ";")
         );
         let path = conf_path();
@@ -341,7 +338,6 @@ async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, shared: Arc<
     }
     let contacts: Vec<_> = parse_contacts(&form.contacts);
     let mut cfg = NodeConfig::new(secret, form.directory_addr(), contacts.iter().map(|(_, k)| *k).collect());
-    cfg.via_server = form.via_server;
     if !form.public_addr.trim().is_empty() {
         cfg.public_addr = Some(form.public_addr.trim().to_string());
     }
@@ -841,8 +837,7 @@ impl eframe::App for App {
                             self.form.secret = hex(&StaticSecret::random_from_rng(OsRng).to_bytes());
                         }
                         ui.separator();
-                        ui.checkbox(&mut self.form.via_server, "Estou atrás de NAT: usar o relay do servidor (sem abrir porta)");
-                        ui.label("Endereço público ip:porta (só se o servidor enxergar um IP que não serve):");
+                        ui.label("Endereço público ip:porta (só se o servidor enxergar um IP que não serve, como atrás de NAT; a porta precisa estar aberta no roteador):");
                         ui.text_edit_singleline(&mut self.form.public_addr);
                     });
                 });
