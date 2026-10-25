@@ -8,7 +8,8 @@
 //! telefone e publica no diretório; "Ligar" só precisa da chave pública do outro. Chamadas de
 //! contatos da lista são atendidas sozinhas. Sem `--features audio` (ou sem a opção marcada),
 //! cada lado envia um tom (440 Hz quem liga, 660 Hz quem atende).
-//! Os campos são gravados em `~/.clam-gui.conf` (inclui a chave secreta).
+//! Os campos são gravados em `~/.clam-gui.conf`; a chave secreta vai para o chaveiro do sistema
+//! (ou, se não houver um, para o arquivo, que só o dono lê).
 
 use std::{
     collections::HashMap,
@@ -150,6 +151,22 @@ fn parse_rooms(text: &str) -> Vec<(String, [u8; 32])> {
         .collect()
 }
 
+/// Valor de `secret=` no arquivo quando a chave de verdade está no chaveiro do sistema.
+const KEYRING_MARK: &str = "@keyring";
+
+fn vault() -> Option<keyring::Entry> {
+    keyring::Entry::new("clam", "identity").ok()
+}
+
+fn vault_get() -> Option<String> {
+    vault()?.get_password().ok().filter(|s| unhex(s).is_ok())
+}
+
+/// Guarda a identidade no chaveiro e confere que dá para ler de volta.
+fn vault_set(secret: &str) -> bool {
+    vault().is_some_and(|e| e.set_password(secret).is_ok()) && vault_get().as_deref() == Some(secret)
+}
+
 fn conf_path() -> PathBuf {
     let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from).unwrap_or_default();
     home.join(".clam-gui.conf")
@@ -165,8 +182,14 @@ impl Form {
         let Ok(text) = std::fs::read_to_string(conf_path()) else { return Form::first_run() };
         let kv: HashMap<_, _> = text.lines().filter_map(|l| l.split_once('=')).map(|(k, v)| (k.to_string(), v.to_string())).collect();
         let get = |k: &str| kv.get(k).cloned().unwrap_or_default();
+        let secret = match get("secret").as_str() {
+            "" => hex(&StaticSecret::random_from_rng(OsRng).to_bytes()),
+            // Guardada no chaveiro do sistema; se ele sumiu, gera outra (a identidade antiga se perde).
+            KEYRING_MARK => vault_get().unwrap_or_else(|| hex(&StaticSecret::random_from_rng(OsRng).to_bytes())),
+            plain => plain.to_string(),
+        };
         Form {
-            secret: if get("secret").is_empty() { hex(&StaticSecret::random_from_rng(OsRng).to_bytes()) } else { get("secret") },
+            secret,
             directory: get("directory"),
             contacts: get("contacts").replace(';', "\n"),
             peer: get("peer"),
@@ -178,10 +201,12 @@ impl Form {
     }
 
     fn save(&self) {
+        // Chave de identidade no chaveiro do sistema; só cai para o arquivo se ele não estiver disponível.
+        let secret = if vault_set(self.secret.trim()) { KEYRING_MARK } else { self.secret.trim() };
         let text = format!(
             "audio={}\nsecret={}\ndirectory={}\ncontacts={}\npeer={}\npublic_addr={}\nrooms={}\n",
             u8::from(self.use_audio),
-            self.secret.trim(),
+            secret,
             self.directory.trim(),
             self.contacts.trim().replace('\n', ";"),
             self.peer.trim(),

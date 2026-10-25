@@ -388,3 +388,30 @@ async fn room_dials_in_background_and_reconnects() {
     ma.hangup();
     mb.hangup();
 }
+
+#[tokio::test]
+async fn directory_rate_limits_per_ip() {
+    use clam::directory::RateLimit;
+    let d = DirectoryServer::spawn_limited("127.0.0.1:0".parse().unwrap(), RateLimit { per_sec: 0.1, burst: 3.0 }).await.unwrap();
+    let addr = d.local_addr().to_string();
+    let mut refused = 0;
+    for _ in 0..10 {
+        if clam::directory::lookup(&addr, &[7u8; 32]).await.is_err() {
+            refused += 1;
+        }
+    }
+    assert!(refused >= 5, "só {refused} recusados");
+}
+
+#[tokio::test]
+async fn room_owner_rotates_secret_and_removed_member_is_left_out() {
+    use clam::{room, x25519_dalek::{PublicKey, StaticSecret}, rand_core::OsRng};
+    let d = DirectoryServer::spawn("127.0.0.1:0".parse().unwrap()).await.unwrap();
+    let addr = d.local_addr().to_string();
+    let (owner, bob, eve) = (StaticSecret::random_from_rng(OsRng), StaticSecret::random_from_rng(OsRng), StaticSecret::random_from_rng(OsRng));
+    let (opub, bpub) = (PublicKey::from(&owner).to_bytes(), PublicKey::from(&bob).to_bytes());
+    let old = room::new_secret();
+    let new = room::rotate(&addr, &owner, &old, &[bpub]).await.unwrap();
+    assert_eq!(room::follow(&addr, &bob, &opub, &old).await.unwrap(), Some(new));
+    assert_eq!(room::follow(&addr, &eve, &opub, &old).await.unwrap(), None);
+}

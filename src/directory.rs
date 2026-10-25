@@ -43,6 +43,11 @@ pub const REPUBLISH: Duration = Duration::from_secs(40);
 pub const MAX_LISTENERS: usize = 1024;
 /// Intervalo mínimo entre testes de alcançabilidade da mesma chave.
 const REACH_COOLDOWN: Duration = Duration::from_secs(20);
+/// Tamanho de um aviso de troca de segredo: nonce (12) ‖ segredo novo cifrado (32) ‖ etiqueta (16).
+pub const NOTICE_LEN: usize = 12 + 32 + 16;
+/// Quanto tempo um aviso espera quem estava desconectado.
+const NOTICE_TTL: Duration = Duration::from_secs(3 * 24 * 3600);
+const MAX_NOTICES: usize = 8192;
 /// Entradas simultâneas no servidor.
 pub const MAX_ENTRIES: usize = 4096;
 
@@ -64,6 +69,8 @@ const REQ_LOOKUP: u8 = 2;
 const REQ_SAMPLE: u8 = 3;
 const REQ_PUNCH_LISTEN: u8 = 9;
 const REQ_REACH: u8 = 12;
+const REQ_NOTICE_PUT: u8 = 13;
+const REQ_NOTICE_GET: u8 = 14;
 const REQ_PUNCH_PREP: u8 = 10;
 const REQ_PUNCH_GO: u8 = 11;
 const CTL_PUNCH: u8 = 3;
@@ -180,6 +187,73 @@ struct PunchState {
     probed: Mutex<HashMap<[u8; 32], Instant>>,
 }
 
+/// Avisos de troca de segredo de sala: (dono, sala antiga, destinatário) → aviso cifrado.
+type Notices = Arc<Mutex<HashMap<[u8; 96], (Vec<u8>, Instant)>>>;
+
+/// Limite de pedidos por IP: balde de fichas que enche `per_sec` por segundo até `burst`.
+/// Pedidos baratos custam 1 ficha; os que verificam assinatura ou fazem conexões de volta custam mais.
+#[derive(Clone, Copy, Debug)]
+pub struct RateLimit {
+    pub per_sec: f64,
+    pub burst: f64,
+}
+
+impl Default for RateLimit {
+    /// Folgado para vários nós atrás do mesmo IP (CGNAT, casa, empresa), apertado para quem faz flood.
+    fn default() -> Self {
+        Self { per_sec: 50.0, burst: 200.0 }
+    }
+}
+
+/// IPs rastreados ao mesmo tempo; passou disso, IPs novos são recusados até alguns saírem.
+const MAX_TRACKED_IPS: usize = 65536;
+
+struct Limiter {
+    cfg: RateLimit,
+    buckets: Mutex<HashMap<u128, (f64, Instant)>>,
+}
+
+impl Limiter {
+    fn new(cfg: RateLimit) -> Self {
+        Self { cfg, buckets: Mutex::default() }
+    }
+
+    /// Gasta `cost` fichas do IP; `false` se não há. IPv6 conta por /64 (um usuário recebe o bloco todo).
+    fn allow(&self, ip: std::net::IpAddr, cost: f64) -> bool {
+        let key = match ip.to_canonical() {
+            std::net::IpAddr::V4(a) => u32::from(a) as u128,
+            std::net::IpAddr::V6(a) => (u128::from(a) >> 64) << 64 | 1 << 100,
+        };
+        let now = Instant::now();
+        let mut b = self.buckets.lock().unwrap();
+        if b.len() >= MAX_TRACKED_IPS && !b.contains_key(&key) {
+            // Quem já recuperou o balde inteiro não precisa mais ser lembrado.
+            let c = self.cfg;
+            b.retain(|_, (t, at)| *t + at.elapsed().as_secs_f64() * c.per_sec < c.burst);
+            if b.len() >= MAX_TRACKED_IPS {
+                return false;
+            }
+        }
+        let e = b.entry(key).or_insert((self.cfg.burst, now));
+        e.0 = (e.0 + e.1.elapsed().as_secs_f64() * self.cfg.per_sec).min(self.cfg.burst);
+        e.1 = now;
+        if e.0 < cost {
+            return false;
+        }
+        e.0 -= cost;
+        true
+    }
+}
+
+/// Ficha que cada tipo de pedido custa.
+fn cost(kind: Option<&u8>) -> f64 {
+    match kind {
+        Some(&(REQ_ROOM_JOIN | REQ_ROOM_LEAVE | REQ_ROOM_LIST | REQ_NOTICE_PUT | REQ_NOTICE_GET | REQ_PUNCH_LISTEN)) => 5.0,
+        Some(&REQ_REACH) => 20.0,
+        _ => 1.0,
+    }
+}
+
 /// Validade de uma ficha UDP sem reaparecer.
 const TOKEN_TTL: Duration = Duration::from_secs(120);
 const MAX_TOKENS: usize = 8192;
@@ -193,19 +267,29 @@ pub struct DirectoryServer {
 
 impl DirectoryServer {
     pub async fn spawn(listen: SocketAddr) -> io::Result<Self> {
+        Self::spawn_limited(listen, RateLimit::default()).await
+    }
+
+    /// Como [`spawn`](Self::spawn), com outro [`RateLimit`] por IP.
+    pub async fn spawn_limited(listen: SocketAddr, limit: RateLimit) -> io::Result<Self> {
         let listener = TcpListener::bind(listen).await?;
         let addr = listener.local_addr()?;
         let table: Table = Arc::default();
         let rooms: Rooms = Arc::default();
         let punch: Arc<PunchState> = Arc::default();
+        let notices: Notices = Arc::default();
+        let limiter = Arc::new(Limiter::new(limit));
         let udp = Arc::new(UdpSocket::bind(addr).await?);
         let udp_task = tokio::spawn(udp_loop(udp, punch.clone()));
         let task = tokio::spawn(async move {
             loop {
                 let Ok((s, peer)) = listener.accept().await else { continue };
-                let (table, rooms, punch) = (table.clone(), rooms.clone(), punch.clone());
+                if !limiter.allow(peer.ip(), 1.0) {
+                    continue;
+                }
+                let (table, rooms, punch, notices, limiter) = (table.clone(), rooms.clone(), punch.clone(), notices.clone(), limiter.clone());
                 tokio::spawn(async move {
-                    let _ = serve(s, peer, table, rooms, punch).await;
+                    let _ = serve(s, peer, table, rooms, punch, notices, limiter).await;
                 });
             }
         });
@@ -224,7 +308,7 @@ impl Drop for DirectoryServer {
     }
 }
 
-async fn serve(mut s: TcpStream, peer: SocketAddr, table: Table, rooms: Rooms, punch: Arc<PunchState>) -> io::Result<()> {
+async fn serve(mut s: TcpStream, peer: SocketAddr, table: Table, rooms: Rooms, punch: Arc<PunchState>, notices: Notices, limiter: Arc<Limiter>) -> io::Result<()> {
     // Estática (e não `EphemeralSecret`) porque a chave pública do cliente só chega no pedido de publicar.
     let eph = StaticSecret::random_from_rng(OsRng);
     let e_pub = PublicKey::from(&eph);
@@ -237,7 +321,16 @@ async fn serve(mut s: TcpStream, peer: SocketAddr, table: Table, rooms: Rooms, p
             Ok(r) => r,
             Err(_) => return Ok(()),
         };
+        if !limiter.allow(peer.ip(), cost(req.first())) {
+            write_frame(&mut s, &[&[RES_ERR][..], b"muitos pedidos"].concat()).await?;
+            return Ok(());
+        }
         match req.first() {
+            Some(&REQ_NOTICE_PUT | &REQ_NOTICE_GET) => {
+                let reply = notice_request(&req, &eph, e_pub.as_bytes(), &notices);
+                write_frame(&mut s, &reply).await?;
+                continue;
+            }
             Some(&REQ_REACH) => {
                 let reply = reach(&req, &eph, e_pub.as_bytes(), &table, &punch).await;
                 write_frame(&mut s, &reply).await?;
@@ -331,6 +424,40 @@ fn handle(req: &[u8], eph: &StaticSecret, e_pub: &[u8; 32], peer: SocketAddr, ta
         REQ_ROOM_JOIN | REQ_ROOM_LEAVE | REQ_ROOM_LIST => room_request(kind, body, e_pub, rooms),
         _ => err("pedido desconhecido"),
     }
+}
+
+/// Avisos de troca de segredo. `PUT` (só o dono, com a prova de posse da chave dele): `dono ‖ sala ‖ destino ‖
+/// aviso ‖ HMAC`. `GET` (aberto, o aviso é cifrado): `dono ‖ sala ‖ destino`. Um aviso por (dono, sala, destino).
+fn notice_request(req: &[u8], eph: &StaticSecret, e_pub: &[u8; 32], notices: &Notices) -> Vec<u8> {
+    let err = |m: &str| [&[RES_ERR][..], m.as_bytes()].concat();
+    let slot = |b: &[u8]| -> [u8; 96] { b[..96].try_into().unwrap() };
+    let mut all = notices.lock().unwrap();
+    if req[0] == REQ_NOTICE_GET {
+        if req.len() != 1 + 96 {
+            return err("tamanho");
+        }
+        all.retain(|_, (_, at)| at.elapsed() < NOTICE_TTL);
+        return match all.get(&slot(&req[1..])) {
+            Some((blob, _)) => [&[RES_FOUND][..], blob].concat(),
+            None => vec![RES_NONE],
+        };
+    }
+    if req.len() != 1 + 96 + NOTICE_LEN + 32 {
+        return err("tamanho");
+    }
+    let owner: [u8; 32] = req[1..33].try_into().unwrap();
+    let shared = eph.diffie_hellman(&PublicKey::from(owner));
+    let split = req.len() - 32;
+    if !shared.was_contributory() || mac(shared.as_bytes(), e_pub, &req[..split]).verify_slice(&req[split..]).is_err() {
+        return err("prova de posse inválida");
+    }
+    all.retain(|_, (_, at)| at.elapsed() < NOTICE_TTL);
+    let key = slot(&req[1..]);
+    if all.len() >= MAX_NOTICES && !all.contains_key(&key) {
+        return err("servidor cheio");
+    }
+    all.insert(key, (req[97..split].to_vec(), Instant::now()));
+    vec![RES_OK]
 }
 
 /// Entrar, sair ou listar uma sala. Corpo: `sala (32) ‖ [membro (32)] ‖ assinatura da sala (64)`.
@@ -505,6 +632,40 @@ pub async fn room_members(server: &str, room: &ed25519_dalek::SigningKey) -> io:
         return Err(bad("lista inválida"));
     }
     Ok(reply[2..].chunks(32).map(|c| c.try_into().unwrap()).collect())
+}
+
+/// O dono de uma sala (`owner`, a chave de identidade dele) deixa um aviso para `recipient` na sala `room`
+/// (a chave pública da sala antiga). `notice` é o resultado de [`crate::room::seal_rekey`].
+pub async fn notice_put(server: &str, owner: &StaticSecret, room: &[u8; 32], recipient: &[u8; 32], notice: &[u8]) -> io::Result<()> {
+    if notice.len() != NOTICE_LEN {
+        return Err(bad("aviso com tamanho errado"));
+    }
+    let mut sess = connect(server).await?;
+    let mut req = vec![REQ_NOTICE_PUT];
+    req.extend_from_slice(PublicKey::from(owner).as_bytes());
+    req.extend_from_slice(room);
+    req.extend_from_slice(recipient);
+    req.extend_from_slice(notice);
+    let shared = owner.diffie_hellman(&PublicKey::from(sess.e_pub));
+    req.extend_from_slice(&mac(shared.as_bytes(), &sess.e_pub, &req).finalize().into_bytes());
+    match ask(&mut sess, &req).await?.split_first() {
+        Some((&RES_OK, _)) => Ok(()),
+        Some((&RES_ERR, m)) => Err(bad(&format!("diretório recusou: {}", String::from_utf8_lossy(m)))),
+        _ => Err(bad("resposta inesperada")),
+    }
+}
+
+/// Aviso que o dono `owner` deixou para `recipient` na sala `room`, se houver.
+pub async fn notice_get(server: &str, owner: &[u8; 32], room: &[u8; 32], recipient: &[u8; 32]) -> io::Result<Option<Vec<u8>>> {
+    let mut sess = connect(server).await?;
+    let req = [&[REQ_NOTICE_GET][..], owner, room, recipient].concat();
+    let reply = ask(&mut sess, &req).await?;
+    match reply.split_first() {
+        Some((&RES_FOUND, b)) if b.len() == NOTICE_LEN => Ok(Some(b.to_vec())),
+        Some((&RES_NONE, _)) => Ok(None),
+        Some((&RES_ERR, m)) => Err(bad(&format!("diretório recusou: {}", String::from_utf8_lossy(m)))),
+        _ => Err(bad("resposta inesperada")),
+    }
 }
 
 /// Pede ao diretório que tente conectar ao relay que `secret` publicou. `true`: alcançável de fora.

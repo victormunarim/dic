@@ -15,7 +15,12 @@ use std::{
     time::{Duration, Instant},
 };
 
+use chacha20poly1305::{
+    ChaCha20Poly1305, Key, Nonce,
+    aead::{Aead, KeyInit},
+};
 use ed25519_dalek::SigningKey;
+use x25519_dalek::{PublicKey, StaticSecret};
 use hkdf::Hkdf;
 use rand_core::{OsRng, RngCore};
 use sha2::Sha256;
@@ -43,6 +48,56 @@ pub fn room_key(secret: &[u8; 32]) -> SigningKey {
     let mut seed = [0u8; 32];
     Hkdf::<Sha256>::new(None, secret).expand(b"clam-room-key-v1", &mut seed).expect("32 bytes cabem no HKDF");
     SigningKey::from_bytes(&seed)
+}
+
+/// Chave que cifra o aviso do dono para um membro: DH entre as identidades dos dois (só eles a têm).
+fn rekey_cipher(shared: &[u8; 32], old_room: &[u8; 32]) -> ChaCha20Poly1305 {
+    let mut k = [0u8; 32];
+    Hkdf::<Sha256>::new(Some(old_room), shared).expand(b"clam-room-rekey-v1", &mut k).expect("32 bytes cabem no HKDF");
+    ChaCha20Poly1305::new(Key::from_slice(&k))
+}
+
+/// Aviso do dono `owner` para o membro `recipient`: o segredo novo, cifrado só para ele. Quem foi removido não
+/// ganha aviso e, mesmo vendo o do diretório, não consegue abrir o dos outros. Tem [`directory::NOTICE_LEN`] bytes.
+pub fn seal_rekey(owner: &StaticSecret, recipient: &[u8; 32], old_secret: &[u8; 32], new_secret: &[u8; 32]) -> Vec<u8> {
+    let shared = owner.diffie_hellman(&PublicKey::from(*recipient));
+    let old_room = room_key(old_secret).verifying_key().to_bytes();
+    let mut nonce = [0u8; 12];
+    OsRng.fill_bytes(&mut nonce);
+    let ct = rekey_cipher(shared.as_bytes(), &old_room)
+        .encrypt(Nonce::from_slice(&nonce), &new_secret[..])
+        .expect("cifrar 32 bytes não falha");
+    [&nonce[..], &ct].concat()
+}
+
+/// Abre um aviso de [`seal_rekey`] com a identidade do membro. `None` se não for para ele ou for adulterado.
+pub fn open_rekey(me: &StaticSecret, owner: &[u8; 32], old_secret: &[u8; 32], notice: &[u8]) -> Option<[u8; 32]> {
+    if notice.len() != directory::NOTICE_LEN {
+        return None;
+    }
+    let shared = me.diffie_hellman(&PublicKey::from(*owner));
+    let old_room = room_key(old_secret).verifying_key().to_bytes();
+    let pt = rekey_cipher(shared.as_bytes(), &old_room).decrypt(Nonce::from_slice(&notice[..12]), &notice[12..]).ok()?;
+    pt.try_into().ok()
+}
+
+/// O dono troca o segredo da sala: gera um novo e deixa um aviso no diretório para cada membro de `keep`
+/// (quem não estiver na lista fica de fora). Devolve o segredo novo; o dono entra nele com [`sync`].
+pub async fn rotate(server: &str, owner: &StaticSecret, old_secret: &[u8; 32], keep: &[[u8; 32]]) -> io::Result<[u8; 32]> {
+    let new = new_secret();
+    let old_room = room_key(old_secret).verifying_key().to_bytes();
+    for m in keep {
+        directory::notice_put(server, owner, &old_room, m, &seal_rekey(owner, m, old_secret, &new)).await?;
+    }
+    Ok(new)
+}
+
+/// Membro: procura o aviso do dono para você e, se houver, devolve o segredo novo da sala.
+pub async fn follow(server: &str, me: &StaticSecret, owner: &[u8; 32], old_secret: &[u8; 32]) -> io::Result<Option<[u8; 32]>> {
+    let old_room = room_key(old_secret).verifying_key().to_bytes();
+    let mine = PublicKey::from(me).to_bytes();
+    let found = directory::notice_get(server, owner, &old_room, &mine).await?;
+    Ok(found.and_then(|n| open_rekey(me, owner, old_secret, &n)))
 }
 
 /// Situação da sala depois de uma sincronização.
@@ -261,6 +316,18 @@ mod tests {
         let (a, b) = (new_secret(), new_secret());
         assert_eq!(room_key(&a).to_bytes(), room_key(&a).to_bytes());
         assert_ne!(room_key(&a).verifying_key(), room_key(&b).verifying_key());
+    }
+
+    #[test]
+    fn rekey_notice_opens_only_for_its_recipient() {
+        let (owner, bob, eve) = (StaticSecret::random_from_rng(OsRng), StaticSecret::random_from_rng(OsRng), StaticSecret::random_from_rng(OsRng));
+        let (old, new) = (new_secret(), new_secret());
+        let (opub, bpub) = (PublicKey::from(&owner).to_bytes(), PublicKey::from(&bob).to_bytes());
+        let n = seal_rekey(&owner, &bpub, &old, &new);
+        assert_eq!(n.len(), directory::NOTICE_LEN);
+        assert_eq!(open_rekey(&bob, &opub, &old, &n), Some(new));
+        assert_eq!(open_rekey(&eve, &opub, &old, &n), None);
+        assert_eq!(open_rekey(&bob, &opub, &new_secret(), &n), None);
     }
 
     #[test]
