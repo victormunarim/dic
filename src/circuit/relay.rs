@@ -33,6 +33,7 @@ pub struct CircRef {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)] // um `Cell` por variante: encaixotar custaria uma alocação por célula
 pub enum Action {
     Send { link: LinkId, cell: Cell },
     Connect { link: LinkId, addr: String, key: [u8; 32] },

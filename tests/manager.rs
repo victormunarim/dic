@@ -136,11 +136,10 @@ impl Net {
             self.now += 10;
             let outs = self.mgr.tick(self.now);
             self.drive(outs);
-            if send {
-                if let Ok(outs) = self.mgr.send(b"voz") {
+            if send
+                && let Ok(outs) = self.mgr.send(b"voz") {
                     self.drive(outs);
                 }
-            }
         }
     }
 
@@ -270,11 +269,10 @@ fn end_to_end_cover_hides_talk_from_silence() {
         n.now += 10;
         let outs = n.mgr.tick(n.now);
         n.drive(outs);
-        if i % 2 == 0 {
-            if let Ok(outs) = n.mgr.send(b"voz") {
+        if i % 2 == 0
+            && let Ok(outs) = n.mgr.send(b"voz") {
                 n.drive(outs);
             }
-        }
     }
     let talk = window(&n, &first, t1, n.now);
 

@@ -415,3 +415,83 @@ async fn room_owner_rotates_secret_and_removed_member_is_left_out() {
     assert_eq!(room::follow(&addr, &bob, &opub, &old).await.unwrap(), Some(new));
     assert_eq!(room::follow(&addr, &eve, &opub, &old).await.unwrap(), None);
 }
+
+#[tokio::test]
+async fn host_leaving_hands_the_room_to_the_next_member() {
+    use clam::room;
+    let (_d, addr) = dir().await;
+    let rkey = room::room_key(&room::new_secret());
+    let (a, b, c) = (
+        Node::start(cfg(key(), &addr, vec![])).await.unwrap(),
+        Node::start(cfg(key(), &addr, vec![])).await.unwrap(),
+        Node::start(cfg(key(), &addr, vec![])).await.unwrap(),
+    );
+    for n in [&a, &b, &c] {
+        room::sync(n, &rkey).await.unwrap();
+    }
+    let view = room::sync(&c, &rkey).await.unwrap();
+    assert_eq!(view.host, a.public_key());
+    room::leave(&a, &rkey).await.unwrap();
+    let view = room::sync(&c, &rkey).await.unwrap();
+    assert_eq!((view.host, view.members.len()), (b.public_key(), 2));
+    assert!(room::sync(&b, &rkey).await.unwrap().i_am_host);
+    // O antigo anfitrião volta como o membro mais novo e não toma a sala de volta.
+    let view = room::sync(&a, &rkey).await.unwrap();
+    assert_eq!((view.host, view.members.last().copied()), (b.public_key(), Some(a.public_key())));
+}
+
+#[tokio::test]
+async fn member_that_drops_and_returns_keeps_the_room_alive() {
+    use clam::room::{self, Mesh};
+    let (_d, addr) = dir().await;
+    let rkey = room::room_key(&room::new_secret());
+    let (mut a, mut b) = (Node::start(cfg(key(), &addr, vec![])).await.unwrap(), Node::start(cfg(key(), &addr, vec![])).await.unwrap());
+    if a.public_key() > b.public_key() {
+        std::mem::swap(&mut a, &mut b);
+    }
+    let (ma, mb) = (Mesh::new(), Mesh::new());
+    room::sync(&a, &rkey).await.unwrap();
+    room::sync(&b, &rkey).await.unwrap();
+    // `b` cai (sai da sala e perde a chamada); `a` segue sozinho na sala.
+    room::leave(&b, &rkey).await.unwrap();
+    let view_a = room::sync(&a, &rkey).await.unwrap();
+    assert_eq!(view_a.members, vec![a.public_key()]);
+    assert_eq!(room::connect_missing(&a.dialer(), &view_a, &ma, Duration::from_secs(10)), 0);
+    // `b` volta: `a` o vê de novo e a malha se refaz.
+    room::sync(&b, &rkey).await.unwrap();
+    let view_a = room::sync(&a, &rkey).await.unwrap();
+    let view_b = room::sync(&b, &rkey).await.unwrap();
+    assert_eq!(view_a.members.len(), 2);
+    room::connect_missing(&a.dialer(), &view_a, &ma, Duration::from_secs(10));
+    let end = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < end && !(ma.count() == 1 && mb.count() == 1) {
+        if let Ok(Some(inc)) = timeout(Duration::from_millis(200), b.next_incoming()).await {
+            room::accept_member(inc, &view_b, &mb).await;
+        }
+    }
+    assert!(ma.count() == 1 && mb.count() == 1, "a {} b {}", ma.count(), mb.count());
+    ma.hangup();
+    mb.hangup();
+}
+
+#[tokio::test]
+async fn restarted_directory_keeps_rooms_and_publications() {
+    use clam::{directory, room};
+    let state = std::env::temp_dir().join(format!("clam-dir-{}.state", std::process::id()));
+    let _ = std::fs::remove_file(&state);
+    let d = DirectoryServer::spawn_with("127.0.0.1:0".parse().unwrap(), Default::default(), Some(state.clone())).await.unwrap();
+    let addr = d.local_addr();
+    let rkey = room::room_key(&room::new_secret());
+    let (a, b) = (Node::start(cfg(key(), &addr.to_string(), vec![])).await.unwrap(), Node::start(cfg(key(), &addr.to_string(), vec![])).await.unwrap());
+    room::sync(&a, &rkey).await.unwrap();
+    room::sync(&b, &rkey).await.unwrap();
+    tokio::time::sleep(directory::SAVE_EVERY + Duration::from_secs(1)).await;
+    drop(d);
+    // Sem o diretório, nada responde; ao voltar com o mesmo estado, tudo reaparece sem ninguém republicar.
+    assert!(directory::lookup(&addr.to_string(), &a.public_key()).await.is_err());
+    let _d2 = DirectoryServer::spawn_with(addr, Default::default(), Some(state.clone())).await.unwrap();
+    assert!(directory::lookup(&addr.to_string(), &a.public_key()).await.unwrap().is_some());
+    let members = directory::room_members(&addr.to_string(), &rkey).await.unwrap();
+    assert_eq!(members, vec![a.public_key(), b.public_key()]);
+    let _ = std::fs::remove_file(&state);
+}

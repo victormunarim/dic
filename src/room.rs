@@ -36,6 +36,8 @@ use crate::{
 /// Quadros de um mesmo membro guardados à espera da mistura (200 ms): além disso o atraso só cresce.
 const MAX_QUEUED_FRAMES: usize = 10;
 
+type Sender = mpsc::Sender<Vec<i16>>;
+
 /// Segredo novo para uma sala.
 pub fn new_secret() -> [u8; 32] {
     let mut s = [0u8; 32];
@@ -177,7 +179,7 @@ type Queues = Arc<Mutex<HashMap<[u8; 32], VecDeque<Vec<i16>>>>>;
 /// Chamadas ativas de uma sala: envia o microfone a todas e mistura o que chega.
 #[derive(Clone, Default)]
 pub struct Mesh {
-    peers: Arc<Mutex<HashMap<[u8; 32], mpsc::Sender<Vec<i16>>>>>,
+    peers: Arc<Mutex<HashMap<[u8; 32], Sender>>>,
     queues: Queues,
     /// Ganho do limitador da mixagem (1,0 = sem redução).
     gain: Arc<Mutex<f32>>,

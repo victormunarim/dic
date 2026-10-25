@@ -115,6 +115,7 @@ pub enum Event {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::large_enum_variant)] // um `Cell` por variante: encaixotar custaria uma alocação por célula
 pub enum Out {
     /// Entregue `cell` à conexão com o relay `to` (primeiro salto).
     Send { to: String, cell: Cell },
@@ -283,8 +284,8 @@ impl CircuitManager {
                 let queued = covered && self.cfg.cover_ms.is_some();
                 Self::ping(slot, &mut self.next_nonce, now, queued, &mut out);
             }
-            if let (true, true, Some(every)) = (covered, slot.phase == Phase::Ready, self.cfg.cover_ms) {
-                if now >= slot.next_cover {
+            if let (true, true, Some(every)) = (covered, slot.phase == Phase::Ready, self.cfg.cover_ms)
+                && now >= slot.next_cover {
                     // Atrasado mais que um intervalo: não recupera em rajada.
                     slot.next_cover = if now - slot.next_cover > every { now + every } else { slot.next_cover + every };
                     let cell = match slot.queue.pop_front().or_else(|| slot.ping_cell.take()) {
@@ -295,7 +296,6 @@ impl CircuitManager {
                         out.push(Out::Send { to: slot.first.addr.clone(), cell });
                     }
                 }
-            }
         }
 
         if self.active.is_none() && now >= self.next_active_attempt {
@@ -304,8 +304,8 @@ impl CircuitManager {
                 None => self.next_active_attempt = now + self.cfg.retry_ms,
             }
         }
-        if self.standby.is_none() && now >= self.next_standby_attempt {
-            if let Some(active) = &self.active {
+        if self.standby.is_none() && now >= self.next_standby_attempt
+            && let Some(active) = &self.active {
                 let (a, b) = (active.first.addr.clone(), active.second.addr.clone());
                 // Do mais ao menos independente: evita ambos, depois só o primeiro, depois só o segundo.
                 let tiers = [vec![a.clone(), b.clone()], vec![a], vec![b]];
@@ -317,7 +317,6 @@ impl CircuitManager {
                     None => self.next_standby_attempt = now + self.cfg.retry_ms,
                 }
             }
-        }
         out
     }
 

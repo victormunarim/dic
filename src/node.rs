@@ -98,7 +98,7 @@ impl Dialer {
         let mut relays: Vec<Candidate> = directory::sample(&self.directory, 3, &[me, peer]).await?.iter().map(RelayInfo::candidate).collect();
         // Último recurso para o primeiro salto: o próprio relay (por loopback). Perde o anonimato
         // perante o outro lado, mas permite ligar quando só há duas pessoas online.
-        relays.push(Candidate { addr: format!("127.0.0.1:{}", self.relay_port), public: self.mine.onion.into(), link_public: self.mine.link, score: 0.5 });
+        relays.push(Candidate { addr: format!("127.0.0.1:{}", self.relay_port), public: self.mine.onion, link_public: self.mine.link, score: 0.5 });
         relays.push(exit.candidate());
         let cfg = ManagerConfig { exit_addr: Some(exit.addr.clone()), ..Default::default() };
         let client = CircuitClient::spawn_with(CircuitManager::new(cfg, &dest_for(&peer), relays), Duration::from_secs(3), ClientOptions::default());
@@ -122,7 +122,7 @@ impl Node {
     /// Sobe relay e telefone e publica no diretório. Erra se o diretório não responder.
     pub async fn start(cfg: NodeConfig) -> io::Result<Self> {
         let me = PublicKey::from(&cfg.secret);
-        let phone = Phone::bind("127.0.0.1:0".parse().unwrap(), cfg.secret.clone(), cfg.contacts).await?;
+        let phone = Phone::bind("127.0.0.1:0".parse().unwrap(), cfg.secret.clone(), cfg.contacts.clone()).await?;
         let relay_node = RelayNode::new(StaticSecret::random_from_rng(rand_core::OsRng), RelayConfig::default(), 0);
         let onion = relay_node.public_key();
         let mut scfg = ServerConfig::new(SocketAddr::from(([0, 0, 0, 0], cfg.relay_port)));
@@ -135,23 +135,15 @@ impl Node {
                 let onion = n.public_key();
                 scfg.listen = SocketAddr::from(([0, 0, 0, 0], 0));
                 let r = RelayServer::spawn(n, scfg).await?;
-                return Self::finish(cfg.secret, cfg.directory, cfg.public_addr, cfg.upnp, cfg.punch, phone, r, onion).await;
+                return Self::finish(cfg, phone, r, onion).await;
             }
             Err(e) => return Err(e),
         };
-        Self::finish(cfg.secret, cfg.directory, cfg.public_addr, cfg.upnp, cfg.punch, phone, relay, onion).await
+        Self::finish(cfg, phone, relay, onion).await
     }
 
-    async fn finish(
-        secret: StaticSecret,
-        directory: String,
-        public_addr: Option<String>,
-        upnp: bool,
-        punch: bool,
-        phone: Phone,
-        relay: RelayServer,
-        onion: [u8; 32],
-    ) -> io::Result<Self> {
+    async fn finish(cfg: NodeConfig, phone: Phone, relay: RelayServer, onion: [u8; 32]) -> io::Result<Self> {
+        let NodeConfig { secret, directory, public_addr, upnp, punch, .. } = cfg;
         let (port, link) = (relay.local_addr().port(), relay.link_public_key());
         let last_error = Arc::new(Mutex::new(None));
         // Diretório na internet e nenhum endereço público informado: tenta abrir a porta no roteador.

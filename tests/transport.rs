@@ -141,15 +141,14 @@ async fn failover_after_killing_a_relay_keeps_silence_under_500ms() {
             let _ = c.send(b"voz").await;
             next_send += Duration::from_millis(20);
         }
-        if let Ok(Some(ev)) = timeout(Duration::from_millis(5), c.next_event()).await {
-            if let Event::Data(_) = ev {
+        if let Ok(Some(ev)) = timeout(Duration::from_millis(5), c.next_event()).await
+            && let Event::Data(_) = ev {
                 max_gap = max_gap.max(last_data.elapsed());
                 last_data = Instant::now();
                 if killed {
                     after_kill_data += 1;
                 }
             }
-        }
     }
     assert!(after_kill_data > 20, "mídia não retomou após a falha");
     assert!(max_gap < Duration::from_millis(500), "silêncio de {max_gap:?}");
