@@ -475,8 +475,14 @@ impl eframe::App for App {
                         ui.label("Endereço público ip:porta (só se o IP que os outros enxergam não serve, como atrás de NAT; a porta precisa estar aberta no roteador; pode ser um nome):");
                         ui.text_edit_singleline(&mut self.form.public_addr);
                         ui.separator();
-                        ui.checkbox(&mut self.form.use_dht, "Usar a DHT (BitTorrent) para reencontrar contatos")
+                        // A DHT vem ligada: a caixa é para desligá-la.
+                        let mut no_dht = !self.form.use_dht;
+                        let off = ui
+                            .checkbox(&mut no_dht, "Não usar a DHT (BitTorrent) para reencontrar contatos")
                             .on_hover_text("Quando você e um contato mudam de endereço ao mesmo tempo, os dois se acham por ela, sem servidor. O conteúdo vai cifrado só para o contato, mas quem opera nós da DHT vê o seu IP. Com a DHT ligada, seu nó também atende a DHT para circuitos de outros nós.");
+                        if off.changed() {
+                            self.form.use_dht = !no_dht;
+                        }
                         ui.add_enabled_ui(self.form.use_dht, |ui| {
                             ui.checkbox(&mut self.form.dht_circuit, "Falar com a DHT pelos relays dos contatos (esconde o seu IP)")
                                 .on_hover_text("Usa um circuito de dois relays de contatos: o primeiro vê o seu IP mas não o pedido, o segundo vê o pedido mas não o seu IP. Precisa de ao menos dois contatos com endereço guardado; sem eles a DHT não é usada.");
