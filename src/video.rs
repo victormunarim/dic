@@ -142,7 +142,9 @@ impl H264Encoder {
             .max_frame_rate(FrameRate::from_hz(FPS))
             // Sem pular quadros: sob movimento o codificador gasta qualidade em vez de fluidez.
             .skip_frames(false)
-            .intra_frame_period(IntraFramePeriod::from_num_frames((FPS * 4.0) as u32));
+            // Quadro-chave grande (dezenas de kB) leva segundos no circuito e congela a imagem: só periódico
+            // de longe em longe; perda e quem entra pedem o seu por `WANT_KEY`.
+            .intra_frame_period(IntraFramePeriod::from_num_frames((FPS * 30.0) as u32));
         Encoder::with_api_config(openh264::OpenH264API::from_source(), config).map_err(codec_err)
     }
 
