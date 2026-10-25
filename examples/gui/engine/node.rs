@@ -151,6 +151,7 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
                         next_dial: tokio::time::Instant::now(),
                         shown: (0, 0, [0; 32]),
                         n: 0,
+                        decoders: Default::default(),
                     });
                 }
                 Some(Cmd::Remove(gone)) => {
@@ -205,6 +206,18 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
                 }
                 if let Some(f) = r.mesh.mix() {
                     play_scaled(r.sound.as_ref(), f, &shared);
+                }
+                for (who, ev) in r.mesh.take_screen_events() {
+                    if !on_screen_event(&shared.screen, who, r.decoders.entry(who).or_default(), ev) {
+                        out.line(format!("tela de {}: quadro inválido; esperando o próximo quadro-chave", member_name(&names, &who)));
+                    }
+                }
+                if r.n.is_multiple_of(50) {
+                    shared.screen.retain(|k| r.mesh.has(k));
+                    r.decoders.retain(|k, _| r.mesh.has(k));
+                    if shared.screen.want_share.load(Ordering::Relaxed) && !shared.screen.share_task.swap(true, Ordering::Relaxed) {
+                        tokio::spawn(room_share_task(dialer.clone(), r.mesh.clone(), shared.clone(), out.clone()));
+                    }
                 }
                 // Discagem em segundo plano e em paralelo; repete a cada 2 s, o que religa sozinho quem caiu.
                 if tokio::time::Instant::now() >= r.next_dial {
