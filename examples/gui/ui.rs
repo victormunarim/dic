@@ -327,6 +327,23 @@ impl App {
     }
 }
 
+thread_local! {
+    /// Fim do último quadro desenhado, para notar quando a janela fica parada.
+    static LAST_FRAME_END: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
+}
+
+impl App {
+    /// Registra no log da janela uma lentidão da própria janela, no máximo uma vez por segundo.
+    fn note_slow(&mut self, line: String) {
+        thread_local!(static LAST_NOTE: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) });
+        let due = LAST_NOTE.with(|l| l.get()).is_none_or(|t| t.elapsed() >= Duration::from_secs(1));
+        if due {
+            LAST_NOTE.with(|l| l.set(Some(std::time::Instant::now())));
+            self.log.lock().unwrap().push(line);
+        }
+    }
+}
+
 impl App {
     /// Janela própria com a tela de `zoom`, ajustada ao tamanho da janela; fecha sozinha se a tela some.
     fn zoom_window(&mut self, ctx: &egui::Context) {
@@ -356,6 +373,16 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        let began = std::time::Instant::now();
+        let watching = !self.shared.screen.images.lock().unwrap().is_empty();
+        if let Some(end) = LAST_FRAME_END.with(|l| l.get()) {
+            // Vendo tela a janela repinta a cada 16 ms: bem mais que isso sem atualizar é a janela travada fora da
+            // nossa conta (troca de buffers, eventos do sistema).
+            let gap = began.duration_since(end);
+            if watching && gap > Duration::from_millis(400) {
+                self.note_slow(format!("janela: {} ms sem atualizar entre dois quadros", gap.as_millis()));
+            }
+        }
         if self.done.swap(false, Ordering::Relaxed) {
             self.running = None;
             self.shared.in_call.store(false, Ordering::Relaxed);
@@ -537,7 +564,11 @@ impl eframe::App for App {
             });
         });
         // Com tela chegando a janela repinta a cada ~16 ms; a 300 ms o vídeo parecia ter 3 quadros/s.
-        let watching = !self.shared.screen.images.lock().unwrap().is_empty();
         ctx.request_repaint_after(Duration::from_millis(if watching { 16 } else { 300 }));
+        let took = began.elapsed();
+        if took > Duration::from_millis(100) {
+            self.note_slow(format!("janela: um quadro levou {} ms para desenhar", took.as_millis()));
+        }
+        LAST_FRAME_END.with(|l| l.set(Some(std::time::Instant::now())));
     }
 }
