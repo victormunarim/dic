@@ -38,6 +38,8 @@ pub(crate) struct AudioPrefs {
     pub(crate) gate_depth_db: f32,
     /// Volume automático: nivela a voz, reforçando quem fala baixo e contendo quem fala alto.
     pub(crate) agc: bool,
+    /// Remoção de ruído por rede neural (RNNoise): tira teclado, ventilador, vozes ao fundo; também diz à porta o que é voz.
+    pub(crate) denoise: bool,
 }
 
 impl AudioPrefs {
@@ -61,26 +63,28 @@ impl AudioPrefs {
             gate_db: num("gate_db", &Self::GATE_DB, d.gate_db),
             gate_depth_db: num("gate_depth_db", &Self::GATE_DEPTH_DB, d.gate_depth_db),
             agc: flag("agc", d.agc),
+            denoise: flag("denoise", d.denoise),
         }
     }
 
     fn to_conf(self) -> String {
         format!(
-            "volume={:.2}\nmic_gain={:.2}\nhigh_pass={}\ngate={}\ngate_db={:.0}\ngate_depth_db={:.0}\nagc={}\n",
+            "volume={:.2}\nmic_gain={:.2}\nhigh_pass={}\ngate={}\ngate_db={:.0}\ngate_depth_db={:.0}\nagc={}\ndenoise={}\n",
             self.volume,
             self.mic_gain,
             u8::from(self.high_pass),
             u8::from(self.gate),
             self.gate_db,
             self.gate_depth_db,
-            u8::from(self.agc)
+            u8::from(self.agc),
+            u8::from(self.denoise)
         )
     }
 }
 
 impl Default for AudioPrefs {
     fn default() -> Self {
-        AudioPrefs { volume: 1.0, mic_gain: 1.0, high_pass: true, gate: false, gate_db: -45.0, gate_depth_db: 40.0, agc: false }
+        AudioPrefs { volume: 1.0, mic_gain: 1.0, high_pass: true, gate: false, gate_db: -45.0, gate_depth_db: 40.0, agc: false, denoise: true }
     }
 }
 
@@ -479,7 +483,7 @@ mod tests {
 
     #[test]
     fn audio_prefs_round_trip_and_survive_bad_values() {
-        let prefs = AudioPrefs { volume: 1.5, mic_gain: 2.25, high_pass: false, gate: true, gate_db: -38.0, gate_depth_db: 24.0, agc: true };
+        let prefs = AudioPrefs { volume: 1.5, mic_gain: 2.25, high_pass: false, gate: true, gate_db: -38.0, gate_depth_db: 24.0, agc: true, denoise: false };
         let kv = |text: &str| -> HashMap<String, String> { text.lines().filter_map(|l| l.split_once('=')).map(|(k, v)| (k.to_string(), v.to_string())).collect() };
         assert_eq!(AudioPrefs::from_kv(&kv(&prefs.to_conf())), prefs);
         // Arquivo de versão anterior, sem nenhum ajuste: tudo no padrão.

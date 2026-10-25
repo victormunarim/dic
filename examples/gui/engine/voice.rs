@@ -1,8 +1,11 @@
-//! Tratamento da voz que sai do microfone: filtro de graves, porta de ruído e volume automático.
+//! Tratamento da voz que sai do microfone: filtro de graves, remoção de ruído por rede neural (RNNoise),
+//! porta de ruído e volume automático.
 //!
-//! Tudo roda em quadros de qualquer tamanho a 16 kHz, guardando o estado entre um quadro e o seguinte.
-//! A ordem é: filtro de graves → medida do nível (a mesma que o medidor da janela mostra) → porta →
-//! ganho do microfone × volume automático → limitador de picos.
+//! Tudo roda em quadros a 16 kHz, guardando o estado entre um quadro e o seguinte. A ordem é: filtro de
+//! graves → medida do nível (a mesma que o medidor da janela mostra) → RNNoise → porta (que só abre com
+//! volume acima do limiar *e* voz segundo o RNNoise) → ganho do microfone × volume automático → limitador.
+
+use nnnoiseless::DenoiseState;
 
 use crate::conf::AudioPrefs;
 
@@ -25,6 +28,14 @@ const AGC_MAX_CUT_DB: f32 = -12.0;
 const AGC_FLOOR_DB: f32 = -50.0;
 /// O limitador começa a comprimir aqui, antes do fundo de escala.
 const LIMIT_KNEE: f32 = 24_000.0;
+
+/// O RNNoise trabalha a 48 kHz em quadros de 480 amostras (10 ms): são 160 amostras a 16 kHz.
+const NN_UP: usize = 3;
+const NN_CHUNK: usize = 160;
+/// Probabilidade de voz (0 a 1, dada pelo RNNoise) a partir da qual um trecho conta como voz.
+const VOICE_PROB: f32 = 0.5;
+/// Filtro de reamostragem: 63 coeficientes, corte em 7,6 kHz a 48 kHz.
+const FIR_TAPS: usize = 63;
 
 /// Nível de `samples` em dBFS (RMS); silêncio total dá -120.
 pub(crate) fn rms_db(samples: &[f32]) -> f32 {
@@ -49,8 +60,86 @@ pub(crate) struct Measure {
     pub(crate) speaking: bool,
 }
 
+/// Filtro passa-baixas FIR (janela de Hann) que acompanha a reamostragem de 16 para 48 kHz e de volta.
+struct Fir {
+    taps: [f32; FIR_TAPS],
+    hist: [f32; FIR_TAPS],
+    pos: usize,
+}
+
+impl Fir {
+    fn new() -> Self {
+        let fc = 7600.0 / 48_000.0;
+        let m = (FIR_TAPS - 1) as f32 / 2.0;
+        let mut taps = [0f32; FIR_TAPS];
+        for (n, t) in taps.iter_mut().enumerate() {
+            let x = n as f32 - m;
+            let sinc = if x == 0.0 { 1.0 } else { (std::f32::consts::TAU * fc * x).sin() / (std::f32::consts::PI * 2.0 * fc * x) };
+            let hann = 0.5 - 0.5 * (std::f32::consts::TAU * n as f32 / (FIR_TAPS - 1) as f32).cos();
+            *t = sinc * hann;
+        }
+        // Ganho 1 na faixa de voz.
+        let sum: f32 = taps.iter().sum();
+        taps.iter_mut().for_each(|t| *t /= sum);
+        Fir { taps, hist: [0.0; FIR_TAPS], pos: 0 }
+    }
+
+    fn push(&mut self, x: f32) -> f32 {
+        self.hist[self.pos] = x;
+        let mut acc = 0.0;
+        for (k, t) in self.taps.iter().enumerate() {
+            acc += t * self.hist[(self.pos + FIR_TAPS - k) % FIR_TAPS];
+        }
+        self.pos = (self.pos + 1) % FIR_TAPS;
+        acc
+    }
+}
+
+/// Remoção de ruído por rede neural (RNNoise, pelo `nnnoiseless`). Entra e sai a 16 kHz.
+struct Denoiser {
+    state: Box<DenoiseState<'static>>,
+    up: Fir,
+    down: Fir,
+}
+
+impl Denoiser {
+    fn new() -> Self {
+        let mut state = DenoiseState::new();
+        // O primeiro quadro que o RNNoise devolve sai com artefato de entrada; gasta um de silêncio.
+        state.process_frame(&mut [0.0; DenoiseState::FRAME_SIZE], &[0.0; DenoiseState::FRAME_SIZE]);
+        Denoiser { state, up: Fir::new(), down: Fir::new() }
+    }
+
+    /// Limpa `x` no lugar (o tamanho tem de ser múltiplo de 160) e devolve a probabilidade de voz de cada
+    /// trecho de 10 ms. O som sai ~10 ms atrasado em relação à entrada, o atraso da própria rede.
+    fn run(&mut self, x: &mut [f32]) -> Vec<f32> {
+        let mut probs = Vec::with_capacity(x.len() / NN_CHUNK);
+        for chunk in x.chunks_mut(NN_CHUNK) {
+            let mut up = [0f32; DenoiseState::FRAME_SIZE];
+            for (i, s) in chunk.iter().enumerate() {
+                for k in 0..NN_UP {
+                    // Zeros entre as amostras e ganho NN_UP, para o filtro devolver o sinal original.
+                    up[i * NN_UP + k] = self.up.push(if k == 0 { *s * NN_UP as f32 } else { 0.0 });
+                }
+            }
+            let mut out = [0f32; DenoiseState::FRAME_SIZE];
+            probs.push(self.state.process_frame(&mut out, &up));
+            for (i, s) in chunk.iter_mut().enumerate() {
+                let mut y = 0.0;
+                for k in 0..NN_UP {
+                    y = self.down.push(out[i * NN_UP + k]);
+                }
+                *s = y;
+            }
+        }
+        probs
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct Voice {
+    /// Presente enquanto a remoção de ruído está ligada.
+    denoiser: Option<Denoiser>,
     /// Memória dos dois estágios do filtro de graves: (entrada anterior, saída anterior).
     hp: [(f32, f32); 2],
     /// Ganho atual da porta (1.0 aberta, até a redução escolhida fechada).
@@ -74,9 +163,19 @@ impl Voice {
         }
         let db = rms_db(&x);
         let level = voice_meter(db);
+        // Volume de cada trecho de 5 ms antes da limpeza: o limiar vale para o que o microfone capta.
+        let blocks: Vec<f32> = x.chunks(BLOCK).map(rms_db).collect();
 
-        let open = self.gate(&mut x, p);
-        let speaking = if p.gate { open } else { db >= p.gate_db };
+        let voice = if p.denoise {
+            if !x.is_empty() && x.len().is_multiple_of(NN_CHUNK) { Some(self.denoiser.get_or_insert_with(Denoiser::new).run(&mut x)) } else { None }
+        } else {
+            self.denoiser = None;
+            None
+        };
+
+        let open = self.gate(&mut x, p, &blocks, voice.as_deref());
+        let heard = voice.as_ref().is_none_or(|v| v.iter().any(|p| *p >= VOICE_PROB));
+        let speaking = if p.gate { open } else { db >= p.gate_db && heard };
 
         let user = p.mic_gain;
         let target = self.agc_target(p, db, user, speaking);
@@ -110,8 +209,10 @@ impl Voice {
         }
     }
 
-    /// Aplica a porta de ruído; devolve se ela terminou o quadro aberta.
-    fn gate(&mut self, x: &mut [f32], p: &AudioPrefs) -> bool {
+    /// Aplica a porta de ruído; devolve se ela terminou o quadro aberta. `blocks` é o volume de cada trecho
+    /// de `BLOCK` amostras e `voice` a probabilidade de voz de cada trecho de `NN_CHUNK` (sem
+    /// remoção de ruído, não há e só o volume decide).
+    fn gate(&mut self, x: &mut [f32], p: &AudioPrefs, blocks: &[f32], voice: Option<&[f32]>) -> bool {
         if !p.gate {
             self.gate_gain = None;
             self.hold = 0;
@@ -120,8 +221,9 @@ impl Voice {
         let closed = 10f32.powf(-p.gate_depth_db / 20.0);
         let mut g = self.gate_gain.unwrap_or(closed);
         let (attack, release) = (1.0 - (-1.0 / (GATE_ATTACK_S * RATE)).exp(), 1.0 - (-1.0 / (GATE_RELEASE_S * RATE)).exp());
-        for block in x.chunks_mut(BLOCK) {
-            if rms_db(block) >= p.gate_db {
+        for (i, block) in x.chunks_mut(BLOCK).enumerate() {
+            let is_voice = voice.is_none_or(|v| v.get(i * BLOCK / NN_CHUNK).or(v.last()).is_none_or(|prob| *prob >= VOICE_PROB));
+            if blocks[i] >= p.gate_db && is_voice {
                 self.hold = HOLD_SAMPLES;
             } else {
                 self.hold = self.hold.saturating_sub(block.len());
@@ -175,7 +277,7 @@ mod tests {
     }
 
     fn off() -> AudioPrefs {
-        AudioPrefs { high_pass: false, gate: false, agc: false, ..AudioPrefs::default() }
+        AudioPrefs { high_pass: false, gate: false, agc: false, denoise: false, ..AudioPrefs::default() }
     }
 
     /// Passa `frames` quadros de uma senóide e devolve o último quadro tratado e a última medida.
@@ -281,6 +383,53 @@ mod tests {
         }
         assert_eq!(limit(1234.0), 1234.0);
         assert!(limit(30_000.0) > 24_000.0 && limit(30_000.0) < 30_000.0);
+    }
+
+    /// Ruído branco determinístico.
+    fn noise(amp: f32, n: usize, seed: &mut u32) -> Vec<i16> {
+        (0..n)
+            .map(|_| {
+                *seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (((*seed >> 8) as f32 / (1u32 << 24) as f32 - 0.5) * 2.0 * amp) as i16
+            })
+            .collect()
+    }
+
+    #[test]
+    fn denoiser_removes_steady_noise_and_keeps_the_frame_size() {
+        let p = AudioPrefs { denoise: true, ..off() };
+        let mut v = Voice::default();
+        let mut seed = 1;
+        let mut last = (Vec::new(), Vec::new());
+        for _ in 0..150 {
+            let mut f = noise(800.0, FRAME, &mut seed);
+            let before = f.clone();
+            v.process(&mut f, &p);
+            assert_eq!(f.len(), FRAME);
+            last = (before, f);
+        }
+        assert!(db_of(&last.1) < db_of(&last.0) - 12.0, "ruído deveria cair: {} -> {}", db_of(&last.0), db_of(&last.1));
+    }
+
+    #[test]
+    fn noise_never_counts_as_speaking_with_the_denoiser_on() {
+        // Mesmo bem acima do limiar de volume, ruído branco não é voz para o RNNoise.
+        let p = AudioPrefs { denoise: true, gate: true, gate_db: -50.0, gate_depth_db: 60.0, ..off() };
+        let mut v = Voice::default();
+        let mut seed = 7;
+        let flags: Vec<bool> = (0..100).map(|_| v.process(&mut noise(1500.0, FRAME, &mut seed), &p).speaking).collect();
+        // A rede leva uns 100 ms para se convencer, e a porta segura mais 250 ms: os primeiros ~20 quadros não contam.
+        let late: Vec<usize> = flags.iter().enumerate().skip(25).filter(|(_, s)| **s).map(|(i, _)| i).collect();
+        assert!(late.is_empty(), "ruído tomado por voz nos quadros {late:?}");
+    }
+
+    #[test]
+    fn turning_denoise_off_drops_the_network_state() {
+        let mut v = Voice::default();
+        v.process(&mut vec![0i16; FRAME], &AudioPrefs { denoise: true, ..off() });
+        assert!(v.denoiser.is_some());
+        v.process(&mut vec![0i16; FRAME], &off());
+        assert!(v.denoiser.is_none());
     }
 
     #[test]

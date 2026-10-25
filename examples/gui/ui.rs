@@ -298,7 +298,9 @@ impl App {
 
         ui.add(egui::Slider::new(&mut p.gate_db, AudioPrefs::GATE_DB).suffix(" dB").text("Sensibilidade (limiar da voz)"))
             .on_hover_text("A linha laranja no medidor. Quanto mais para a esquerda, mais sensível: sons baixos já contam como voz.");
-        ui.checkbox(&mut p.gate, "Silenciar ruído de fundo")
+        ui.checkbox(&mut p.denoise, "Remover ruído (rede neural)")
+            .on_hover_text("Tira teclado, ventilador, estática e vozes ao fundo (RNNoise). Com ela ligada, a porta e o indicador \"voz\" só contam o que a rede reconhece como fala. Adiciona ~10 ms de atraso.");
+        ui.checkbox(&mut p.gate, "Silenciar o que não é voz")
             .on_hover_text("Quando o microfone fica abaixo do limiar, o som enviado é reduzido. Ajuste a sensibilidade até a linha ficar logo acima do ruído.");
         ui.add_enabled(p.gate, egui::Slider::new(&mut p.gate_depth_db, AudioPrefs::GATE_DEPTH_DB).suffix(" dB").text("Redução do ruído"));
         ui.checkbox(&mut p.high_pass, "Cortar graves (ventilador, mesa, sopro)");

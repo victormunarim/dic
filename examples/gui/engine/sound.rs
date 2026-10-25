@@ -187,7 +187,7 @@ mod tests {
         assert!(c.level() > 0.5, "o medidor deve mostrar o microfone mesmo mudo");
         assert!(!c.speaking(), "mudo nunca aparece como falando");
         c.muted.store(false, Ordering::Relaxed);
-        c.set_prefs(AudioPrefs { high_pass: false, mic_gain: 0.5, ..AudioPrefs::default() });
+        c.set_prefs(AudioPrefs { high_pass: false, denoise: false, mic_gain: 0.5, ..AudioPrefs::default() });
         let mut f = vec![4000i16; 320];
         c.outgoing(&mut f);
         assert!(f.iter().all(|x| *x == 2000));
@@ -197,7 +197,7 @@ mod tests {
     fn sensitivity_decides_whether_a_quiet_voice_is_speaking() {
         let c = Controls::default();
         let quiet = |gate_db: f32| {
-            c.set_prefs(AudioPrefs { gate_db, ..AudioPrefs::default() });
+            c.set_prefs(AudioPrefs { gate_db, denoise: false, ..AudioPrefs::default() });
             c.outgoing(&mut sine_frame(300.0));
             c.speaking()
         };
@@ -209,6 +209,7 @@ mod tests {
     #[test]
     fn zero_level_clears_speaking() {
         let c = Controls::default();
+        c.set_prefs(AudioPrefs { denoise: false, ..AudioPrefs::default() });
         c.outgoing(&mut sine_frame(8000.0));
         assert!(c.speaking());
         c.set_level(0.0);
