@@ -47,8 +47,6 @@ pub enum MediaError {
     BadKey,
     #[error("PCM com {got} amostras; o codec espera {want}")]
     FrameLen { got: usize, want: usize },
-    #[error("convite velho demais")]
-    Stale,
     #[error("contador de pacotes esgotado")]
     CounterExhausted,
 }

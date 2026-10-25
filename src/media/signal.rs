@@ -14,8 +14,11 @@
 //! - O convite não prova quem chama (qualquer um pode escrever um `s_i` alheio), mas quem não
 //!   tem a chave secreta de `s_i` não deriva as chaves da chamada ([`CallKeys`]): o aceite
 //!   vai para o vazio e a voz nunca autentica.
-//! - A hora no convite (segundos Unix) limita a repetição de convites gravados a [`INVITE_TTL_SECS`].
-//!   Dentro desse prazo o replay só faz o telefone tocar; não dá acesso à chamada.
+//! - O convite não depende do relógio de quem recebe: duas máquinas com a hora desencontrada
+//!   (ou sem diretório para acertá-la) ainda se ligam. A repetição de um convite gravado é
+//!   barrada por quem recebe, que lembra as efêmeras já vistas ([`Incoming::nonce`]); sem
+//!   essa memória (telefone reiniciado) o replay só faz o telefone tocar, não dá acesso à
+//!   chamada. A hora de quem liga segue no convite só para telefones de versão anterior, que a conferem.
 
 use chacha20poly1305::{
     ChaCha20Poly1305, Key, Nonce,
@@ -30,9 +33,6 @@ use super::{
     keys::{CallKeys, Ephemeral},
     packet::PACKET_LEN,
 };
-
-/// Idade máxima aceita para um convite.
-pub const INVITE_TTL_SECS: u64 = 60;
 
 const TAG_INVITE: u8 = 1;
 const TAG_ACCEPT: u8 = 2;
@@ -102,8 +102,8 @@ pub struct Incoming {
 
 impl Incoming {
     /// Abre um quadro que pode ser um convite para `my_static`. Erro = não é um convite
-    /// para esta chave (ou é velho demais): ignore o quadro.
-    pub fn parse(my_static: &StaticSecret, now_secs: u64, frame: &[u8]) -> Result<Self, MediaError> {
+    /// para esta chave: ignore o quadro. Não olha o relógio; use [`Incoming::nonce`] contra repetição.
+    pub fn parse(my_static: &StaticSecret, frame: &[u8]) -> Result<Self, MediaError> {
         let frame: &Frame = frame.try_into().map_err(|_| MediaError::Size)?;
         if frame[0] != TAG_INVITE {
             return Err(MediaError::Malformed);
@@ -117,12 +117,13 @@ impl Incoming {
         let plain = invite_key(dh.as_bytes(), &eph, me.as_bytes())
             .decrypt(&Nonce::default(), &frame[33..33 + SEALED_LEN])
             .map_err(|_| MediaError::Decrypt)?;
-        let sent = u64::from_be_bytes(plain[32..40].try_into().expect("8 bytes"));
-        if now_secs.abs_diff(sent) > INVITE_TTL_SECS {
-            return Err(MediaError::Stale);
-        }
         let caller: [u8; 32] = plain[..32].try_into().expect("32 bytes");
         Ok(Self { caller: PublicKey::from(caller), eph })
+    }
+
+    /// Efêmera do convite, única por convite: quem recebe a guarda para recusar o mesmo convite de novo.
+    pub fn nonce(&self) -> [u8; 32] {
+        self.eph
     }
 
     /// Chave estática que o chamador diz ter. Compare com a lista de contatos antes de aceitar.
@@ -162,7 +163,7 @@ mod tests {
     fn invite_accept_then_voice() {
         let (a, b) = ids();
         let (caller, inv) = Caller::invite(&a, &PublicKey::from(&b), 1000).unwrap();
-        let incoming = Incoming::parse(&b, 1010, &inv).unwrap();
+        let incoming = Incoming::parse(&b, &inv).unwrap();
         assert_eq!(incoming.caller().as_bytes(), PublicKey::from(&a).as_bytes());
         let (acc, kb) = incoming.accept(&b).unwrap();
         let Answer::Accepted(ka) = caller.answer(&a, &acc).unwrap() else { panic!("aceite esperado") };
@@ -171,10 +172,26 @@ mod tests {
     }
 
     #[test]
+    fn the_invite_does_not_depend_on_either_clock() {
+        let (a, b) = ids();
+        for sent in [0, 1000, u64::MAX / 2] {
+            let (_, inv) = Caller::invite(&a, &PublicKey::from(&b), sent).unwrap();
+            assert_eq!(Incoming::parse(&b, &inv).unwrap().caller().as_bytes(), PublicKey::from(&a).as_bytes());
+        }
+    }
+
+    #[test]
+    fn each_invite_has_its_own_nonce() {
+        let (a, b) = ids();
+        let n = |_| Incoming::parse(&b, &Caller::invite(&a, &PublicKey::from(&b), 0).unwrap().1).unwrap().nonce();
+        assert_ne!(n(0), n(1));
+    }
+
+    #[test]
     fn all_signals_have_the_packet_size() {
         let (a, b) = ids();
         let (_, inv) = Caller::invite(&a, &PublicKey::from(&b), 0).unwrap();
-        let (acc, _) = Incoming::parse(&b, 0, &inv).unwrap().accept(&b).unwrap();
+        let (acc, _) = Incoming::parse(&b, &inv).unwrap().accept(&b).unwrap();
         assert_eq!((inv.len(), acc.len()), (PACKET_LEN, PACKET_LEN));
     }
 
@@ -182,7 +199,7 @@ mod tests {
     fn reject_is_understood() {
         let (a, b) = ids();
         let (caller, inv) = Caller::invite(&a, &PublicKey::from(&b), 0).unwrap();
-        let rej = Incoming::parse(&b, 0, &inv).unwrap().reject();
+        let rej = Incoming::parse(&b, &inv).unwrap().reject();
         assert!(matches!(caller.answer(&a, &rej), Ok(Answer::Rejected)));
     }
 
@@ -195,17 +212,16 @@ mod tests {
     }
 
     #[test]
-    fn other_recipients_stale_and_tampered_invites_are_rejected() {
+    fn other_recipients_and_tampered_invites_are_rejected() {
         let (a, b) = ids();
         let (_, inv) = Caller::invite(&a, &PublicKey::from(&b), 1000).unwrap();
         let other = StaticSecret::random_from_rng(OsRng);
-        assert_eq!(Incoming::parse(&other, 1000, &inv).err(), Some(MediaError::Decrypt));
-        assert_eq!(Incoming::parse(&b, 1000 + INVITE_TTL_SECS + 1, &inv).err(), Some(MediaError::Stale));
+        assert_eq!(Incoming::parse(&other, &inv).err(), Some(MediaError::Decrypt));
         let mut bad = inv;
         bad[40] ^= 1;
-        assert!(Incoming::parse(&b, 1000, &bad).is_err());
-        assert_eq!(Incoming::parse(&b, 1000, &inv[..100]).err(), Some(MediaError::Size));
-        assert_eq!(Incoming::parse(&b, 1000, &[2u8; PACKET_LEN]).err(), Some(MediaError::Malformed));
+        assert!(Incoming::parse(&b, &bad).is_err());
+        assert_eq!(Incoming::parse(&b, &inv[..100]).err(), Some(MediaError::Size));
+        assert_eq!(Incoming::parse(&b, &[2u8; PACKET_LEN]).err(), Some(MediaError::Malformed));
     }
 
     #[test]
@@ -213,7 +229,7 @@ mod tests {
         let (a, b) = ids();
         let other = StaticSecret::random_from_rng(OsRng);
         let (caller, inv) = Caller::invite(&a, &PublicKey::from(&b), 0).unwrap();
-        let (acc, kb) = Incoming::parse(&b, 0, &inv).unwrap().accept(&b).unwrap();
+        let (acc, kb) = Incoming::parse(&b, &inv).unwrap().accept(&b).unwrap();
         // Quem tem o estado do chamador mas não a chave secreta `a` deriva chaves erradas.
         let Answer::Accepted(kx) = caller.answer(&other, &acc).unwrap() else { panic!() };
         let (mut s, mut o) = (Sealer::new(&kx), Opener::new(&kb));

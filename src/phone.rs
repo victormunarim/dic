@@ -78,7 +78,7 @@ impl std::fmt::Display for CallError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NoCircuit => write!(f, "circuito não ficou pronto"),
-            Self::NoAnswer => write!(f, "sem resposta ao convite (confira se o relógio das duas máquinas está certo, com menos de 60 s de diferença, e se a sua chave está nos Contatos do outro lado)"),
+            Self::NoAnswer => write!(f, "sem resposta ao convite (confira se a sua chave está nos Contatos do outro lado e se ele está online)"),
             Self::Rejected => write!(f, "chamada recusada"),
             Self::Closed => write!(f, "circuito fechado"),
             Self::Media(e) => write!(f, "{e}"),
@@ -793,6 +793,32 @@ async fn write_frames(mut wr: OwnedWriteHalf, mut rx: mpsc::Receiver<Vec<u8>>) {
     }
 }
 
+/// Quantos convites recentes o telefone lembra para recusar repetição.
+const SEEN_INVITES: usize = 1024;
+
+/// Efêmeras dos últimos convites aceitos para tocar: um convite gravado e reenviado não toca duas vezes.
+#[derive(Default)]
+struct SeenInvites {
+    set: std::collections::HashSet<[u8; 32]>,
+    order: std::collections::VecDeque<[u8; 32]>,
+}
+
+impl SeenInvites {
+    /// `true` na primeira vez que vê `nonce`.
+    fn first_time(&mut self, nonce: [u8; 32]) -> bool {
+        if !self.set.insert(nonce) {
+            return false;
+        }
+        self.order.push_back(nonce);
+        if self.order.len() > SEEN_INVITES
+            && let Some(old) = self.order.pop_front()
+        {
+            self.set.remove(&old);
+        }
+        true
+    }
+}
+
 async fn run_actor(
     mut rx: mpsc::Receiver<Msg>,
     me: mpsc::Sender<Msg>,
@@ -805,6 +831,7 @@ async fn run_actor(
     let mut writers: HashMap<u64, mpsc::Sender<Vec<u8>>> = HashMap::new();
     let mut binds: HashMap<u64, Bind> = HashMap::new();
     let mut calls: HashMap<u64, mpsc::Sender<WireIn>> = HashMap::new();
+    let mut seen = SeenInvites::default();
     while let Some(msg) = rx.recv().await {
         match msg {
             Msg::Open(c, w) => {
@@ -845,17 +872,15 @@ async fn run_actor(
                 }
                 Some(Bind::Pending) => {}
                 None => {
-                    let parsed = Incoming::parse(&secret, unix_secs(), &data);
-                    if matches!(parsed, Err(crate::media::MediaError::Stale)) {
-                        *notice.lock().unwrap() = Some("convite ignorado: relógio desta máquina difere em mais de 60 s do de quem ligou".into());
-                    }
-                    let invite = parsed.ok().filter(|i| {
+                    let invite = Incoming::parse(&secret, &data).ok().filter(|i| {
                         let known = contacts.lock().unwrap().contains(i.caller().as_bytes());
                         if !known {
                             let hex: String = i.caller().as_bytes()[..4].iter().map(|b| format!("{b:02x}")).collect();
                             *notice.lock().unwrap() = Some(format!("convite de {hex}... ignorado: essa chave não está em Contatos"));
+                            return false;
                         }
-                        known
+                        // O convite não leva prazo que dependa de relógio: o mesmo convite repetido não toca de novo.
+                        seen.first_time(i.nonce())
                     });
                     if let Some(invite) = invite {
                         let call = IncomingCall { invite, secret: secret.clone(), conn, actor: me.clone(), ids: ids.clone() };
@@ -872,5 +897,34 @@ async fn run_actor(
                 }
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_repeated_invite_does_not_ring_twice() {
+        let mut seen = SeenInvites::default();
+        assert!(seen.first_time([1; 32]));
+        assert!(!seen.first_time([1; 32]));
+        assert!(seen.first_time([2; 32]));
+    }
+
+    #[test]
+    fn the_oldest_invites_are_forgotten_past_the_limit() {
+        let mut seen = SeenInvites::default();
+        let id = |i: usize| {
+            let mut n = [0u8; 32];
+            n[..8].copy_from_slice(&(i as u64).to_be_bytes());
+            n
+        };
+        for i in 0..=SEEN_INVITES {
+            assert!(seen.first_time(id(i)));
+        }
+        assert_eq!((seen.set.len(), seen.order.len()), (SEEN_INVITES, SEEN_INVITES));
+        assert!(seen.first_time(id(0)), "o mais antigo saiu da memória");
+        assert!(!seen.first_time(id(SEEN_INVITES)), "o mais novo continua lembrado");
     }
 }
