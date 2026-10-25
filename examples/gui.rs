@@ -100,6 +100,16 @@ struct Form {
     via_server: bool,
 }
 
+/// Código de contato: a chave pública (64 hex), com o diretório opcional depois de `@`
+/// (`<chave>@host:porta`). Devolve a chave e o diretório, se houver.
+fn split_code(t: &str) -> Option<([u8; 32], Option<String>)> {
+    let (key, dir) = match t.trim().split_once('@') {
+        Some((k, d)) => (k, Some(d.trim().to_string()).filter(|d| !d.is_empty())),
+        None => (t.trim(), None),
+    };
+    unhex(key).ok().map(|k| (k, dir))
+}
+
 /// Contatos da lista: `(nome, chave)`. Linhas sem uma chave de 64 hex são ignoradas.
 fn parse_contacts(text: &str) -> Vec<(String, [u8; 32])> {
     text.lines()
@@ -107,9 +117,9 @@ fn parse_contacts(text: &str) -> Vec<(String, [u8; 32])> {
             let mut name = vec![];
             let mut key = None;
             for t in l.split_whitespace() {
-                match unhex(t) {
-                    Ok(k) => key = Some(k),
-                    Err(_) => name.push(t),
+                match split_code(t) {
+                    Some((k, _)) => key = Some(k),
+                    None => name.push(t),
                 }
             }
             key.map(|k| (if name.is_empty() { hex(&k)[..8].to_string() } else { name.join(" ") }, k))
@@ -165,16 +175,33 @@ impl Form {
     }
 
     /// Resolve o campo "ligar para": uma chave de 64 hex ou o nome de um contato.
+    /// Diretório a usar: o campo, ou o que veio num código de contato (`chave@host:porta`).
+    fn directory_addr(&self) -> String {
+        let d = self.directory.trim();
+        if !d.is_empty() {
+            return d.to_string();
+        }
+        let codes = self.contacts.split_whitespace().chain(self.peer.split_whitespace());
+        codes.filter_map(|t| split_code(t).and_then(|(_, d)| d)).next().unwrap_or_default()
+    }
+
+    /// Meu código de contato: chave pública e, se conhecido, o diretório.
+    fn my_code(&self) -> Option<String> {
+        let key = hex(PublicKey::from(&self.identity().ok()?).as_bytes());
+        let dir = self.directory_addr();
+        Some(if dir.is_empty() { key } else { format!("{key}@{dir}") })
+    }
+
     fn target(&self) -> Result<[u8; 32], String> {
         let p = self.peer.trim();
-        if let Ok(k) = unhex(p) {
+        if let Some((k, _)) = split_code(p) {
             return Ok(k);
         }
         parse_contacts(&self.contacts)
             .into_iter()
             .find(|(n, _)| n.eq_ignore_ascii_case(p))
             .map(|(_, k)| k)
-            .ok_or_else(|| "informe a chave pública (64 hex) ou o nome de um contato".to_string())
+            .ok_or_else(|| "informe o código de contato (ou chave de 64 hex) ou o nome de um contato".to_string())
     }
 }
 
@@ -267,8 +294,11 @@ struct Shared {
 /// Roda o nó até `stop`: atende contatos sozinho e disca quando a janela pede.
 async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, shared: Arc<Shared>, stop: Arc<AtomicBool>, out: Sink) -> Result<(), String> {
     let secret = form.identity()?;
+    if form.directory_addr().is_empty() {
+        return Err("informe o diretório (host:porta), ou cole um código de contato com @host:porta".into());
+    }
     let contacts: Vec<_> = parse_contacts(&form.contacts);
-    let mut cfg = NodeConfig::new(secret, form.directory.trim(), contacts.iter().map(|(_, k)| *k).collect());
+    let mut cfg = NodeConfig::new(secret, form.directory_addr(), contacts.iter().map(|(_, k)| *k).collect());
     cfg.via_server = form.via_server;
     if !form.public_addr.trim().is_empty() {
         cfg.public_addr = Some(form.public_addr.trim().to_string());
@@ -421,17 +451,16 @@ impl eframe::App for App {
             ui.heading("Clam: chamada de voz");
             egui::Grid::new("form").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
                 field(ui, "Identidade (chave secreta, 64 hex)", &mut self.form.secret, offline);
-                ui.label("Minha chave pública");
+                ui.label("Meu código de contato");
                 ui.horizontal(|ui| {
-                    match self.form.identity() {
-                        Ok(k) => {
-                            let p = hex(PublicKey::from(&k).as_bytes());
-                            ui.monospace(&p);
+                    match self.form.my_code() {
+                        Some(code) => {
+                            ui.monospace(if code.len() > 40 { format!("{}...", &code[..40]) } else { code.clone() });
                             if ui.button("Copiar").clicked() {
-                                ui.ctx().copy_text(p);
+                                ui.ctx().copy_text(code);
                             }
                         }
-                        Err(_) => {
+                        None => {
                             ui.weak("(informe ou gere a identidade)");
                         }
                     }
@@ -441,7 +470,7 @@ impl eframe::App for App {
                 });
                 ui.end_row();
                 field(ui, "Diretório (host:porta)", &mut self.form.directory, offline);
-                ui.label("Contatos (um por linha:\n[nome] chave pública)");
+                ui.label("Contatos (um por linha:\n[nome] código de contato)");
                 ui.add_enabled(offline, egui::TextEdit::multiline(&mut self.form.contacts).desired_rows(3).desired_width(f32::INFINITY));
                 ui.end_row();
                 ui.label("Opções");
@@ -479,7 +508,7 @@ impl eframe::App for App {
             ui.separator();
             ui.horizontal(|ui| {
                 ui.label("Ligar para:");
-                ui.add_enabled(!offline && !in_call, egui::TextEdit::singleline(&mut self.form.peer).hint_text("nome ou chave pública").desired_width(420.0));
+                ui.add_enabled(!offline && !in_call, egui::TextEdit::singleline(&mut self.form.peer).hint_text("nome ou código de contato").desired_width(420.0));
                 if ui.add_enabled(!offline && !in_call, egui::Button::new("Ligar")).clicked() {
                     match self.form.target() {
                         Ok(k) => {
@@ -528,4 +557,20 @@ fn main() -> eframe::Result {
             }))
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn contact_code_parses() {
+        let k = "ab".repeat(32);
+        assert_eq!(split_code(&k).unwrap().1, None);
+        let (key, dir) = split_code(&format!(" {k}@10.0.0.1:7777 ")).unwrap();
+        assert_eq!((key, dir.as_deref()), ([0xab; 32], Some("10.0.0.1:7777")));
+        assert!(split_code("nome").is_none());
+        let c = parse_contacts(&format!("ana {k}@h:1"));
+        assert_eq!(c, vec![("ana".to_string(), [0xab; 32])]);
+    }
 }
