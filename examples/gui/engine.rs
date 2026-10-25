@@ -17,6 +17,8 @@ use tokio::{
     time::{MissedTickBehavior, interval},
 };
 
+use clam::x25519_dalek::StaticSecret;
+
 use crate::conf::*;
 
 #[cfg(feature = "audio")]
@@ -145,7 +147,10 @@ pub(crate) async fn talk(mut c: ActiveCall, hz: f64, stop: Arc<AtomicBool>, out:
 
 pub(crate) enum Cmd {
     Dial([u8; 32]),
-    Join([u8; 32], String),
+    /// Segredo, dono da sala (se conhecido) e nome.
+    Join([u8; 32], Option<[u8; 32]>, String),
+    /// O dono tira um membro: troca o segredo e avisa só quem fica.
+    Remove([u8; 32]),
     Leave,
 }
 
@@ -166,11 +171,16 @@ pub(crate) struct Shared {
     pub(crate) mesh: Mutex<Option<Mesh>>,
     pub(crate) members: Mutex<Vec<[u8; 32]>>,
     pub(crate) me: Mutex<[u8; 32]>,
+    /// Sou o dono da sala atual (posso remover membros).
+    pub(crate) owner: AtomicBool,
+    /// Segredos de sala trocados pelo dono, `(antigo, novo)`, para a janela atualizar o que está salvo.
+    pub(crate) rekeyed: Mutex<Vec<([u8; 32], [u8; 32])>>,
 }
 
 /// Roda o nó até `stop`: atende contatos sozinho e disca quando a janela pede.
 pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, shared: Arc<Shared>, stop: Arc<AtomicBool>, out: Sink) -> Result<(), String> {
     let secret = form.identity()?;
+    let ident = secret.clone();
     if form.directory_addr().is_empty() {
         return Err("informe o diretório (host:porta), ou cole um código de contato com @host:porta".into());
     }
@@ -243,18 +253,30 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
                         }
                     }
                 }
-                Some(Cmd::Join(secret, name)) => {
+                Some(Cmd::Join(mut secret, owner, name)) => {
                     if shared.in_call.swap(true, Ordering::Relaxed) {
                         out.line("saia da chamada atual antes de entrar numa sala");
                         continue;
                     }
                     out.line(format!("entrando na sala {name}..."));
+                    let me = node.public_key();
+                    // Se o dono já trocou o segredo (alguém foi removido), segue a troca antes de entrar.
+                    if let Some(o) = owner.filter(|o| *o != me) {
+                        let new = follow_chain(node.directory(), &ident, &o, secret, &shared).await;
+                        if new != secret {
+                            out.line(format!("sala {name}: o dono trocou o segredo; usando o novo"));
+                            secret = new;
+                        }
+                    }
+                    shared.owner.store(owner == Some(me), Ordering::Relaxed);
                     shared.in_room.store(true, Ordering::Relaxed);
                     let mesh = Mesh::new();
                     *shared.mesh.lock().unwrap() = Some(mesh.clone());
                     *shared.me.lock().unwrap() = node.public_key();
                     room = Some(RoomRun {
                         name,
+                        secret,
+                        owner,
                         key: room::room_key(&secret),
                         mesh,
                         view: None,
@@ -264,6 +286,26 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
                         shown: (0, 0, [0; 32]),
                         n: 0,
                     });
+                }
+                Some(Cmd::Remove(gone)) => {
+                    let Some(r) = room.as_mut() else { continue };
+                    let (Some(view), true) = (r.view.as_ref(), r.owner == Some(node.public_key())) else {
+                        out.line("só o dono da sala remove membros");
+                        continue;
+                    };
+                    let keep: Vec<[u8; 32]> = view.members.iter().copied().filter(|m| *m != gone && *m != node.public_key()).collect();
+                    match room::rotate(node.directory(), &ident, &r.secret, &keep).await {
+                        Ok(new) => {
+                            shared.rekeyed.lock().unwrap().push((r.secret, new));
+                            r.secret = new;
+                            r.key = room::room_key(&new);
+                            r.mesh.retain(&keep);
+                            r.view = None;
+                            r.next_sync = tokio::time::Instant::now();
+                            out.line(format!("{} foi removido da sala {}; o segredo mudou e só quem ficou recebe o novo", member_name(&names, &gone), r.name));
+                        }
+                        Err(e) => out.line(format!("não deu para remover: {e}")),
+                    }
                 }
                 Some(Cmd::Leave) => {
                     if let Some(r) = room.take() {
@@ -296,6 +338,15 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
                 }
                 if tokio::time::Instant::now() >= r.next_sync {
                     r.next_sync = tokio::time::Instant::now() + Duration::from_secs(10);
+                    // Membro: o dono pode ter trocado o segredo para tirar alguém; passa para o novo.
+                    if let Some(o) = r.owner.filter(|o| *o != node.public_key()) {
+                        let new = follow_chain(node.directory(), &ident, &o, r.secret, &shared).await;
+                        if new != r.secret {
+                            out.line(format!("sala {}: o dono trocou o segredo; acompanhando", r.name));
+                            r.secret = new;
+                            r.key = room::room_key(&new);
+                        }
+                    }
                     match room::sync(&node, &r.key).await {
                         Ok(view) => {
                             room::connect_missing(&dialer, &view, &r.mesh, Duration::from_secs(8));
@@ -307,6 +358,8 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
                                 out.line(text.clone());
                                 *shared.room.lock().unwrap() = text;
                             }
+                            // Quem saiu da lista (removido pelo dono) perde também a chamada.
+                            r.mesh.retain(&view.members);
                             *shared.members.lock().unwrap() = view.members.clone();
                             r.view = Some(view);
                         }
@@ -330,6 +383,8 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
 /// Sala em andamento na tarefa do nó.
 pub(crate) struct RoomRun {
     pub(crate) name: String,
+    pub(crate) secret: [u8; 32],
+    pub(crate) owner: Option<[u8; 32]>,
     pub(crate) key: clam::ed25519_dalek::SigningKey,
     pub(crate) mesh: Mesh,
     pub(crate) view: Option<RoomView>,
@@ -339,6 +394,21 @@ pub(crate) struct RoomRun {
     /// O que o último resumo mostrou (membros, conectados, anfitrião), para só repetir quando mudar.
     pub(crate) shown: (usize, usize, [u8; 32]),
     pub(crate) n: usize,
+}
+
+/// Segue as trocas de segredo que o dono `owner` deixou no diretório, até não haver mais (no máximo 8).
+/// Cada troca vai para `shared.rekeyed`, para a janela salvar o segredo novo.
+pub(crate) async fn follow_chain(directory: &str, me: &StaticSecret, owner: &[u8; 32], mut secret: [u8; 32], shared: &Shared) -> [u8; 32] {
+    for _ in 0..8 {
+        match room::follow(directory, me, owner, &secret).await {
+            Ok(Some(new)) if new != secret => {
+                shared.rekeyed.lock().unwrap().push((secret, new));
+                secret = new;
+            }
+            _ => break,
+        }
+    }
+    secret
 }
 
 pub(crate) fn member_name(contacts: &[(String, [u8; 32])], key: &[u8; 32]) -> String {
@@ -400,6 +470,23 @@ mod tests {
         let l = s.log.lock().unwrap();
         assert!(l.len() <= 500);
         assert_eq!(l.last().unwrap(), "linha 649");
+    }
+
+    #[tokio::test]
+    async fn follow_chain_walks_every_rotation_and_skips_removed_members() {
+        use clam::{directory::DirectoryServer, rand_core::OsRng, x25519_dalek::PublicKey};
+        let d = DirectoryServer::spawn("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let addr = d.local_addr().to_string();
+        let (owner, bob, eve) = (StaticSecret::random_from_rng(OsRng), StaticSecret::random_from_rng(OsRng), StaticSecret::random_from_rng(OsRng));
+        let (opub, bpub, epub) = (PublicKey::from(&owner).to_bytes(), PublicKey::from(&bob).to_bytes(), PublicKey::from(&eve).to_bytes());
+        let first = room::new_secret();
+        let second = room::rotate(&addr, &owner, &first, &[bpub, epub]).await.unwrap();
+        let third = room::rotate(&addr, &owner, &second, &[bpub]).await.unwrap();
+        let shared = Shared::default();
+        assert_eq!(follow_chain(&addr, &bob, &opub, first, &shared).await, third);
+        assert_eq!(shared.rekeyed.lock().unwrap().len(), 2);
+        // Eve foi removida na segunda troca: fica presa no segredo do meio.
+        assert_eq!(follow_chain(&addr, &eve, &opub, first, &Shared::default()).await, second);
     }
 
     #[test]

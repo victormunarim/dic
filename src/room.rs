@@ -335,6 +335,12 @@ impl Mesh {
         Some(out)
     }
 
+    /// Desliga as chamadas com quem não está em `keep` (por exemplo, quem o dono removeu da sala).
+    pub fn retain(&self, keep: &[[u8; 32]]) {
+        self.peers.lock().unwrap().retain(|k, _| keep.contains(k));
+        self.queues.lock().unwrap().retain(|k, _| keep.contains(k));
+    }
+
     /// Desliga todas as chamadas.
     pub fn hangup(&self) {
         self.spoke.lock().unwrap().clear();
