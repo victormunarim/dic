@@ -380,7 +380,7 @@ pub(crate) fn save_known(book: &Book) -> std::io::Result<()> {
 impl Form {
     /// Primeira abertura: já nasce com uma identidade, para a pessoa não precisar gerar nada.
     pub(crate) fn first_run() -> Self {
-        Form { secret: hex(&StaticSecret::random_from_rng(OsRng).to_bytes()), intros: true, ..Form::default() }
+        Form { secret: hex(&StaticSecret::random_from_rng(OsRng).to_bytes()), intros: true, use_dht: true, anchor: true, ..Form::default() }
     }
 
     pub(crate) fn load() -> Self {
@@ -398,12 +398,13 @@ impl Form {
             contacts: get("contacts").replace(';', "\n"),
             peer: get("peer"),
             public_addr: get("public_addr"),
-            use_dht: get("dht") == "1",
+            // Ligadas de início: o arquivo antigo, sem a chave, também aceita.
+            use_dht: get("dht") != "0",
             dht_circuit: get("dht_circuit") == "1",
             my_name: get("name"),
             // Ligado de início: o arquivo antigo, sem a chave, também aceita.
             intros: get("intros") != "0",
-            anchor: get("anchor") == "1",
+            anchor: get("anchor") != "0",
             anchors: get("anchors").replace(';', "\n"),
             use_audio: get("audio") == "1",
             input_dev: get("input_dev"),
