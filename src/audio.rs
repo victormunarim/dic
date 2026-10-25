@@ -17,6 +17,8 @@ use std::{
     time::Duration,
 };
 
+use sonora::{AudioProcessing, Config, StreamConfig};
+
 use cpal::{
     FromSample, SampleFormat, SizedSample, Stream,
     traits::{DeviceTrait, HostTrait, StreamTrait},
@@ -107,7 +109,8 @@ pub struct Audio {
     info: String,
     frame: usize,
     rate: u32,
-    gain: Mutex<Agc>,
+    apm: Mutex<AudioProcessing>,
+    tap: Queue,
     played: Arc<AtomicUsize>,
 }
 
@@ -124,8 +127,9 @@ impl Audio {
         let stop = Arc::new(AtomicBool::new(false));
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<String, AudioError>>();
         let played = Arc::new(AtomicUsize::new(0));
-        let (c, p, s, n) = (capture.clone(), playback.clone(), stop.clone(), played.clone());
-        let thread = std::thread::spawn(move || match open_streams(c, p, n, rate) {
+        let tap = Queue::default();
+        let (c, p, s, n, tap2) = (capture.clone(), playback.clone(), stop.clone(), played.clone(), tap.clone());
+        let thread = std::thread::spawn(move || match open_streams(c, p, n, rate, tap2) {
             Ok((streams, info)) => {
                 let _ = ready_tx.send(Ok(info));
                 while !s.load(Ordering::Relaxed) {
@@ -138,7 +142,7 @@ impl Audio {
             }
         });
         match ready_rx.recv() {
-            Ok(Ok(info)) => Ok(Self { capture, playback, stop, thread: Some(thread), info, played, frame: (rate / 50) as usize, rate, gain: Mutex::new(Agc::new()) }),
+            Ok(Ok(info)) => Ok(Self { capture, playback, stop, thread: Some(thread), info, played, frame: (rate / 50) as usize, rate, apm: Mutex::new(voice_processor(rate)), tap }),
             Ok(Err(e)) => {
                 let _ = thread.join();
                 Err(e)
@@ -155,7 +159,24 @@ impl Audio {
         }
         let mut pcm: Vec<i16> = q.drain(..self.frame).collect();
         drop(q);
-        self.gain.lock().unwrap().process(&mut pcm);
+        // Referência de eco: o que o alto-falante consumiu no mesmo intervalo (zeros se não tocou nada).
+        let mut render: Vec<i16> = {
+            let mut t = self.tap.lock().unwrap();
+            if t.len() > self.frame * 4 {
+                let extra = t.len() - self.frame * 2;
+                t.drain(..extra);
+            }
+            let n = t.len().min(self.frame);
+            t.drain(..n).collect()
+        };
+        render.resize(self.frame, 0);
+        let (chunk, mut apm) = (self.frame / 2, self.apm.lock().unwrap());
+        let mut sink = vec![0i16; chunk];
+        for (r, c) in render.chunks(chunk).zip(pcm.chunks_mut(chunk)) {
+            let src = c.to_vec();
+            let _ = apm.process_render_i16(r, &mut sink);
+            let _ = apm.process_capture_i16(&src, c);
+        }
         Some(pcm)
     }
 
@@ -184,53 +205,25 @@ impl Drop for Audio {
     }
 }
 
-/// Alvo de nível da voz (RMS) e ganho máximo do controle automático de ganho do microfone.
-const AGC_TARGET: f32 = 3000.0;
-const AGC_MAX_GAIN: f32 = 30.0;
-/// Quadros (20 ms) que a porta de ruído fica aberta depois da última voz.
-const AGC_HANG: u32 = 12;
-/// Atenuação do que não é voz (fundo, chiado, teclado ao longe).
-const AGC_FLOOR_ATTEN: f32 = 0.03;
-
-/// Controle automático de ganho com porta de ruído. Estima o piso de ruído (desce rápido, sobe devagar);
-/// só é voz o que passa bem do piso. Voz: o ganho leva o nível perto de [`AGC_TARGET`] (sem amplificar
-/// o ruído além de ~600 de RMS). Sem voz: a porta fecha e o quadro é quase silenciado.
-struct Agc {
-    gain: f32,
-    floor: f32,
-    open: f32,
-    hang: u32,
-}
-
-impl Agc {
-    fn new() -> Self {
-        Self { gain: 1.0, floor: 60.0, open: 0.0, hang: 0 }
-    }
-
-    fn process(&mut self, pcm: &mut [i16]) {
-        let rms = (pcm.iter().map(|&x| (x as f32).powi(2)).sum::<f32>() / pcm.len().max(1) as f32).sqrt();
-        let k = if rms < self.floor { 0.3 } else { 0.003 };
-        self.floor += (rms - self.floor) * k;
-        let voice = rms > (self.floor * 3.0).max(80.0);
-        if voice {
-            self.hang = AGC_HANG;
-            let cap = AGC_MAX_GAIN.min(600.0 / self.floor.max(1.0)).max(1.0);
-            let want = (AGC_TARGET / rms).clamp(1.0, cap);
-            let k = if want < self.gain { 0.5 } else { 0.1 };
-            self.gain += (want - self.gain) * k;
-        } else if self.hang > 0 {
-            self.hang -= 1;
-        } else {
-            self.gain += (1.0 - self.gain) * 0.1;
-        }
-        let target = if self.hang > 0 { 1.0 } else { AGC_FLOOR_ATTEN };
-        let k = if target > self.open { 0.7 } else { 0.25 };
-        self.open += (target - self.open) * k;
-        let g = self.gain * self.open;
-        for x in pcm {
-            *x = (*x as f32 * g).clamp(-32768.0, 32767.0) as i16;
-        }
-    }
+/// Tratamento da voz do microfone (WebRTC, em Rust puro): filtro passa-altas, cancelamento de eco (usa o
+/// que foi tocado como referência), supressão de ruído e ganho automático.
+fn voice_processor(rate: u32) -> AudioProcessing {
+    use sonora::config::{AdaptiveDigital, EchoCanceller, GainController2, HighPassFilter, NoiseSuppression, NoiseSuppressionLevel};
+    let config = Config {
+        high_pass_filter: Some(HighPassFilter::default()),
+        echo_canceller: Some(EchoCanceller::default()),
+        noise_suppression: Some(NoiseSuppression { level: NoiseSuppressionLevel::High, ..Default::default() }),
+        gain_controller2: Some(GainController2 {
+            adaptive_digital: Some(AdaptiveDigital::default()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    AudioProcessing::builder()
+        .config(config)
+        .capture_config(StreamConfig::new(rate, 1))
+        .render_config(StreamConfig::new(rate, 1))
+        .build()
 }
 
 fn push_capped(q: &mut VecDeque<i16>, it: impl Iterator<Item = i16>, max: usize) {
@@ -241,7 +234,7 @@ fn push_capped(q: &mut VecDeque<i16>, it: impl Iterator<Item = i16>, max: usize)
     }
 }
 
-fn open_streams(capture: Queue, playback: Queue, played: Arc<AtomicUsize>, rate: u32) -> Result<((Stream, Stream), String), AudioError> {
+fn open_streams(capture: Queue, playback: Queue, played: Arc<AtomicUsize>, rate: u32, tap: Queue) -> Result<((Stream, Stream), String), AudioError> {
     let host = cpal::default_host();
     let input = host.default_input_device().ok_or_else(|| AudioError("sem microfone padrão".into()))?;
     let output = host.default_output_device().ok_or_else(|| AudioError("sem alto-falante padrão".into()))?;
@@ -260,10 +253,10 @@ fn open_streams(capture: Queue, playback: Queue, played: Arc<AtomicUsize>, rate:
         f => return Err(AudioError(format!("formato de entrada não suportado: {f}"))),
     };
     let out_stream = match outp.sample_format() {
-        SampleFormat::F32 => build_output::<f32>(&output, outp.into(), playback, played, rate)?,
-        SampleFormat::I16 => build_output::<i16>(&output, outp.into(), playback, played, rate)?,
-        SampleFormat::U16 => build_output::<u16>(&output, outp.into(), playback, played, rate)?,
-        SampleFormat::I32 => build_output::<i32>(&output, outp.into(), playback, played, rate)?,
+        SampleFormat::F32 => build_output::<f32>(&output, outp.into(), playback, played, rate, tap.clone())?,
+        SampleFormat::I16 => build_output::<i16>(&output, outp.into(), playback, played, rate, tap.clone())?,
+        SampleFormat::U16 => build_output::<u16>(&output, outp.into(), playback, played, rate, tap.clone())?,
+        SampleFormat::I32 => build_output::<i32>(&output, outp.into(), playback, played, rate, tap.clone())?,
         f => return Err(AudioError(format!("formato de saída não suportado: {f}"))),
     };
     in_stream.play().map_err(err)?;
@@ -294,7 +287,7 @@ where
     .map_err(err)
 }
 
-fn build_output<T>(dev: &cpal::Device, cfg: cpal::StreamConfig, q: Queue, played: Arc<AtomicUsize>, rate: u32) -> Result<Stream, AudioError>
+fn build_output<T>(dev: &cpal::Device, cfg: cpal::StreamConfig, q: Queue, played: Arc<AtomicUsize>, rate: u32, tap: Queue) -> Result<Stream, AudioError>
 where
     T: SizedSample + FromSample<f32>,
 {
@@ -305,10 +298,13 @@ where
         move |data: &mut [T], _| {
             let mut q = q.lock().unwrap();
             for frame in data.chunks_mut(ch) {
-                let before = q.len();
+                let (before, front) = (q.len(), q.front().copied());
                 let v = T::from_sample(up.pull(&mut q).unwrap_or(0.0));
                 if q.len() < before {
                     played.fetch_add(1, Ordering::Relaxed);
+                    if let Some(f) = front {
+                        push_capped(&mut tap.lock().unwrap(), std::iter::once(f), max_queued(rate));
+                    }
                 }
                 frame.fill(v);
             }
@@ -360,34 +356,27 @@ mod tests {
         assert!((0.85..1.05).contains(&ratio), "{ratio}");
     }
 
-    fn rms(v: &[i16]) -> f32 {
-        (v.iter().map(|&x| (x as f32).powi(2)).sum::<f32>() / v.len() as f32).sqrt()
-    }
-
     #[test]
-    fn agc_lifts_quiet_voice_and_gates_noise() {
-        let mut agc = Agc::new();
-        let noise = |n: usize| -> Vec<i16> { (0..160).map(|i| (((n * 160 + i) * 7919 % 61) as i16 - 30)).collect() };
-        // 2 s de ruído (RMS ~17): o piso é aprendido e a saída fica quase muda.
-        let mut out = Vec::new();
-        for n in 0..100 {
-            out = noise(n);
-            agc.process(&mut out);
+    fn voice_processor_suppresses_steady_noise_and_keeps_speech_level() {
+        let mut apm = voice_processor(16000);
+        let rms = |v: &[i16]| (v.iter().map(|&x| (x as f64).powi(2)).sum::<f64>() / v.len() as f64).sqrt();
+        let (mut seed, mut sink, mut out) = (12345u32, vec![0i16; 160], vec![0i16; 160]);
+        let mut noise = move || {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            ((seed >> 16) as i16) / 40
+        };
+        let (mut last_in, mut last_out) = (0.0, 0.0);
+        for n in 0..300 {
+            let frame: Vec<i16> = (0..160).map(|_| noise()).collect();
+            let silence = [0i16; 160];
+            apm.process_render_i16(&silence, &mut sink).unwrap();
+            apm.process_capture_i16(&frame, &mut out).unwrap();
+            if n >= 250 {
+                last_in += rms(&frame);
+                last_out += rms(&out);
+            }
         }
-        assert!(rms(&out) < 3.0, "{}", rms(&out));
-        // Voz fraca (RMS ~300): sobe para perto do alvo.
-        let voice: Vec<i16> = (0..160).map(|i| (420.0 * (i as f32 * 0.3).sin()) as i16).collect();
-        for _ in 0..60 {
-            out = voice.clone();
-            agc.process(&mut out);
-        }
-        assert!(rms(&out) > 1500.0, "{}", rms(&out));
-        // Volta o ruído: a porta fecha.
-        for n in 0..60 {
-            out = noise(n);
-            agc.process(&mut out);
-        }
-        assert!(rms(&out) < 3.0, "{}", rms(&out));
+        assert!(last_out < last_in, "in {last_in} out {last_out}");
     }
 
     #[test]

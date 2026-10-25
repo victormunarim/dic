@@ -21,10 +21,11 @@ tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "sync", "
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 zeroize = { version = "1", features = ["derive"] }
 igd-next = { version = "0.18.0", features = ["aio_tokio"], optional = true }
+sonora = { version = "0.2.0", optional = true }
 
 [features]
 gui = ["net", "dep:eframe"]
-audio = ["dep:cpal"]
+audio = ["dep:cpal", "dep:sonora"]
 net = ["dep:igd-next", "dep:libp2p", "dep:tokio", "dep:futures", "dep:snow"]
 
 [dev-dependencies]
