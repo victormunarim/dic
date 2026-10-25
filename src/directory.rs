@@ -33,7 +33,8 @@ use rand_core::{OsRng, RngCore};
 use sha2::Sha256;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, copy_bidirectional},
-    net::{TcpListener, TcpStream},
+    net::{TcpListener, TcpStream, UdpSocket},
+    sync::mpsc,
     task::JoinHandle,
     time::{interval, sleep, timeout},
 };
@@ -76,6 +77,10 @@ const REQ_LOOKUP: u8 = 2;
 const REQ_SAMPLE: u8 = 3;
 const REQ_HOST: u8 = 4;
 const REQ_ATTACH: u8 = 5;
+const REQ_PUNCH_LISTEN: u8 = 9;
+const REQ_PUNCH_PREP: u8 = 10;
+const REQ_PUNCH_GO: u8 = 11;
+const CTL_PUNCH: u8 = 3;
 const REQ_ROOM_JOIN: u8 = 6;
 const REQ_ROOM_LEAVE: u8 = 7;
 const REQ_ROOM_LIST: u8 = 8;
@@ -168,11 +173,37 @@ struct Member {
 /// Salas: chave pública da sala → membros vivos, do mais antigo (o anfitrião) ao mais novo.
 type Rooms = Arc<Mutex<HashMap<[u8; 32], Vec<Member>>>>;
 
+struct Token {
+    addr: Option<SocketAddr>,
+    key: Option<[u8; 32]>,
+    at: Instant,
+}
+
+struct Listener {
+    id: u64,
+    token: [u8; 16],
+    udp: Option<SocketAddr>,
+    push: mpsc::Sender<SocketAddr>,
+}
+
+/// Furo de NAT: o servidor só descobre o endereço UDP de cada ponta (como um STUN) e avisa o ouvinte
+/// de quem vai chamar. A voz nunca passa por aqui.
+#[derive(Default)]
+struct PunchState {
+    tokens: Mutex<HashMap<[u8; 16], Token>>,
+    listeners: Mutex<HashMap<[u8; 32], Listener>>,
+}
+
+/// Validade de uma ficha UDP sem reaparecer.
+const TOKEN_TTL: Duration = Duration::from_secs(120);
+const MAX_TOKENS: usize = 8192;
+
 /// Servidor de diretório em memória. Encerra ao ser descartado.
 pub struct DirectoryServer {
     addr: SocketAddr,
     relay_addr: Option<SocketAddr>,
     task: JoinHandle<()>,
+    udp_task: JoinHandle<()>,
     _relay: Option<RelayServer>,
 }
 
@@ -206,6 +237,9 @@ impl DirectoryServer {
         let addr = listener.local_addr()?;
         let table: Table = Arc::default();
         let rooms: Rooms = Arc::default();
+        let punch: Arc<PunchState> = Arc::default();
+        let udp = Arc::new(UdpSocket::bind(addr).await?);
+        let udp_task = tokio::spawn(udp_loop(udp, punch.clone()));
         let (host, relay) = match host {
             None => (None, None),
             Some(cfg) => {
@@ -225,13 +259,13 @@ impl DirectoryServer {
         let task = tokio::spawn(async move {
             loop {
                 let Ok((s, peer)) = listener.accept().await else { continue };
-                let (table, rooms, host) = (table.clone(), rooms.clone(), host.clone());
+                let (table, rooms, punch, host) = (table.clone(), rooms.clone(), punch.clone(), host.clone());
                 tokio::spawn(async move {
-                    let _ = serve(s, peer, table, rooms, host).await;
+                    let _ = serve(s, peer, table, rooms, punch, host).await;
                 });
             }
         });
-        Ok(Self { addr, relay_addr, task, _relay: relay })
+        Ok(Self { addr, relay_addr, task, udp_task, _relay: relay })
     }
 
     /// Endereço do relay hospedado, se houver.
@@ -247,10 +281,11 @@ impl DirectoryServer {
 impl Drop for DirectoryServer {
     fn drop(&mut self) {
         self.task.abort();
+        self.udp_task.abort();
     }
 }
 
-async fn serve(mut s: TcpStream, peer: SocketAddr, table: Table, rooms: Rooms, host: Option<Arc<Host>>) -> io::Result<()> {
+async fn serve(mut s: TcpStream, peer: SocketAddr, table: Table, rooms: Rooms, punch: Arc<PunchState>, host: Option<Arc<Host>>) -> io::Result<()> {
     // Estática (e não `EphemeralSecret`) porque a chave pública do cliente só chega no pedido de publicar.
     let eph = StaticSecret::random_from_rng(OsRng);
     let e_pub = PublicKey::from(&eph);
@@ -266,6 +301,12 @@ async fn serve(mut s: TcpStream, peer: SocketAddr, table: Table, rooms: Rooms, h
         match req.first() {
             Some(&REQ_HOST) => return host_control(s, peer, &eph, e_pub.as_bytes(), &req, &table, host).await,
             Some(&REQ_ATTACH) => return attach(s, &req, host).await,
+            Some(&REQ_PUNCH_LISTEN) => return punch_listen(s, &eph, e_pub.as_bytes(), &req, &punch).await,
+            Some(&REQ_PUNCH_PREP | &REQ_PUNCH_GO) => {
+                let reply = punch_request(&req, &punch);
+                write_frame(&mut s, &reply).await?;
+                continue;
+            }
             _ => {}
         }
         let reply = handle(&req, &eph, e_pub.as_bytes(), peer, &table, &rooms);
@@ -702,4 +743,183 @@ async fn read_frame_idle<R: AsyncReadExt + Unpin>(r: &mut R) -> io::Result<Vec<u
     let mut buf = vec![0u8; u16::from_be_bytes(len) as usize];
     r.read_exact(&mut buf).await?;
     Ok(buf)
+}
+
+/// UDP do servidor: `[1] ‖ ficha (16)` → guarda o endereço de onde veio e responde `[2] ‖ ficha ‖ endereço (texto)`.
+async fn udp_loop(sock: Arc<UdpSocket>, punch: Arc<PunchState>) {
+    let mut buf = [0u8; 64];
+    loop {
+        let Ok((n, src)) = sock.recv_from(&mut buf).await else { continue };
+        if n != 17 || buf[0] != 1 {
+            continue;
+        }
+        let tok: [u8; 16] = buf[1..17].try_into().unwrap();
+        let key = {
+            let mut t = punch.tokens.lock().unwrap();
+            let Some(e) = t.get_mut(&tok).filter(|e| e.at.elapsed() < TOKEN_TTL) else { continue };
+            e.addr = Some(src);
+            e.key
+        };
+        if let Some(k) = key
+            && let Some(l) = punch.listeners.lock().unwrap().get_mut(&k)
+            && l.token == tok
+        {
+            l.udp = Some(src);
+        }
+        let _ = sock.send_to(&[&[2u8][..], &tok, src.to_string().as_bytes()].concat(), src).await;
+    }
+}
+
+fn new_token(punch: &PunchState, key: Option<[u8; 32]>) -> Option<[u8; 16]> {
+    let mut tok = [0u8; 16];
+    OsRng.fill_bytes(&mut tok);
+    let mut t = punch.tokens.lock().unwrap();
+    t.retain(|_, e| e.at.elapsed() < TOKEN_TTL);
+    if t.len() >= MAX_TOKENS {
+        return None;
+    }
+    t.insert(tok, Token { addr: None, key, at: Instant::now() });
+    Some(tok)
+}
+
+/// Preparar (`PREP`: devolve uma ficha para o cliente anunciar seu UDP) e pedir o furo (`GO`).
+fn punch_request(req: &[u8], punch: &PunchState) -> Vec<u8> {
+    let err = |m: &str| [&[RES_ERR][..], m.as_bytes()].concat();
+    match req[0] {
+        REQ_PUNCH_PREP => match new_token(punch, None) {
+            Some(tok) => [&[RES_OK][..], &tok].concat(),
+            None => err("servidor ocupado"),
+        },
+        _ => {
+            // ficha (16) ‖ destino (32)
+            let (Ok(tok), Ok(target)) = (<[u8; 16]>::try_from(req.get(1..17).unwrap_or(&[])), <[u8; 32]>::try_from(req.get(17..).unwrap_or(&[]))) else {
+                return err("tamanho");
+            };
+            let from = punch.tokens.lock().unwrap().get(&tok).filter(|e| e.at.elapsed() < TOKEN_TTL).and_then(|e| e.addr);
+            let Some(from) = from else { return err("seu UDP não chegou ao servidor (firewall bloqueia UDP?)") };
+            let ls = punch.listeners.lock().unwrap();
+            let Some((udp, push)) = ls.get(&target).and_then(|l| l.udp.map(|u| (u, l.push.clone()))) else { return vec![RES_NONE] };
+            if push.try_send(from).is_err() {
+                return vec![RES_NONE];
+            }
+            [&[RES_OK][..], udp.to_string().as_bytes()].concat()
+        }
+    }
+}
+
+/// Conexão de um nó que aceita chamadas por furo de NAT: devolve a ficha UDP e depois avisa de cada chamador.
+async fn punch_listen(mut s: TcpStream, eph: &StaticSecret, e_pub: &[u8; 32], req: &[u8], punch: &PunchState) -> io::Result<()> {
+    let refuse = |m: &str| [&[RES_ERR][..], m.as_bytes()].concat();
+    if req.len() != 1 + 32 + 32 {
+        return write_frame(&mut s, &refuse("tamanho")).await;
+    }
+    let pubkey: [u8; 32] = req[1..33].try_into().unwrap();
+    let shared = eph.diffie_hellman(&PublicKey::from(pubkey));
+    if !shared.was_contributory() || mac(shared.as_bytes(), e_pub, &req[..33]).verify_slice(&req[33..]).is_err() {
+        return write_frame(&mut s, &refuse("prova de posse inválida")).await;
+    }
+    let Some(token) = new_token(punch, Some(pubkey)) else { return write_frame(&mut s, &refuse("servidor ocupado")).await };
+    let (tx, mut rx) = mpsc::channel(8);
+    let id = OsRng.next_u64();
+    let full = {
+        let mut ls = punch.listeners.lock().unwrap();
+        let full = ls.len() >= MAX_HOSTED && !ls.contains_key(&pubkey);
+        if !full {
+            ls.insert(pubkey, Listener { id, token, udp: None, push: tx });
+        }
+        full
+    };
+    if full {
+        return write_frame(&mut s, &refuse("servidor cheio")).await;
+    }
+    write_frame(&mut s, &[&[RES_OK][..], &token].concat()).await?;
+    let mut tick = interval(REPUBLISH);
+    tick.tick().await;
+    let mut probe = [0u8; 1];
+    loop {
+        tokio::select! {
+            from = rx.recv() => {
+                let Some(from) = from else { break };
+                if write_frame(&mut s, &[&[CTL_PUNCH][..], from.to_string().as_bytes()].concat()).await.is_err() {
+                    break;
+                }
+            }
+            _ = tick.tick() => {
+                if write_frame(&mut s, &[CTL_PING]).await.is_err() {
+                    break;
+                }
+            }
+            r = s.read(&mut probe) => {
+                if !matches!(r, Ok(n) if n > 0) {
+                    break;
+                }
+            }
+        }
+    }
+    let mut ls = punch.listeners.lock().unwrap();
+    if ls.get(&pubkey).is_some_and(|l| l.id == id) {
+        ls.remove(&pubkey);
+    }
+    drop(ls);
+    punch.tokens.lock().unwrap().remove(&token);
+    Ok(())
+}
+
+/// Ouvinte de furos de NAT registrado no diretório (veja [`punch_register`]).
+pub struct PunchListener {
+    sess: Session,
+    /// Ficha que o nó repete por UDP ao servidor para ele aprender (e manter aberto) o endereço externo.
+    pub token: [u8; 16],
+}
+
+impl PunchListener {
+    /// Espera o próximo chamador: o endereço UDP de onde ele vai sondar. Erra se a conexão cair.
+    pub async fn next(&mut self) -> io::Result<SocketAddr> {
+        loop {
+            let f = timeout(CONTROL_IDLE, read_frame_idle(&mut self.sess.s)).await.map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
+            match f.first() {
+                Some(&CTL_PING) => {}
+                Some(&CTL_PUNCH) => return String::from_utf8_lossy(&f[1..]).parse().map_err(|_| bad("endereço inválido")),
+                _ => return Err(bad("mensagem de controle desconhecida")),
+            }
+        }
+    }
+}
+
+/// Passa a aceitar chamadas por furo de NAT: o servidor avisa a cada chamador novo.
+pub async fn punch_register(server: &str, secret: &StaticSecret) -> io::Result<PunchListener> {
+    let mut sess = connect(server).await?;
+    let mut req = vec![REQ_PUNCH_LISTEN];
+    req.extend_from_slice(PublicKey::from(secret).as_bytes());
+    let shared = secret.diffie_hellman(&PublicKey::from(sess.e_pub));
+    req.extend_from_slice(&mac(shared.as_bytes(), &sess.e_pub, &req).finalize().into_bytes());
+    let reply = ask(&mut sess, &req).await?;
+    match reply.split_first() {
+        Some((&RES_OK, t)) => Ok(PunchListener { token: t.try_into().map_err(|_| bad("ficha inválida"))?, sess }),
+        Some((&RES_ERR, m)) => Err(bad(&format!("servidor recusou: {}", String::from_utf8_lossy(m)))),
+        _ => Err(bad("resposta inesperada")),
+    }
+}
+
+/// Pede uma ficha para anunciar o UDP de quem vai chamar.
+pub async fn punch_prep(server: &str) -> io::Result<[u8; 16]> {
+    let mut sess = connect(server).await?;
+    let reply = ask(&mut sess, &[REQ_PUNCH_PREP]).await?;
+    match reply.split_first() {
+        Some((&RES_OK, t)) => t.try_into().map_err(|_| bad("ficha inválida")),
+        Some((&RES_ERR, m)) => Err(bad(&format!("servidor recusou: {}", String::from_utf8_lossy(m)))),
+        _ => Err(bad("resposta inesperada")),
+    }
+}
+
+/// Pede o furo até `target`: o servidor avisa `target` e devolve o endereço UDP dele (`None`: não aceita furos).
+pub async fn punch_go(server: &str, token: &[u8; 16], target: &[u8; 32]) -> io::Result<Option<SocketAddr>> {
+    let mut sess = connect(server).await?;
+    let reply = ask(&mut sess, &[&[REQ_PUNCH_GO][..], token, target].concat()).await?;
+    match reply.split_first() {
+        Some((&RES_OK, a)) => Ok(Some(String::from_utf8_lossy(a).parse().map_err(|_| bad("endereço inválido"))?)),
+        Some((&RES_NONE, _)) => Ok(None),
+        Some((&RES_ERR, m)) => Err(bad(&format!("servidor recusou: {}", String::from_utf8_lossy(m)))),
+        _ => Err(bad("resposta inesperada")),
+    }
 }

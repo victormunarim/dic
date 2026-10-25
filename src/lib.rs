@@ -76,6 +76,8 @@ pub mod node;
 #[cfg(feature = "net")]
 pub mod phone;
 #[cfg(feature = "net")]
+pub mod punch;
+#[cfg(feature = "net")]
 pub mod timer;
 #[cfg(feature = "net")]
 pub mod upnp;

@@ -26,7 +26,8 @@ use crate::{
     upnp,
     directory::{self, REPUBLISH, RelayInfo, dest_for},
     media::codec::Codec,
-    phone::{ActiveCall, CallError, IncomingCall, Phone, call},
+    phone::{ActiveCall, CallError, IncomingCall, Phone, call, call_over},
+    punch::Punch,
     transport::{CircuitClient, ClientOptions, RelayServer, ServerConfig, allow_list},
 };
 
@@ -49,11 +50,13 @@ pub struct NodeConfig {
     pub via_server: bool,
     /// Tenta abrir a porta do relay no roteador por UPnP quando o diretório está na internet. Padrão: sim.
     pub upnp: bool,
+    /// Tenta furar o NAT por UDP para chamadas diretas (sem circuito). Padrão: sim.
+    pub punch: bool,
 }
 
 impl NodeConfig {
     pub fn new(secret: StaticSecret, directory: impl Into<String>, contacts: Vec<[u8; 32]>) -> Self {
-        Self { secret, directory: directory.into(), contacts, relay_port: DEFAULT_RELAY_PORT, public_addr: None, via_server: false, upnp: true }
+        Self { secret, directory: directory.into(), contacts, relay_port: DEFAULT_RELAY_PORT, public_addr: None, via_server: false, upnp: true, punch: true }
     }
 }
 
@@ -76,6 +79,7 @@ pub struct Node {
     last_error: Arc<Mutex<Option<String>>>,
     republish: JoinHandle<()>,
     note: Option<String>,
+    punch: Option<Punch>,
 }
 
 impl Node {
@@ -95,11 +99,11 @@ impl Node {
                 let onion = n.public_key();
                 scfg.listen = SocketAddr::from(([0, 0, 0, 0], 0));
                 let r = RelayServer::spawn(n, scfg).await?;
-                return Self::finish(cfg.secret, cfg.directory, cfg.public_addr, cfg.via_server, cfg.upnp, phone, r, onion).await;
+                return Self::finish(cfg.secret, cfg.directory, cfg.public_addr, cfg.via_server, cfg.upnp, cfg.punch, phone, r, onion).await;
             }
             Err(e) => return Err(e),
         };
-        Self::finish(cfg.secret, cfg.directory, cfg.public_addr, cfg.via_server, cfg.upnp, phone, relay, onion).await
+        Self::finish(cfg.secret, cfg.directory, cfg.public_addr, cfg.via_server, cfg.upnp, cfg.punch, phone, relay, onion).await
     }
 
     async fn finish(
@@ -108,6 +112,7 @@ impl Node {
         public_addr: Option<String>,
         via_server: bool,
         upnp: bool,
+        punch: bool,
         phone: Phone,
         relay: RelayServer,
         onion: [u8; 32],
@@ -117,7 +122,7 @@ impl Node {
         if via_server {
             let (addr, task) = directory::host(&directory, &secret, phone.local_addr(), last_error.clone()).await?;
             let mine = RelayInfo { addr, onion, link };
-            return Ok(Self { secret, directory, phone, relay, mine, last_error, republish: task, note: None });
+            return Ok(Self { secret, directory, phone, relay, mine, last_error, republish: task, note: None, punch: None });
         }
         // Diretório na internet e nenhum endereço público informado: tenta abrir a porta no roteador.
         let (mut public_addr, mut mapping, mut note) = (public_addr, None, None);
@@ -131,6 +136,20 @@ impl Node {
                 Err(e) => note = Some(format!("não deu para abrir a porta automaticamente: {e}. Libere a porta {port} no roteador/firewall ou informe o endereço público")),
             }
         }
+        let punch = if punch {
+            match Punch::start(&directory, &secret, phone.datagram_port()).await {
+                Ok(p) => Some(p),
+                Err(e) => {
+                    note = Some(match note {
+                        Some(n) => format!("{n}; sem furo de NAT: {e}"),
+                        None => format!("sem furo de NAT: {e}"),
+                    });
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let addr = directory::publish(&directory, &secret, port, onion, link, public_addr.as_deref()).await?;
         let mine = RelayInfo { addr, onion, link };
         let republish = {
@@ -146,7 +165,7 @@ impl Node {
                 }
             })
         };
-        Ok(Self { secret, directory, phone, relay, mine, last_error, republish, note })
+        Ok(Self { secret, directory, phone, relay, mine, last_error, republish, note, punch })
     }
 
     /// Aceita convites de `keys` além dos contatos (membros de uma sala).
@@ -194,6 +213,18 @@ impl Node {
 
     /// Liga para `peer`: acha o relay dele no diretório, sorteia primeiros saltos e chama.
     pub async fn dial<C: Codec + Send + 'static>(&self, peer: [u8; 32], codec: C, wait: Duration) -> Result<ActiveCall, DialError> {
+        // Caminho direto por furo de NAT; se não der, cai no circuito.
+        let codec = if let Some(p) = &self.punch {
+            match p.dial(&peer, Duration::from_secs(6)).await {
+                Ok(c) => match call_over(c.tx, c.rx, &self.secret, &PublicKey::from(peer), codec, wait).await {
+                    Ok(a) => return Ok(a),
+                    Err(e) => return Err(e.into()),
+                },
+                Err(_) => codec,
+            }
+        } else {
+            codec
+        };
         let exit = directory::lookup(&self.directory, &peer).await?.ok_or(DialError::NotFound)?;
         let me = self.public_key();
         let mut relays: Vec<Candidate> = directory::sample(&self.directory, 3, &[me, peer]).await?.iter().map(RelayInfo::candidate).collect();
