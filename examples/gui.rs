@@ -61,6 +61,9 @@ impl Sound {
     fn mic_frame(&self) -> Option<Vec<i16>> {
         match *self {}
     }
+    fn played(&self) -> usize {
+        match *self {}
+    }
     fn play(&self, _: &[i16]) {
         match *self {}
     }
@@ -74,7 +77,7 @@ fn open_sound(want: bool, out: &Sink) -> Option<Sound> {
     #[cfg(feature = "audio")]
     match Sound::open() {
         Ok(s) => {
-            out.line("microfone e alto-falante abertos (use fones: não há cancelamento de eco)");
+            out.line(format!("microfone e alto-falante abertos (use fones: não há cancelamento de eco): {}", s.info()));
             return Some(s);
         }
         Err(e) => out.line(format!("{e}; usando tom de teste")),
@@ -262,8 +265,9 @@ async fn talk(mut c: ActiveCall, hz: f64, stop: Arc<AtomicBool>, out: Sink, soun
                 let s = c.stats();
                 let rms = if frames > 0 { (energy / frames as f64).sqrt() } else { 0.0 };
                 out.line(format!(
-                    "recebidos +{:<3} (total {})  escondidos +{}  atraso {} ms  volume {:.0}",
-                    s.received - prev.received, s.received, s.concealed - prev.concealed, s.delay_ms, rms
+                    "recebidos +{:<3} (total {})  escondidos +{}  atraso {} ms  volume {:.0}{}",
+                    s.received - prev.received, s.received, s.concealed - prev.concealed, s.delay_ms, rms,
+                    sound.as_ref().map(|s| format!("  tocadas {}", s.played())).unwrap_or_default()
                 ));
                 prev = s;
                 (frames, energy) = (0, 0.0);

@@ -11,7 +11,7 @@ use std::{
     collections::VecDeque,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread::JoinHandle,
     time::Duration,
@@ -102,6 +102,8 @@ pub struct Audio {
     playback: Queue,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
+    info: String,
+    played: Arc<AtomicUsize>,
 }
 
 impl Audio {
@@ -110,11 +112,12 @@ impl Audio {
         let capture = Queue::default();
         let playback = Queue::default();
         let stop = Arc::new(AtomicBool::new(false));
-        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
-        let (c, p, s) = (capture.clone(), playback.clone(), stop.clone());
-        let thread = std::thread::spawn(move || match open_streams(c, p) {
-            Ok(streams) => {
-                let _ = ready_tx.send(Ok(()));
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<String, AudioError>>();
+        let played = Arc::new(AtomicUsize::new(0));
+        let (c, p, s, n) = (capture.clone(), playback.clone(), stop.clone(), played.clone());
+        let thread = std::thread::spawn(move || match open_streams(c, p, n) {
+            Ok((streams, info)) => {
+                let _ = ready_tx.send(Ok(info));
                 while !s.load(Ordering::Relaxed) {
                     std::thread::sleep(Duration::from_millis(50));
                 }
@@ -125,7 +128,7 @@ impl Audio {
             }
         });
         match ready_rx.recv() {
-            Ok(Ok(())) => Ok(Self { capture, playback, stop, thread: Some(thread) }),
+            Ok(Ok(info)) => Ok(Self { capture, playback, stop, thread: Some(thread), info, played }),
             Ok(Err(e)) => {
                 let _ = thread.join();
                 Err(e)
@@ -141,6 +144,16 @@ impl Audio {
             return None;
         }
         Some(q.drain(..FRAME).collect())
+    }
+
+    /// Dispositivos e formatos em uso, para diagnóstico.
+    pub fn info(&self) -> &str {
+        &self.info
+    }
+
+    /// Amostras de voz (8 kHz) já entregues ao alto-falante.
+    pub fn played(&self) -> usize {
+        self.played.load(Ordering::Relaxed)
     }
 
     /// Enfileira PCM recebido para o alto-falante.
@@ -166,12 +179,17 @@ fn push_capped(q: &mut VecDeque<i16>, it: impl Iterator<Item = i16>) {
     }
 }
 
-fn open_streams(capture: Queue, playback: Queue) -> Result<(Stream, Stream), AudioError> {
+fn open_streams(capture: Queue, playback: Queue, played: Arc<AtomicUsize>) -> Result<((Stream, Stream), String), AudioError> {
     let host = cpal::default_host();
     let input = host.default_input_device().ok_or_else(|| AudioError("sem microfone padrão".into()))?;
     let output = host.default_output_device().ok_or_else(|| AudioError("sem alto-falante padrão".into()))?;
     let (inp, outp) = (input.default_input_config().map_err(err)?, output.default_output_config().map_err(err)?);
 
+    let info = format!(
+        "entrada \"{}\" {:?} {} Hz {} canais; saída \"{}\" {:?} {} Hz {} canais",
+        input.description().map(|d| d.to_string()).unwrap_or_default(), inp.sample_format(), inp.sample_rate(), inp.channels(),
+        output.description().map(|d| d.to_string()).unwrap_or_default(), outp.sample_format(), outp.sample_rate(), outp.channels(),
+    );
     let in_stream = match inp.sample_format() {
         SampleFormat::F32 => build_input::<f32>(&input, inp.into(), capture)?,
         SampleFormat::I16 => build_input::<i16>(&input, inp.into(), capture)?,
@@ -180,15 +198,15 @@ fn open_streams(capture: Queue, playback: Queue) -> Result<(Stream, Stream), Aud
         f => return Err(AudioError(format!("formato de entrada não suportado: {f}"))),
     };
     let out_stream = match outp.sample_format() {
-        SampleFormat::F32 => build_output::<f32>(&output, outp.into(), playback)?,
-        SampleFormat::I16 => build_output::<i16>(&output, outp.into(), playback)?,
-        SampleFormat::U16 => build_output::<u16>(&output, outp.into(), playback)?,
-        SampleFormat::I32 => build_output::<i32>(&output, outp.into(), playback)?,
+        SampleFormat::F32 => build_output::<f32>(&output, outp.into(), playback, played)?,
+        SampleFormat::I16 => build_output::<i16>(&output, outp.into(), playback, played)?,
+        SampleFormat::U16 => build_output::<u16>(&output, outp.into(), playback, played)?,
+        SampleFormat::I32 => build_output::<i32>(&output, outp.into(), playback, played)?,
         f => return Err(AudioError(format!("formato de saída não suportado: {f}"))),
     };
     in_stream.play().map_err(err)?;
     out_stream.play().map_err(err)?;
-    Ok((in_stream, out_stream))
+    Ok(((in_stream, out_stream), info))
 }
 
 fn build_input<T>(dev: &cpal::Device, cfg: cpal::StreamConfig, q: Queue) -> Result<Stream, AudioError>
@@ -214,7 +232,7 @@ where
     .map_err(err)
 }
 
-fn build_output<T>(dev: &cpal::Device, cfg: cpal::StreamConfig, q: Queue) -> Result<Stream, AudioError>
+fn build_output<T>(dev: &cpal::Device, cfg: cpal::StreamConfig, q: Queue, played: Arc<AtomicUsize>) -> Result<Stream, AudioError>
 where
     T: SizedSample + FromSample<f32>,
 {
@@ -225,7 +243,11 @@ where
         move |data: &mut [T], _| {
             let mut q = q.lock().unwrap();
             for frame in data.chunks_mut(ch) {
+                let before = q.len();
                 let v = T::from_sample(up.pull(&mut q).unwrap_or(0.0));
+                if q.len() < before {
+                    played.fetch_add(1, Ordering::Relaxed);
+                }
                 frame.fill(v);
             }
         },
