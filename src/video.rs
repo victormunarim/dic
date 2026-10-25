@@ -168,14 +168,23 @@ impl H264Decoder {
 /// Um passo da transmissão: captura, codifica e entrega ao circuito. Chame a cada `1/FPS` s.
 /// Devolve `true` se um quadro seguiu. Atende o pedido de quadro-chave de quem assiste.
 pub fn pump(source: &mut dyn ScreenSource, encoder: &mut H264Encoder, share: &ScreenShare) -> Result<bool, VideoError> {
-    let wanted = share.keyframe_wanted();
-    let Some(raw) = source.grab() else { return Ok(false) };
-    let Some(frame) = encoder.encode(&raw, wanted)? else {
-        return Ok(false);
-    };
-    let sent = share.push(&frame.data, frame.keyframe).map_err(|_| VideoError::Push)?;
-    if !sent {
-        encoder.need_key = true;
+    Ok(pump_all(source, encoder, &[share], false)? > 0)
+}
+
+/// Como [`pump`], para vários espectadores (sala): o mesmo quadro codificado vai a todos os circuitos.
+/// `force_key` pede quadro-chave (por exemplo, entrou um espectador). Devolve para quantos o quadro seguiu.
+pub fn pump_all(source: &mut dyn ScreenSource, encoder: &mut H264Encoder, shares: &[&ScreenShare], force_key: bool) -> Result<usize, VideoError> {
+    // Todos precisam ser consultados: `any` pararia no primeiro e deixaria pedidos pendentes.
+    let wanted = shares.iter().fold(force_key, |w, s| s.keyframe_wanted() | w);
+    let Some(raw) = source.grab() else { return Ok(0) };
+    let Some(frame) = encoder.encode(&raw, wanted)? else { return Ok(0) };
+    let mut sent = 0;
+    for share in shares {
+        match share.push(&frame.data, frame.keyframe) {
+            Ok(true) => sent += 1,
+            Ok(false) => encoder.need_key = true,
+            Err(_) => return Err(VideoError::Push),
+        }
     }
     Ok(sent)
 }

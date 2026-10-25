@@ -16,6 +16,8 @@ pub(crate) struct RoomRun {
     /// O que o último resumo mostrou (membros, conectados, anfitrião), para só repetir quando mudar.
     pub(crate) shown: (usize, usize, [u8; 32]),
     pub(crate) n: usize,
+    /// Um decodificador por membro que transmite a tela.
+    pub(crate) decoders: std::collections::HashMap<[u8; 32], Option<clam::video::H264Decoder>>,
 }
 
 /// Segue as trocas de segredo que o dono `owner` deixou no diretório, até não haver mais (no máximo 8).
@@ -39,6 +41,7 @@ pub(crate) fn member_name(contacts: &[(String, [u8; 32])], key: &[u8; 32]) -> St
 
 pub(crate) async fn leave_room(node: &Node, r: RoomRun, shared: &Shared, out: &Sink) {
     r.mesh.hangup();
+    shared.screen.reset();
     let _ = room::leave(node, &r.key).await;
     out.line(format!("saiu da sala {}", r.name));
     shared.room.lock().unwrap().clear();

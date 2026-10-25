@@ -144,7 +144,7 @@ pub(crate) async fn talk(mut c: ActiveCall, hz: f64, stop: Arc<AtomicBool>, out:
             },
             ev = screen_rx.recv(), if screen_open => match ev {
                 Some(ev) => {
-                    if !on_screen_event(&shared.screen, &mut decoder, ev) {
+                    if !on_screen_event(&shared.screen, peer.key, &mut decoder, ev) {
                         out.line("tela: quadro inválido; esperando o próximo quadro-chave");
                     }
                 }

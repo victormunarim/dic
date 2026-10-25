@@ -28,7 +28,7 @@ pub(crate) struct App {
     #[cfg_attr(not(feature = "audio"), allow(dead_code))]
     pub(crate) devs: (Vec<String>, Vec<String>),
     /// Textura da tela de quem transmite para você e o número da imagem que ela mostra.
-    pub(crate) screen_tex: Option<(u64, egui::TextureHandle)>,
+    pub(crate) screen_tex: std::collections::HashMap<[u8; 32], (u64, egui::TextureHandle)>,
 }
 
 impl App {
@@ -347,7 +347,7 @@ impl App {
 }
 
 impl App {
-    /// Compartilhar a própria tela e ver a do outro lado, dentro do cartão "Em chamada".
+    /// Compartilhar a própria tela e ver a dos outros, na chamada ou na sala.
     fn screen_ui(&mut self, ui: &mut egui::Ui) {
         let st = &self.shared.screen;
         let (wanted, sharing) = (st.want_share.load(Ordering::Relaxed), st.sharing.load(Ordering::Relaxed));
@@ -369,16 +369,26 @@ impl App {
                 ui.colored_label(egui::Color32::LIGHT_RED, note);
             }
         }
-        let seq = st.seq.load(Ordering::Relaxed);
-        if self.screen_tex.as_ref().is_none_or(|(n, _)| *n != seq) {
-            self.screen_tex = st.image.lock().unwrap().as_ref().map(|img| {
-                let color = egui::ColorImage::from_rgba_unmultiplied([img.width, img.height], &img.rgba);
-                (seq, ui.ctx().load_texture("tela", color, egui::TextureOptions::LINEAR))
-            });
+        let names = self.form.names();
+        let mut shown: Vec<([u8; 32], u64, egui::ColorImage)> = Vec::new();
+        {
+            let images = st.images.lock().unwrap();
+            self.screen_tex.retain(|k, _| images.contains_key(k));
+            for (who, (seq, img)) in images.iter() {
+                if self.screen_tex.get(who).is_none_or(|(n, _)| n != seq) {
+                    shown.push((*who, *seq, egui::ColorImage::from_rgba_unmultiplied([img.width, img.height], &img.rgba)));
+                }
+            }
         }
-        if let Some((_, tex)) = &self.screen_tex {
+        for (who, seq, color) in shown {
+            let tex = ui.ctx().load_texture(format!("tela-{}", who[0]), color, egui::TextureOptions::LINEAR);
+            self.screen_tex.insert(who, (seq, tex));
+        }
+        let mut order: Vec<_> = self.screen_tex.iter().collect();
+        order.sort_by_key(|(k, _)| **k);
+        for (who, (_, tex)) in order {
             ui.separator();
-            ui.label("Tela do outro lado:");
+            ui.label(format!("Tela de {}:", crate::engine::member_name(&names, who)));
             ui.add(egui::Image::new(tex).max_width(ui.available_width()).shrink_to_fit());
         }
     }
@@ -506,7 +516,12 @@ impl eframe::App for App {
                     }
                 });
 
-                card(ui, "Salas", |ui| self.rooms_ui(ui, offline, in_room, in_call));
+                card(ui, "Salas", |ui| {
+                    self.rooms_ui(ui, offline, in_room, in_call);
+                    if in_room {
+                        self.screen_ui(ui);
+                    }
+                });
 
                 egui::CollapsingHeader::new("Configurações avançadas").show(ui, |ui| {
                     ui.add_enabled_ui(offline, |ui| {

@@ -30,13 +30,19 @@ use crate::{
     directory,
     media::codec::G722,
     node::{Dialer, Node},
-    phone::{ActiveCall, IncomingCall},
+    media::keys::CallKeys,
+    phone::{ActiveCall, IncomingCall, ScreenEvent},
 };
 
 /// Quadros de um mesmo membro guardados à espera da mistura (200 ms): além disso o atraso só cresce.
 const MAX_QUEUED_FRAMES: usize = 10;
 
+/// Eventos de tela à espera de quem os consome; se passar, os mais antigos se perdem (o decodificador
+/// espera o próximo quadro-chave).
+const MAX_SCREEN_EVENTS: usize = 512;
+
 type Sender = mpsc::Sender<Vec<i16>>;
+type ScreenQueue = Arc<Mutex<VecDeque<([u8; 32], ScreenEvent)>>>;
 
 /// Segredo novo para uma sala.
 pub fn new_secret() -> [u8; 32] {
@@ -194,6 +200,10 @@ pub struct Mesh {
     volumes: Arc<Mutex<HashMap<[u8; 32], f32>>>,
     /// Quando cada membro falou por último (energia acima de [`SPEAKING_RMS`]).
     spoke: Arc<Mutex<HashMap<[u8; 32], Instant>>>,
+    /// Chaves do circuito de tela de cada chamada viva (para transmitir a tela a esse membro).
+    screen_keys: Arc<Mutex<HashMap<[u8; 32], CallKeys>>>,
+    /// Tela que os membros transmitem para você, na ordem em que chegou.
+    screen_events: ScreenQueue,
 }
 
 /// Estado da discagem a um membro: em andamento, ou esperando para tentar de novo depois de falhar.
@@ -214,9 +224,23 @@ impl Mesh {
         self.peers.lock().unwrap().insert(key, tx);
         let queues = self.queues.clone();
         let spoke = self.spoke.clone();
+        self.screen_keys.lock().unwrap().insert(key, call.share_keys().clone());
+        let (screen_keys, events) = (self.screen_keys.clone(), self.screen_events.clone());
+        let mut screen_rx = call.take_screen();
         tokio::spawn(async move {
+            let mut screen_open = true;
             loop {
                 tokio::select! {
+                    ev = screen_rx.recv(), if screen_open => match ev {
+                        Some(ev) => {
+                            let mut q = events.lock().unwrap();
+                            if q.len() >= MAX_SCREEN_EVENTS {
+                                q.pop_front();
+                            }
+                            q.push_back((key, ev));
+                        }
+                        None => screen_open = false,
+                    },
                     out = rx.recv() => match out {
                         Some(pcm) => if call.send(pcm).await.is_err() { break },
                         None => break,
@@ -239,6 +263,7 @@ impl Mesh {
                 }
             }
             queues.lock().unwrap().remove(&key);
+            screen_keys.lock().unwrap().remove(&key);
             call.hangup();
         });
     }
@@ -292,6 +317,17 @@ impl Mesh {
         p.len()
     }
 
+    /// Chaves de tela dos membros com chamada viva: com elas cada um recebe a sua tela por um circuito próprio.
+    pub fn screen_keys(&self) -> Vec<([u8; 32], CallKeys)> {
+        let alive: Vec<[u8; 32]> = self.peers.lock().unwrap().iter().filter(|(_, t)| !t.is_closed()).map(|(k, _)| *k).collect();
+        self.screen_keys.lock().unwrap().iter().filter(|(k, _)| alive.contains(k)).map(|(k, v)| (*k, v.clone())).collect()
+    }
+
+    /// Eventos de tela que chegaram dos membros desde a última chamada (quem enviou, o evento).
+    pub fn take_screen_events(&self) -> Vec<([u8; 32], ScreenEvent)> {
+        self.screen_events.lock().unwrap().drain(..).collect()
+    }
+
     /// Manda um quadro de voz a todos os membros conectados (quem está lento perde o quadro).
     pub fn send(&self, pcm: &[i16]) {
         for t in self.peers.lock().unwrap().values() {
@@ -339,12 +375,15 @@ impl Mesh {
     pub fn retain(&self, keep: &[[u8; 32]]) {
         self.peers.lock().unwrap().retain(|k, _| keep.contains(k));
         self.queues.lock().unwrap().retain(|k, _| keep.contains(k));
+        self.screen_keys.lock().unwrap().retain(|k, _| keep.contains(k));
     }
 
     /// Desliga todas as chamadas.
     pub fn hangup(&self) {
         self.spoke.lock().unwrap().clear();
         self.peers.lock().unwrap().clear();
+        self.screen_keys.lock().unwrap().clear();
+        self.screen_events.lock().unwrap().clear();
     }
 }
 
