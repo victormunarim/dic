@@ -236,6 +236,7 @@ async fn talk(mut c: ActiveCall, hz: f64, stop: Arc<AtomicBool>, out: Sink, soun
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut report = interval(Duration::from_secs(1));
     let (mut n, mut frames, mut energy) = (0usize, 0u64, 0f64);
+    let (mut sent_n, mut sent_energy) = (0u64, 0f64);
     let mut prev = c.stats();
     loop {
         tokio::select! {
@@ -248,6 +249,8 @@ async fn talk(mut c: ActiveCall, hz: f64, stop: Arc<AtomicBool>, out: Sink, soun
                 };
                 let mut closed = false;
                 for f in sent {
+                    sent_n += 1;
+                    sent_energy += f.iter().map(|x| (*x as f64).powi(2)).sum::<f64>() / f.len() as f64;
                     closed |= c.send(f).await.is_err();
                 }
                 if closed { break; }
@@ -265,12 +268,12 @@ async fn talk(mut c: ActiveCall, hz: f64, stop: Arc<AtomicBool>, out: Sink, soun
                 let s = c.stats();
                 let rms = if frames > 0 { (energy / frames as f64).sqrt() } else { 0.0 };
                 out.line(format!(
-                    "recebidos +{:<3} (total {})  escondidos +{}  atraso {} ms  volume {:.0}{}",
-                    s.received - prev.received, s.received, s.concealed - prev.concealed, s.delay_ms, rms,
+                    "recebidos +{:<3} (total {})  escondidos +{}  atraso {} ms  volume {:.0}  mic {:.0}{}",
+                    s.received - prev.received, s.received, s.concealed - prev.concealed, s.delay_ms, rms, if sent_n > 0 { (sent_energy / sent_n as f64).sqrt() } else { 0.0 },
                     sound.as_ref().map(|s| format!("  tocadas {}", s.played())).unwrap_or_default()
                 ));
                 prev = s;
-                (frames, energy) = (0, 0.0);
+                (frames, energy, sent_n, sent_energy) = (0, 0.0, 0, 0.0);
             }
         }
     }
