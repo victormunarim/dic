@@ -493,8 +493,14 @@ impl eframe::App for App {
                         ui.checkbox(&mut self.form.intros, "Aceitar quem me adiciona como contato")
                             .on_hover_text("Quando alguém adiciona o seu código, ele manda uma apresentação cifrada e passa a aparecer na sua lista, para os dois se ligarem. Desligado, só entra na lista quem você adicionar. Só aceita de quem já tem o seu endereço; no máximo 20 por minuto.");
                         ui.separator();
-                        ui.checkbox(&mut self.form.anchor, "Servir de âncora para os registros de endereço dos outros")
+                        // Servir de âncora vem ligado: a caixa é para não servir.
+                        let mut no_anchor = !self.form.anchor;
+                        let off = ui
+                            .checkbox(&mut no_anchor, "Não servir de âncora para os registros de endereço dos outros")
                             .on_hover_text("Guarda, em memória, o endereço cifrado de quem usa este computador como âncora, para os contatos dele o acharem. Não lê o conteúdo nem forja item. Precisa de um endereço que os outros alcancem; quem a usa vê o IP do relay dela.");
+                        if off.changed() {
+                            self.form.anchor = !no_anchor;
+                        }
                         ui.label("Âncoras que você usa (uma por linha: ip:porta#chave-do-circuito#chave-do-link):");
                         ui.add(egui::TextEdit::multiline(&mut self.form.anchors).desired_rows(2).desired_width(f32::INFINITY));
                     });
