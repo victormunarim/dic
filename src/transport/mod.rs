@@ -118,8 +118,10 @@ pub const DEFAULT_CIRCUIT_COVER: Duration = Duration::from_millis(20);
 
 const CHANNEL: usize = 1024;
 const WRITE_QUEUE: usize = 256;
-/// Células esperando acima das quais o escritor com cover manda duas por intervalo.
+/// Células esperando acima das quais o escritor com cover manda mais algumas por intervalo.
 const BACKLOG: usize = 4;
+/// Células a mais por intervalo quando há fila acumulada.
+const MAX_EXTRA: usize = 3;
 
 // ---------------------------------------------------------------------------
 // Leitura/escrita de links
@@ -247,13 +249,15 @@ async fn write_loop(mut wr: LinkWriter, mut rx: mpsc::Receiver<Cell>, mut cover:
         if wr.write_cell(&cell).await.is_err() {
             return;
         }
-        // Há fila acumulada (um circuito mais rápido que o cover do link, como o da tela a 5 ms):
-        // escoa mais uma célula, senão a fila enche e o excesso é descartado.
-        if rx.len() > BACKLOG
-            && let Ok(extra) = rx.try_recv()
-            && wr.write_cell(&extra).await.is_err()
-        {
-            return;
+        // Há fila acumulada (um circuito mais rápido que o cover do link, como o da tela a 3 ms):
+        // escoa mais algumas, senão a fila enche e o excesso é descartado.
+        if rx.len() > BACKLOG {
+            for _ in 0..MAX_EXTRA {
+                let Ok(extra) = rx.try_recv() else { break };
+                if wr.write_cell(&extra).await.is_err() {
+                    return;
+                }
+            }
         }
     }
 }

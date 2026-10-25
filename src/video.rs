@@ -22,7 +22,7 @@ pub const FPS: f32 = 8.0;
 
 /// Largura máxima enviada: telas maiores são reduzidas por média de blocos, senão o quadro-chave
 /// passa de [`MAX_FRAME`] e nada chega a quem assiste.
-pub const MAX_WIDTH: usize = 1280;
+pub const MAX_WIDTH: usize = 1920;
 const MAX_SHRINK: usize = 8;
 
 #[derive(Debug, Error)]
@@ -286,17 +286,17 @@ mod tests {
         assert!(f.keyframe && f.data.len() <= MAX_FRAME);
         let mut dec = H264Decoder::new().unwrap();
         let img = dec.decode(&f.data).unwrap().expect("imagem");
-        assert_eq!((img.width, img.height), (1280, 720));
+        assert_eq!((img.width, img.height), (1280, 720)); // 2560 / 2: redução inteira por blocos
     }
 
     #[test]
     fn a_keyframe_that_does_not_fit_makes_the_encoder_send_fewer_pixels() {
         let detailed = |t: usize| {
-            let rgba = (0..1280 * 720).flat_map(|i| {
-                let n = (((i % 1280 / 3 * 7 + i / 1280 / 3 * 13 + t) * 2654435761usize) >> 24) as u8;
-                [n, n / 2, 90, 255]
+            let rgba = (0..1920 * 1080).flat_map(|i| {
+                let n = (((i + t) * 2654435761usize) >> 24) as u8;
+                [n, n.wrapping_mul(3), n ^ 90, 255]
             });
-            RawFrame::new(1280, 720, rgba.collect()).unwrap()
+            RawFrame::new(1920, 1080, rgba.collect()).unwrap()
         };
         let mut enc = H264Encoder::new(H264Encoder::default_bitrate()).unwrap();
         let key = (0..10).find_map(|t| enc.encode(&detailed(t), false).unwrap()).expect("um quadro-chave acaba cabendo");

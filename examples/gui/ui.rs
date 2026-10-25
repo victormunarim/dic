@@ -28,6 +28,8 @@ pub(crate) struct App {
     #[cfg_attr(not(feature = "audio"), allow(dead_code))]
     pub(crate) devs: (Vec<String>, Vec<String>),
     /// Textura da tela de quem transmite para você e o número da imagem que ela mostra.
+    /// Tela de quem está aberta numa janela própria, em tamanho grande.
+    pub(crate) zoom: Option<[u8; 32]>,
     pub(crate) screen_tex: std::collections::HashMap<[u8; 32], (u64, egui::TextureHandle)>,
 }
 
@@ -392,8 +394,40 @@ impl App {
         order.sort_by_key(|(k, _)| **k);
         for (who, (_, tex)) in order {
             ui.separator();
-            ui.label(format!("Tela de {}:", crate::engine::member_name(&names, who)));
+            ui.horizontal(|ui| {
+                ui.label(format!("Tela de {}:", crate::engine::member_name(&names, who)));
+                if ui.button("🔍 Ampliar").on_hover_text("Abre a tela numa janela maior").clicked() {
+                    self.zoom = Some(*who);
+                }
+            });
             ui.add(egui::Image::new(tex).max_width(ui.available_width()).shrink_to_fit());
+        }
+    }
+}
+
+impl App {
+    /// Janela própria com a tela de `zoom`, ajustada ao tamanho da janela; fecha sozinha se a tela some.
+    fn zoom_window(&mut self, ctx: &egui::Context) {
+        let Some(who) = self.zoom else { return };
+        let Some((_, tex)) = self.screen_tex.get(&who) else {
+            self.zoom = None;
+            return;
+        };
+        let title = format!("Tela de {}", crate::engine::member_name(&self.form.names(), &who));
+        let size = tex.size_vec2();
+        let mut close = false;
+        ctx.show_viewport_immediate(
+            egui::ViewportId::from_hash_of("tela-ampliada"),
+            egui::ViewportBuilder::default().with_title(title).with_inner_size([size.x.min(1600.0), size.y.min(900.0)]),
+            |ctx, _| {
+                egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx, |ui| {
+                    ui.add(egui::Image::new(tex).fit_to_exact_size(ui.available_size()).maintain_aspect_ratio(true));
+                });
+                close = ctx.input(|i| i.viewport().close_requested());
+            },
+        );
+        if close {
+            self.zoom = None;
         }
     }
 }
@@ -407,6 +441,7 @@ impl eframe::App for App {
             self.shared.status.lock().unwrap().clear();
             self.shared.room.lock().unwrap().clear();
         }
+        self.zoom_window(ctx);
         let offline = self.running.is_none();
         let in_call = self.shared.in_call.load(Ordering::Relaxed);
         let in_room = self.shared.in_room.load(Ordering::Relaxed);

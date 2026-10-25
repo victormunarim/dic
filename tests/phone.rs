@@ -475,6 +475,6 @@ async fn full_size_screen_gets_through_at_the_circuit_slot_rate() {
     assert_eq!(lost, 0, "quadros perdidos no caminho");
     assert!(count >= 20, "só {count} imagens em 8 s");
     let img = shown.expect("a tela chegou");
-    assert!(img.width <= 1280 && img.width >= 320);
+    assert!(img.width <= 1920 && img.width >= 320);
     share.stop().await;
 }
