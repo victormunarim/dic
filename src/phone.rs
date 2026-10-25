@@ -78,7 +78,7 @@ impl std::fmt::Display for CallError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NoCircuit => write!(f, "circuito não ficou pronto"),
-            Self::NoAnswer => write!(f, "sem resposta ao convite"),
+            Self::NoAnswer => write!(f, "sem resposta ao convite (confira se o relógio das duas máquinas está certo, com menos de 60 s de diferença, e se a sua chave está nos Contatos do outro lado)"),
             Self::Rejected => write!(f, "chamada recusada"),
             Self::Closed => write!(f, "circuito fechado"),
             Self::Media(e) => write!(f, "{e}"),
