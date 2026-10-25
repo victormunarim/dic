@@ -107,6 +107,7 @@ pub struct Audio {
     info: String,
     frame: usize,
     rate: u32,
+    gain: Mutex<f32>,
     played: Arc<AtomicUsize>,
 }
 
@@ -137,7 +138,7 @@ impl Audio {
             }
         });
         match ready_rx.recv() {
-            Ok(Ok(info)) => Ok(Self { capture, playback, stop, thread: Some(thread), info, played, frame: (rate / 50) as usize, rate }),
+            Ok(Ok(info)) => Ok(Self { capture, playback, stop, thread: Some(thread), info, played, frame: (rate / 50) as usize, rate, gain: Mutex::new(1.0) }),
             Ok(Err(e)) => {
                 let _ = thread.join();
                 Err(e)
@@ -152,7 +153,10 @@ impl Audio {
         if q.len() < self.frame {
             return None;
         }
-        Some(q.drain(..self.frame).collect())
+        let mut pcm: Vec<i16> = q.drain(..self.frame).collect();
+        drop(q);
+        agc(&mut self.gain.lock().unwrap(), &mut pcm);
+        Some(pcm)
     }
 
     /// Dispositivos e formatos em uso, para diagnóstico.
@@ -177,6 +181,25 @@ impl Drop for Audio {
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
+    }
+}
+
+/// Alvo de nível da voz (RMS) e ganho máximo do controle automático de ganho do microfone.
+const AGC_TARGET: f32 = 3000.0;
+const AGC_MAX_GAIN: f32 = 30.0;
+/// Abaixo disto o quadro é tratado como silêncio/ruído: o ganho não muda, para não amplificar chiado.
+const AGC_GATE: f32 = 40.0;
+
+/// Ajusta o ganho para levar a voz perto de [`AGC_TARGET`] (sobe devagar, desce rápido) e o aplica ao quadro.
+fn agc(gain: &mut f32, pcm: &mut [i16]) {
+    let rms = (pcm.iter().map(|&x| (x as f32).powi(2)).sum::<f32>() / pcm.len().max(1) as f32).sqrt();
+    if rms > AGC_GATE {
+        let want = (AGC_TARGET / rms).clamp(1.0, AGC_MAX_GAIN);
+        let k = if want < *gain { 0.5 } else { 0.05 };
+        *gain += (want - *gain) * k;
+    }
+    for x in pcm {
+        *x = (*x as f32 * *gain).clamp(-32768.0, 32767.0) as i16;
     }
 }
 
@@ -305,6 +328,22 @@ mod tests {
         let rms = |v: &[i16]| (v.iter().map(|&x| (x as f64).powi(2)).sum::<f64>() / v.len() as f64).sqrt();
         let ratio = rms(&back[100..back.len() - 100]) / rms(&tone);
         assert!((0.85..1.05).contains(&ratio), "{ratio}");
+    }
+
+    #[test]
+    fn agc_lifts_quiet_voice_and_leaves_silence() {
+        let quiet: Vec<i16> = (0..160).map(|i| (150.0 * (i as f32 * 0.3).sin()) as i16).collect();
+        let (mut g, mut f) = (1.0f32, quiet.clone());
+        for _ in 0..200 {
+            f = quiet.clone();
+            agc(&mut g, &mut f);
+        }
+        let rms = (f.iter().map(|&x| (x as f32).powi(2)).sum::<f32>() / 160.0).sqrt();
+        assert!(rms > 2000.0, "{rms}");
+        let mut g = 1.0f32;
+        let mut hiss = vec![10i16; 160];
+        agc(&mut g, &mut hiss);
+        assert_eq!((g, hiss[0]), (1.0, 10));
     }
 
     #[test]
