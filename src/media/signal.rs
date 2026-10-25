@@ -3,7 +3,7 @@
 //!
 //! ```text
 //! chamador                                    chamado
-//!   Invite: tag 1 ‖ e_i ‖ AEAD(s_i ‖ hora)  ─>
+//!   Invite: tag 1 ‖ e_i ‖ AEAD(s_i ‖ hora) ‖ AEAD(dica de relay)  ─>
 //!                                           <─  Accept: tag 2 ‖ e_r      (ou Reject: tag 3)
 //!   [pacotes de voz de 200 B nos dois sentidos, chaves de `CallKeys`]
 //! ```
@@ -19,12 +19,21 @@
 //!   barrada por quem recebe, que lembra as efêmeras já vistas ([`Incoming::nonce`]); sem
 //!   essa memória (telefone reiniciado) o replay só faz o telefone tocar, não dá acesso à
 //!   chamada. A hora de quem liga segue no convite só para telefones de versão anterior, que a conferem.
+//! - O convite pode levar uma **dica de relay** ([`RelayHint`]): o endereço e as chaves do relay de
+//!   quem liga, num segundo bloco cifrado com a mesma chave (nonce diferente). Quem atende guarda a
+//!   dica para ligar de volta sem consultar o diretório. Telefones de versão anterior não olham esses
+//!   bytes; sem dica o bloco é aleatório e [`Incoming::relay_hint`] devolve `None`. Como `s_i`, a dica
+//!   não é autenticada: quem a recebe só a usa depois do endereço guardado e do diretório falharem, e só a
+//!   promove a endereço guardado depois de uma chamada autenticada por ela.
+
+use std::net::{IpAddr, SocketAddr};
 
 use chacha20poly1305::{
     ChaCha20Poly1305, Key, Nonce,
     aead::{Aead, KeyInit},
 };
 use hkdf::Hkdf;
+use rand_core::{OsRng, RngCore};
 use sha2::Sha256;
 use x25519_dalek::{PublicKey, StaticSecret};
 
@@ -38,6 +47,56 @@ const TAG_INVITE: u8 = 1;
 const TAG_ACCEPT: u8 = 2;
 const TAG_REJECT: u8 = 3;
 const SEALED_LEN: usize = 32 + 8 + 16;
+/// Dica de relay em claro: onion ‖ link ‖ família (4 ou 6) ‖ IP (16, completado com zeros) ‖ porta.
+const HINT_LEN: usize = 32 + 32 + 1 + 16 + 2;
+const HINT_SEALED_LEN: usize = HINT_LEN + 16;
+const HINT_AT: usize = 33 + SEALED_LEN;
+
+/// Onde chegar ao relay de quem liga: o que o chamado precisa para ligar de volta sem diretório.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RelayHint {
+    pub addr: SocketAddr,
+    pub onion: [u8; 32],
+    pub link: [u8; 32],
+}
+
+impl RelayHint {
+    fn encode(&self) -> [u8; HINT_LEN] {
+        let mut b = [0u8; HINT_LEN];
+        b[..32].copy_from_slice(&self.onion);
+        b[32..64].copy_from_slice(&self.link);
+        match self.addr.ip() {
+            IpAddr::V4(ip) => {
+                b[64] = 4;
+                b[65..69].copy_from_slice(&ip.octets());
+            }
+            IpAddr::V6(ip) => {
+                b[64] = 6;
+                b[65..81].copy_from_slice(&ip.octets());
+            }
+        }
+        b[81..].copy_from_slice(&self.addr.port().to_be_bytes());
+        b
+    }
+
+    fn decode(b: &[u8]) -> Option<Self> {
+        let b: &[u8; HINT_LEN] = b.try_into().ok()?;
+        let ip = match b[64] {
+            4 => IpAddr::from(<[u8; 4]>::try_from(&b[65..69]).ok()?),
+            6 => IpAddr::from(<[u8; 16]>::try_from(&b[65..81]).ok()?),
+            _ => return None,
+        };
+        let port = u16::from_be_bytes([b[81], b[82]]);
+        Some(Self { addr: SocketAddr::new(ip, port), onion: b[..32].try_into().ok()?, link: b[32..64].try_into().ok()? })
+    }
+}
+
+/// Nonce do bloco da dica (o do bloco da identidade é zero; a chave é a mesma, então não podem coincidir).
+fn hint_nonce() -> Nonce {
+    let mut n = [0u8; 12];
+    n[11] = 1;
+    n.into()
+}
 
 /// Um quadro de sinalização, pronto para ir ao circuito.
 pub type Frame = [u8; PACKET_LEN];
@@ -65,6 +124,11 @@ pub enum Answer {
 impl Caller {
     /// Monta o convite para `peer` (a chave do pareamento). `now_secs`: relógio Unix.
     pub fn invite(my_static: &StaticSecret, peer: &PublicKey, now_secs: u64) -> Result<(Self, Frame), MediaError> {
+        Self::invite_with_hint(my_static, peer, now_secs, None)
+    }
+
+    /// Como [`Caller::invite`], levando junto o relay de quem liga (veja [`RelayHint`]).
+    pub fn invite_with_hint(my_static: &StaticSecret, peer: &PublicKey, now_secs: u64, hint: Option<&RelayHint>) -> Result<(Self, Frame), MediaError> {
         let eph = Ephemeral::generate();
         let dh = eph.diffie_hellman(peer)?;
         let cipher = invite_key(&dh, &eph.public(), peer.as_bytes());
@@ -75,7 +139,16 @@ impl Caller {
         let mut f = [0u8; PACKET_LEN];
         f[0] = TAG_INVITE;
         f[1..33].copy_from_slice(&eph.public());
-        f[33..33 + SEALED_LEN].copy_from_slice(&sealed);
+        f[33..HINT_AT].copy_from_slice(&sealed);
+        // Sem dica, o bloco é aleatório: quem vê o quadro não distingue se há dica.
+        match hint {
+            Some(h) => {
+                let sealed = cipher.encrypt(&hint_nonce(), h.encode().as_slice()).expect("cifrar em memória não falha");
+                f[HINT_AT..HINT_AT + HINT_SEALED_LEN].copy_from_slice(&sealed);
+            }
+            None => OsRng.fill_bytes(&mut f[HINT_AT..HINT_AT + HINT_SEALED_LEN]),
+        }
+        OsRng.fill_bytes(&mut f[HINT_AT + HINT_SEALED_LEN..]);
         Ok((Self { eph, peer: *peer }, f))
     }
 
@@ -98,6 +171,7 @@ impl Caller {
 pub struct Incoming {
     caller: PublicKey,
     eph: [u8; 32],
+    hint: Option<RelayHint>,
 }
 
 impl Incoming {
@@ -114,11 +188,17 @@ impl Incoming {
             return Err(MediaError::BadKey);
         }
         let me = PublicKey::from(my_static);
-        let plain = invite_key(dh.as_bytes(), &eph, me.as_bytes())
-            .decrypt(&Nonce::default(), &frame[33..33 + SEALED_LEN])
-            .map_err(|_| MediaError::Decrypt)?;
+        let cipher = invite_key(dh.as_bytes(), &eph, me.as_bytes());
+        let plain = cipher.decrypt(&Nonce::default(), &frame[33..HINT_AT]).map_err(|_| MediaError::Decrypt)?;
         let caller: [u8; 32] = plain[..32].try_into().expect("32 bytes");
-        Ok(Self { caller: PublicKey::from(caller), eph })
+        // Convite de versão anterior ou sem dica: o bloco não autentica e fica `None`.
+        let hint = cipher.decrypt(&hint_nonce(), &frame[HINT_AT..HINT_AT + HINT_SEALED_LEN]).ok().and_then(|p| RelayHint::decode(&p));
+        Ok(Self { caller: PublicKey::from(caller), eph, hint })
+    }
+
+    /// Relay de quem ligou, se o convite o trouxe. Não é autenticado (veja o módulo): é só uma dica.
+    pub fn relay_hint(&self) -> Option<&RelayHint> {
+        self.hint.as_ref()
     }
 
     /// Efêmera do convite, única por convite: quem recebe a guarda para recusar o mesmo convite de novo.
@@ -185,6 +265,54 @@ mod tests {
         let (a, b) = ids();
         let n = |_| Incoming::parse(&b, &Caller::invite(&a, &PublicKey::from(&b), 0).unwrap().1).unwrap().nonce();
         assert_ne!(n(0), n(1));
+    }
+
+    fn hint() -> RelayHint {
+        RelayHint { addr: "192.168.15.10:4001".parse().unwrap(), onion: [7; 32], link: [9; 32] }
+    }
+
+    #[test]
+    fn the_invite_carries_the_relay_of_the_caller() {
+        let (a, b) = ids();
+        for addr in ["192.168.15.10:4001", "[2001:db8::1]:65535"] {
+            let h = RelayHint { addr: addr.parse().unwrap(), ..hint() };
+            let (caller, inv) = Caller::invite_with_hint(&a, &PublicKey::from(&b), 0, Some(&h)).unwrap();
+            let incoming = Incoming::parse(&b, &inv).unwrap();
+            assert_eq!(incoming.relay_hint(), Some(&h));
+            // A dica não atrapalha o resto do convite.
+            let (acc, _) = incoming.accept(&b).unwrap();
+            assert!(matches!(caller.answer(&a, &acc), Ok(Answer::Accepted(_))));
+        }
+    }
+
+    #[test]
+    fn an_invite_without_hint_or_from_an_old_phone_gives_none() {
+        let (a, b) = ids();
+        let (_, inv) = Caller::invite(&a, &PublicKey::from(&b), 0).unwrap();
+        assert_eq!(Incoming::parse(&b, &inv).unwrap().relay_hint(), None);
+        // Telefone antigo: o que vem depois do bloco da identidade é zero.
+        let mut old = inv;
+        old[HINT_AT..].fill(0);
+        let incoming = Incoming::parse(&b, &old).unwrap();
+        assert_eq!((incoming.caller().as_bytes(), incoming.relay_hint()), (PublicKey::from(&a).as_bytes(), None));
+    }
+
+    #[test]
+    fn a_tampered_hint_is_dropped_but_the_invite_still_works() {
+        let (a, b) = ids();
+        let (_, mut inv) = Caller::invite_with_hint(&a, &PublicKey::from(&b), 0, Some(&hint())).unwrap();
+        inv[HINT_AT + 3] ^= 1;
+        let incoming = Incoming::parse(&b, &inv).unwrap();
+        assert_eq!(incoming.relay_hint(), None);
+    }
+
+    #[test]
+    fn the_hint_stays_hidden_from_the_exit_relay() {
+        let (a, b) = ids();
+        let h = hint();
+        let (_, inv) = Caller::invite_with_hint(&a, &PublicKey::from(&b), 0, Some(&h)).unwrap();
+        assert!(!inv.windows(32).any(|w| w == h.onion || w == h.link));
+        assert!(!inv.windows(4).any(|w| w == [192, 168, 15, 10]));
     }
 
     #[test]

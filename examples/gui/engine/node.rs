@@ -13,12 +13,16 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
     let contacts: Vec<_> = parse_contacts(&form.contacts);
     let names = form.names();
     let mut cfg = NodeConfig::new(secret, form.directory_addr(), contacts.iter().map(|(_, k)| *k).collect());
-    cfg.known = load_known();
-    cfg.relay_keys = Some(load_relay_keys());
+    (cfg.known, cfg.hints) = load_known();
+    let (relay_keys, keys_error) = load_relay_keys();
+    cfg.relay_keys = Some(relay_keys);
+    if let Some(e) = keys_error {
+        out.line(format!("não consegui gravar as chaves do relay em {}: {e}; os contatos perdem o endereço guardado de você a cada vez que o programa reabre", relay_keys_path().display()));
+    }
     if !form.public_addr.trim().is_empty() {
         cfg.public_addr = Some(form.public_addr.trim().to_string());
     }
-    out.line(format!("{} endereço(s) de contatos guardados em {}", cfg.known.len(), known_path().display()));
+    out.line(format!("{} endereço(s) de contatos guardados em {} ({} deles só vieram de convites)", cfg.known.len() + cfg.hints.len(), known_path().display(), cfg.hints.len()));
     out.line("conectando ao diretório...");
     let mut node = Node::start(cfg).await.map_err(|e| format!("não ficou online: {e}"))?;
     *shared.status.lock().unwrap() = format!("online em {}", node.published_addr());
@@ -27,6 +31,7 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
         out.line(n);
     }
     let dialer = node.dialer();
+    let mut saver = KnownSaver::new(&node.known(), &node.hints());
     let (dialed_tx, mut dialed_rx) = mpsc::unbounded_channel::<([u8; 32], u32, Option<Result<ActiveCall, clam::node::DialError>>)>();
     let (redial_tx, mut redial_rx) = mpsc::unbounded_channel::<([u8; 32], u32)>();
     // Discar demora (furo de NAT, endereço guardado, espera de resposta): numa tarefa, para a janela seguir
@@ -80,7 +85,7 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
                 }
             }
             Some((peer, attempt, r)) = dialed_rx.recv() => {
-                save_known(&node.known());
+                saver.sync(&node.known(), &node.hints(), &out);
                 match (dial_step(attempt, r.as_ref().map(|r| r.is_ok())), r) {
                     (DialStep::Talk, Some(Ok(c))) => {
                         out.line(if attempt > 0 { "religada" } else { "atendida" });
@@ -268,10 +273,68 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
         if let Some(n) = node.take_notice() {
             out.line(n);
         }
+        // Os endereços mudam sozinhos (renovação com o diretório, convites): grava quando mudam, não só
+        // depois de uma ligação, para um fechamento brusco não perder o que foi aprendido.
+        if saver.due() {
+            saver.sync(&node.known(), &node.hints(), &out);
+        }
     }
+    saver.sync(&node.known(), &node.hints(), &out);
     if let Some(r) = room.take() {
         leave_room(&node, r, &shared, &out).await;
     }
     shared.hangup.store(true, Ordering::Relaxed);
     Ok(())
+}
+
+/// Mantém `.clam-gui.known` igual aos endereços de contatos que o nó conhece, avisando de erro de gravação
+/// uma vez por erro diferente (não a cada tentativa).
+struct KnownSaver {
+    saved: (Stored, Stored),
+    last_error: Option<String>,
+    next_check: tokio::time::Instant,
+}
+
+impl KnownSaver {
+    const EVERY: Duration = Duration::from_secs(5);
+
+    /// `known` e `hints` são o que já está no arquivo (lido na partida): só grava quando algo for diferente disso.
+    fn new(known: &Stored, hints: &Stored) -> Self {
+        Self { saved: (Self::sorted(known), Self::sorted(hints)), last_error: None, next_check: tokio::time::Instant::now() + Self::EVERY }
+    }
+
+    fn sorted(list: &Stored) -> Stored {
+        let mut v = list.clone();
+        v.sort_by_key(|(k, _)| *k);
+        v
+    }
+
+    fn due(&mut self) -> bool {
+        let now = tokio::time::Instant::now();
+        if now < self.next_check {
+            return false;
+        }
+        self.next_check = now + Self::EVERY;
+        true
+    }
+
+    fn sync(&mut self, known: &Stored, hints: &Stored, out: &Sink) {
+        let now = (Self::sorted(known), Self::sorted(hints));
+        if now == self.saved && self.last_error.is_none() {
+            return;
+        }
+        match save_known(&now.0, &now.1) {
+            Ok(()) => {
+                self.saved = now;
+                self.last_error = None;
+            }
+            Err(e) => {
+                let text = format!("não consegui gravar os endereços dos contatos em {}: {e}", known_path().display());
+                if self.last_error.as_ref() != Some(&text) {
+                    out.line(text.clone());
+                }
+                self.last_error = Some(text);
+            }
+        }
+    }
 }

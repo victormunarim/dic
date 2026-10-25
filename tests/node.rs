@@ -735,3 +735,97 @@ async fn dead_stored_address_and_no_directory_says_both() {
     let err = a.dial(other, Mulaw::new(), Duration::from_secs(3)).await.err().unwrap();
     assert!(matches!(err, DialError::NoStoredAddress(_)), "{err}");
 }
+
+/// Quem atende aprende o relay de quem ligou pelo convite: ligar de volta funciona sem diretório e sem ter
+/// consultado esse contato antes.
+#[tokio::test]
+async fn callee_learns_the_caller_from_the_invite_and_calls_back_without_directory() {
+    let (d, addr) = dir().await;
+    let (sa, sb) = (key(), key());
+    let (pa, pb) = (*PublicKey::from(&sa).as_bytes(), *PublicKey::from(&sb).as_bytes());
+    // `b` só aceita `a` depois de subir: a consulta de contatos da partida não acha `a` no diretório.
+    let mut b = Node::start(cfg(sb, &addr, vec![])).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    b.allow(&[pa]);
+    let mut a = Node::start(cfg(sa, &addr, vec![pb])).await.unwrap();
+    assert!(b.known().is_empty() && b.hints().is_empty());
+    let first = tokio::spawn(async move {
+        let inc = timeout(Duration::from_secs(15), b.next_incoming()).await.unwrap().unwrap();
+        (inc.accept(Mulaw::new()).await.unwrap(), b)
+    });
+    let ca = a.dial(pb, Mulaw::new(), Duration::from_secs(15)).await.unwrap();
+    let (cb, b) = first.await.unwrap();
+    ca.hangup();
+    drop(cb);
+    let hints = b.hints();
+    assert_eq!(hints.len(), 1);
+    assert_eq!((hints[0].0, hints[0].1.addr.clone()), (pa, a.published_addr()));
+    assert_eq!(b.dialer().stored_address(&pa), Some(a.published_addr()));
+
+    // O diretório some; `b` liga de volta só com o que o convite trouxe.
+    drop(d);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let back = tokio::spawn(async move {
+        let inc = timeout(Duration::from_secs(15), a.next_incoming()).await.unwrap().unwrap();
+        (inc.accept(Mulaw::new()).await.unwrap(), a)
+    });
+    let cb = b.dial(pa, Mulaw::new(), Duration::from_secs(15)).await.unwrap();
+    let (_ca, a) = back.await.unwrap();
+    cb.hangup();
+    // A chamada confirmou o endereço: de dica passa a guardado.
+    assert!(b.hints().is_empty());
+    let known = b.known();
+    assert_eq!((known.len(), known[0].0, known[0].1.addr.clone()), (1, pa, a.published_addr()));
+}
+
+/// O endereço guardado vem antes da dica; se estiver morto, a dica atende e vira o endereço guardado.
+#[tokio::test]
+async fn stored_address_goes_before_the_hint_and_a_working_hint_replaces_it() {
+    use clam::directory::RelayInfo;
+    let (d, addr) = dir().await;
+    let (sa, sb) = (key(), key());
+    let (pa, pb) = (*PublicKey::from(&sa).as_bytes(), *PublicKey::from(&sb).as_bytes());
+    let dead = RelayInfo { addr: "127.0.0.1:1".into(), onion: [7; 32], link: [8; 32] };
+    let mut b = Node::start(NodeConfig { known: vec![(pa, dead.clone())], ..cfg(sb, &addr, vec![]) }).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    b.allow(&[pa]);
+    let mut a = Node::start(cfg(sa, &addr, vec![pb])).await.unwrap();
+    let first = tokio::spawn(async move {
+        let inc = timeout(Duration::from_secs(15), b.next_incoming()).await.unwrap().unwrap();
+        (inc.accept(Mulaw::new()).await.unwrap(), b)
+    });
+    let ca = a.dial(pb, Mulaw::new(), Duration::from_secs(15)).await.unwrap();
+    let (_cb, b) = first.await.unwrap();
+    ca.hangup();
+    assert_eq!(b.dialer().stored_address(&pa).as_deref(), Some("127.0.0.1:1"));
+    assert_eq!(b.hints().len(), 1);
+
+    drop(d);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let back = tokio::spawn(async move {
+        let inc = timeout(Duration::from_secs(15), a.next_incoming()).await.unwrap().unwrap();
+        (inc.accept(Mulaw::new()).await.unwrap(), a)
+    });
+    let cb = b.dial(pa, Mulaw::new(), Duration::from_secs(20)).await.unwrap();
+    let (_ca, a) = back.await.unwrap();
+    cb.hangup();
+    let known = b.known();
+    assert_eq!((known.len(), known[0].1.addr.clone()), (1, a.published_addr()));
+    assert!(b.hints().is_empty());
+}
+
+/// Uma dica que ninguém atende não vira endereço guardado: o erro diz que tentou e que o diretório não atende.
+#[tokio::test]
+async fn a_dead_hint_never_becomes_the_stored_address() {
+    use clam::directory::RelayInfo;
+    let (d, addr) = dir().await;
+    drop(d);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let pb = *PublicKey::from(&key()).as_bytes();
+    let dead = RelayInfo { addr: "127.0.0.1:1".into(), onion: [7; 32], link: [8; 32] };
+    let a = Node::start(NodeConfig { hints: vec![(pb, dead)], ..cfg(key(), &addr, vec![]) }).await.unwrap();
+    let err = a.dial(pb, Mulaw::new(), Duration::from_secs(3)).await.err().unwrap();
+    assert!(matches!(err, DialError::StoredAddressDead(_)), "{err}");
+    assert!(a.known().is_empty());
+    assert_eq!(a.hints().len(), 1);
+}

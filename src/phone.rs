@@ -51,7 +51,7 @@ use crate::{
         codec::Codec,
         keys::CallKeys,
         screen::{ScreenFrame, ScreenStats, ScreenStream},
-        signal::{Answer, Caller, Incoming},
+        signal::{Answer, Caller, Incoming, RelayHint},
     },
     transport::{CircuitClient, ClientOptions},
 };
@@ -336,7 +336,7 @@ pub async fn call_linked<C: Codec + Send + 'static>(
     .await
     .map_err(|_| CallError::NoCircuit)??;
 
-    let (caller, invite) = Caller::invite(my_static, peer, unix_secs())?;
+    let (caller, invite) = Caller::invite_with_hint(my_static, peer, unix_secs(), PhoneLink::current_hint(link).as_ref())?;
     client.send(&invite).await.map_err(|_| CallError::NoCircuit)?;
     let keys = timeout(wait, async {
         loop {
@@ -406,6 +406,20 @@ enum Bind {
 pub struct PhoneLink {
     actor: mpsc::Sender<Msg>,
     ids: Arc<AtomicU64>,
+    hint: Arc<Mutex<Option<RelayHint>>>,
+}
+
+impl PhoneLink {
+    /// Relay desta máquina que os convites das chamadas ligadas a este telefone passam a levar, para o
+    /// outro lado poder ligar de volta sem diretório (`None`: não leva). Vale também para o que já foi criado
+    /// por [`Phone::link`].
+    pub fn set_relay_hint(&self, hint: Option<RelayHint>) {
+        *self.hint.lock().unwrap() = hint;
+    }
+
+    fn current_hint(link: Option<&PhoneLink>) -> Option<RelayHint> {
+        link.and_then(|l| l.hint.lock().unwrap().clone())
+    }
 }
 
 /// Saída por uma conexão do telefone (tudo que não é o circuito próprio da chamada, conexão 0).
@@ -545,6 +559,12 @@ impl IncomingCall {
         self.invite.caller()
     }
 
+    /// Relay de quem ligou, se o convite o trouxe (veja [`RelayHint`]): serve para ligar de volta sem
+    /// diretório. Não é autenticado; use só como último recurso.
+    pub fn relay_hint(&self) -> Option<&RelayHint> {
+        self.invite.relay_hint()
+    }
+
     pub async fn accept<C: Codec + Send + 'static>(self, codec: C) -> Result<ActiveCall, CallError> {
         let (frame, keys) = self.invite.accept(&self.secret)?;
         let id = self.ids.fetch_add(1, Ordering::Relaxed);
@@ -629,7 +649,7 @@ pub async fn call_over_linked<C: Codec + Send + 'static>(
     wait: Duration,
     link: Option<&PhoneLink>,
 ) -> Result<ActiveCall, CallError> {
-    let (caller, invite) = Caller::invite(my_static, peer, unix_secs())?;
+    let (caller, invite) = Caller::invite_with_hint(my_static, peer, unix_secs(), PhoneLink::current_hint(link).as_ref())?;
     // O convite pode se perder no caminho: repete até chegar a resposta.
     let keys = timeout(wait, async {
         let mut resend = tokio::time::interval(Duration::from_millis(700));
@@ -683,6 +703,7 @@ pub struct Phone {
     port: DatagramPort,
     ids: Arc<AtomicU64>,
     link_tx: mpsc::Sender<Msg>,
+    hint: Arc<Mutex<Option<RelayHint>>>,
     tasks: Vec<JoinHandle<()>>,
 }
 
@@ -724,7 +745,7 @@ impl Phone {
         });
         let port = DatagramPort { actor: actor_tx.clone(), next: Arc::new(AtomicU64::new(DATAGRAM_CONN_BASE)) };
         let actor = tokio::spawn(run_actor(actor_rx, actor_tx.clone(), inc_tx, my_static, contacts.clone(), ids.clone(), notice.clone()));
-        Ok(Self { addr, incoming: inc_rx, notice, contacts, port, ids, link_tx: actor_tx, tasks: vec![accept, actor] })
+        Ok(Self { addr, incoming: inc_rx, notice, contacts, port, ids, link_tx: actor_tx, hint: Arc::default(), tasks: vec![accept, actor] })
     }
 
     /// Porta para ligações que chegam por datagramas (furo de NAT) em vez de TCP.
@@ -734,7 +755,7 @@ impl Phone {
 
     /// Para registrar neste telefone as chamadas que esta máquina faz ([`call_linked`]).
     pub fn link(&self) -> PhoneLink {
-        PhoneLink { actor: self.link_tx.clone(), ids: self.ids.clone() }
+        PhoneLink { actor: self.link_tx.clone(), ids: self.ids.clone(), hint: self.hint.clone() }
     }
 
     /// Lista viva de chaves aceitas.

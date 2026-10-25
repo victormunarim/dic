@@ -26,7 +26,7 @@ use crate::{
     },
     upnp,
     directory::{self, REPUBLISH, RelayInfo, dest_for},
-    media::{codec::Codec, keys::CallKeys},
+    media::{codec::Codec, keys::CallKeys, signal::RelayHint},
     phone::{self, ActiveCall, CallError, IncomingCall, Phone, PhoneLink, ScreenShare, call_linked, call_over_linked, screen_client_options, share_screen},
     punch::Punch,
     transport::{CircuitClient, ClientOptions, RelayServer, ServerConfig, allow_list},
@@ -59,6 +59,9 @@ pub struct NodeConfig {
     /// Últimos endereços de relay conhecidos por contato (veja [`Node::known`]). Ligar para quem está
     /// aqui funciona mesmo com o diretório fora do ar, enquanto o endereço não mudar.
     pub known: Vec<([u8; 32], RelayInfo)>,
+    /// Relays que contatos informaram nos convites que mandaram (veja [`Node::hints`]). Ficam atrás de `known`
+    /// e do diretório na ordem de tentativa, e só viram `known` depois de uma chamada completada por eles.
+    pub hints: Vec<([u8; 32], RelayInfo)>,
     /// Segredos do relay (circuito, link). `None` gera chaves novas a cada início, e então o endereço
     /// que os contatos guardaram de você (veja `known`) deixa de valer a cada reinício; gere o par uma vez
     /// com [`RelayKeys::random`], guarde-o e passe-o aqui.
@@ -80,7 +83,7 @@ impl RelayKeys {
 
 impl NodeConfig {
     pub fn new(secret: StaticSecret, directory: impl Into<String>, contacts: Vec<[u8; 32]>) -> Self {
-        Self { secret, directory: directory.into(), contacts, relay_port: DEFAULT_RELAY_PORT, public_addr: None, upnp: true, punch: true, known: Vec::new(), relay_keys: None }
+        Self { secret, directory: directory.into(), contacts, relay_port: DEFAULT_RELAY_PORT, public_addr: None, upnp: true, punch: true, known: Vec::new(), hints: Vec::new(), relay_keys: None }
     }
 }
 
@@ -107,6 +110,8 @@ pub struct Dialer {
     relay_port: u16,
     punch: Option<Arc<Punch>>,
     known: Known,
+    /// Relays que contatos mandaram nos convites (veja [`Node::hints`]): última opção antes do diretório.
+    hints: Known,
     /// Contatos que não deixaram furar o NAT há pouco: pula o furo até a data indicada.
     no_punch: Arc<Mutex<HashMap<[u8; 32], Instant>>>,
     /// Registra as chamadas que esta máquina faz no telefone dela (para receber a tela do outro lado).
@@ -127,6 +132,22 @@ async fn refresh_known(directory: &str, contacts: &phone::Contacts, known: &Know
             Err(_) => return,
         }
     }
+}
+
+/// Relay a informar nos convites: o endereço publicado pelo diretório ou, se o diretório ainda não
+/// respondeu (`published` falso: `mine.addr` é só o de loopback inventado aqui), o IP desta máquina na rede
+/// local. `None` se não houver endereço que alguém de fora use.
+fn relay_hint(mine: &RelayInfo, published: bool) -> Option<RelayHint> {
+    let addr: SocketAddr = mine.addr.parse().ok()?;
+    let addr = if !published && (addr.ip().is_loopback() || addr.ip().is_unspecified()) { SocketAddr::new(local_ip()?, addr.port()) } else { addr };
+    Some(RelayHint { addr, onion: mine.onion, link: mine.link })
+}
+
+/// IP desta máquina na rota para fora. O "connect" de UDP só escolhe a rota: nenhum pacote sai.
+fn local_ip() -> Option<std::net::IpAddr> {
+    let s = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    s.connect("192.0.2.1:9").ok()?;
+    s.local_addr().ok().map(|a| a.ip()).filter(|ip| !ip.is_loopback() && !ip.is_unspecified())
 }
 
 /// Acrescenta um aviso à nota de rede, separando por `; `.
@@ -152,10 +173,45 @@ async fn ready_within(client: &CircuitClient, limit: Duration) -> bool {
 }
 
 impl Dialer {
-    /// Endereço de relay guardado de `peer` (da última ligação ou consulta), se houver; é por ele que
-    /// [`Dialer::dial`] tenta primeiro, sem passar pelo diretório.
+    /// Endereço de relay guardado de `peer` (da última ligação ou consulta, ou, na falta, do convite que ele
+    /// mandou), se houver; é por ele que [`Dialer::dial`] tenta primeiro, sem passar pelo diretório.
     pub fn stored_address(&self, peer: &[u8; 32]) -> Option<String> {
-        self.known.lock().unwrap().get(peer).map(|r| r.addr.clone())
+        self.stored_for(peer).first().map(|r| r.addr.clone())
+    }
+
+    /// Relays de `peer` para tentar antes do diretório, em ordem: o guardado de uma consulta ou ligação e, se
+    /// for outro, o que o convite dele trouxe (que ninguém verificou).
+    fn stored_for(&self, peer: &[u8; 32]) -> Vec<RelayInfo> {
+        let mut v: Vec<RelayInfo> = self.known.lock().unwrap().get(peer).cloned().into_iter().collect();
+        if let Some(h) = self.hints.lock().unwrap().get(peer)
+            && !v.contains(h)
+        {
+            v.push(h.clone());
+        }
+        v
+    }
+
+    /// Primeiro relay de `stored` cujo circuito fica pronto em 5 s, com o cliente já aberto.
+    /// Endereço velho (relay sumiu, ou outra máquina no mesmo IP) nunca completa o handshake.
+    async fn stored_client(&self, peer: &[u8; 32], stored: Vec<RelayInfo>, options: fn() -> ClientOptions) -> Option<(CircuitClient, RelayInfo)> {
+        for k in stored {
+            let client = self.client_with(peer, &k, Vec::new(), options());
+            if ready_within(&client, Duration::from_secs(5)).await {
+                return Some((client, k));
+            }
+            client.stop();
+        }
+        None
+    }
+
+    /// Uma chamada completou por `used`: passa a ser o endereço guardado de `peer`. É aqui que uma dica de
+    /// convite (sem prova de quem a mandou) vira endereço de confiança.
+    fn remember(&self, peer: &[u8; 32], used: RelayInfo) {
+        let mut hints = self.hints.lock().unwrap();
+        if hints.get(peer) == Some(&used) {
+            hints.remove(peer);
+        }
+        self.known.lock().unwrap().insert(*peer, used);
     }
 
     /// Procura o relay de `peer` no diretório e guarda o endereço. `tried_stored`: o endereço guardado já
@@ -203,16 +259,14 @@ impl Dialer {
             _ => codec,
         };
         let me = *PublicKey::from(&self.secret).as_bytes();
-        // Endereço guardado da última vez: se o circuito fica pronto, o diretório nem entra na conversa.
-        // Endereço velho (relay sumiu, ou outra máquina no mesmo IP) nunca completa o handshake.
-        let cached = self.known.lock().unwrap().get(&peer).cloned();
-        let tried_stored = cached.is_some();
-        if let Some(k) = cached {
-            let client = self.client(&peer, &k, Vec::new());
-            if ready_within(&client, Duration::from_secs(5)).await {
-                return Ok(call_linked(client, &self.secret, &PublicKey::from(peer), codec, wait, Some(&self.link)).await?);
-            }
-            client.stop();
+        // Endereço guardado da última vez (ou o do convite que ele mandou): se o circuito fica pronto, o
+        // diretório nem entra na conversa.
+        let stored = self.stored_for(&peer);
+        let tried_stored = !stored.is_empty();
+        if let Some((client, k)) = self.stored_client(&peer, stored, ClientOptions::default).await {
+            let call = call_linked(client, &self.secret, &PublicKey::from(peer), codec, wait, Some(&self.link)).await?;
+            self.remember(&peer, k);
+            return Ok(call);
         }
         let exit = self.lookup_after_stored(&peer, tried_stored).await?;
         let relays = directory::sample(&self.directory, 3, &[me, peer]).await?.iter().map(RelayInfo::candidate).collect();
@@ -230,29 +284,21 @@ impl Dialer {
     /// guarda uma cópia de [`ActiveCall::share_keys`]).
     pub async fn share_screen_keys(&self, peer: [u8; 32], keys: &CallKeys, wait: Duration) -> Result<ScreenShare, DialError> {
         let me = *PublicKey::from(&self.secret).as_bytes();
-        let cached = self.known.lock().unwrap().get(&peer).cloned();
-        let tried_stored = cached.is_some();
-        let client = match cached {
-            Some(k) => {
-                let client = self.client_with(&peer, &k, Vec::new(), screen_client_options());
-                if ready_within(&client, Duration::from_secs(5)).await {
-                    Some(client)
-                } else {
-                    client.stop();
-                    None
-                }
-            }
-            None => None,
-        };
-        let client = match client {
-            Some(c) => c,
+        let stored = self.stored_for(&peer);
+        let tried_stored = !stored.is_empty();
+        let (client, used) = match self.stored_client(&peer, stored, screen_client_options).await {
+            Some((c, k)) => (c, Some(k)),
             None => {
                 let exit = self.lookup_after_stored(&peer, tried_stored).await?;
                 let relays = directory::sample(&self.directory, 3, &[me, peer]).await?.iter().map(RelayInfo::candidate).collect();
-                self.client_with(&peer, &exit, relays, screen_client_options())
+                (self.client_with(&peer, &exit, relays, screen_client_options()), None)
             }
         };
-        Ok(share_screen(client, keys, wait).await?)
+        let share = share_screen(client, keys, wait).await?;
+        if let Some(k) = used {
+            self.remember(&peer, k);
+        }
+        Ok(share)
     }
 }
 
@@ -268,6 +314,7 @@ pub struct Node {
     note: Option<String>,
     dialer: Dialer,
     known: Known,
+    hints: Known,
 }
 
 impl Node {
@@ -298,8 +345,9 @@ impl Node {
     }
 
     async fn finish(cfg: NodeConfig, phone: Phone, relay: RelayServer, onion: [u8; 32]) -> io::Result<Self> {
-        let NodeConfig { secret, directory, public_addr, upnp, punch, known, .. } = cfg;
+        let NodeConfig { secret, directory, public_addr, upnp, punch, known, hints, .. } = cfg;
         let known: Known = Arc::new(Mutex::new(known.into_iter().collect()));
+        let hints: Known = Arc::new(Mutex::new(hints.into_iter().collect()));
         let (port, link) = (relay.local_addr().port(), relay.link_public_key());
         let last_error = Arc::new(Mutex::new(None));
         // Diretório na internet e nenhum endereço público informado: tenta abrir a porta no roteador.
@@ -346,7 +394,10 @@ impl Node {
             };
             push_note(&mut note, warn);
         }
-        let dialer = Dialer { secret: secret.clone(), directory: directory.clone(), mine: mine.clone(), relay_port: port, punch, known: known.clone(), no_punch: Arc::default(), link: phone.link() };
+        let dialer = Dialer { secret: secret.clone(), directory: directory.clone(), mine: mine.clone(), relay_port: port, punch, known: known.clone(), hints: hints.clone(), no_punch: Arc::default(), link: phone.link() };
+        // Os convites levam este relay, para o outro lado ligar de volta sem diretório.
+        let link_to_phone = phone.link();
+        link_to_phone.set_relay_hint(relay_hint(&mine, published));
         let republish = {
             let (directory, secret, last_error, public_addr, addr_now) = (directory.clone(), secret.clone(), last_error.clone(), public_addr, addr_now.clone());
             let (contacts, known) = (phone.contacts(), known.clone());
@@ -365,6 +416,7 @@ impl Node {
                     let r = directory::publish(&directory, &secret, port, onion, link, public_addr.as_deref()).await;
                     match r {
                         Ok(a) => {
+                            link_to_phone.set_relay_hint(relay_hint(&RelayInfo { addr: a.clone(), onion, link }, true));
                             *addr_now.lock().unwrap() = a;
                             *last_error.lock().unwrap() = None;
                         }
@@ -373,7 +425,7 @@ impl Node {
                 }
             })
         };
-        Ok(Self { secret, directory, phone, _relay: relay, last_error, republish, note, dialer, known, addr: addr_now })
+        Ok(Self { secret, directory, phone, _relay: relay, last_error, republish, note, dialer, known, hints, addr: addr_now })
     }
 
     /// Aceita convites de `keys` além dos contatos (membros de uma sala).
@@ -422,13 +474,24 @@ impl Node {
         self.known.lock().unwrap().iter().map(|(k, v)| (*k, v.clone())).collect()
     }
 
+    /// Relays que contatos mandaram nos convites e que ainda não foram confirmados por uma chamada, para
+    /// guardar e devolver em [`NodeConfig::hints`]. Ligar de volta para quem te ligou funciona com o diretório
+    /// fora do ar.
+    pub fn hints(&self) -> Vec<([u8; 32], RelayInfo)> {
+        self.hints.lock().unwrap().iter().map(|(k, v)| (*k, v.clone())).collect()
+    }
+
     /// Motivo de um convite descartado em silêncio, se houve (veja [`Phone::take_notice`]).
     pub fn take_notice(&self) -> Option<String> {
         self.phone.take_notice()
     }
 
     pub async fn next_incoming(&mut self) -> Option<IncomingCall> {
-        self.phone.next_incoming().await
+        let inc = self.phone.next_incoming().await?;
+        if let Some(h) = inc.relay_hint() {
+            self.hints.lock().unwrap().insert(*inc.caller().as_bytes(), RelayInfo { addr: h.addr.to_string(), onion: h.onion, link: h.link });
+        }
+        Some(inc)
     }
 
     /// Liga para `peer` (veja [`Dialer::dial`]).

@@ -152,20 +152,39 @@ pub(crate) fn conf_path() -> PathBuf {
     home.join(".clam-gui.conf")
 }
 
-/// Últimos endereços de relay dos contatos, num arquivo à parte (`chave addr onion link` por linha).
+/// Endereços de relay de contatos, num arquivo à parte (`chave addr onion link` por linha). Linhas que
+/// terminam em `dica` vieram do convite que o contato mandou, sem confirmação de uma chamada.
 pub(crate) fn known_path() -> PathBuf {
     conf_path().with_file_name(".clam-gui.known")
 }
 
-pub(crate) fn load_known() -> Vec<([u8; 32], clam::directory::RelayInfo)> {
-    let Ok(text) = std::fs::read_to_string(known_path()) else { return Vec::new() };
-    text.lines()
-        .filter_map(|l| {
-            let mut p = l.split_whitespace();
+pub(crate) type Stored = Vec<([u8; 32], clam::directory::RelayInfo)>;
+
+/// Lê o arquivo: `(confirmados, dicas)`.
+pub(crate) fn load_known() -> (Stored, Stored) {
+    parse_known(&std::fs::read_to_string(known_path()).unwrap_or_default())
+}
+
+fn parse_known(text: &str) -> (Stored, Stored) {
+    let (mut known, mut hints) = (Vec::new(), Vec::new());
+    for l in text.lines() {
+        let mut p = l.split_whitespace();
+        let entry = (|| {
             let (k, addr, o, link) = (p.next()?, p.next()?, p.next()?, p.next()?);
             Some((unhex(k).ok()?, clam::directory::RelayInfo { addr: addr.to_string(), onion: unhex(o).ok()?, link: unhex(link).ok()? }))
-        })
-        .collect()
+        })();
+        match entry {
+            Some(e) if p.next() == Some("dica") => hints.push(e),
+            Some(e) => known.push(e),
+            None => {}
+        }
+    }
+    (known, hints)
+}
+
+fn format_known(known: &Stored, hints: &Stored) -> String {
+    let line = |(k, r): &([u8; 32], clam::directory::RelayInfo), tail: &str| format!("{} {} {} {}{tail}\n", hex(k), r.addr, hex(&r.onion), hex(&r.link));
+    known.iter().map(|e| line(e, "")).chain(hints.iter().map(|e| line(e, " dica"))).collect()
 }
 
 /// Chaves do relay deste computador, num arquivo à parte (`onion link`, em hex). Mantê-las entre execuções
@@ -174,19 +193,22 @@ pub(crate) fn relay_keys_path() -> PathBuf {
     conf_path().with_file_name(".clam-gui.relay")
 }
 
-/// Lê as chaves do relay; sem arquivo (ou ilegível) gera um par novo e grava.
-pub(crate) fn load_relay_keys() -> clam::node::RelayKeys {
+/// Lê as chaves do relay; sem arquivo (ou ilegível) gera um par novo e grava. O segundo valor é o erro de
+/// gravação, se houve: sem o arquivo as chaves mudam a cada execução e os endereços que os contatos
+/// guardaram de você deixam de valer, então a janela precisa avisar.
+pub(crate) fn load_relay_keys() -> (clam::node::RelayKeys, Option<std::io::Error>) {
     let read = || {
         let text = std::fs::read_to_string(relay_keys_path()).ok()?;
         let mut p = text.split_whitespace();
         let (onion, link) = (unhex(p.next()?).ok()?, unhex(p.next()?).ok()?);
         Some(clam::node::RelayKeys { onion: StaticSecret::from(onion), link: StaticSecret::from(link) })
     };
-    read().unwrap_or_else(|| {
-        let keys = clam::node::RelayKeys::random();
-        let _ = write_private(&relay_keys_path(), &format!("{} {}\n", hex(&keys.onion.to_bytes()), hex(&keys.link.to_bytes())));
-        keys
-    })
+    if let Some(keys) = read() {
+        return (keys, None);
+    }
+    let keys = clam::node::RelayKeys::random();
+    let saved = write_private(&relay_keys_path(), &format!("{} {}\n", hex(&keys.onion.to_bytes()), hex(&keys.link.to_bytes())));
+    (keys, saved.err())
 }
 
 /// Grava `text` em `path` de uma vez só (arquivo temporário + rename) e, no Unix, já com permissão 0600:
@@ -205,9 +227,8 @@ pub(crate) fn write_private(path: &std::path::Path, text: &str) -> std::io::Resu
     result
 }
 
-pub(crate) fn save_known(known: &[([u8; 32], clam::directory::RelayInfo)]) {
-    let text: String = known.iter().map(|(k, r)| format!("{} {} {} {}\n", hex(k), r.addr, hex(&r.onion), hex(&r.link))).collect();
-    let _ = write_private(&known_path(), &text);
+pub(crate) fn save_known(known: &Stored, hints: &Stored) -> std::io::Result<()> {
+    write_private(&known_path(), &format_known(known, hints))
 }
 
 impl Form {
@@ -380,6 +401,17 @@ mod tests {
             assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
         }
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn known_addresses_and_hints_round_trip_and_stay_apart() {
+        let r = |addr: &str, n: u8| clam::directory::RelayInfo { addr: addr.into(), onion: [n; 32], link: [n + 1; 32] };
+        let (known, hints) = (vec![([1; 32], r("10.0.0.1:4001", 5))], vec![([2; 32], r("[::1]:4001", 8))]);
+        let text = format_known(&known, &hints);
+        assert_eq!(parse_known(&text), (known.clone(), hints));
+        // Arquivo de versão anterior (sem a marca) e linha estragada.
+        let old = format_known(&known, &Vec::new()) + "lixo\n";
+        assert_eq!(parse_known(&old), (known, Vec::new()));
     }
 
     #[test]
