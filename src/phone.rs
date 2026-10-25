@@ -329,8 +329,12 @@ pub struct Phone {
     addr: SocketAddr,
     incoming: mpsc::Receiver<IncomingCall>,
     notice: Arc<Mutex<Option<String>>>,
+    contacts: Contacts,
     tasks: Vec<JoinHandle<()>>,
 }
+
+/// Chaves aceitas pelo telefone; pode mudar com ele ligado (membros de salas entram e saem).
+pub type Contacts = Arc<Mutex<Vec<[u8; 32]>>>;
 
 impl Phone {
     /// Escuta em `listen`. Só convites de `contacts` (chaves estáticas do pareamento) tocam;
@@ -343,6 +347,7 @@ impl Phone {
         let (inc_tx, inc_rx) = mpsc::channel(8);
         let ids = Arc::new(AtomicU64::new(1));
         let notice: Arc<Mutex<Option<String>>> = Arc::default();
+        let contacts: Contacts = Arc::new(Mutex::new(contacts));
 
         let accept_tx = actor_tx.clone();
         let accept = tokio::spawn(async move {
@@ -364,8 +369,13 @@ impl Phone {
                 tokio::spawn(read_frames(rd, conn, accept_tx.clone()));
             }
         });
-        let actor = tokio::spawn(run_actor(actor_rx, actor_tx, inc_tx, my_static, contacts, ids, notice.clone()));
-        Ok(Self { addr, incoming: inc_rx, notice, tasks: vec![accept, actor] })
+        let actor = tokio::spawn(run_actor(actor_rx, actor_tx, inc_tx, my_static, contacts.clone(), ids, notice.clone()));
+        Ok(Self { addr, incoming: inc_rx, notice, contacts, tasks: vec![accept, actor] })
+    }
+
+    /// Lista viva de chaves aceitas.
+    pub fn contacts(&self) -> Contacts {
+        self.contacts.clone()
     }
 
     pub fn local_addr(&self) -> SocketAddr {
@@ -424,7 +434,7 @@ async fn run_actor(
     me: mpsc::Sender<Msg>,
     incoming: mpsc::Sender<IncomingCall>,
     secret: StaticSecret,
-    contacts: Vec<[u8; 32]>,
+    contacts: Contacts,
     ids: Arc<AtomicU64>,
     notice: Arc<Mutex<Option<String>>>,
 ) {
@@ -473,7 +483,7 @@ async fn run_actor(
                         *notice.lock().unwrap() = Some("convite ignorado: relógio desta máquina difere em mais de 60 s do de quem ligou".into());
                     }
                     let invite = parsed.ok().filter(|i| {
-                        let known = contacts.contains(i.caller().as_bytes());
+                        let known = contacts.lock().unwrap().contains(i.caller().as_bytes());
                         if !known {
                             let hex: String = i.caller().as_bytes()[..4].iter().map(|b| format!("{b:02x}")).collect();
                             *notice.lock().unwrap() = Some(format!("convite de {hex}... ignorado: essa chave não está em Contatos"));

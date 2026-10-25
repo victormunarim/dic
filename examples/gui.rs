@@ -23,6 +23,7 @@ use std::{
 use clam::media::codec::G722;
 use clam::node::{Node, NodeConfig};
 use clam::phone::ActiveCall;
+use clam::room::{self, Mesh, RoomView};
 use clam::{
     rand_core::OsRng,
     x25519_dalek::{PublicKey, StaticSecret},
@@ -105,6 +106,10 @@ struct Form {
     public_addr: String,
     use_audio: bool,
     via_server: bool,
+    /// Salas guardadas, uma por linha: `nome segredo-hex`.
+    rooms: String,
+    room_name: String,
+    room_code: String,
 }
 
 /// Código de contato: a chave pública (64 hex), com o diretório opcional depois de `@`
@@ -134,6 +139,16 @@ fn parse_contacts(text: &str) -> Vec<(String, [u8; 32])> {
         .collect()
 }
 
+/// Salas guardadas: `(nome, segredo)`. Linhas sem um segredo de 64 hex são ignoradas.
+fn parse_rooms(text: &str) -> Vec<(String, [u8; 32])> {
+    text.lines()
+        .filter_map(|l| {
+            let (name, secret) = l.trim().rsplit_once(' ')?;
+            Some((name.trim().to_string(), unhex(secret).ok()?))
+        })
+        .collect()
+}
+
 fn conf_path() -> PathBuf {
     let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from).unwrap_or_default();
     home.join(".clam-gui.conf")
@@ -152,19 +167,22 @@ impl Form {
             public_addr: get("public_addr"),
             use_audio: get("audio") == "1",
             via_server: get("via_server") == "1",
+            rooms: get("rooms").replace(';', "\n"),
+            ..Form::default()
         }
     }
 
     fn save(&self) {
         let text = format!(
-            "audio={}\nsecret={}\ndirectory={}\ncontacts={}\npeer={}\npublic_addr={}\nvia_server={}\n",
+            "audio={}\nsecret={}\ndirectory={}\ncontacts={}\npeer={}\npublic_addr={}\nvia_server={}\nrooms={}\n",
             u8::from(self.use_audio),
             self.secret.trim(),
             self.directory.trim(),
             self.contacts.trim().replace('\n', ";"),
             self.peer.trim(),
             self.public_addr.trim(),
-            u8::from(self.via_server)
+            u8::from(self.via_server),
+            self.rooms.trim().replace('\n', ";")
         );
         let path = conf_path();
         // Contém a chave secreta: no Unix, só o dono lê.
@@ -289,6 +307,8 @@ async fn talk(mut c: ActiveCall, hz: f64, stop: Arc<AtomicBool>, out: Sink, soun
 
 enum Cmd {
     Dial([u8; 32]),
+    Join([u8; 32], String),
+    Leave,
 }
 
 /// Estado compartilhado entre a janela e a tarefa do nó.
@@ -300,6 +320,10 @@ struct Shared {
     hangup: AtomicBool,
     /// Texto de estado do nó ("online em ...").
     status: Mutex<String>,
+    /// Está numa sala (as chamadas da sala não usam `in_call`, mas ele fica ligado).
+    in_room: AtomicBool,
+    /// Resumo da sala atual.
+    room: Mutex<String>,
 }
 
 /// Roda o nó até `stop`: atende contatos sozinho e disca quando a janela pede.
@@ -321,6 +345,9 @@ async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, shared: Arc<
     if let Some(n) = node.network_note() {
         out.line(n);
     }
+    let mut room: Option<RoomRun> = None;
+    let mut room_tick = interval(Duration::from_millis(20));
+    room_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
         if stop.load(Ordering::Relaxed) {
             break;
@@ -328,6 +355,15 @@ async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, shared: Arc<
         tokio::select! {
             inc = node.next_incoming() => {
                 let Some(inc) = inc else { break };
+                if let Some(r) = &room
+                    && let Some(view) = &r.view
+                    && view.members.contains(inc.caller().as_bytes())
+                {
+                    if room::accept_member(inc, view, &r.mesh).await {
+                        out.line("alguém da sala entrou na chamada");
+                    }
+                    continue;
+                }
                 let name = contacts.iter().find(|(_, k)| k == inc.caller().as_bytes()).map(|(n, _)| n.clone()).unwrap_or_else(|| hex(inc.caller().as_bytes())[..8].to_string());
                 if shared.in_call.swap(true, Ordering::Relaxed) {
                     out.line(format!("{name} ligou, mas já há uma chamada; recusada"));
@@ -363,16 +399,102 @@ async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, shared: Arc<
                         }
                     }
                 }
+                Some(Cmd::Join(secret, name)) => {
+                    if shared.in_call.swap(true, Ordering::Relaxed) {
+                        out.line("saia da chamada atual antes de entrar numa sala");
+                        continue;
+                    }
+                    out.line(format!("entrando na sala {name}..."));
+                    shared.in_room.store(true, Ordering::Relaxed);
+                    room = Some(RoomRun {
+                        name,
+                        key: room::room_key(&secret),
+                        mesh: Mesh::new(),
+                        view: None,
+                        sound: open_sound(form.use_audio, &out),
+                        next_sync: tokio::time::Instant::now(),
+                        shown: (0, 0, [0; 32]),
+                        n: 0,
+                    });
+                }
+                Some(Cmd::Leave) => {
+                    if let Some(r) = room.take() {
+                        leave_room(&node, r, &shared, &out).await;
+                    }
+                }
                 None => break,
             },
+            _ = room_tick.tick(), if room.is_some() => {
+                let r = room.as_mut().unwrap();
+                let frames: Vec<Vec<i16>> = match &r.sound {
+                    Some(s) => std::iter::from_fn(|| s.mic_frame()).take(2).collect(),
+                    None => vec![tone(440.0, r.n)],
+                };
+                r.n += 1;
+                for f in frames {
+                    r.mesh.send(&f);
+                }
+                if let Some(f) = r.mesh.mix()
+                    && let Some(s) = &r.sound
+                {
+                    s.play(&f);
+                }
+                if tokio::time::Instant::now() >= r.next_sync {
+                    r.next_sync = tokio::time::Instant::now() + Duration::from_secs(10);
+                    match room::sync(&node, &r.key).await {
+                        Ok(view) => {
+                            room::connect_missing(&node, &view, &r.mesh, Duration::from_secs(8)).await;
+                            let shown = (view.members.len(), r.mesh.count(), view.host);
+                            if shown != r.shown {
+                                r.shown = shown;
+                                let host = if view.i_am_host { "você".to_string() } else { member_name(&contacts, &view.host) };
+                                let text = format!("sala {}: {} pessoa(s), {} conectada(s); anfitrião: {host}", r.name, shown.0, shown.1);
+                                out.line(text.clone());
+                                *shared.room.lock().unwrap() = text;
+                            }
+                            r.view = Some(view);
+                        }
+                        Err(e) => out.line(format!("sala {}: diretório: {e}", r.name)),
+                    }
+                }
+            }
             _ = tokio::time::sleep(Duration::from_millis(200)) => {}
         }
         if let Some(n) = node.take_notice() {
             out.line(n);
         }
     }
+    if let Some(r) = room.take() {
+        leave_room(&node, r, &shared, &out).await;
+    }
     shared.hangup.store(true, Ordering::Relaxed);
     Ok(())
+}
+
+/// Sala em andamento na tarefa do nó.
+struct RoomRun {
+    name: String,
+    key: clam::ed25519_dalek::SigningKey,
+    mesh: Mesh,
+    view: Option<RoomView>,
+    sound: Option<Sound>,
+    next_sync: tokio::time::Instant,
+    /// O que o último resumo mostrou (membros, conectados, anfitrião), para só repetir quando mudar.
+    shown: (usize, usize, [u8; 32]),
+    n: usize,
+}
+
+fn member_name(contacts: &[(String, [u8; 32])], key: &[u8; 32]) -> String {
+    contacts.iter().find(|(_, k)| k == key).map(|(n, _)| n.clone()).unwrap_or_else(|| hex(key)[..8].to_string())
+}
+
+async fn leave_room(node: &Node, r: RoomRun, shared: &Shared, out: &Sink) {
+    r.mesh.hangup();
+    let _ = room::leave(node, &r.key).await;
+    out.line(format!("saiu da sala {}", r.name));
+    shared.room.lock().unwrap().clear();
+    shared.in_room.store(false, Ordering::Relaxed);
+    shared.in_call.store(false, Ordering::Relaxed);
 }
 
 /// Inicia a conversa numa tarefa própria; `hangup` (da janela) encerra.
@@ -413,6 +535,77 @@ struct App {
 }
 
 impl App {
+    /// Salas guardadas neste computador: entrar de novo é um clique, sem combinar nada.
+    fn rooms_ui(&mut self, ui: &mut egui::Ui, offline: bool, in_room: bool, in_call: bool) {
+        ui.strong("Salas (ficam salvas aqui; o primeiro a entrar é o anfitrião)");
+        let rooms = parse_rooms(&self.form.rooms);
+        let mut forget = None;
+        for (i, (name, secret)) in rooms.iter().enumerate() {
+            ui.horizontal(|ui| {
+                ui.label(name);
+                if ui.add_enabled(!offline && !in_call, egui::Button::new("Entrar")).clicked()
+                    && let Some(r) = &self.running
+                {
+                    let _ = r.cmds.send(Cmd::Join(*secret, name.clone()));
+                }
+                if ui.button("Copiar código").clicked() {
+                    let dir = self.form.directory_addr();
+                    ui.ctx().copy_text(if dir.is_empty() { hex(secret) } else { format!("{}@{dir}", hex(secret)) });
+                }
+                if ui.add_enabled(!in_room, egui::Button::new("Esquecer")).clicked() {
+                    forget = Some(i);
+                }
+            });
+        }
+        if let Some(i) = forget {
+            let kept: Vec<String> = rooms.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, (n, s))| format!("{n} {}", hex(s))).collect();
+            self.form.rooms = kept.join("\n");
+            self.form.save();
+        }
+        ui.horizontal(|ui| {
+            ui.label("Nome:");
+            ui.add(egui::TextEdit::singleline(&mut self.form.room_name).desired_width(120.0));
+            ui.label("Código (vazio cria uma sala nova):");
+            ui.add(egui::TextEdit::singleline(&mut self.form.room_code).desired_width(240.0));
+            if ui.add_enabled(!offline && !in_call, egui::Button::new("Criar / entrar")).clicked() {
+                let secret = if self.form.room_code.trim().is_empty() {
+                    Some(room::new_secret())
+                } else {
+                    split_code(&self.form.room_code).map(|(k, _)| k)
+                };
+                match secret {
+                    Some(secret) => {
+                        let name: String = self.form.room_name.chars().filter(|c| !matches!(c, ';' | '\n')).collect();
+                        let name = if name.trim().is_empty() { format!("sala {}", rooms.len() + 1) } else { name.trim().to_string() };
+                        if !rooms.iter().any(|(_, s)| *s == secret) {
+                            if !self.form.rooms.trim().is_empty() {
+                                self.form.rooms.push('\n');
+                            }
+                            self.form.rooms.push_str(&format!("{name} {}", hex(&secret)));
+                        }
+                        self.form.room_name.clear();
+                        self.form.room_code.clear();
+                        self.error.clear();
+                        self.form.save();
+                        if let Some(r) = &self.running {
+                            let _ = r.cmds.send(Cmd::Join(secret, name));
+                        }
+                    }
+                    None => self.error = "código de sala inválido (64 hex, com @host:porta opcional)".into(),
+                }
+            }
+            if ui.add_enabled(in_room, egui::Button::new("Sair da sala")).clicked()
+                && let Some(r) = &self.running
+            {
+                let _ = r.cmds.send(Cmd::Leave);
+            }
+        });
+        let status = self.shared.room.lock().unwrap().clone();
+        if !status.is_empty() {
+            ui.label(status);
+        }
+    }
+
     fn go_online(&mut self, ctx: &egui::Context) {
         self.error.clear();
         if let Err(e) = self.form.identity() {
@@ -458,6 +651,7 @@ impl eframe::App for App {
         }
         let offline = self.running.is_none();
         let in_call = self.shared.in_call.load(Ordering::Relaxed);
+        let in_room = self.shared.in_room.load(Ordering::Relaxed);
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("Clam: chamada de voz");
             egui::Grid::new("form").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
@@ -532,10 +726,12 @@ impl eframe::App for App {
                         Err(e) => self.error = e,
                     }
                 }
-                if ui.add_enabled(in_call, egui::Button::new("Desligar")).clicked() {
+                if ui.add_enabled(in_call && !in_room, egui::Button::new("Desligar")).clicked() {
                     self.shared.hangup.store(true, Ordering::Relaxed);
                 }
             });
+            ui.separator();
+            self.rooms_ui(ui, offline, in_room, in_call);
             ui.separator();
             egui::ScrollArea::vertical().stick_to_bottom(true).auto_shrink(false).show(ui, |ui| {
                 for l in self.log.lock().unwrap().iter() {
@@ -583,5 +779,12 @@ mod tests {
         assert!(split_code("nome").is_none());
         let c = parse_contacts(&format!("ana {k}@h:1"));
         assert_eq!(c, vec![("ana".to_string(), [0xab; 32])]);
+    }
+
+    #[test]
+    fn rooms_parse_with_spaces_in_names() {
+        let k = hex(&[7u8; 32]);
+        let rooms = parse_rooms(&format!("noite de jogo {k}\nlixo\nsala {}", &k[..60]));
+        assert_eq!(rooms, vec![("noite de jogo".to_string(), [7u8; 32])]);
     }
 }

@@ -791,6 +791,17 @@ cargo run --release --features net --example directory -- 0.0.0.0:7777
 cargo run --release --features net --example directory -- 0.0.0.0:7777 --relay 0.0.0.0:4000 IP-PUBLICO:4000
 ```
 
+### Salas persistentes (`clam::room`, feature `net`)
+
+Como uma sala do Discord: a sala é um **segredo de 32 bytes** (64 hex) que fica salvo na máquina de quem já entrou. Quem o tem entra de novo quando quiser; para convidar, copie o código da sala.
+
+- O diretório identifica a sala por uma chave Ed25519 derivada do segredo (HKDF). Entrar, sair e listar são pedidos assinados por ela (com a `E` da conexão, sem repetição): sem o segredo não se entra nem se vê quem está lá.
+- A lista é de quem está presente (renovada a cada sincronização, vence em `TTL`). O **primeiro membro vivo é o anfitrião**; se ele sai, o próximo assume. Até `MAX_ROOM_MEMBERS` (8) por sala.
+- **Malha completa**: o menor `chave pública` de cada par liga para o outro; a voz segue de ponta a ponta entre cada par. `room::Mesh` envia o microfone a todos e mistura (soma saturada) o que chega.
+- Os membros listados são liberados no telefone (`Node::allow`), então ninguém precisa estar na lista de Contatos.
+- Na GUI: "Criar / entrar" (código vazio cria uma sala nova), "Copiar código", "Entrar" nas salas salvas, "Sair da sala". As salas ficam em `~/.clam-gui.conf` (campo `rooms`, contém segredos).
+- Limite: o diretório vê quem entra em cada sala (chaves e IPs), não a voz.
+
 ### Interface gráfica mínima
 
 Guias passo a passo por sistema: [`docs/LINUX.md`](docs/LINUX.md) e [`docs/WINDOWS.md`](docs/WINDOWS.md).

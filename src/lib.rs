@@ -19,6 +19,7 @@
 //! | `timer` | Temporizadores de 1 ms no Windows (feature `net`) |
 //! | `directory` | Diretório de primeiro contato: publicar e achar o relay de uma chave (feature `net`) |
 //! | `node` | `Node`: relay + telefone + publicação no diretório; liga só com a chave do outro (feature `net`) |
+//! | `room` | Salas persistentes em malha: segredo salvo, anfitrião pelo diretório, mixagem (feature `net`) |
 //! | `phone` | Chamado (`Phone`) e chamador (`call`) sobre o circuito (feature `net`) |
 //! | [`path`] | Modos de caminho: 2 saltos (padrão), 1 salto, direto |
 //!
@@ -78,6 +79,8 @@ pub mod phone;
 pub mod timer;
 #[cfg(feature = "net")]
 pub mod upnp;
+#[cfg(feature = "net")]
+pub mod room;
 #[cfg(feature = "net")]
 pub mod runner;
 pub mod presence;
