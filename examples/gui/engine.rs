@@ -36,6 +36,9 @@ impl Sound {
     pub(crate) fn played(&self) -> usize {
         match *self {}
     }
+    pub(crate) fn take_error(&self) -> Option<String> {
+        match *self {}
+    }
     pub(crate) fn play(&self, _: &[i16]) {
         match *self {}
     }
@@ -127,6 +130,9 @@ pub(crate) async fn talk(mut c: ActiveCall, hz: f64, stop: Arc<AtomicBool>, out:
                 None => break,
             },
             _ = report.tick() => {
+                if let Some(e) = sound.as_ref().and_then(Sound::take_error) {
+                    out.line(format!("áudio: {e}"));
+                }
                 let s = c.stats();
                 let rms = if frames > 0 { (energy / frames as f64).sqrt() } else { 0.0 };
                 out.line(format!(
@@ -200,6 +206,7 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
         out.line(n);
     }
     let dialer = node.dialer();
+    let (dialed_tx, mut dialed_rx) = mpsc::unbounded_channel::<Option<Result<ActiveCall, clam::node::DialError>>>();
     let mut room: Option<RoomRun> = None;
     let mut room_tick = interval(Duration::from_millis(20));
     room_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -235,6 +242,23 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
                     }
                 }
             }
+            Some(r) = dialed_rx.recv() => {
+                save_known(&node.known());
+                match r {
+                    Some(Ok(c)) => {
+                        out.line("atendida");
+                        start_talk(c, 440.0, &shared, &out, &form);
+                    }
+                    Some(Err(e)) => {
+                        out.line(format!("não completou: {e}"));
+                        shared.in_call.store(false, Ordering::Relaxed);
+                    }
+                    None => {
+                        out.line("ligação cancelada");
+                        shared.in_call.store(false, Ordering::Relaxed);
+                    }
+                }
+            }
             cmd = rx.recv() => match cmd {
                 Some(Cmd::Dial(peer)) => {
                     if shared.in_call.swap(true, Ordering::Relaxed) {
@@ -243,18 +267,20 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
                     }
                     shared.hangup.store(false, Ordering::Relaxed);
                     out.line("ligando...");
-                    let dialed = node.dial(peer, G722::new(), Duration::from_secs(15)).await;
-                    save_known(&node.known());
-                    match dialed {
-                        Ok(c) => {
-                            out.line("atendida");
-                            start_talk(c, 440.0, &shared, &out, &form);
-                        }
-                        Err(e) => {
-                            out.line(format!("não completou: {e}"));
-                            shared.in_call.store(false, Ordering::Relaxed);
-                        }
-                    }
+                    // Discar demora (furo de NAT, endereço guardado, espera de resposta): numa tarefa, para a
+                    // janela seguir atendendo comandos; "Desligar" cancela a ligação.
+                    let (dialer, sh, tx) = (dialer.clone(), shared.clone(), dialed_tx.clone());
+                    tokio::spawn(async move {
+                        let r = tokio::select! {
+                            r = dialer.dial(peer, G722::new(), Duration::from_secs(15)) => Some(r),
+                            _ = async {
+                                while !sh.hangup.load(Ordering::Relaxed) {
+                                    tokio::time::sleep(Duration::from_millis(50)).await;
+                                }
+                            } => None,
+                        };
+                        let _ = tx.send(r);
+                    });
                 }
                 Some(Cmd::Join(mut secret, owner, name)) => {
                     if shared.in_call.swap(true, Ordering::Relaxed) {
@@ -324,6 +350,11 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
                     None => vec![tone(440.0, r.n)],
                 };
                 r.n += 1;
+                if r.n.is_multiple_of(50)
+                    && let Some(e) = r.sound.as_ref().and_then(Sound::take_error)
+                {
+                    out.line(format!("áudio: {e}"));
+                }
                 for f in frames {
                     r.mesh.send(&f);
                 }

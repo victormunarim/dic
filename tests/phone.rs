@@ -26,6 +26,17 @@ use tokio::{
 
 const WAIT: Duration = Duration::from_secs(5);
 
+/// Espera a condição ficar verdadeira (até `WAIT`).
+async fn wait_until(mut cond: impl FnMut() -> bool) {
+    timeout(WAIT, async {
+        while !cond() {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("condição não ocorreu a tempo");
+}
+
 fn tone(n: usize) -> Vec<i16> {
     (0..160).map(|i| (9000.0 * (std::f64::consts::TAU * 440.0 * (n * 160 + i) as f64 / 8000.0).sin()) as i16).collect()
 }
@@ -156,17 +167,17 @@ async fn call_follows_the_voice_to_a_new_connection() {
 
     let first = voice.send(&tone(0)).unwrap();
     send_frame(&mut c1, &first).await;
-    sleep(Duration::from_millis(100)).await;
+    wait_until(|| b.stats().received >= 1).await;
     b.send(tone(1)).await.unwrap();
     assert_eq!(read_frame(&mut c1).await.len(), 200);
 
     // Segunda conexão: manda voz nova direto, sem convite.
     let mut c2 = TcpStream::connect(addr).await.unwrap();
     send_frame(&mut c2, &voice.send(&tone(2)).unwrap()).await;
-    sleep(Duration::from_millis(100)).await;
+    wait_until(|| b.stats().received >= 2).await;
     // Repetição do primeiro pacote por c1 não volta a rota.
     send_frame(&mut c1, &first).await;
-    sleep(Duration::from_millis(100)).await;
+    wait_until(|| b.stats().rejected >= 1).await;
     b.send(tone(3)).await.unwrap();
     assert_eq!(read_frame(&mut c2).await.len(), 200);
     assert!(b.stats().received >= 2);
@@ -190,7 +201,13 @@ async fn call_survives_killing_the_active_relay() {
     })
     .await
     .unwrap();
-    sleep(Duration::from_millis(600)).await; // reserva montar
+    timeout(WAIT, async {
+        while !c.status().await.is_some_and(|s| s.standby.is_some_and(|b| b.ready)) {
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("reserva não ficou pronta");
     let active = c.status().await.unwrap().active.unwrap();
     let idx = cands.iter().position(|x| x.addr == active.first).unwrap();
 

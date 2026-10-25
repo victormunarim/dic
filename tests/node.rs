@@ -535,3 +535,60 @@ async fn node_without_directory_dials_stored_address() {
     let (_cb, _b) = second.await.unwrap();
     ca.hangup();
 }
+
+/// Endereço guardado que não responde mais: a ligação cai no diretório e corrige o cache.
+#[tokio::test]
+async fn stale_stored_address_falls_back_to_directory() {
+    let (_d, addr) = dir().await;
+    let (sa, sb) = (key(), key());
+    let (pa, pb) = (*PublicKey::from(&sa).as_bytes(), *PublicKey::from(&sb).as_bytes());
+    let mut b = Node::start(cfg(sb, &addr, vec![pa])).await.unwrap();
+    let real = directory::lookup(&addr, &pb).await.unwrap().unwrap();
+    let stale = clam::directory::RelayInfo { addr: "127.0.0.1:1".into(), ..real.clone() };
+    let a = Node::start(NodeConfig { known: vec![(pb, stale)], ..cfg(sa, &addr, vec![]) }).await.unwrap();
+    let answer = tokio::spawn(async move {
+        let inc = timeout(Duration::from_secs(20), b.next_incoming()).await.unwrap().unwrap();
+        (inc.accept(Mulaw::new()).await.unwrap(), b)
+    });
+    let ca = a.dial(pb, Mulaw::new(), Duration::from_secs(15)).await.unwrap();
+    let (_cb, _b) = answer.await.unwrap();
+    assert_eq!(a.known()[0].1.addr, real.addr);
+    ca.hangup();
+}
+
+/// Com o diretório no ar mas sem conhecer o contato, o endereço guardado basta.
+#[tokio::test]
+async fn stored_address_works_when_directory_does_not_know_the_peer() {
+    let (_d1, addr1) = dir().await;
+    let (_d2, addr2) = dir().await;
+    let (sa, sb) = (key(), key());
+    let (pa, pb) = (*PublicKey::from(&sa).as_bytes(), *PublicKey::from(&sb).as_bytes());
+    let mut b = Node::start(cfg(sb, &addr1, vec![pa])).await.unwrap();
+    let real = directory::lookup(&addr1, &pb).await.unwrap().unwrap();
+    let a = Node::start(NodeConfig { known: vec![(pb, real)], ..cfg(sa, &addr2, vec![]) }).await.unwrap();
+    let answer = tokio::spawn(async move {
+        let inc = timeout(Duration::from_secs(15), b.next_incoming()).await.unwrap().unwrap();
+        (inc.accept(Mulaw::new()).await.unwrap(), b)
+    });
+    let ca = a.dial(pb, Mulaw::new(), Duration::from_secs(15)).await.unwrap();
+    let (_cb, _b) = answer.await.unwrap();
+    ca.hangup();
+}
+
+/// Os endereços dos contatos são guardados sozinhos, sem precisar ligar antes.
+#[tokio::test]
+async fn contacts_addresses_are_stored_in_background() {
+    let (_d, addr) = dir().await;
+    let (sa, sb) = (key(), key());
+    let pb = *PublicKey::from(&sb).as_bytes();
+    let _b = Node::start(cfg(sb, &addr, vec![])).await.unwrap();
+    let a = Node::start(cfg(sa, &addr, vec![pb])).await.unwrap();
+    timeout(Duration::from_secs(5), async {
+        while a.known().is_empty() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("endereço do contato não foi guardado");
+    assert_eq!(a.known()[0].0, pb);
+}

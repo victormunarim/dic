@@ -13,7 +13,7 @@ use std::{
     io,
     net::SocketAddr,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use tokio::task::JoinHandle;
@@ -27,10 +27,16 @@ use crate::{
     upnp,
     directory::{self, REPUBLISH, RelayInfo, dest_for},
     media::codec::Codec,
-    phone::{ActiveCall, CallError, IncomingCall, Phone, call, call_over},
+    phone::{self, ActiveCall, CallError, IncomingCall, Phone, call, call_over},
     punch::Punch,
     transport::{CircuitClient, ClientOptions, RelayServer, ServerConfig, allow_list},
 };
+
+/// Depois de um furo de NAT que falhou, quanto tempo a ligação para o mesmo contato nem tenta de novo.
+const NO_PUNCH_FOR: Duration = Duration::from_secs(300);
+
+/// A cada quantas renovações no diretório os endereços dos contatos são atualizados.
+const REFRESH_KNOWN_EVERY: u32 = 5;
 
 /// Porta de relay preferida; se estiver ocupada, o sistema escolhe outra.
 pub const DEFAULT_RELAY_PORT: u16 = 4001;
@@ -80,16 +86,58 @@ pub struct Dialer {
     relay_port: u16,
     punch: Option<Arc<Punch>>,
     known: Known,
+    /// Contatos que não deixaram furar o NAT há pouco: pula o furo até a data indicada.
+    no_punch: Arc<Mutex<HashMap<[u8; 32], Instant>>>,
 }
 
 type Known = Arc<Mutex<HashMap<[u8; 32], RelayInfo>>>;
 
-/// Vale a pena tentar o endereço guardado se o relay ainda aceita conexões.
-async fn relay_up(addr: &str) -> bool {
-    matches!(tokio::time::timeout(Duration::from_secs(2), tokio::net::TcpStream::connect(addr)).await, Ok(Ok(_)))
+/// Consulta o relay de cada contato (até 32) e guarda o endereço. Para na primeira falha do diretório.
+async fn refresh_known(directory: &str, contacts: &phone::Contacts, known: &Known) {
+    let keys: Vec<[u8; 32]> = contacts.lock().unwrap().iter().take(32).copied().collect();
+    for k in keys {
+        match directory::lookup(directory, &k).await {
+            Ok(Some(r)) => {
+                known.lock().unwrap().insert(k, r);
+            }
+            Ok(None) => {}
+            Err(_) => return,
+        }
+    }
+}
+
+/// Acrescenta um aviso à nota de rede, separando por `; `.
+fn push_note(note: &mut Option<String>, add: String) {
+    *note = Some(match note.take() {
+        Some(n) => format!("{n}; {add}"),
+        None => add,
+    });
+}
+
+/// Espera o circuito do cliente ficar pronto, até `limit`.
+async fn ready_within(client: &CircuitClient, limit: Duration) -> bool {
+    tokio::time::timeout(limit, async {
+        loop {
+            if client.status().await.is_some_and(|s| s.active.is_some_and(|a| a.ready)) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .is_ok()
 }
 
 impl Dialer {
+    /// Cliente de circuito até `exit`. Sem outros relays, o primeiro salto é o próprio relay (por loopback).
+    fn client(&self, peer: &[u8; 32], exit: &RelayInfo, mut relays: Vec<Candidate>) -> CircuitClient {
+        // Último recurso para o primeiro salto: o próprio relay (por loopback). Perde o anonimato
+        // perante o outro lado, mas permite ligar quando só há duas pessoas online.
+        relays.push(Candidate { addr: format!("127.0.0.1:{}", self.relay_port), public: self.mine.onion, link_public: self.mine.link, score: 0.5 });
+        relays.push(exit.candidate());
+        let cfg = ManagerConfig { exit_addr: Some(exit.addr.clone()), ..Default::default() };
+        CircuitClient::spawn_with(CircuitManager::new(cfg, &dest_for(peer), relays), Duration::from_secs(3), ClientOptions::default())
+    }
     pub fn public_key(&self) -> [u8; 32] {
         *PublicKey::from(&self.secret).as_bytes()
     }
@@ -97,32 +145,32 @@ impl Dialer {
     /// Liga para `peer`: tenta o furo de NAT; se não der, acha o relay dele no diretório, sorteia primeiros saltos e chama.
     pub async fn dial<C: Codec + Send + 'static>(&self, peer: [u8; 32], codec: C, wait: Duration) -> Result<ActiveCall, DialError> {
         // Caminho direto por furo de NAT; se não der, cai no circuito.
-        let codec = if let Some(p) = &self.punch {
-            match p.dial(&peer, Duration::from_secs(6)).await {
+        let skip = self.no_punch.lock().unwrap().get(&peer).is_some_and(|until| *until > Instant::now());
+        let codec = match &self.punch {
+            Some(p) if !skip => match p.dial(&peer, Duration::from_secs(6)).await {
                 Ok(c) => return Ok(call_over(c.tx, c.rx, &self.secret, &PublicKey::from(peer), codec, wait).await?),
-                Err(_) => codec,
-            }
-        } else {
-            codec
+                Err(_) => {
+                    self.no_punch.lock().unwrap().insert(peer, Instant::now() + NO_PUNCH_FOR);
+                    codec
+                }
+            },
+            _ => codec,
         };
         let me = *PublicKey::from(&self.secret).as_bytes();
-        // Endereço guardado da última vez: se o relay responde, o diretório nem entra na conversa.
+        // Endereço guardado da última vez: se o circuito fica pronto, o diretório nem entra na conversa.
+        // Endereço velho (relay sumiu, ou outra máquina no mesmo IP) nunca completa o handshake.
         let cached = self.known.lock().unwrap().get(&peer).cloned();
-        let (exit, mut relays) = match cached {
-            Some(k) if relay_up(&k.addr).await => (k, Vec::new()),
-            _ => {
-                let exit = directory::lookup(&self.directory, &peer).await?.ok_or(DialError::NotFound)?;
-                self.known.lock().unwrap().insert(peer, exit.clone());
-                let relays = directory::sample(&self.directory, 3, &[me, peer]).await?.iter().map(RelayInfo::candidate).collect();
-                (exit, relays)
+        if let Some(k) = cached {
+            let client = self.client(&peer, &k, Vec::new());
+            if ready_within(&client, Duration::from_secs(5)).await {
+                return Ok(call(client, &self.secret, &PublicKey::from(peer), codec, wait).await?);
             }
-        };
-        // Último recurso para o primeiro salto: o próprio relay (por loopback). Perde o anonimato
-        // perante o outro lado, mas permite ligar quando só há duas pessoas online.
-        relays.push(Candidate { addr: format!("127.0.0.1:{}", self.relay_port), public: self.mine.onion, link_public: self.mine.link, score: 0.5 });
-        relays.push(exit.candidate());
-        let cfg = ManagerConfig { exit_addr: Some(exit.addr.clone()), ..Default::default() };
-        let client = CircuitClient::spawn_with(CircuitManager::new(cfg, &dest_for(&peer), relays), Duration::from_secs(3), ClientOptions::default());
+            client.stop();
+        }
+        let exit = directory::lookup(&self.directory, &peer).await?.ok_or(DialError::NotFound)?;
+        self.known.lock().unwrap().insert(peer, exit.clone());
+        let relays = directory::sample(&self.directory, 3, &[me, peer]).await?.iter().map(RelayInfo::candidate).collect();
+        let client = self.client(&peer, &exit, relays);
         Ok(call(client, &self.secret, &PublicKey::from(peer), codec, wait).await?)
     }
 }
@@ -132,7 +180,8 @@ pub struct Node {
     directory: String,
     phone: Phone,
     _relay: RelayServer,
-    mine: RelayInfo,
+    /// Endereço publicado; vale o local até o diretório responder.
+    addr: Arc<Mutex<String>>,
     last_error: Arc<Mutex<Option<String>>>,
     republish: JoinHandle<()>,
     note: Option<String>,
@@ -186,10 +235,7 @@ impl Node {
             match Punch::start(&directory, &secret, phone.datagram_port()).await {
                 Ok(p) => Some(Arc::new(p)),
                 Err(e) => {
-                    note = Some(match note {
-                        Some(n) => format!("{n}; sem furo de NAT: {e}"),
-                        None => format!("sem furo de NAT: {e}"),
-                    });
+                    push_note(&mut note, format!("sem furo de NAT: {e}"));
                     None
                 }
             }
@@ -200,14 +246,10 @@ impl Node {
             Ok(a) => (a, true),
             Err(e) => {
                 *last_error.lock().unwrap() = Some(e.to_string());
-                let warn = format!("diretório fora do ar ({e}): só chegam a você os que já têm o seu endereço; tentando de novo a cada {}s", REPUBLISH.as_secs());
-                note = Some(match note {
-                    Some(n) => format!("{n}; {warn}"),
-                    None => warn,
-                });
                 (public_addr.clone().unwrap_or_else(|| format!("127.0.0.1:{port}")), false)
             }
         };
+        let addr_now = Arc::new(Mutex::new(addr.clone()));
         let mine = RelayInfo { addr, onion, link };
         // Pede ao diretório para conectar de fora ao relay publicado: avisa cedo se ninguém consegue ligar para você.
         if published
@@ -219,26 +261,36 @@ impl Node {
             } else {
                 format!("o relay {} não é alcançável de fora: ninguém consegue ligar para você. Libere a porta {port} no roteador/firewall ou informe o endereço público", mine.addr)
             };
-            note = Some(match note {
-                Some(n) => format!("{n}; {warn}"),
-                None => warn,
-            });
+            push_note(&mut note, warn);
         }
-        let dialer = Dialer { secret: secret.clone(), directory: directory.clone(), mine: mine.clone(), relay_port: port, punch, known: known.clone() };
+        let dialer = Dialer { secret: secret.clone(), directory: directory.clone(), mine: mine.clone(), relay_port: port, punch, known: known.clone(), no_punch: Arc::default() };
         let republish = {
-            let (directory, secret, last_error, public_addr) = (directory.clone(), secret.clone(), last_error.clone(), public_addr);
+            let (directory, secret, last_error, public_addr, addr_now) = (directory.clone(), secret.clone(), last_error.clone(), public_addr, addr_now.clone());
+            let (contacts, known) = (phone.contacts(), known.clone());
             tokio::spawn(async move {
+                let mut round = 0u32;
                 loop {
+                    // Guarda o endereço dos contatos agora (e de tempos em tempos) para ligar a eles com o diretório fora.
+                    if round.is_multiple_of(REFRESH_KNOWN_EVERY) {
+                        refresh_known(&directory, &contacts, &known).await;
+                    }
+                    round = round.wrapping_add(1);
                     tokio::time::sleep(REPUBLISH).await;
                     if let Some(m) = &mapping {
                         let _ = m.renew().await;
                     }
                     let r = directory::publish(&directory, &secret, port, onion, link, public_addr.as_deref()).await;
-                    *last_error.lock().unwrap() = r.err().map(|e| e.to_string());
+                    match r {
+                        Ok(a) => {
+                            *addr_now.lock().unwrap() = a;
+                            *last_error.lock().unwrap() = None;
+                        }
+                        Err(e) => *last_error.lock().unwrap() = Some(e.to_string()),
+                    }
                 }
             })
         };
-        Ok(Self { secret, directory, phone, _relay: relay, mine, last_error, republish, note, dialer, known })
+        Ok(Self { secret, directory, phone, _relay: relay, last_error, republish, note, dialer, known, addr: addr_now })
     }
 
     /// Aceita convites de `keys` além dos contatos (membros de uma sala).
@@ -261,13 +313,20 @@ impl Node {
     }
 
     /// Endereço publicado no diretório (o que os outros usam para chegar ao seu relay).
-    pub fn published_addr(&self) -> &str {
-        &self.mine.addr
+    pub fn published_addr(&self) -> String {
+        self.addr.lock().unwrap().clone()
     }
 
     /// Aviso sobre a rede (porta aberta por UPnP, ou por que não foi possível), se houver.
-    pub fn network_note(&self) -> Option<&str> {
-        self.note.as_deref()
+    /// Inclui o aviso de diretório fora do ar enquanto durar.
+    pub fn network_note(&self) -> Option<String> {
+        let down = self.directory_error().map(|e| {
+            format!("diretório fora do ar ({e}): só chegam a você os que já têm o seu endereço; tentando de novo a cada {}s", REPUBLISH.as_secs())
+        });
+        match (self.note.clone(), down) {
+            (Some(n), Some(d)) => Some(format!("{n}; {d}")),
+            (n, d) => n.or(d),
+        }
     }
 
     /// Erro da última renovação no diretório, se houve. `None`: tudo certo.
