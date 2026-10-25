@@ -83,7 +83,7 @@ pub mod timer;
 pub mod video;
 #[cfg(feature = "capture")]
 pub mod capture;
-#[cfg(feature = "portal")]
+#[cfg(all(feature = "portal", unix))]
 pub mod portal;
 #[cfg(feature = "net")]
 pub mod upnp;

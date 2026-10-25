@@ -83,8 +83,14 @@ pub(crate) fn on_screen_event(state: &ScreenState, who: [u8; 32], dec: &mut Opti
     }
 }
 
-/// Abre a captura da tela: pelo portal (PipeWire) no Wayland e pelo X11 nos outros casos; se a
-/// primeira falhar, tenta a outra. Fora daqui só há o trait `ScreenSource`.
+/// Abre a captura da tela: no Windows pelo GDI; no Unix pelo portal (PipeWire) no Wayland e pelo
+/// X11 nos outros casos, e se a primeira falhar tenta a outra. Fora daqui só há o trait `ScreenSource`.
+#[cfg(windows)]
+async fn open_source() -> Result<Box<dyn ScreenSource + Send>, String> {
+    clam::capture::GdiScreen::open().map(|s| Box::new(s) as Box<dyn ScreenSource + Send>).map_err(|e| e.to_string())
+}
+
+#[cfg(unix)]
 async fn open_source() -> Result<Box<dyn ScreenSource + Send>, String> {
     async fn portal() -> Result<Box<dyn ScreenSource + Send>, String> {
         clam::portal::PortalScreen::open().await.map(|s| Box::new(s) as Box<dyn ScreenSource + Send>).map_err(|e| e.to_string())
