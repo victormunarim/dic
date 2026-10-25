@@ -50,7 +50,7 @@ Banda total por sentido com o circuito: 1 célula de 256 B por 20 ms (~100 kbps)
 ### Limites
 
 - **Opus não está incluído**: exige `libopus` (C) e `cmake` neste ambiente. Implemente `Codec` com a crate de sua escolha; o quadro codificado deve ter até 167 bytes (`MAX_PAYLOAD`), sobra para Opus a 32–64 kbps em 20 ms.
-- Sem controle de congestionamento nem retransmissão (voz tolera perda), sem cancelamento de eco, sem relógio de áudio (o app amostra o dispositivo e lida com deriva).
+- Sem controle de congestionamento nem retransmissão (voz tolera perda), sem relógio de áudio (o app amostra o dispositivo e lida com deriva).
 - `tests/media.rs` cobre rede limpa, perda de 5% com jitter e duplicatas, pacotes forjados e áudio bit a bit idêntico ao do codec. Não há teste sobre o circuito real.
 
 ### Telefone: chamar e atender pelo circuito (`clam::phone`, feature `net`)
@@ -146,7 +146,7 @@ cargo run --release --features gui --example gui
 2. Informe o **servidor (diretório)** `host:porta` e clique **Ficar online**. O indicador mostra Offline / Conectando / Online.
 3. **Contatos**: cada um tem *Ligar* e *Remover*; para adicionar, nome e código de contato. Quem não estiver na lista (nem numa sala sua) não recebe resposta; contatos são atendidos automaticamente. *Ligar para um código* aceita um código ou nome sem salvar. **Desligar** encerra.
 4. Os campos são gravados em `~/.clam-gui.conf` (`%USERPROFILE%` no Windows), **inclusive a chave secreta**; no Unix o arquivo fica `0600`.
-5. **Áudio real** (feature `audio`): `--features gui,audio` e marque *Microfone e alto-falante*. Usa `cpal`, 16 kHz mono (G.722), filas de 400 ms. O microfone passa pelo `sonora` (WebRTC em Rust puro): filtro passa-altas, cancelamento de eco, supressão de ruído e ganho automático (cada estágio se liga e desliga com `Audio::set_processing(Processing)`; a GUI desliga os que ela mesma faz, ver `docs/GUI.md`). Fones ainda são o mais seguro. Sem a opção, cai para tom (440 Hz quem liga, 660 Hz quem atende). No Linux a compilação exige `pkg-config` e `libasound2-dev`.
+5. **Áudio real** (feature `audio`): `--features gui,audio` e marque *Microfone e alto-falante*. Usa `cpal`, 16 kHz mono (G.722), filas de 400 ms. O microfone passa pelo `sonora` (WebRTC em Rust puro): filtro passa-altas, cancelamento de eco, supressão de ruído e ganho automático (cada estágio se liga e desliga com `Audio::set_processing(Processing)`, e `Audio::echo_stats()` diz quantos dB de eco saem; a referência do eco são só pedaços inteiros de 10 ms do que o alto-falante consumiu, sem zeros de preenchimento; a GUI desliga os que ela mesma faz, ver `docs/GUI.md`). Fones ainda são o mais seguro. Sem a opção, cai para tom (440 Hz quem liga, 660 Hz quem atende). No Linux a compilação exige `pkg-config` e `libasound2-dev`.
 6. `eframe` fica atrás da feature `gui`, fixado em 0.32 (a 0.37 conflita com o libp2p por `js-sys`).
 
 O fluxo antigo, com relays manuais, continua em `examples/call.rs` e `examples/measure.rs`.

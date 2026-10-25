@@ -40,6 +40,11 @@ pub(crate) struct AudioPrefs {
     pub(crate) agc: bool,
     /// Remoção de ruído por rede neural (RNNoise): tira teclado, ventilador, vozes ao fundo; também diz à porta o que é voz.
     pub(crate) denoise: bool,
+    /// Cancelamento de eco do WebRTC: tira do microfone o que saiu pelo alto-falante.
+    pub(crate) echo_cancel: bool,
+    /// Supressão do eco que sobra: com o outro lado falando, abaixa o microfone enquanto ele só está captando
+    /// o eco (bem mais baixo que a voz que sai pelo alto-falante).
+    pub(crate) echo_suppress: bool,
 }
 
 impl AudioPrefs {
@@ -64,12 +69,14 @@ impl AudioPrefs {
             gate_depth_db: num("gate_depth_db", &Self::GATE_DEPTH_DB, d.gate_depth_db),
             agc: flag("agc", d.agc),
             denoise: flag("denoise", d.denoise),
+            echo_cancel: flag("echo_cancel", d.echo_cancel),
+            echo_suppress: flag("echo_suppress", d.echo_suppress),
         }
     }
 
     fn to_conf(self) -> String {
         format!(
-            "volume={:.2}\nmic_gain={:.2}\nhigh_pass={}\ngate={}\ngate_db={:.0}\ngate_depth_db={:.0}\nagc={}\ndenoise={}\n",
+            "volume={:.2}\nmic_gain={:.2}\nhigh_pass={}\ngate={}\ngate_db={:.0}\ngate_depth_db={:.0}\nagc={}\ndenoise={}\necho_cancel={}\necho_suppress={}\n",
             self.volume,
             self.mic_gain,
             u8::from(self.high_pass),
@@ -77,14 +84,16 @@ impl AudioPrefs {
             self.gate_db,
             self.gate_depth_db,
             u8::from(self.agc),
-            u8::from(self.denoise)
+            u8::from(self.denoise),
+            u8::from(self.echo_cancel),
+            u8::from(self.echo_suppress)
         )
     }
 }
 
 impl Default for AudioPrefs {
     fn default() -> Self {
-        AudioPrefs { volume: 1.0, mic_gain: 1.0, high_pass: true, gate: false, gate_db: -45.0, gate_depth_db: 40.0, agc: true, denoise: true }
+        AudioPrefs { volume: 1.0, mic_gain: 1.0, high_pass: true, gate: false, gate_db: -45.0, gate_depth_db: 40.0, agc: true, denoise: true, echo_cancel: true, echo_suppress: true }
     }
 }
 
@@ -483,7 +492,7 @@ mod tests {
 
     #[test]
     fn audio_prefs_round_trip_and_survive_bad_values() {
-        let prefs = AudioPrefs { volume: 1.5, mic_gain: 2.25, high_pass: false, gate: true, gate_db: -38.0, gate_depth_db: 24.0, agc: true, denoise: false };
+        let prefs = AudioPrefs { volume: 1.5, mic_gain: 2.25, high_pass: false, gate: true, gate_db: -38.0, gate_depth_db: 24.0, agc: true, denoise: false, echo_cancel: false, echo_suppress: false };
         let kv = |text: &str| -> HashMap<String, String> { text.lines().filter_map(|l| l.split_once('=')).map(|(k, v)| (k.to_string(), v.to_string())).collect() };
         assert_eq!(AudioPrefs::from_kv(&kv(&prefs.to_conf())), prefs);
         // Arquivo de versão anterior, sem nenhum ajuste: tudo no padrão.

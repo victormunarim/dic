@@ -248,25 +248,8 @@ impl Audio {
         }
         let mut pcm: Vec<i16> = q.drain(..self.frame).collect();
         drop(q);
-        // Referência de eco: o que o alto-falante consumiu no mesmo intervalo (zeros se não tocou nada).
-        let mut render: Vec<i16> = {
-            let mut t = self.tap.lock().unwrap();
-            if t.len() > self.frame * 4 {
-                let extra = t.len() - self.frame * 2;
-                t.drain(..extra);
-            }
-            let n = t.len().min(self.frame);
-            t.drain(..n).collect()
-        };
-        render.resize(self.frame, 0);
-        let (chunk, mut guard) = (self.frame / 2, self.apm.lock().unwrap());
-        let apm = &mut guard.0;
-        let mut sink = vec![0i16; chunk];
-        for (r, c) in render.chunks(chunk).zip(pcm.chunks_mut(chunk)) {
-            let src = c.to_vec();
-            let _ = apm.process_render_i16(r, &mut sink);
-            let _ = apm.process_capture_i16(&src, c);
-        }
+        let mut guard = self.apm.lock().unwrap();
+        clean_capture(&mut guard.0, &mut pcm, &mut self.tap.lock().unwrap(), self.frame / 2);
         Some(pcm)
     }
 
@@ -277,6 +260,14 @@ impl Audio {
         if guard.1 != on {
             *guard = (voice_processor(self.rate, on), on);
         }
+    }
+
+    /// O que o cancelador de eco mede agora: quantos dB ele tira do eco (só tem valor depois que o
+    /// alto-falante tocou algo) e o atraso que achou entre tocar e o microfone ouvir.
+    pub fn echo_stats(&self) -> EchoStats {
+        let guard = self.apm.lock().unwrap();
+        let st = guard.0.statistics();
+        EchoStats { erle_db: st.echo_return_loss_enhancement, delay_ms: st.delay_ms }
     }
 
     /// Tratamento do microfone em uso.
@@ -321,6 +312,13 @@ pub struct Processing {
     pub auto_gain: bool,
 }
 
+/// Medidas do cancelador de eco, para diagnóstico.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct EchoStats {
+    pub erle_db: Option<f64>,
+    pub delay_ms: Option<i32>,
+}
+
 impl Default for Processing {
     fn default() -> Self {
         Processing { high_pass: true, echo_cancel: true, noise_suppression: true, auto_gain: true }
@@ -343,6 +341,32 @@ fn voice_processor(rate: u32, on: Processing) -> AudioProcessing {
         .capture_config(StreamConfig::new(rate, 1))
         .render_config(StreamConfig::new(rate, 1))
         .build()
+}
+
+/// Passa `pcm` (microfone) pelo tratamento, dando ao cancelador de eco o que o alto-falante tocou como
+/// referência. `tap` é a fila do que o alto-falante já consumiu e `chunk` o tamanho do passo do tratamento
+/// (10 ms).
+///
+/// A referência entra só em pedaços inteiros, quando existem, e nunca é preenchida com zeros: o alto-falante
+/// e o microfone entregam em rajadas diferentes, e zeros no meio da referência a deslocariam no tempo em
+/// relação ao eco, que o cancelador teria de reaprender a cada vez.
+fn clean_capture(apm: &mut AudioProcessing, pcm: &mut [i16], tap: &mut VecDeque<i16>, chunk: usize) {
+    // Atrasou demais (alto-falante parado e voltando): fica só com os dois pedaços mais novos.
+    if tap.len() > chunk * 4 {
+        let extra = (tap.len() / chunk - 2) * chunk;
+        tap.drain(..extra);
+    }
+    let (mut render, mut sink) = (vec![0i16; chunk], vec![0i16; chunk]);
+    for c in pcm.chunks_mut(chunk) {
+        if tap.len() >= chunk {
+            for (r, t) in render.iter_mut().zip(tap.drain(..chunk)) {
+                *r = t;
+            }
+            let _ = apm.process_render_i16(&render, &mut sink);
+        }
+        let src = c.to_vec();
+        let _ = apm.process_capture_i16(&src, c);
+    }
 }
 
 fn push_capped(q: &mut VecDeque<i16>, it: impl Iterator<Item = i16>, max: usize) {
@@ -643,6 +667,122 @@ mod tests {
         let none = Processing { high_pass: false, echo_cancel: false, noise_suppression: false, auto_gain: false };
         assert!((run(none) - 1.0).abs() < 0.01, "tudo desligado deveria deixar passar");
         assert!(run(Processing { noise_suppression: true, ..none }) < 0.95, "a supressão de ruído ligada deveria baixar o ruído");
+    }
+
+    /// Eco simulado: o que toca volta ao microfone atrasado e atenuado. Devolve quantos dB o cancelador
+    /// tira do eco depois de convergir (ERLE).
+    fn erle(delay_ms: usize, with_aec: bool) -> f64 {
+        let on = Processing { high_pass: false, echo_cancel: with_aec, noise_suppression: false, auto_gain: false };
+        let mut apm = voice_processor(16000, on);
+        let rms = |v: &[i16]| (v.iter().map(|&x| (x as f64).powi(2)).sum::<f64>() / v.len() as f64).sqrt();
+        let delay = delay_ms * 16;
+        let mut seed = 99u32;
+        let mut far: Vec<i16> = Vec::new();
+        let (mut sink, mut out) = (vec![0i16; 160], vec![0i16; 160]);
+        let (mut e_in, mut e_out) = (0.0, 0.0);
+        let mut smooth = 0.0f64;
+        for n in 0..1500 {
+            // Voz distante: ruído colorido com envelope lento.
+            let mut render = vec![0i16; 160];
+            for r in render.iter_mut() {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                smooth = 0.7 * smooth + 0.3 * (((seed >> 16) as i16) as f64);
+                *r = (smooth * 0.5) as i16;
+            }
+            far.extend_from_slice(&render);
+            // Microfone: só o eco (sala simples: atraso, ganho 0,6, um eco curto a mais).
+            let at = |i: isize| if i >= 0 { far.get(i as usize).copied().unwrap_or(0) as f64 } else { 0.0 };
+            let base = (n * 160) as isize;
+            let capture: Vec<i16> = (0..160).map(|i| {
+                let t = base + i - delay as isize;
+                (0.6 * at(t) + 0.2 * at(t - 40)) as i16
+            }).collect();
+            apm.process_render_i16(&render, &mut sink).unwrap();
+            apm.process_capture_i16(&capture, &mut out).unwrap();
+            if n >= 1300 {
+                e_in += rms(&capture);
+                e_out += rms(&out);
+            }
+        }
+        20.0 * (e_in / e_out.max(1e-9)).log10()
+    }
+
+    #[test]
+    fn echo_canceller_removes_a_delayed_echo() {
+        assert!(erle(80, false) < 1.0, "sem o cancelador não há ganho");
+        let e = erle(80, true);
+        assert!(e > 12.0, "ERLE de {e:.1} dB");
+    }
+
+    /// Eco com o alto-falante e o microfone entregando em rajadas irregulares, como os dispositivos reais.
+    /// `padded` refaz o jeito antigo (referência completada com zeros) para comparar.
+    fn erle_with_bursts(padded: bool) -> f64 {
+        const CH: usize = 160;
+        let mut apm = voice_processor(16000, Processing { high_pass: false, echo_cancel: true, noise_suppression: false, auto_gain: false });
+        let rms = |v: &[i16]| (v.iter().map(|&x| (x as f64).powi(2)).sum::<f64>() / v.len() as f64).sqrt();
+        let (mut seed, mut smooth) = (4242u32, 0.0f64);
+        let mut next = move || {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            smooth = 0.7 * smooth + 0.3 * (((seed >> 16) as i16) as f64);
+            (smooth * 0.5) as i16
+        };
+        let mut far: Vec<i16> = Vec::new();
+        let mut tap: VecDeque<i16> = VecDeque::new();
+        let mut cap_q: VecDeque<i16> = VecDeque::new();
+        let mut jitter = 17u32;
+        let (mut e_in, mut e_out) = (0.0, 0.0);
+        for step in 0..2000usize {
+            // A cada 10 ms toca um pedaço, que chega à fila do eco em rajadas (0 a 3 pedaços de uma vez).
+            let chunk: Vec<i16> = (0..CH).map(|_| next()).collect();
+            far.extend_from_slice(&chunk);
+            let played = &far[far.len() - CH..];
+            tap.extend(played.iter().copied());
+            jitter = jitter.wrapping_mul(1103515245).wrapping_add(12345);
+            // O microfone ouve o eco a 80 ms.
+            let base = (step * CH) as isize - 1280;
+            let echo: Vec<i16> = (0..CH as isize).map(|i| 0.6 * far.get((base + i).max(0) as usize).copied().unwrap_or(0) as f64).map(|x| x as i16).collect();
+            cap_q.extend(echo.iter().copied());
+            // O consumidor só aparece a cada 20 ms.
+            if step % 2 == 1 {
+                let mut pcm: Vec<i16> = cap_q.drain(..2 * CH).collect();
+                let input = pcm.clone();
+                if padded {
+                    let mut render: Vec<i16> = tap.drain(..tap.len().min(2 * CH)).collect();
+                    // Em rajadas, o que chegou até agora é só parte do intervalo.
+                    if (jitter >> 16).is_multiple_of(3) {
+                        let keep = render.len() / 2;
+                        for r in render.drain(keep..).collect::<Vec<_>>().into_iter().rev() {
+                            tap.push_front(r);
+                        }
+                    }
+                    render.resize(2 * CH, 0);
+                    let mut sink = vec![0i16; CH];
+                    for (r, c) in render.chunks(CH).zip(pcm.chunks_mut(CH)) {
+                        let src = c.to_vec();
+                        apm.process_render_i16(r, &mut sink).unwrap();
+                        apm.process_capture_i16(&src, c).unwrap();
+                    }
+                } else {
+                    // Metade das vezes o alto-falante só entregou parte do que tocou neste intervalo.
+                    let hold = if (jitter >> 16).is_multiple_of(3) { tap.len().min(CH) } else { 0 };
+                    let kept: Vec<i16> = tap.drain(tap.len() - hold..).collect();
+                    clean_capture(&mut apm, &mut pcm, &mut tap, CH);
+                    tap.extend(kept);
+                }
+                if step >= 1700 {
+                    e_in += rms(&input);
+                    e_out += rms(&pcm);
+                }
+            }
+        }
+        20.0 * (e_in / e_out.max(1e-9)).log10()
+    }
+
+    #[test]
+    fn echo_canceller_holds_up_when_the_speaker_reference_arrives_in_bursts() {
+        let (old, new) = (erle_with_bursts(true), erle_with_bursts(false));
+        assert!(new > 10.0, "ERLE de {new:.1} dB");
+        assert!(new > old + 6.0, "sem zeros {new:.1} dB, com zeros {old:.1} dB");
     }
 
     #[test]

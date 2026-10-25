@@ -193,7 +193,7 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
                     match open_sound(true, &form, &out) {
                         Some(sound) => {
                             shared.mic_test.store(true, Ordering::Relaxed);
-                            out.line("teste do microfone: você se ouve com um pequeno atraso; use fones para não dar eco");
+                            out.line("teste do microfone: você se ouve com um pequeno atraso; use fones, senão o microfone capta o alto-falante e o teste faz microfonia");
                             tokio::spawn(mic_test(sound, shared.clone(), stop.clone(), out.clone()));
                         }
                         None => shared.in_call.store(false, Ordering::Relaxed),

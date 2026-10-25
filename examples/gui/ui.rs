@@ -300,6 +300,13 @@ impl App {
             .on_hover_text("A linha laranja no medidor. Quanto mais para a esquerda, mais sensível: sons baixos já contam como voz.");
         ui.checkbox(&mut p.denoise, "Remover ruído (rede neural)")
             .on_hover_text("Tira teclado, ventilador, estática e vozes ao fundo (RNNoise). Com ela ligada, a porta e o indicador \"voz\" só contam o que a rede reconhece como fala. Adiciona ~10 ms de atraso.");
+        ui.checkbox(&mut p.echo_cancel, "Cancelar eco do alto-falante")
+            .on_hover_text("Tira do microfone o que saiu pelo alto-falante, para o outro lado não se ouvir de volta. Leva alguns segundos de conversa para aprender a sala. Com fones não é preciso.");
+        ui.checkbox(&mut p.echo_suppress, "Abaixar o microfone enquanto só há eco")
+            .on_hover_text("Reforço para o eco que o cancelador deixa passar: com o outro lado falando, o microfone cai 18 dB enquanto estiver mais de 20 dB abaixo do que sai pelo alto-falante. Quem fala baixinho por cima do outro pode ser cortado; com fones, desligue.");
+        if let Some(erle) = a.echo_erle().filter(|_| p.echo_cancel && (in_call || testing)) {
+            ui.weak(format!("Eco cancelado: {erle:.0} dB"));
+        }
         ui.checkbox(&mut p.gate, "Silenciar o que não é voz")
             .on_hover_text("Quando o microfone fica abaixo do limiar, o som enviado é reduzido. Ajuste a sensibilidade até a linha ficar logo acima do ruído.");
         ui.add_enabled(p.gate, egui::Slider::new(&mut p.gate_depth_db, AudioPrefs::GATE_DEPTH_DB).suffix(" dB").text("Redução do ruído"));
@@ -518,7 +525,7 @@ impl eframe::App for App {
                         conf_path().display(),
                         if self.form.loaded { "lida ao abrir" } else { "não encontrada ao abrir; será criada" }
                     ));
-                    ui.add_enabled(offline, egui::Checkbox::new(&mut self.form.use_audio, "Usar microfone e alto-falante (use fones para não dar eco)"));
+                    ui.add_enabled(offline, egui::Checkbox::new(&mut self.form.use_audio, "Usar microfone e alto-falante"));
                     #[cfg(feature = "audio")]
                     self.devices_ui(ui, offline);
                     ui.add_space(4.0);

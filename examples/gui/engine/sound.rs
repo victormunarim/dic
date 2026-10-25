@@ -26,14 +26,17 @@ impl Sound {
 }
 
 /// Diz ao tratamento WebRTC do microfone quais estágios ficam: os que a janela já faz (filtro de graves,
-/// ganho automático, remoção de ruído) saem de lá, para não serem aplicados duas vezes.
+/// ganho automático, remoção de ruído) saem de lá, para não serem aplicados duas vezes. Aproveita para
+/// anotar quanto o cancelador de eco está tirando, que a janela mostra.
 #[cfg(feature = "audio")]
-fn tune(sound: &Sound, p: &AudioPrefs) {
-    sound.set_processing(clam::audio::Processing { high_pass: false, echo_cancel: true, noise_suppression: !p.denoise, auto_gain: false });
+fn tune(sound: &Sound, audio: &Controls) {
+    let p = audio.prefs();
+    sound.set_processing(clam::audio::Processing { high_pass: false, echo_cancel: p.echo_cancel, noise_suppression: !p.denoise, auto_gain: false });
+    audio.set_echo_erle(if p.echo_cancel { sound.echo_stats().erle_db } else { None });
 }
 
 #[cfg(not(feature = "audio"))]
-fn tune(sound: &Sound, _: &AudioPrefs) {
+fn tune(sound: &Sound, _: &Controls) {
     match *sound {}
 }
 
@@ -45,7 +48,7 @@ pub(crate) fn open_sound(want: bool, form: &Form, out: &Sink) -> Option<Sound> {
     #[cfg(feature = "audio")]
     match Sound::open_with(G722::RATE, &form.devices()) {
         Ok(s) => {
-            out.line(format!("microfone e alto-falante abertos (use fones: não há cancelamento de eco): {}", s.info()));
+            out.line(format!("microfone e alto-falante abertos (cancelamento de eco ligado; fones ainda são o mais seguro): {}", s.info()));
             // Bipe de 0,3 s: se não soar, o problema é a saída do sistema, não a chamada.
             let beep: Vec<i16> = (0..4800).map(|i| (8000.0 * (std::f64::consts::TAU * 440.0 * i as f64 / 16000.0).sin()) as i16).collect();
             s.play(&beep);
@@ -62,7 +65,6 @@ pub(crate) fn open_sound(want: bool, form: &Form, out: &Sink) -> Option<Sound> {
 }
 
 /// Ajustes de áudio da janela, lidos pelo motor a cada quadro.
-#[derive(Default)]
 pub(crate) struct Controls {
     pub(crate) muted: AtomicBool,
     prefs: Mutex<AudioPrefs>,
@@ -70,9 +72,33 @@ pub(crate) struct Controls {
     voice: Mutex<Voice>,
     /// Nível do microfone, de 0.0 a 1.0, em bits de `f32`.
     level: AtomicU32,
+    /// O que o alto-falante está tocando (dBFS, em bits de `f32`) e por quantos quadros de microfone ainda
+    /// vale, já que o eco chega ao microfone depois de uns 100 ms.
+    far_db: AtomicU32,
+    far_hold: AtomicU32,
+    /// Quanto o cancelador de eco tira do eco (dB, em bits de `f32`; NaN = sem medida ainda).
+    echo_erle: AtomicU32,
     /// Há voz acima do limiar de sensibilidade (e o microfone não está mudo).
     speaking: AtomicBool,
 }
+
+impl Default for Controls {
+    fn default() -> Self {
+        Controls {
+            muted: AtomicBool::new(false),
+            prefs: Mutex::default(),
+            voice: Mutex::default(),
+            level: AtomicU32::new(0),
+            far_db: AtomicU32::new((-120f32).to_bits()),
+            far_hold: AtomicU32::new(0),
+            echo_erle: AtomicU32::new(f32::NAN.to_bits()),
+            speaking: AtomicBool::new(false),
+        }
+    }
+}
+
+/// Quadros de microfone (20 ms) em que o que o alto-falante tocou ainda conta como possível eco.
+const FAR_HOLD_FRAMES: u32 = 8;
 
 impl Controls {
     pub(crate) fn prefs(&self) -> AudioPrefs {
@@ -93,6 +119,31 @@ impl Controls {
             self.speaking.store(false, Ordering::Relaxed);
         }
     }
+    /// Anota um quadro que vai para o alto-falante (já no volume escolhido).
+    pub(crate) fn note_played(&self, f: &[i16]) {
+        let db = rms_db(&f.iter().map(|x| *x as f32).collect::<Vec<_>>());
+        if db > ECHO_FAR_MIN_DB {
+            let held = if self.far_hold.load(Ordering::Relaxed) > 0 { f32::from_bits(self.far_db.load(Ordering::Relaxed)) } else { -120.0 };
+            self.far_db.store(db.max(held).to_bits(), Ordering::Relaxed);
+            self.far_hold.store(FAR_HOLD_FRAMES, Ordering::Relaxed);
+        }
+    }
+    /// O que o alto-falante tocou há pouco (-120 se está calado), gastando um quadro da validade.
+    fn far_now(&self) -> f32 {
+        match self.far_hold.load(Ordering::Relaxed) {
+            0 => -120.0,
+            n => {
+                self.far_hold.store(n - 1, Ordering::Relaxed);
+                f32::from_bits(self.far_db.load(Ordering::Relaxed))
+            }
+        }
+    }
+    pub(crate) fn echo_erle(&self) -> Option<f32> {
+        Some(f32::from_bits(self.echo_erle.load(Ordering::Relaxed))).filter(|v| v.is_finite())
+    }
+    pub(crate) fn set_echo_erle(&self, v: Option<f64>) {
+        self.echo_erle.store(v.map_or(f32::NAN, |v| v as f32).to_bits(), Ordering::Relaxed);
+    }
     pub(crate) fn speaking(&self) -> bool {
         self.speaking.load(Ordering::Relaxed)
     }
@@ -101,7 +152,7 @@ impl Controls {
     /// antes de porta e ganhos, para o medidor mostrar que o microfone funciona), e zera se estiver mudo.
     pub(crate) fn outgoing(&self, f: &mut [i16]) {
         let prefs = self.prefs();
-        let m = self.voice.lock().unwrap_or_else(|e| e.into_inner()).process(f, &prefs);
+        let m = self.voice.lock().unwrap_or_else(|e| e.into_inner()).process(f, &prefs, self.far_now());
         self.level.store(m.level.to_bits(), Ordering::Relaxed);
         if self.muted.load(Ordering::Relaxed) {
             f.fill(0);
@@ -131,7 +182,7 @@ pub(crate) fn tone(hz: f64, n: usize) -> Vec<i16> {
 pub(crate) fn mic_frames(sound: Option<&Sound>, hz: f64, n: usize, shared: &Shared) -> Vec<Vec<i16>> {
     let mut frames: Vec<Vec<i16>> = match sound {
         Some(s) => {
-            tune(s, &shared.audio.prefs());
+            tune(s, &shared.audio);
             std::iter::from_fn(|| s.mic_frame()).take(2).collect()
         }
         None => vec![tone(hz, n)],
@@ -144,6 +195,7 @@ pub(crate) fn mic_frames(sound: Option<&Sound>, hz: f64, n: usize, shared: &Shar
 pub(crate) fn play_scaled(sound: Option<&Sound>, mut f: Vec<i16>, shared: &Shared) {
     if let Some(s) = sound {
         scale_pcm(&mut f, shared.audio.volume());
+        shared.audio.note_played(&f);
         s.play(&f);
     }
 }
@@ -162,7 +214,7 @@ pub(crate) async fn mic_test(sound: Sound, shared: Arc<Shared>, stop: Arc<Atomic
     let mut n = 0u32;
     while shared.mic_test.load(Ordering::Relaxed) && !stop.load(Ordering::Relaxed) {
         tick.tick().await;
-        tune(&sound, &shared.audio.prefs());
+        tune(&sound, &shared.audio);
         while let Some(mut f) = sound.mic_frame() {
             shared.audio.outgoing(&mut f);
             play_scaled(Some(&sound), f, &shared);
@@ -220,6 +272,26 @@ mod tests {
         // 300 de amplitude ≈ -43 dBFS: acima de -55, abaixo de -30.
         assert!(quiet(-55.0));
         assert!(!quiet(-30.0));
+    }
+
+    #[test]
+    fn what_the_speaker_played_counts_as_far_end_for_a_few_frames_only() {
+        let c = Controls::default();
+        assert_eq!(c.far_now(), -120.0);
+        c.note_played(&sine_frame(8000.0));
+        let loud = c.far_now();
+        assert!(loud > -20.0, "{loud}");
+        // Um quadro mais baixo logo depois não derruba o nível lembrado.
+        c.note_played(&sine_frame(500.0));
+        assert!(c.far_now() > loud - 0.1);
+        // Passada a validade, volta a calar.
+        for _ in 0..FAR_HOLD_FRAMES {
+            c.far_now();
+        }
+        assert_eq!(c.far_now(), -120.0);
+        // Silêncio do alto-falante não conta.
+        c.note_played(&[0; 320]);
+        assert_eq!(c.far_now(), -120.0);
     }
 
     #[test]

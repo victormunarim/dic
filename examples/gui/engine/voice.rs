@@ -26,6 +26,14 @@ const AGC_MAX_BOOST_DB: f32 = 24.0;
 const AGC_MAX_CUT_DB: f32 = -12.0;
 /// Abaixo disso o quadro é ruído de fundo: o volume automático não o reforça.
 const AGC_FLOOR_DB: f32 = -50.0;
+/// Supressão de eco residual: só vale com o outro lado tocando acima disto (dBFS)…
+pub(crate) const ECHO_FAR_MIN_DB: f32 = -50.0;
+/// …e o microfone mais de tantos dB abaixo do que sai pelo alto-falante (eco sobrando, não voz perto do microfone).
+const ECHO_MARGIN_DB: f32 = 20.0;
+/// Quanto o microfone cai (dB) enquanto só há eco, e os tempos de descida e subida (s).
+const ECHO_DUCK_DB: f32 = 18.0;
+const ECHO_ATTACK_S: f32 = 0.003;
+const ECHO_RELEASE_S: f32 = 0.040;
 /// O limitador começa a comprimir aqui, antes do fundo de escala.
 const LIMIT_KNEE: f32 = 24_000.0;
 
@@ -140,6 +148,8 @@ impl Denoiser {
 pub(crate) struct Voice {
     /// Presente enquanto a remoção de ruído está ligada.
     denoiser: Option<Denoiser>,
+    /// Ganho atual da supressão de eco residual (1.0 = sem corte).
+    duck: Option<f32>,
     /// Memória dos dois estágios do filtro de graves: (entrada anterior, saída anterior).
     hp: [(f32, f32); 2],
     /// Ganho atual da porta (1.0 aberta, até a redução escolhida fechada).
@@ -154,7 +164,7 @@ pub(crate) struct Voice {
 impl Voice {
     /// Trata `frame` no lugar e devolve o que mediu. O estado de um recurso desligado é reiniciado, para
     /// religá-lo não herdar nada velho.
-    pub(crate) fn process(&mut self, frame: &mut [i16], p: &AudioPrefs) -> Measure {
+    pub(crate) fn process(&mut self, frame: &mut [i16], p: &AudioPrefs, far_db: f32) -> Measure {
         let mut x: Vec<f32> = frame.iter().map(|s| *s as f32).collect();
         if p.high_pass {
             self.high_pass(&mut x);
@@ -175,7 +185,9 @@ impl Voice {
 
         let open = self.gate(&mut x, p, &blocks, voice.as_deref());
         let heard = voice.as_ref().is_none_or(|v| v.iter().any(|p| *p >= VOICE_PROB));
-        let speaking = if p.gate { open } else { db >= p.gate_db && heard };
+        let only_echo = p.echo_suppress && far_db > ECHO_FAR_MIN_DB && db < far_db - ECHO_MARGIN_DB;
+        self.duck_echo(&mut x, p, only_echo);
+        let speaking = !only_echo && if p.gate { open } else { db >= p.gate_db && heard };
 
         let user = p.mic_gain;
         let target = self.agc_target(p, db, user, speaking);
@@ -207,6 +219,24 @@ impl Voice {
             }
             *s = v;
         }
+    }
+
+    /// Abaixa o microfone enquanto ele só capta o eco do alto-falante (`only_echo`), com descida rápida e
+    /// subida lenta para não cortar o começo da fala de quem volta a falar.
+    fn duck_echo(&mut self, x: &mut [f32], p: &AudioPrefs, only_echo: bool) {
+        if !p.echo_suppress {
+            self.duck = None;
+            return;
+        }
+        let floor = 10f32.powf(-ECHO_DUCK_DB / 20.0);
+        let (goal, tau) = if only_echo { (floor, ECHO_ATTACK_S) } else { (1.0, ECHO_RELEASE_S) };
+        let k = 1.0 - (-1.0 / (tau * RATE)).exp();
+        let mut g = self.duck.unwrap_or(1.0);
+        for s in x.iter_mut() {
+            g += (goal - g) * k;
+            *s *= g;
+        }
+        self.duck = Some(g);
     }
 
     /// Aplica a porta de ruído; devolve se ela terminou o quadro aberta. `blocks` é o volume de cada trecho
@@ -277,7 +307,7 @@ mod tests {
     }
 
     fn off() -> AudioPrefs {
-        AudioPrefs { high_pass: false, gate: false, agc: false, denoise: false, ..AudioPrefs::default() }
+        AudioPrefs { high_pass: false, gate: false, agc: false, denoise: false, echo_suppress: false, ..AudioPrefs::default() }
     }
 
     /// Passa `frames` quadros de uma senóide e devolve o último quadro tratado e a última medida.
@@ -285,7 +315,7 @@ mod tests {
         let mut last = (Vec::new(), Measure { level: 0.0, speaking: false });
         for n in 0..frames {
             let mut f = sine(amp, hz, n * FRAME, FRAME);
-            let m = v.process(&mut f, p);
+            let m = v.process(&mut f, p, -120.0);
             last = (f, m);
         }
         last
@@ -300,7 +330,7 @@ mod tests {
         let mut v = Voice::default();
         let p = AudioPrefs { mic_gain: 0.5, ..off() };
         let mut f = vec![4000i16; FRAME];
-        v.process(&mut f, &p);
+        v.process(&mut f, &p, -120.0);
         assert!(f.iter().all(|x| *x == 2000));
     }
 
@@ -404,7 +434,7 @@ mod tests {
         for _ in 0..150 {
             let mut f = noise(800.0, FRAME, &mut seed);
             let before = f.clone();
-            v.process(&mut f, &p);
+            v.process(&mut f, &p, -120.0);
             assert_eq!(f.len(), FRAME);
             last = (before, f);
         }
@@ -417,18 +447,51 @@ mod tests {
         let p = AudioPrefs { denoise: true, gate: true, gate_db: -50.0, gate_depth_db: 60.0, ..off() };
         let mut v = Voice::default();
         let mut seed = 7;
-        let flags: Vec<bool> = (0..100).map(|_| v.process(&mut noise(1500.0, FRAME, &mut seed), &p).speaking).collect();
+        let flags: Vec<bool> = (0..100).map(|_| v.process(&mut noise(1500.0, FRAME, &mut seed), &p, -120.0).speaking).collect();
         // A rede leva uns 100 ms para se convencer, e a porta segura mais 250 ms: os primeiros ~20 quadros não contam.
         let late: Vec<usize> = flags.iter().enumerate().skip(25).filter(|(_, s)| **s).map(|(i, _)| i).collect();
         assert!(late.is_empty(), "ruído tomado por voz nos quadros {late:?}");
     }
 
     #[test]
+    fn echo_is_ducked_only_while_the_far_end_plays_and_the_mic_is_far_quieter() {
+        let p = AudioPrefs { echo_suppress: true, ..off() };
+        let echo = 120.0; // ≈ -49 dBFS
+        let gain = |far_db: f32, amp: f32| {
+            let mut v = Voice::default();
+            let (out, m) = run_far(&mut v, &p, amp, far_db, 30);
+            (db_of(&out) - db_of(&sine(amp, 500.0, 0, FRAME)), m.speaking)
+        };
+        // Outro lado alto e microfone só com o eco: cai ~18 dB e não conta como voz.
+        let (g, speaking) = gain(-15.0, echo * 4.0);
+        assert!(g < -15.0 && !speaking, "{g}");
+        // Eu falando por cima (microfone perto do que sai pelo alto-falante): passa.
+        let (g, speaking) = gain(-15.0, 3500.0);
+        assert!(g.abs() < 1.0 && speaking, "{g}");
+        // Alto-falante calado: nada é eco.
+        assert!(gain(-120.0, echo * 4.0).0.abs() < 1.0);
+        // Desligado: nunca corta.
+        let off_p = AudioPrefs { echo_suppress: false, ..off() };
+        let (out, _) = run_far(&mut Voice::default(), &off_p, echo * 4.0, -15.0, 30);
+        assert!((db_of(&out) - db_of(&sine(echo * 4.0, 500.0, 0, FRAME))).abs() < 1.0);
+    }
+
+    fn run_far(v: &mut Voice, p: &AudioPrefs, amp: f32, far_db: f32, frames: usize) -> (Vec<i16>, Measure) {
+        let mut last = (Vec::new(), Measure { level: 0.0, speaking: false });
+        for n in 0..frames {
+            let mut f = sine(amp, 500.0, n * FRAME, FRAME);
+            let m = v.process(&mut f, p, far_db);
+            last = (f, m);
+        }
+        last
+    }
+
+    #[test]
     fn turning_denoise_off_drops_the_network_state() {
         let mut v = Voice::default();
-        v.process(&mut vec![0i16; FRAME], &AudioPrefs { denoise: true, ..off() });
+        v.process(&mut vec![0i16; FRAME], &AudioPrefs { denoise: true, ..off() }, -120.0);
         assert!(v.denoiser.is_some());
-        v.process(&mut vec![0i16; FRAME], &off());
+        v.process(&mut vec![0i16; FRAME], &off(), -120.0);
         assert!(v.denoiser.is_none());
     }
 
@@ -436,7 +499,7 @@ mod tests {
     fn turning_a_feature_off_forgets_its_state() {
         let mut v = Voice::default();
         run(&mut v, &AudioPrefs { gate: true, agc: true, ..off() }, 8000.0, 500.0, 20);
-        v.process(&mut vec![0i16; FRAME], &off());
+        v.process(&mut vec![0i16; FRAME], &off(), -120.0);
         assert_eq!((v.agc_db, v.gate_gain, v.hold), (0.0, None, 0));
     }
 }
