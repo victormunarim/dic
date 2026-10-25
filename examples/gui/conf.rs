@@ -435,15 +435,9 @@ impl Form {
         unhex(&self.secret).map(StaticSecret::from).map_err(|e| format!("identidade: {e}"))
     }
 
-    /// Resolve o campo "ligar para": uma chave de 64 hex ou o nome de um contato.
-    /// Diretório a usar: o campo, ou o que veio num código de contato (`chave@host:porta`).
+    /// Diretório a usar: só o campo "servidor". Vazio é de propósito: sem diretório, só o código direto liga.
     pub(crate) fn directory_addr(&self) -> String {
-        let d = self.directory.trim();
-        if !d.is_empty() {
-            return d.to_string();
-        }
-        let codes = self.contacts.split_whitespace().chain(self.peer.split_whitespace());
-        codes.filter_map(|t| split_code(t).and_then(|(_, d)| d)).next().unwrap_or_default()
+        self.directory.trim().to_string()
     }
 
     /// Meu código de contato: chave pública e, se conhecido, o diretório. Sem diretório, o código leva o

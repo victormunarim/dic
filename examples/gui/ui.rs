@@ -231,10 +231,6 @@ impl App {
             self.error = e;
             return;
         }
-        // Sem o campo preenchido, vale o servidor que veio num código de contato (`chave@host:porta`).
-        if self.form.directory.trim().is_empty() {
-            self.form.directory = self.form.directory_addr();
-        }
         if let Err(e) = self.form.save_checked() {
             self.error = format!("não deu para gravar a configuração em {}: {e}; o servidor e os contatos não ficam salvos", conf_path().display());
         }
@@ -375,6 +371,12 @@ impl App {
                     self.error = "Esse código de contato não parece certo (são 64 letras e números, e o que vem depois deles tem de estar inteiro).".into();
                 } else {
                     let name: String = self.form.new_name.chars().filter(|c| !matches!(c, ';' | '\n')).collect();
+                    // Servidor ainda vazio e o código traz um (`chave@host:porta`): passa a valer, à vista no campo.
+                    if self.form.directory.trim().is_empty()
+                        && let Some((_, Some(dir), _)) = split_direct(&self.form.new_code)
+                    {
+                        self.form.directory = dir;
+                    }
                     let line = format!("{} {}", name.trim(), self.form.new_code.trim());
                     if !self.form.contacts.trim().is_empty() {
                         self.form.contacts.push('\n');

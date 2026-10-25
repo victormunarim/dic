@@ -39,7 +39,7 @@ O diretório só é indispensável no primeiro contato. Depois disso:
 
 ### Totalmente P2P: o código de contato direto
 
-Dá para nem ter diretório na primeira conexão. Deixe o campo do servidor vazio e fique online: *Meu código de contato* passa a mostrar o código direto,
+Dá para nem ter diretório na primeira conexão. Deixe o campo do servidor vazio e fique online (a GUI não o preenche sozinha; só *Adicionar contato* copia o `@host:porta` de um código para o campo, e só se ele estava vazio): *Meu código de contato* passa a mostrar o código direto,
 
 ```
 <sua chave pública>#<ip:porta do seu relay>#<chave do circuito, 64 hex>#<chave do link, 64 hex>
