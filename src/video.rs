@@ -97,7 +97,7 @@ impl RawFrame {
     }
 }
 
-/// Fragmentos na fila (≈ 0,3 s de circuito) a partir dos quais a resolução cai.
+/// Fragmentos na fila (≈ 0,25 s de circuito) a partir dos quais a resolução cai.
 const BACKLOG_HIGH: usize = 120;
 /// Fragmentos na fila a partir dos quais um quadro de camada alta é largado em vez de enfileirado.
 const DROP_BACKLOG: usize = 40;
