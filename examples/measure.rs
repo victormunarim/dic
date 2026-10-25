@@ -1,5 +1,5 @@
 //! Medição de latência do circuito de 2 saltos entre máquinas reais.
-//! Roteiro completo no README, seção "Medir entre máquinas reais".
+//! Roteiro completo em `docs/CIRCUITO.md`, seção "Medir entre máquinas reais".
 //!
 //! ```text
 //! measure contact <escuta>                       # destino que ecoa (máquina C)

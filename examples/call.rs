@@ -1,5 +1,5 @@
 //! Chamada de voz de teste entre duas máquinas (sem placa de som: cada lado envia um tom).
-//! Roteiro completo no README, seção "Testar uma chamada entre Linux e Windows".
+//! Roteiro completo em `docs/LINUX.md` e `docs/WINDOWS.md`.
 //!
 //! ```text
 //! call keygen <arquivo>                                   # cria (ou lê) a identidade e imprime a chave pública

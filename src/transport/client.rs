@@ -26,7 +26,7 @@ pub struct ClientOptions {
     /// Reputação medida dos relays (veja [`crate::reputation`]).
     pub reputation: Option<Reputation>,
     /// Cover traffic nos links do cliente: um quadro a cada intervalo, real ou `Padding`.
-    /// `None` desliga. Padrão: `Some(DEFAULT_COVER)`, que custa banda constante (veja o README).
+    /// `None` desliga. Padrão: `Some(DEFAULT_COVER)`, que custa banda constante (veja `docs/CIRCUITO.md`).
     pub cover: Option<Duration>,
     /// Cover de ponta a ponta no circuito ativo: uma célula por intervalo, de mídia, ping ou
     /// `Drop`, e o relay de saída responde na mesma cadência. `None` desliga. Padrão:

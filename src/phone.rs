@@ -24,7 +24,7 @@ use std::{
     net::SocketAddr,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -92,6 +92,7 @@ pub struct ActiveCall {
     mic: mpsc::Sender<Vec<i16>>,
     speaker: mpsc::Receiver<Vec<i16>>,
     stats: Arc<Mutex<CallStats>>,
+    peer_hung_up: Arc<AtomicBool>,
 }
 
 impl ActiveCall {
@@ -104,6 +105,11 @@ impl ActiveCall {
     /// (o outro lado desligou ou o circuito caiu).
     pub async fn next_pcm(&mut self) -> Option<Vec<i16>> {
         self.speaker.recv().await
+    }
+
+    /// A chamada acabou porque o outro lado desligou (e não por queda de rede).
+    pub fn peer_hung_up(&self) -> bool {
+        self.peer_hung_up.load(Ordering::Relaxed)
     }
 
     pub fn stats(&self) -> CallStats {
@@ -135,6 +141,7 @@ async fn drive<C: Codec>(
     mut mic: mpsc::Receiver<Vec<i16>>,
     speaker: mpsc::Sender<Vec<i16>>,
     stats: Arc<Mutex<CallStats>>,
+    peer_hung_up: Arc<AtomicBool>,
 ) {
     let t0 = Instant::now();
     let now = || t0.elapsed().as_millis() as u64;
@@ -167,6 +174,7 @@ async fn drive<C: Codec>(
                             let _ = wire_out.send(WireOut::Bound(conn)).await;
                         }
                         if call.is_hung_up() {
+                            peer_hung_up.store(true, Ordering::Relaxed);
                             break;
                         }
                     }
@@ -195,8 +203,9 @@ fn start_call<C: Codec + Send + 'static>(
     let (mic_tx, mic_rx) = mpsc::channel(8);
     let (spk_tx, spk_rx) = mpsc::channel(32);
     let stats = Arc::new(Mutex::new(CallStats::default()));
-    tokio::spawn(drive(voice, frame_ms, conn, in_rx, out_tx, mic_rx, spk_tx, stats.clone()));
-    (ActiveCall { mic: mic_tx, speaker: spk_rx, stats }, in_tx, out_rx)
+    let peer_hung_up = Arc::new(AtomicBool::new(false));
+    tokio::spawn(drive(voice, frame_ms, conn, in_rx, out_tx, mic_rx, spk_tx, stats.clone(), peer_hung_up.clone()));
+    (ActiveCall { mic: mic_tx, speaker: spk_rx, stats, peer_hung_up }, in_tx, out_rx)
 }
 
 /// Liga para `peer` (a chave do pareamento) pelo circuito de `client`.
