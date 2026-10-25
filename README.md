@@ -855,7 +855,7 @@ cargo run --release --features net --example measure -- direct 127.0.0.1:9000
 | `src/intro.rs` | `IntroSelector`, `IntroConfig`, `Selection` |
 | `src/circuit/` | `crypto`, `client::ClientCircuit`, `relay::RelayNode`, `manager::CircuitManager` (circuito de 2 saltos, reserva e failover) |
 | `src/link.rs` | Noise NK do link (feature `net`) |
-| `src/transport.rs` | `RelayServer`, `CircuitClient`, `ExitPolicy` (TCP, feature `net`) |
+| `src/transport/` | `RelayServer`, `CircuitClient`, `ExitPolicy` (TCP, feature `net`) |
 | `tests/fuzz.rs` | fuzzing determinístico dos parsers e do relay |
 | `src/net.rs` | `Node`, `NetStore`, `NetConfig` (feature `net`) |
 | `src/circle.rs` | `CircleSecret`, `TopicKind` |
@@ -913,3 +913,5 @@ O diretório só é indispensável no primeiro contato. Depois disso:
 Endereço guardado velho não trava a ligação: se o circuito não fica pronto em 5 s, a busca no diretório assume e corrige o cache. Quando o diretório volta, `published_addr()` e `network_note()` se atualizam sozinhos.
 
 Limites: sem diretório não há furo de NAT nem sorteio de primeiro salto (usa o próprio relay por loopback), e o endereço publicado fica sendo o local até o diretório voltar. Quem muda de IP só é achado de novo pelo diretório.
+
+Detalhes do modo sem diretório: o nó consulta o endereço de cada contato (até 32) ao subir e a cada 5 renovações, então dá para ligar a quem você nunca discou. Um furo de NAT que falha não é repetido para o mesmo contato por 5 minutos. Na GUI, discar roda em segundo plano (o botão "Desligar" cancela) e erros de áudio (fone desconectado, driver caiu) aparecem no log.

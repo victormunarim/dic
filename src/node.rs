@@ -13,7 +13,7 @@ use std::{
     io,
     net::SocketAddr,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use tokio::task::JoinHandle;
@@ -27,10 +27,16 @@ use crate::{
     upnp,
     directory::{self, REPUBLISH, RelayInfo, dest_for},
     media::codec::Codec,
-    phone::{ActiveCall, CallError, IncomingCall, Phone, call, call_over},
+    phone::{self, ActiveCall, CallError, IncomingCall, Phone, call, call_over},
     punch::Punch,
     transport::{CircuitClient, ClientOptions, RelayServer, ServerConfig, allow_list},
 };
+
+/// Depois de um furo de NAT que falhou, quanto tempo a ligação para o mesmo contato nem tenta de novo.
+const NO_PUNCH_FOR: Duration = Duration::from_secs(300);
+
+/// A cada quantas renovações no diretório os endereços dos contatos são atualizados.
+const REFRESH_KNOWN_EVERY: u32 = 5;
 
 /// Porta de relay preferida; se estiver ocupada, o sistema escolhe outra.
 pub const DEFAULT_RELAY_PORT: u16 = 4001;
@@ -80,9 +86,25 @@ pub struct Dialer {
     relay_port: u16,
     punch: Option<Arc<Punch>>,
     known: Known,
+    /// Contatos que não deixaram furar o NAT há pouco: pula o furo até a data indicada.
+    no_punch: Arc<Mutex<HashMap<[u8; 32], Instant>>>,
 }
 
 type Known = Arc<Mutex<HashMap<[u8; 32], RelayInfo>>>;
+
+/// Consulta o relay de cada contato (até 32) e guarda o endereço. Para na primeira falha do diretório.
+async fn refresh_known(directory: &str, contacts: &phone::Contacts, known: &Known) {
+    let keys: Vec<[u8; 32]> = contacts.lock().unwrap().iter().take(32).copied().collect();
+    for k in keys {
+        match directory::lookup(directory, &k).await {
+            Ok(Some(r)) => {
+                known.lock().unwrap().insert(k, r);
+            }
+            Ok(None) => {}
+            Err(_) => return,
+        }
+    }
+}
 
 /// Acrescenta um aviso à nota de rede, separando por `; `.
 fn push_note(note: &mut Option<String>, add: String) {
@@ -123,13 +145,16 @@ impl Dialer {
     /// Liga para `peer`: tenta o furo de NAT; se não der, acha o relay dele no diretório, sorteia primeiros saltos e chama.
     pub async fn dial<C: Codec + Send + 'static>(&self, peer: [u8; 32], codec: C, wait: Duration) -> Result<ActiveCall, DialError> {
         // Caminho direto por furo de NAT; se não der, cai no circuito.
-        let codec = if let Some(p) = &self.punch {
-            match p.dial(&peer, Duration::from_secs(6)).await {
+        let skip = self.no_punch.lock().unwrap().get(&peer).is_some_and(|until| *until > Instant::now());
+        let codec = match &self.punch {
+            Some(p) if !skip => match p.dial(&peer, Duration::from_secs(6)).await {
                 Ok(c) => return Ok(call_over(c.tx, c.rx, &self.secret, &PublicKey::from(peer), codec, wait).await?),
-                Err(_) => codec,
-            }
-        } else {
-            codec
+                Err(_) => {
+                    self.no_punch.lock().unwrap().insert(peer, Instant::now() + NO_PUNCH_FOR);
+                    codec
+                }
+            },
+            _ => codec,
         };
         let me = *PublicKey::from(&self.secret).as_bytes();
         // Endereço guardado da última vez: se o circuito fica pronto, o diretório nem entra na conversa.
@@ -238,11 +263,18 @@ impl Node {
             };
             push_note(&mut note, warn);
         }
-        let dialer = Dialer { secret: secret.clone(), directory: directory.clone(), mine: mine.clone(), relay_port: port, punch, known: known.clone() };
+        let dialer = Dialer { secret: secret.clone(), directory: directory.clone(), mine: mine.clone(), relay_port: port, punch, known: known.clone(), no_punch: Arc::default() };
         let republish = {
             let (directory, secret, last_error, public_addr, addr_now) = (directory.clone(), secret.clone(), last_error.clone(), public_addr, addr_now.clone());
+            let (contacts, known) = (phone.contacts(), known.clone());
             tokio::spawn(async move {
+                let mut round = 0u32;
                 loop {
+                    // Guarda o endereço dos contatos agora (e de tempos em tempos) para ligar a eles com o diretório fora.
+                    if round.is_multiple_of(REFRESH_KNOWN_EVERY) {
+                        refresh_known(&directory, &contacts, &known).await;
+                    }
+                    round = round.wrapping_add(1);
                     tokio::time::sleep(REPUBLISH).await;
                     if let Some(m) = &mapping {
                         let _ = m.renew().await;

@@ -574,3 +574,21 @@ async fn stored_address_works_when_directory_does_not_know_the_peer() {
     let (_cb, _b) = answer.await.unwrap();
     ca.hangup();
 }
+
+/// Os endereços dos contatos são guardados sozinhos, sem precisar ligar antes.
+#[tokio::test]
+async fn contacts_addresses_are_stored_in_background() {
+    let (_d, addr) = dir().await;
+    let (sa, sb) = (key(), key());
+    let pb = *PublicKey::from(&sb).as_bytes();
+    let _b = Node::start(cfg(sb, &addr, vec![])).await.unwrap();
+    let a = Node::start(cfg(sa, &addr, vec![pb])).await.unwrap();
+    timeout(Duration::from_secs(5), async {
+        while a.known().is_empty() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("endereço do contato não foi guardado");
+    assert_eq!(a.known()[0].0, pb);
+}
