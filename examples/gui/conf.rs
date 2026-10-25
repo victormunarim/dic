@@ -143,7 +143,10 @@ pub(crate) fn vault_set(secret: &str) -> bool {
 }
 
 pub(crate) fn conf_path() -> PathBuf {
-    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from).unwrap_or_default();
+    // No Windows `HOME` só existe em shells estilo Unix (Git Bash) e vale algo como `/c/Users/x`, que o
+    // sistema não resolve: a gravação falhava calada e a configuração sumia a cada abertura.
+    let vars: [&str; 2] = if cfg!(windows) { ["USERPROFILE", "HOME"] } else { ["HOME", "USERPROFILE"] };
+    let home = vars.iter().find_map(|v| std::env::var_os(v).filter(|h| !h.is_empty())).map(PathBuf::from).unwrap_or_default();
     home.join(".clam-gui.conf")
 }
 
@@ -216,6 +219,13 @@ impl Form {
     }
 
     pub(crate) fn save(&self) {
+        if let Err(e) = self.save_checked() {
+            eprintln!("não deu para gravar {}: {e}", conf_path().display());
+        }
+    }
+
+    /// Como [`save`](Self::save), mas devolve o erro de gravação.
+    pub(crate) fn save_checked(&self) -> std::io::Result<()> {
         // Chave de identidade no chaveiro do sistema; só cai para o arquivo se ele não estiver disponível.
         let secret = if vault_set(self.secret.trim()) { KEYRING_MARK } else { self.secret.trim() };
         let text = format!(
@@ -231,9 +241,8 @@ impl Form {
             self.output_dev.trim(),
             self.nicks.trim().replace('\n', ";")
         );
-        let path = conf_path();
         // Contém a chave secreta: só o dono lê.
-        let _ = write_private(&path, &text);
+        write_private(&conf_path(), &text)
     }
 
     /// Nomes conhecidos: contatos e apelidos (o apelido vale para quem não é contato).
