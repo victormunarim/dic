@@ -50,49 +50,52 @@ pub(crate) fn open_sound(want: bool, form: &Form, out: &Sink) -> Option<Sound> {
 }
 
 /// Ajustes de áudio da janela, lidos pelo motor a cada quadro.
+#[derive(Default)]
 pub(crate) struct Controls {
     pub(crate) muted: AtomicBool,
-    /// Volume do alto-falante e ganho do microfone (1.0 = sem alteração), em bits de `f32`.
-    volume: AtomicU32,
-    mic_gain: AtomicU32,
-    /// Nível do microfone, de 0.0 a 1.0.
+    prefs: Mutex<AudioPrefs>,
+    /// Estado do tratamento da voz (filtro, porta, volume automático); só o laço de áudio mexe nele.
+    voice: Mutex<Voice>,
+    /// Nível do microfone, de 0.0 a 1.0, em bits de `f32`.
     level: AtomicU32,
-}
-
-impl Default for Controls {
-    fn default() -> Self {
-        Controls { muted: AtomicBool::new(false), volume: AtomicU32::new(1f32.to_bits()), mic_gain: AtomicU32::new(1f32.to_bits()), level: AtomicU32::new(0) }
-    }
+    /// Há voz acima do limiar de sensibilidade (e o microfone não está mudo).
+    speaking: AtomicBool,
 }
 
 impl Controls {
+    pub(crate) fn prefs(&self) -> AudioPrefs {
+        *self.prefs.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    pub(crate) fn set_prefs(&self, p: AudioPrefs) {
+        *self.prefs.lock().unwrap_or_else(|e| e.into_inner()) = p;
+    }
     pub(crate) fn volume(&self) -> f32 {
-        f32::from_bits(self.volume.load(Ordering::Relaxed))
-    }
-    pub(crate) fn set_volume(&self, v: f32) {
-        self.volume.store(v.to_bits(), Ordering::Relaxed);
-    }
-    pub(crate) fn mic_gain(&self) -> f32 {
-        f32::from_bits(self.mic_gain.load(Ordering::Relaxed))
-    }
-    pub(crate) fn set_mic_gain(&self, v: f32) {
-        self.mic_gain.store(v.to_bits(), Ordering::Relaxed);
+        self.prefs().volume
     }
     pub(crate) fn level(&self) -> f32 {
         f32::from_bits(self.level.load(Ordering::Relaxed))
     }
     pub(crate) fn set_level(&self, v: f32) {
         self.level.store(v.to_bits(), Ordering::Relaxed);
+        if v == 0.0 {
+            self.speaking.store(false, Ordering::Relaxed);
+        }
+    }
+    pub(crate) fn speaking(&self) -> bool {
+        self.speaking.load(Ordering::Relaxed)
     }
 
-    /// Prepara um quadro do microfone para enviar: mede o nível (antes de mudo e ganho, para o medidor
-    /// mostrar que o microfone funciona), depois zera se mudo ou aplica o ganho.
+    /// Prepara um quadro do microfone para enviar: trata a voz, mede o nível (depois do filtro de graves e
+    /// antes de porta e ganhos, para o medidor mostrar que o microfone funciona), e zera se estiver mudo.
     pub(crate) fn outgoing(&self, f: &mut [i16]) {
-        self.set_level(level(f));
+        let prefs = self.prefs();
+        let m = self.voice.lock().unwrap_or_else(|e| e.into_inner()).process(f, &prefs);
+        self.level.store(m.level.to_bits(), Ordering::Relaxed);
         if self.muted.load(Ordering::Relaxed) {
             f.fill(0);
+            self.speaking.store(false, Ordering::Relaxed);
         } else {
-            scale_pcm(f, self.mic_gain());
+            self.speaking.store(m.speaking, Ordering::Relaxed);
         }
     }
 }
@@ -105,15 +108,6 @@ pub(crate) fn scale_pcm(f: &mut [i16], gain: f32) {
     for x in f {
         *x = (*x as f32 * gain).round().clamp(i16::MIN as f32, i16::MAX as f32) as i16;
     }
-}
-
-/// Nível de um quadro de 0.0 (silêncio, -60 dBFS ou menos) a 1.0 (fundo de escala).
-pub(crate) fn level(f: &[i16]) -> f32 {
-    if f.is_empty() {
-        return 0.0;
-    }
-    let rms = (f.iter().map(|x| (*x as f64).powi(2)).sum::<f64>() / f.len() as f64).sqrt();
-    ((20.0 * (rms / 32768.0).max(1e-9).log10() + 60.0) / 60.0).clamp(0.0, 1.0) as f32
 }
 
 pub(crate) fn tone(hz: f64, n: usize) -> Vec<i16> {
@@ -172,28 +166,52 @@ pub(crate) async fn mic_test(sound: Sound, shared: Arc<Shared>, stop: Arc<Atomic
 mod tests {
     use super::*;
 
+    fn sine_frame(amp: f32) -> Vec<i16> {
+        (0..320).map(|i| (amp * (std::f32::consts::TAU * 1000.0 * i as f32 / 16000.0).sin()) as i16).collect()
+    }
+
     #[test]
-    fn scale_pcm_clamps_and_level_follows_loudness() {
+    fn scale_pcm_clamps() {
         let mut f = vec![1000, -1000, 30000, -30000];
         scale_pcm(&mut f, 2.0);
         assert_eq!(f, vec![2000, -2000, i16::MAX, i16::MIN]);
-        assert_eq!(level(&[0; 320]), 0.0);
-        assert!(level(&[1000; 320]) > level(&[100; 320]));
-        assert!(level(&[i16::MAX; 320]) > 0.99);
     }
 
     #[test]
     fn outgoing_measures_before_mute_and_gain() {
         let c = Controls::default();
-        let mut f = vec![4000i16; 320];
+        let mut f = sine_frame(4000.0);
         c.muted.store(true, Ordering::Relaxed);
         c.outgoing(&mut f);
         assert!(f.iter().all(|x| *x == 0));
         assert!(c.level() > 0.5, "o medidor deve mostrar o microfone mesmo mudo");
+        assert!(!c.speaking(), "mudo nunca aparece como falando");
         c.muted.store(false, Ordering::Relaxed);
-        c.set_mic_gain(0.5);
+        c.set_prefs(AudioPrefs { high_pass: false, mic_gain: 0.5, ..AudioPrefs::default() });
         let mut f = vec![4000i16; 320];
         c.outgoing(&mut f);
         assert!(f.iter().all(|x| *x == 2000));
+    }
+
+    #[test]
+    fn sensitivity_decides_whether_a_quiet_voice_is_speaking() {
+        let c = Controls::default();
+        let quiet = |gate_db: f32| {
+            c.set_prefs(AudioPrefs { gate_db, ..AudioPrefs::default() });
+            c.outgoing(&mut sine_frame(300.0));
+            c.speaking()
+        };
+        // 300 de amplitude ≈ -43 dBFS: acima de -55, abaixo de -30.
+        assert!(quiet(-55.0));
+        assert!(!quiet(-30.0));
+    }
+
+    #[test]
+    fn zero_level_clears_speaking() {
+        let c = Controls::default();
+        c.outgoing(&mut sine_frame(8000.0));
+        assert!(c.speaking());
+        c.set_level(0.0);
+        assert!(!c.speaking());
     }
 }

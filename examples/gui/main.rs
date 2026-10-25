@@ -33,15 +33,19 @@ fn main() -> eframe::Result {
         "Clam",
         opts,
         Box::new(|_| {
+            let form = Form::load();
+            let shared = Arc::<engine::Shared>::default();
+            shared.audio.set_prefs(form.audio);
             Ok(Box::new(App {
                 rt,
-                form: Form::load(),
+                form,
                 log: Arc::default(),
-                shared: Arc::default(),
+                shared,
                 running: None,
                 done: Arc::default(),
                 error: String::new(),
                 confirm_remove: None,
+                audio_dirty: false,
                 screen_tex: Default::default(),
                 zoom: None,
                 #[cfg(feature = "audio")]

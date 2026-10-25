@@ -1,6 +1,6 @@
 # Interface gráfica: sala, membros e modo sem diretório
 
-Uso da GUI (`examples/gui`): quem fala, volume, apelidos, dispositivos, remover membro e o que funciona sem diretório.
+Uso da GUI (`examples/gui`): quem fala, volume, sensibilidade do microfone, apelidos, dispositivos, remover membro e o que funciona sem diretório.
 
 [← Voltar ao README](../README.md)
 
@@ -9,7 +9,14 @@ Uso da GUI (`examples/gui`): quem fala, volume, apelidos, dispositivos, remover 
 - **Quem fala.** Cada membro da sala tem uma bolinha: verde e maior enquanto fala (energia do áudio recebido, com 400 ms de retenção), cinza quando conectado e quieto, laranja enquanto a ligação não completou. Na API: `Mesh::is_speaking`.
 - **Volume por pessoa.** Um controle de 0 (mudo) a 200 % por membro; vale só para o que você ouve (`Mesh::set_volume`, antes do limitador da mixagem).
 - **Apelidos.** O campo ao lado de cada membro grava um apelido salvo no `~/.clam-gui.conf` (`nicks=`, só neste computador). Contatos continuam com o nome da lista; o apelido nunca torna alguém "contato" (atendimento automático segue só a lista de contatos).
-- **Controles de áudio.** Com o áudio ligado e o nó online, o cartão "Áudio" tem mudo (envia silêncio), volume do alto-falante (0 a 200 %), ganho do microfone (0 a 300 %), um medidor do microfone (vale mesmo com mudo, para confirmar que ele capta) e "Testar o microfone", que devolve a sua voz ao alto-falante (use fones). Durante o teste a linha fica ocupada. Os ajustes valem só para a sessão.
+- **Controles de áudio.** Com o áudio ligado e o nó online, o cartão "Áudio" tem mudo (envia silêncio), volume do alto-falante (0 a 200 %), ganho do microfone (0 a 300 %), um medidor do microfone (vale mesmo com mudo, para confirmar que ele capta) e "Testar o microfone", que devolve a sua voz ao alto-falante (use fones). Durante o teste a linha fica ocupada.
+- **Sensibilidade e tratamento da voz.** O medidor traz uma linha laranja: o limiar de sensibilidade (-60 a -20 dBFS, padrão -45). Quando a voz passa da linha o medidor diz "Microfone: voz". Quanto mais à esquerda a linha, mais sensível. Em volta dela:
+  - **Silenciar ruído de fundo** (porta de ruído, desligada por padrão): abaixo do limiar o som enviado cai pela "Redução do ruído" (6 a 60 dB, padrão 40). A porta abre em 2 ms, segura 250 ms depois da última palavra e fecha em ~60 ms, para não cortar o fim das frases.
+  - **Cortar graves** (ligado por padrão): filtro passa-altas de 12 dB por oitava em 100 Hz; tira ventilador, estrondo de mesa e sopro.
+  - **Volume automático** (desligado por padrão): mira ~-22 dBFS (reforço até +24 dB, corte até -12 dB); desce rápido e sobe devagar, só aprende com voz e nunca reforça o ruído de fundo. Um limitador suave impede estouro.
+  - **Restaurar padrões do áudio** volta tudo ao padrão.
+
+  A ordem é filtro de graves → medidor → porta → ganho do microfone × volume automático → limitador (`examples/gui/engine/voice.rs`). Os ajustes (e o volume e o ganho) ficam salvos no `~/.clam-gui.conf` (`volume`, `mic_gain`, `high_pass`, `gate`, `gate_db`, `gate_depth_db`, `agc`), gravados ao soltar o controle; valores fora da faixa ou ilegíveis voltam ao limite ou ao padrão.
 - **Dispositivos de áudio.** Em Configurações avançadas, escolha microfone e alto-falante (`clam::audio::devices`, `Audio::open_with`); vazio usa o padrão do sistema. Se o dispositivo escolhido sumiu (fone desconectado), a abertura falha com aviso em vez de trocar de dispositivo em silêncio.
 
 ## Remover membro da sala (GUI)

@@ -24,6 +24,8 @@ pub(crate) struct App {
     pub(crate) error: String,
     /// Membro cujo "Remover" espera confirmação.
     pub(crate) confirm_remove: Option<[u8; 32]>,
+    /// Ajustes de áudio mudaram e ainda não foram salvos (salva ao soltar o controle).
+    pub(crate) audio_dirty: bool,
     /// Microfones e alto-falantes que o sistema listou (atualizável na janela).
     #[cfg_attr(not(feature = "audio"), allow(dead_code))]
     pub(crate) devs: (Vec<String>, Vec<String>),
@@ -275,22 +277,50 @@ pub(crate) fn card(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::U
 }
 
 impl App {
-    /// Mudo, volume, ganho e medidor do microfone, mais o teste do microfone.
+    /// Mudo, volume, sensibilidade e tratamento da voz, medidor do microfone e teste do microfone.
     fn audio_ui(&mut self, ui: &mut egui::Ui, in_call: bool, testing: bool) {
         let a = &self.shared.audio;
         let mut muted = a.muted.load(Ordering::Relaxed);
         if ui.checkbox(&mut muted, "Mudo (o outro lado não ouve você)").changed() {
             a.muted.store(muted, Ordering::Relaxed);
         }
-        let (mut volume, mut gain) = (a.volume(), a.mic_gain());
-        if ui.add(egui::Slider::new(&mut volume, 0.0..=2.0).text("Volume do alto-falante")).changed() {
-            a.set_volume(volume);
+        let before = a.prefs();
+        let mut p = before;
+        ui.add(egui::Slider::new(&mut p.volume, AudioPrefs::VOLUME).text("Volume do alto-falante"));
+        ui.add(egui::Slider::new(&mut p.mic_gain, AudioPrefs::MIC_GAIN).text("Ganho do microfone"));
+
+        // Medidor: a linha marca o limiar de sensibilidade; o texto diz se a voz passa dele.
+        let level = a.level();
+        let speaking = a.speaking() && !muted;
+        let meter = ui.add(egui::ProgressBar::new(level).desired_width(260.0).text(if speaking { "Microfone: voz" } else { "Microfone" }));
+        let x = meter.rect.left() + meter.rect.width() * voice_meter(p.gate_db);
+        ui.painter().vline(x, meter.rect.y_range(), egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(230, 160, 40)));
+
+        ui.add(egui::Slider::new(&mut p.gate_db, AudioPrefs::GATE_DB).suffix(" dB").text("Sensibilidade (limiar da voz)"))
+            .on_hover_text("A linha laranja no medidor. Quanto mais para a esquerda, mais sensível: sons baixos já contam como voz.");
+        ui.checkbox(&mut p.gate, "Silenciar ruído de fundo")
+            .on_hover_text("Quando o microfone fica abaixo do limiar, o som enviado é reduzido. Ajuste a sensibilidade até a linha ficar logo acima do ruído.");
+        ui.add_enabled(p.gate, egui::Slider::new(&mut p.gate_depth_db, AudioPrefs::GATE_DEPTH_DB).suffix(" dB").text("Redução do ruído"));
+        ui.checkbox(&mut p.high_pass, "Cortar graves (ventilador, mesa, sopro)");
+        ui.checkbox(&mut p.agc, "Volume automático (nivela voz baixa e alta)")
+            .on_hover_text("Reforça quem fala baixo e contém quem fala alto. Não reforça o ruído de fundo.");
+        if ui.small_button("Restaurar padrões do áudio").clicked() {
+            p = AudioPrefs::default();
         }
-        if ui.add(egui::Slider::new(&mut gain, 0.0..=3.0).text("Ganho do microfone")).changed() {
-            a.set_mic_gain(gain);
+
+        if p != before {
+            a.set_prefs(p);
+            self.audio_dirty = true;
         }
+        // Salva ao soltar o controle, não a cada quadro do arrasto.
+        if self.audio_dirty && !ui.input(|i| i.pointer.any_down()) {
+            self.audio_dirty = false;
+            self.form.audio = p;
+            self.form.save();
+        }
+
         if in_call || testing {
-            ui.add(egui::ProgressBar::new(a.level()).desired_width(260.0).text("Microfone"));
+            ui.weak("Fale e veja o medidor: a linha laranja deve ficar abaixo da sua voz e acima do ruído.");
         }
         if testing {
             if ui.button("Parar o teste").clicked() {

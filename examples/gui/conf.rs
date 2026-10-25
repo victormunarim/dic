@@ -24,6 +24,66 @@ pub(crate) fn unhex(s: &str) -> Result<[u8; 32], String> {
 }
 
 
+/// Ajustes de áudio que a pessoa escolhe na janela e que ficam salvos.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct AudioPrefs {
+    /// Volume do alto-falante e ganho do microfone (1.0 = sem alteração).
+    pub(crate) volume: f32,
+    pub(crate) mic_gain: f32,
+    /// Corta os graves abaixo de ~100 Hz (ventilador, estrondo de mesa, sopro).
+    pub(crate) high_pass: bool,
+    /// Porta de ruído: quando o microfone fica abaixo de `gate_db` (dBFS) o som é reduzido em `gate_depth_db`.
+    pub(crate) gate: bool,
+    pub(crate) gate_db: f32,
+    pub(crate) gate_depth_db: f32,
+    /// Volume automático: nivela a voz, reforçando quem fala baixo e contendo quem fala alto.
+    pub(crate) agc: bool,
+}
+
+impl AudioPrefs {
+    pub(crate) const VOLUME: std::ops::RangeInclusive<f32> = 0.0..=2.0;
+    pub(crate) const MIC_GAIN: std::ops::RangeInclusive<f32> = 0.0..=3.0;
+    pub(crate) const GATE_DB: std::ops::RangeInclusive<f32> = -60.0..=-20.0;
+    pub(crate) const GATE_DEPTH_DB: std::ops::RangeInclusive<f32> = 6.0..=60.0;
+
+    /// Lê os ajustes de `kv`; o que faltar ou vier estragado fica no padrão e os números são limitados à faixa válida.
+    fn from_kv(kv: &HashMap<String, String>) -> Self {
+        let d = Self::default();
+        let num = |k: &str, range: &std::ops::RangeInclusive<f32>, default: f32| {
+            kv.get(k).and_then(|v| v.trim().parse::<f32>().ok()).filter(|v| v.is_finite()).map_or(default, |v| v.clamp(*range.start(), *range.end()))
+        };
+        let flag = |k: &str, default: bool| kv.get(k).map_or(default, |v| v.trim() == "1");
+        Self {
+            volume: num("volume", &Self::VOLUME, d.volume),
+            mic_gain: num("mic_gain", &Self::MIC_GAIN, d.mic_gain),
+            high_pass: flag("high_pass", d.high_pass),
+            gate: flag("gate", d.gate),
+            gate_db: num("gate_db", &Self::GATE_DB, d.gate_db),
+            gate_depth_db: num("gate_depth_db", &Self::GATE_DEPTH_DB, d.gate_depth_db),
+            agc: flag("agc", d.agc),
+        }
+    }
+
+    fn to_conf(self) -> String {
+        format!(
+            "volume={:.2}\nmic_gain={:.2}\nhigh_pass={}\ngate={}\ngate_db={:.0}\ngate_depth_db={:.0}\nagc={}\n",
+            self.volume,
+            self.mic_gain,
+            u8::from(self.high_pass),
+            u8::from(self.gate),
+            self.gate_db,
+            self.gate_depth_db,
+            u8::from(self.agc)
+        )
+    }
+}
+
+impl Default for AudioPrefs {
+    fn default() -> Self {
+        AudioPrefs { volume: 1.0, mic_gain: 1.0, high_pass: true, gate: false, gate_db: -45.0, gate_depth_db: 40.0, agc: false }
+    }
+}
+
 #[derive(Default, Clone)]
 pub(crate) struct Form {
     pub(crate) secret: String,
@@ -33,6 +93,7 @@ pub(crate) struct Form {
     pub(crate) peer: String,
     pub(crate) public_addr: String,
     pub(crate) use_audio: bool,
+    pub(crate) audio: AudioPrefs,
     /// Microfone e alto-falante escolhidos (vazio = padrão do sistema).
     pub(crate) input_dev: String,
     pub(crate) output_dev: String,
@@ -256,6 +317,7 @@ impl Form {
             use_audio: get("audio") == "1",
             input_dev: get("input_dev"),
             output_dev: get("output_dev"),
+            audio: AudioPrefs::from_kv(&kv),
             nicks: get("nicks").replace(';', "\n"),
             rooms: get("rooms").replace(';', "\n"),
             loaded: true,
@@ -274,7 +336,7 @@ impl Form {
         // Chave de identidade no chaveiro do sistema; só cai para o arquivo se ele não estiver disponível.
         let secret = if vault_set(self.secret.trim()) { KEYRING_MARK } else { self.secret.trim() };
         let text = format!(
-            "audio={}\nsecret={}\ndirectory={}\ncontacts={}\npeer={}\npublic_addr={}\nrooms={}\ninput_dev={}\noutput_dev={}\nnicks={}\n",
+            "audio={}\nsecret={}\ndirectory={}\ncontacts={}\npeer={}\npublic_addr={}\nrooms={}\ninput_dev={}\noutput_dev={}\nnicks={}\n{}",
             u8::from(self.use_audio),
             secret,
             self.directory.trim(),
@@ -284,7 +346,8 @@ impl Form {
             self.rooms.trim().replace('\n', ";"),
             self.input_dev.trim(),
             self.output_dev.trim(),
-            self.nicks.trim().replace('\n', ";")
+            self.nicks.trim().replace('\n', ";"),
+            self.audio.to_conf()
         );
         // Contém a chave secreta: só o dono lê.
         write_private(&conf_path(), &text)
@@ -412,6 +475,18 @@ mod tests {
         // Arquivo de versão anterior (sem a marca) e linha estragada.
         let old = format_known(&known, &Vec::new()) + "lixo\n";
         assert_eq!(parse_known(&old), (known, Vec::new()));
+    }
+
+    #[test]
+    fn audio_prefs_round_trip_and_survive_bad_values() {
+        let prefs = AudioPrefs { volume: 1.5, mic_gain: 2.25, high_pass: false, gate: true, gate_db: -38.0, gate_depth_db: 24.0, agc: true };
+        let kv = |text: &str| -> HashMap<String, String> { text.lines().filter_map(|l| l.split_once('=')).map(|(k, v)| (k.to_string(), v.to_string())).collect() };
+        assert_eq!(AudioPrefs::from_kv(&kv(&prefs.to_conf())), prefs);
+        // Arquivo de versão anterior, sem nenhum ajuste: tudo no padrão.
+        assert_eq!(AudioPrefs::from_kv(&kv("audio=1\n")), AudioPrefs::default());
+        // Fora da faixa, ilegível ou não finito: limita ou volta ao padrão.
+        let bad = AudioPrefs::from_kv(&kv("volume=99\nmic_gain=abc\ngate_db=NaN\ngate_depth_db=-5\n"));
+        assert_eq!((bad.volume, bad.mic_gain, bad.gate_db, bad.gate_depth_db), (2.0, 1.0, -45.0, 6.0));
     }
 
     #[test]

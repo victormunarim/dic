@@ -28,12 +28,14 @@ mod node;
 mod rooms;
 mod screen;
 mod sound;
+mod voice;
 
 pub(crate) use call::*;
 pub(crate) use node::run_node;
 pub(crate) use rooms::*;
 pub(crate) use screen::*;
 pub(crate) use sound::*;
+pub(crate) use voice::*;
 
 pub(crate) type Log = Arc<Mutex<Vec<String>>>;
 
