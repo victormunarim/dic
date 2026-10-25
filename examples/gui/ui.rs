@@ -484,8 +484,15 @@ impl eframe::App for App {
                             self.form.use_dht = !no_dht;
                         }
                         ui.add_enabled_ui(self.form.use_dht, |ui| {
-                            ui.checkbox(&mut self.form.dht_circuit, "Falar com a DHT pelos relays dos contatos (esconde o seu IP)")
-                                .on_hover_text("Usa um circuito de dois relays de contatos: o primeiro vê o seu IP mas não o pedido, o segundo vê o pedido mas não o seu IP. Precisa de ao menos dois contatos com endereço guardado; sem eles a DHT não é usada.");
+                            // O circuito vem ligado: a caixa é para falar direto com a DHT.
+                            let mut direct = !self.form.dht_circuit;
+                            let changed = ui
+                                .checkbox(&mut direct, "Não falar com a DHT pelos relays dos contatos (mostra o seu IP)")
+                                .on_hover_text("Por padrão a DHT é falada por um circuito de dois relays de contatos: o primeiro vê o seu IP mas não o pedido, o segundo vê o pedido mas não o seu IP. Isso precisa de ao menos dois contatos com endereço guardado; sem eles a DHT não é usada. Marcada, o seu computador fala direto com a DHT e quem opera os nós dela vê o seu IP.")
+                                .changed();
+                            if changed {
+                                self.form.dht_circuit = !direct;
+                            }
                         });
                         ui.separator();
                         ui.label("Seu nome (aparece na lista de contatos de quem você adiciona):");
