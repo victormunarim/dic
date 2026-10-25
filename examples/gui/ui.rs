@@ -265,6 +265,34 @@ pub(crate) fn card(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::U
 }
 
 impl App {
+    /// Mudo, volume, ganho e medidor do microfone, mais o teste do microfone.
+    fn audio_ui(&mut self, ui: &mut egui::Ui, in_call: bool, testing: bool) {
+        let a = &self.shared.audio;
+        let mut muted = a.muted.load(Ordering::Relaxed);
+        if ui.checkbox(&mut muted, "Mudo (o outro lado não ouve você)").changed() {
+            a.muted.store(muted, Ordering::Relaxed);
+        }
+        let (mut volume, mut gain) = (a.volume(), a.mic_gain());
+        if ui.add(egui::Slider::new(&mut volume, 0.0..=2.0).text("Volume do alto-falante")).changed() {
+            a.set_volume(volume);
+        }
+        if ui.add(egui::Slider::new(&mut gain, 0.0..=3.0).text("Ganho do microfone")).changed() {
+            a.set_mic_gain(gain);
+        }
+        if in_call || testing {
+            ui.add(egui::ProgressBar::new(a.level()).desired_width(260.0).text("Microfone"));
+        }
+        if testing {
+            if ui.button("Parar o teste").clicked() {
+                self.shared.mic_test.store(false, Ordering::Relaxed);
+            }
+        } else if ui.add_enabled(!in_call, egui::Button::new("Testar o microfone")).clicked()
+            && let Some(r) = &self.running
+        {
+            let _ = r.cmds.send(Cmd::MicTest);
+        }
+    }
+
     pub(crate) fn contacts_ui(&mut self, ui: &mut egui::Ui, online: bool, in_call: bool) {
         let contacts = parse_contacts(&self.form.contacts);
         if contacts.is_empty() {
@@ -376,7 +404,8 @@ impl eframe::App for App {
                     }
                 });
 
-                if in_call && !in_room {
+                let testing = self.shared.mic_test.load(Ordering::Relaxed);
+                if in_call && !in_room && !testing {
                     card(ui, "Em chamada", |ui| {
                         ui.label("Conversando agora.");
                         let link = self.shared.link.lock().unwrap().clone();
@@ -387,6 +416,10 @@ impl eframe::App for App {
                             self.shared.hangup.store(true, Ordering::Relaxed);
                         }
                     });
+                }
+
+                if !offline && self.form.use_audio {
+                    card(ui, "Áudio", |ui| self.audio_ui(ui, in_call, testing));
                 }
 
                 card(ui, "Meu código de contato", |ui| {

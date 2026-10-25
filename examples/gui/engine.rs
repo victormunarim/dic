@@ -3,7 +3,7 @@
 use std::{
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
     },
     time::Duration,
 };
@@ -66,6 +66,73 @@ pub(crate) fn open_sound(want: bool, form: &Form, out: &Sink) -> Option<Sound> {
     #[cfg(not(feature = "audio"))]
     out.line("compilado sem a feature audio; usando tom de teste");
     None
+}
+
+/// Ajustes de áudio da janela, lidos pelo motor a cada quadro.
+pub(crate) struct Controls {
+    pub(crate) muted: AtomicBool,
+    /// Volume do alto-falante e ganho do microfone (1.0 = sem alteração), em bits de `f32`.
+    volume: AtomicU32,
+    mic_gain: AtomicU32,
+    /// Nível do microfone, de 0.0 a 1.0.
+    level: AtomicU32,
+}
+
+impl Default for Controls {
+    fn default() -> Self {
+        Controls { muted: AtomicBool::new(false), volume: AtomicU32::new(1f32.to_bits()), mic_gain: AtomicU32::new(1f32.to_bits()), level: AtomicU32::new(0) }
+    }
+}
+
+impl Controls {
+    pub(crate) fn volume(&self) -> f32 {
+        f32::from_bits(self.volume.load(Ordering::Relaxed))
+    }
+    pub(crate) fn set_volume(&self, v: f32) {
+        self.volume.store(v.to_bits(), Ordering::Relaxed);
+    }
+    pub(crate) fn mic_gain(&self) -> f32 {
+        f32::from_bits(self.mic_gain.load(Ordering::Relaxed))
+    }
+    pub(crate) fn set_mic_gain(&self, v: f32) {
+        self.mic_gain.store(v.to_bits(), Ordering::Relaxed);
+    }
+    pub(crate) fn level(&self) -> f32 {
+        f32::from_bits(self.level.load(Ordering::Relaxed))
+    }
+    fn set_level(&self, v: f32) {
+        self.level.store(v.to_bits(), Ordering::Relaxed);
+    }
+
+    /// Prepara um quadro do microfone para enviar: mede o nível (antes de mudo e ganho, para o medidor
+    /// mostrar que o microfone funciona), depois zera se mudo ou aplica o ganho.
+    pub(crate) fn outgoing(&self, f: &mut [i16]) {
+        self.set_level(level(f));
+        if self.muted.load(Ordering::Relaxed) {
+            f.fill(0);
+        } else {
+            scale_pcm(f, self.mic_gain());
+        }
+    }
+}
+
+/// Multiplica as amostras por `gain`, sem estourar o `i16`.
+pub(crate) fn scale_pcm(f: &mut [i16], gain: f32) {
+    if gain == 1.0 {
+        return;
+    }
+    for x in f {
+        *x = (*x as f32 * gain).round().clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+    }
+}
+
+/// Nível de um quadro de 0.0 (silêncio, -60 dBFS ou menos) a 1.0 (fundo de escala).
+pub(crate) fn level(f: &[i16]) -> f32 {
+    if f.is_empty() {
+        return 0.0;
+    }
+    let rms = (f.iter().map(|x| (*x as f64).powi(2)).sum::<f64>() / f.len() as f64).sqrt();
+    ((20.0 * (rms / 32768.0).max(1e-9).log10() + 60.0) / 60.0).clamp(0.0, 1.0) as f32
 }
 
 pub(crate) fn tone(hz: f64, n: usize) -> Vec<i16> {
@@ -189,7 +256,7 @@ pub(crate) enum End {
     Lost,
 }
 
-pub(crate) async fn talk(mut c: ActiveCall, hz: f64, stop: Arc<AtomicBool>, out: Sink, sound: Option<Sound>, link: &Mutex<String>) -> End {
+pub(crate) async fn talk(mut c: ActiveCall, hz: f64, stop: Arc<AtomicBool>, out: Sink, sound: Option<Sound>, shared: &Shared) -> End {
     let mut silence = Silence::new(tokio::time::Instant::now());
     let mut end = End::Hangup;
     let mut tick = interval(Duration::from_millis(20));
@@ -208,7 +275,8 @@ pub(crate) async fn talk(mut c: ActiveCall, hz: f64, stop: Arc<AtomicBool>, out:
                     None => vec![tone(hz, n)],
                 };
                 let mut closed = false;
-                for f in sent {
+                for mut f in sent {
+                    shared.audio.outgoing(&mut f);
                     sent_n += 1;
                     sent_energy += f.iter().map(|x| (*x as f64).powi(2)).sum::<f64>() / f.len() as f64;
                     closed |= c.send(f).await.is_err();
@@ -220,10 +288,13 @@ pub(crate) async fn talk(mut c: ActiveCall, hz: f64, stop: Arc<AtomicBool>, out:
                 n += 1;
             }
             f = c.next_pcm() => match f {
-                Some(f) => {
-                    if let Some(s) = &sound { s.play(&f); }
+                Some(mut f) => {
                     frames += 1;
                     energy += f.iter().map(|x| (*x as f64).powi(2)).sum::<f64>() / f.len() as f64;
+                    if let Some(s) = &sound {
+                        scale_pcm(&mut f, shared.audio.volume());
+                        s.play(&f);
+                    }
                 }
                 None => {
                     end = if c.peer_hung_up() { End::PeerHangup } else { End::Lost };
@@ -240,7 +311,7 @@ pub(crate) async fn talk(mut c: ActiveCall, hz: f64, stop: Arc<AtomicBool>, out:
                     end = End::Lost;
                     break;
                 }
-                *link.lock().unwrap() = quality(s.received - prev.received, s.concealed - prev.concealed, s.delay_ms);
+                *shared.link.lock().unwrap() = quality(s.received - prev.received, s.concealed - prev.concealed, s.delay_ms);
                 let rms = if frames > 0 { (energy / frames as f64).sqrt() } else { 0.0 };
                 out.line(format!(
                     "recebidos +{:<3} (total {})  escondidos +{}  atraso {} ms  volume {:.0}  mic {:.0}{}",
@@ -252,7 +323,8 @@ pub(crate) async fn talk(mut c: ActiveCall, hz: f64, stop: Arc<AtomicBool>, out:
             }
         }
     }
-    link.lock().unwrap().clear();
+    shared.link.lock().unwrap().clear();
+    shared.audio.set_level(0.0);
     let s = c.stats();
     out.line(format!("chamada encerrada: enviados {}, recebidos {}, escondidos {}, atrasados {}", s.sent, s.received, s.concealed, s.late));
     c.hangup();
@@ -267,6 +339,8 @@ pub(crate) enum Cmd {
     /// O dono tira um membro: troca o segredo e avisa só quem fica.
     Remove([u8; 32]),
     Leave,
+    /// Liga o microfone ao alto-falante para a pessoa conferir som e nível.
+    MicTest,
 }
 
 /// Estado compartilhado entre a janela e a tarefa do nó.
@@ -278,6 +352,10 @@ pub(crate) struct Shared {
     pub(crate) hangup: AtomicBool,
     /// Qualidade da linha na chamada atual (vazio fora de chamada).
     pub(crate) link: Mutex<String>,
+    /// Mudo, volume, ganho e nível do microfone.
+    pub(crate) audio: Controls,
+    /// Teste do microfone em andamento (a pessoa se ouve); desligar este sinalizador encerra o teste.
+    pub(crate) mic_test: AtomicBool,
     /// Texto de estado do nó ("online em ...").
     pub(crate) status: Mutex<String>,
     /// Está numa sala (as chamadas da sala não usam `in_call`, mas ele fica ligado).
@@ -464,6 +542,20 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
                         Err(e) => out.line(format!("não deu para remover: {e}")),
                     }
                 }
+                Some(Cmd::MicTest) => {
+                    if shared.in_call.swap(true, Ordering::Relaxed) {
+                        out.line("encerre a chamada antes de testar o microfone");
+                        continue;
+                    }
+                    match open_sound(true, &form, &out) {
+                        Some(sound) => {
+                            shared.mic_test.store(true, Ordering::Relaxed);
+                            out.line("teste do microfone: você se ouve com um pequeno atraso; use fones para não dar eco");
+                            tokio::spawn(mic_test(sound, shared.clone(), stop.clone(), out.clone()));
+                        }
+                        None => shared.in_call.store(false, Ordering::Relaxed),
+                    }
+                }
                 Some(Cmd::Leave) => {
                     if let Some(r) = room.take() {
                         leave_room(&node, r, &shared, &out).await;
@@ -483,12 +575,14 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
                 {
                     out.line(format!("áudio: {e}"));
                 }
-                for f in frames {
+                for mut f in frames {
+                    shared.audio.outgoing(&mut f);
                     r.mesh.send(&f);
                 }
-                if let Some(f) = r.mesh.mix()
+                if let Some(mut f) = r.mesh.mix()
                     && let Some(s) = &r.sound
                 {
+                    scale_pcm(&mut f, shared.audio.volume());
                     s.play(&f);
                 }
                 // Discagem em segundo plano e em paralelo; repete a cada 2 s, o que religa sozinho quem caiu.
@@ -560,6 +654,31 @@ pub(crate) struct RoomRun {
 
 /// Segue as trocas de segredo que o dono `owner` deixou no diretório, até não haver mais (no máximo 8).
 /// Cada troca vai para `shared.rekeyed`, para a janela salvar o segredo novo.
+/// Devolve o microfone ao alto-falante até a janela encerrar o teste (`mic_test`) ou o nó parar.
+async fn mic_test(sound: Sound, shared: Arc<Shared>, stop: Arc<AtomicBool>, out: Sink) {
+    let mut tick = interval(Duration::from_millis(20));
+    tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut n = 0u32;
+    while shared.mic_test.load(Ordering::Relaxed) && !stop.load(Ordering::Relaxed) {
+        tick.tick().await;
+        while let Some(mut f) = sound.mic_frame() {
+            shared.audio.outgoing(&mut f);
+            scale_pcm(&mut f, shared.audio.volume());
+            sound.play(&f);
+        }
+        n += 1;
+        if n.is_multiple_of(50)
+            && let Some(e) = sound.take_error()
+        {
+            out.line(format!("áudio: {e}"));
+        }
+    }
+    shared.audio.set_level(0.0);
+    shared.mic_test.store(false, Ordering::Relaxed);
+    shared.in_call.store(false, Ordering::Relaxed);
+    out.line("teste do microfone encerrado");
+}
+
 pub(crate) async fn follow_chain(directory: &str, me: &StaticSecret, owner: &[u8; 32], mut secret: [u8; 32], shared: &Shared) -> [u8; 32] {
     for _ in 0..8 {
         match room::follow(directory, me, owner, &secret).await {
@@ -605,7 +724,7 @@ pub(crate) fn start_talk(c: ActiveCall, hz: f64, shared: &Arc<Shared>, out: &Sin
         }
     });
     tokio::spawn(async move {
-        let end = talk(c, hz, stop.clone(), out.clone(), sound, &shared.link).await;
+        let end = talk(c, hz, stop.clone(), out.clone(), sound, &shared).await;
         stop.store(true, Ordering::Relaxed);
         if end == End::Lost
             && !shared.hangup.load(Ordering::Relaxed)
@@ -699,6 +818,31 @@ mod tests {
         assert_eq!(r, Ok(None));
         // Sem pedido de desligar, o resultado passa.
         assert_eq!(until_hangup(async { 7 }, &AtomicBool::new(false)).await, Some(7));
+    }
+
+    #[test]
+    fn scale_pcm_clamps_and_level_follows_loudness() {
+        let mut f = vec![1000, -1000, 30000, -30000];
+        scale_pcm(&mut f, 2.0);
+        assert_eq!(f, vec![2000, -2000, i16::MAX, i16::MIN]);
+        assert_eq!(level(&[0; 320]), 0.0);
+        assert!(level(&[1000; 320]) > level(&[100; 320]));
+        assert!(level(&[i16::MAX; 320]) > 0.99);
+    }
+
+    #[test]
+    fn outgoing_measures_before_mute_and_gain() {
+        let c = Controls::default();
+        let mut f = vec![4000i16; 320];
+        c.muted.store(true, Ordering::Relaxed);
+        c.outgoing(&mut f);
+        assert!(f.iter().all(|x| *x == 0));
+        assert!(c.level() > 0.5, "o medidor deve mostrar o microfone mesmo mudo");
+        c.muted.store(false, Ordering::Relaxed);
+        c.set_mic_gain(0.5);
+        let mut f = vec![4000i16; 320];
+        c.outgoing(&mut f);
+        assert!(f.iter().all(|x| *x == 2000));
     }
 
     #[test]

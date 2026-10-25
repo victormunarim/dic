@@ -9,6 +9,7 @@ Uso da GUI (`examples/gui`): quem fala, volume, apelidos, dispositivos, remover 
 - **Quem fala.** Cada membro da sala tem uma bolinha: verde e maior enquanto fala (energia do áudio recebido, com 400 ms de retenção), cinza quando conectado e quieto, laranja enquanto a ligação não completou. Na API: `Mesh::is_speaking`.
 - **Volume por pessoa.** Um controle de 0 (mudo) a 200 % por membro; vale só para o que você ouve (`Mesh::set_volume`, antes do limitador da mixagem).
 - **Apelidos.** O campo ao lado de cada membro grava um apelido salvo no `~/.clam-gui.conf` (`nicks=`, só neste computador). Contatos continuam com o nome da lista; o apelido nunca torna alguém "contato" (atendimento automático segue só a lista de contatos).
+- **Controles de áudio.** Com o áudio ligado e o nó online, o cartão "Áudio" tem mudo (envia silêncio), volume do alto-falante (0 a 200 %), ganho do microfone (0 a 300 %), um medidor do microfone (vale mesmo com mudo, para confirmar que ele capta) e "Testar o microfone", que devolve a sua voz ao alto-falante (use fones). Durante o teste a linha fica ocupada. Os ajustes valem só para a sessão.
 - **Dispositivos de áudio.** Em Configurações avançadas, escolha microfone e alto-falante (`clam::audio::devices`, `Audio::open_with`); vazio usa o padrão do sistema. Se o dispositivo escolhido sumiu (fone desconectado), a abertura falha com aviso em vez de trocar de dispositivo em silêncio.
 
 ## Remover membro da sala (GUI)
