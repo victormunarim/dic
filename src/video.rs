@@ -67,7 +67,7 @@ impl RawFrame {
                 let mut sum = [0u32; 4];
                 for dy in 0..k {
                     let row = ((y * k + dy) * self.width + x * k) * 4;
-                    for px in self.rgba[row..row + k * 4].chunks_exact(4) {
+                    for px in self.rgba[row..row + k * 4].as_chunks::<4>().0.iter() {
                         for c in 0..4 {
                             sum[c] += px[c] as u32;
                         }
