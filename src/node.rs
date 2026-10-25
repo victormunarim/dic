@@ -84,6 +84,14 @@ pub struct Dialer {
 
 type Known = Arc<Mutex<HashMap<[u8; 32], RelayInfo>>>;
 
+/// Acrescenta um aviso à nota de rede, separando por `; `.
+fn push_note(note: &mut Option<String>, add: String) {
+    *note = Some(match note.take() {
+        Some(n) => format!("{n}; {add}"),
+        None => add,
+    });
+}
+
 /// Espera o circuito do cliente ficar pronto, até `limit`.
 async fn ready_within(client: &CircuitClient, limit: Duration) -> bool {
     tokio::time::timeout(limit, async {
@@ -202,10 +210,7 @@ impl Node {
             match Punch::start(&directory, &secret, phone.datagram_port()).await {
                 Ok(p) => Some(Arc::new(p)),
                 Err(e) => {
-                    note = Some(match note {
-                        Some(n) => format!("{n}; sem furo de NAT: {e}"),
-                        None => format!("sem furo de NAT: {e}"),
-                    });
+                    push_note(&mut note, format!("sem furo de NAT: {e}"));
                     None
                 }
             }
@@ -231,10 +236,7 @@ impl Node {
             } else {
                 format!("o relay {} não é alcançável de fora: ninguém consegue ligar para você. Libere a porta {port} no roteador/firewall ou informe o endereço público", mine.addr)
             };
-            note = Some(match note {
-                Some(n) => format!("{n}; {warn}"),
-                None => warn,
-            });
+            push_note(&mut note, warn);
         }
         let dialer = Dialer { secret: secret.clone(), directory: directory.clone(), mine: mine.clone(), relay_port: port, punch, known: known.clone() };
         let republish = {

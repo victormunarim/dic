@@ -555,3 +555,22 @@ async fn stale_stored_address_falls_back_to_directory() {
     assert_eq!(a.known()[0].1.addr, real.addr);
     ca.hangup();
 }
+
+/// Com o diretório no ar mas sem conhecer o contato, o endereço guardado basta.
+#[tokio::test]
+async fn stored_address_works_when_directory_does_not_know_the_peer() {
+    let (_d1, addr1) = dir().await;
+    let (_d2, addr2) = dir().await;
+    let (sa, sb) = (key(), key());
+    let (pa, pb) = (*PublicKey::from(&sa).as_bytes(), *PublicKey::from(&sb).as_bytes());
+    let mut b = Node::start(cfg(sb, &addr1, vec![pa])).await.unwrap();
+    let real = directory::lookup(&addr1, &pb).await.unwrap().unwrap();
+    let a = Node::start(NodeConfig { known: vec![(pb, real)], ..cfg(sa, &addr2, vec![]) }).await.unwrap();
+    let answer = tokio::spawn(async move {
+        let inc = timeout(Duration::from_secs(15), b.next_incoming()).await.unwrap().unwrap();
+        (inc.accept(Mulaw::new()).await.unwrap(), b)
+    });
+    let ca = a.dial(pb, Mulaw::new(), Duration::from_secs(15)).await.unwrap();
+    let (_cb, _b) = answer.await.unwrap();
+    ca.hangup();
+}

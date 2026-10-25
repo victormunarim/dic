@@ -63,6 +63,17 @@ fn client(cands: Vec<Candidate>) -> CircuitClient {
     CircuitClient::spawn(mgr, Duration::from_secs(2))
 }
 
+/// Espera o circuito reserva ficar pronto (sem prazo fixo de montagem).
+async fn wait_standby(c: &CircuitClient) {
+    timeout(Duration::from_secs(10), async {
+        while !c.status().await.is_some_and(|s| s.standby.is_some_and(|b| b.ready)) {
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("reserva não ficou pronta");
+}
+
 async fn wait_ready(c: &mut CircuitClient) {
     timeout(Duration::from_secs(5), async {
         loop {
@@ -121,7 +132,7 @@ async fn failover_after_killing_a_relay_keeps_silence_under_500ms() {
     let (mut servers, cands) = spawn_relays(6, &contact).await;
     let mut c = client(cands.clone());
     wait_ready(&mut c).await;
-    sleep(Duration::from_millis(500)).await; // reserva montar
+    wait_standby(&c).await;
 
     let active = c.status().await.unwrap().active.unwrap();
     let idx = cands.iter().position(|x| x.addr == active.first).unwrap();
@@ -210,7 +221,7 @@ async fn reputation_records_successes_and_drops_a_dead_relay() {
     );
     c.set_relays(cands.clone()).await;
     wait_ready(&mut c).await;
-    sleep(Duration::from_millis(800)).await;
+    wait_standby(&c).await;
     // Esvazia eventos para o ator não bloquear.
     while let Ok(Some(_)) = timeout(Duration::from_millis(5), c.next_event()).await {}
 
@@ -232,7 +243,7 @@ async fn reputation_snapshot_survives_a_restart() {
     let mut c = CircuitClient::spawn_with_reputation(mgr, Duration::from_secs(1), Reputation::new(cfg));
     c.set_relays(cands).await;
     wait_ready(&mut c).await;
-    sleep(Duration::from_millis(500)).await;
+    wait_standby(&c).await;
     while let Ok(Some(_)) = timeout(Duration::from_millis(5), c.next_event()).await {}
 
     let active = c.status().await.unwrap().active.unwrap();
