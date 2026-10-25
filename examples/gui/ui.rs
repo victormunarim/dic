@@ -142,6 +142,7 @@ impl App {
         let (ins, outs) = self.devs.clone();
         pick(ui, "Microfone", &mut self.form.input_dev, &ins);
         pick(ui, "Alto-falante", &mut self.form.output_dev, &outs);
+        ui.weak(format!("Sistema de áudio: {}", clam::audio::host_name()));
         if ui.small_button("Atualizar lista de dispositivos").clicked() {
             self.devs = clam::audio::devices();
         }

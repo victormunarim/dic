@@ -407,7 +407,12 @@ fn clean_name(n: &str) -> String {
 
 /// Dispositivo que não é microfone nem alto-falante de verdade (o "null" do ALSA, que descarta o som).
 fn is_pseudo(name: &str) -> bool {
-    name.starts_with("Discard all samples")
+    name.starts_with("Discard all samples") || name.starts_with("Default ALSA Output")
+}
+
+/// Sistema de áudio em uso (por exemplo "PulseAudio" ou "ALSA"), para a GUI mostrar de onde vem a lista.
+pub fn host_name() -> String {
+    cpal::default_host().id().name().to_string()
 }
 
 /// Fonte de áudio do PulseAudio/PipeWire que é o espelho de um alto-falante (grava o que toca), não um microfone.
@@ -590,6 +595,7 @@ mod tests {
         assert_eq!(clean_name("sof-hda-dsp, HDMI 1"), "sof-hda-dsp, HDMI 1");
         assert_eq!(clean_name("  PipeWire Sound Server "), "PipeWire Sound Server");
         assert!(is_pseudo("Discard all samples (playback) or generate zero samples (capture)"));
+        assert!(is_pseudo("Default ALSA Output (currently PipeWire Media Server)"));
         assert!(is_monitor("Monitor of Raptor Lake-P/U/H cAVS Speaker"));
         assert!(!is_monitor("Raptor Lake-P/U/H cAVS Digital Microphone"));
         assert!(!is_pseudo("PipeWire Sound Server"));
