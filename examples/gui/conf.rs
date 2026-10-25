@@ -125,11 +125,36 @@ pub(crate) struct Form {
 /// Código de contato: a chave pública (64 hex), com o diretório opcional depois de `@`
 /// (`<chave>@host:porta`). Devolve a chave e o diretório, se houver.
 pub(crate) fn split_code(t: &str) -> Option<([u8; 32], Option<String>)> {
-    let (key, dir) = match t.trim().split_once('@') {
-        Some((k, d)) => (k, Some(d.trim().to_string()).filter(|d| !d.is_empty())),
-        None => (t.trim(), None),
+    split_direct(t).map(|(k, d, _)| (k, d))
+}
+
+/// Código de contato direto: o de [`split_code`] seguido do relay de quem o gerou,
+/// `<chave>[@host:porta]#ip:porta#chave-do-circuito#chave-do-link` (as duas chaves em 64 hex). Com ele a
+/// primeira ligação não precisa de diretório. Um `#` com o resto torto invalida o código inteiro, para um
+/// código cortado na colagem não ser aceito pela metade.
+pub(crate) fn split_direct(t: &str) -> Option<([u8; 32], Option<String>, Option<clam::directory::RelayInfo>)> {
+    let t = t.trim();
+    let (head, relay) = match t.split_once('#') {
+        None => (t, None),
+        Some((h, r)) => {
+            let mut p = r.split('#');
+            let (addr, onion, link) = (p.next()?, p.next()?, p.next()?);
+            if p.next().is_some() || addr.is_empty() || addr.len() > 60 || !addr.contains(':') || addr.contains(char::is_whitespace) {
+                return None;
+            }
+            (h, Some(clam::directory::RelayInfo { addr: addr.to_string(), onion: unhex(onion).ok()?, link: unhex(link).ok()? }))
+        }
     };
-    unhex(key).ok().map(|k| (k, dir))
+    let (key, dir) = match head.split_once('@') {
+        Some((k, d)) => (k, Some(d.trim().to_string()).filter(|d| !d.is_empty())),
+        None => (head, None),
+    };
+    unhex(key).ok().map(|k| (k, dir, relay))
+}
+
+/// Relays que os códigos diretos da lista de contatos trazem, por chave.
+pub(crate) fn contact_relays(text: &str) -> Vec<([u8; 32], clam::directory::RelayInfo)> {
+    text.split_whitespace().filter_map(split_direct).filter_map(|(k, _, r)| Some((k, r?))).collect()
 }
 
 /// Contatos da lista: `(nome, chave)`. Linhas sem uma chave de 64 hex são ignoradas.
@@ -421,11 +446,23 @@ impl Form {
         codes.filter_map(|t| split_code(t).and_then(|(_, d)| d)).next().unwrap_or_default()
     }
 
-    /// Meu código de contato: chave pública e, se conhecido, o diretório.
-    pub(crate) fn my_code(&self) -> Option<String> {
+    /// Meu código de contato: chave pública e, se conhecido, o diretório. Sem diretório, o código leva o
+    /// relay `relay` desta máquina (veja [`split_direct`]); `None` enquanto ele não existe (offline).
+    pub(crate) fn my_code(&self, relay: Option<&clam::directory::RelayInfo>) -> Option<String> {
         let key = hex(PublicKey::from(&self.identity().ok()?).as_bytes());
         let dir = self.directory_addr();
-        Some(if dir.is_empty() { key } else { format!("{key}@{dir}") })
+        Some(match (dir.is_empty(), relay) {
+            (false, _) => format!("{key}@{dir}"),
+            (true, Some(r)) => format!("{key}#{}#{}#{}", r.addr, hex(&r.onion), hex(&r.link)),
+            (true, None) => key,
+        })
+    }
+
+    /// Relay que um código direto (nos contatos ou no campo "ligar para") informa para `key`.
+    pub(crate) fn relay_for(&self, key: &[u8; 32]) -> Option<clam::directory::RelayInfo> {
+        let from_peer = self.peer.split_whitespace().filter_map(split_direct);
+        let from_contacts = self.contacts.split_whitespace().filter_map(split_direct);
+        from_peer.chain(from_contacts).find(|(k, ..)| k == key).and_then(|(_, _, r)| r)
     }
 
     pub(crate) fn target(&self) -> Result<[u8; 32], String> {
@@ -509,8 +546,43 @@ mod tests {
         let (key, dir) = split_code(&format!(" {k}@10.0.0.1:7777 ")).unwrap();
         assert_eq!((key, dir.as_deref()), ([0xab; 32], Some("10.0.0.1:7777")));
         assert!(split_code("nome").is_none());
+        // O código direto passa por split_code sem o relay.
+        let direct = format!("{k}@h:1#203.0.113.7:4001#{}#{}", "11".repeat(32), "22".repeat(32));
+        assert_eq!(split_code(&direct), Some(([0xab; 32], Some("h:1".to_string()))));
         let c = parse_contacts(&format!("ana {k}@h:1"));
         assert_eq!(c, vec![("ana".to_string(), [0xab; 32])]);
+    }
+
+    #[test]
+    fn direct_code_round_trips_and_rejects_bad_tails() {
+        let k = "ab".repeat(32);
+        let (onion, link) = ("11".repeat(32), "22".repeat(32));
+        let (key, dir, relay) = split_direct(&format!(" {k}#203.0.113.7:4001#{onion}#{link} ")).unwrap();
+        assert_eq!((key, dir), ([0xab; 32], None));
+        assert_eq!(relay, Some(clam::directory::RelayInfo { addr: "203.0.113.7:4001".into(), onion: [0x11; 32], link: [0x22; 32] }));
+        let (_, dir, relay) = split_direct(&format!("{k}@d:7#[::1]:4001#{onion}#{link}")).unwrap();
+        assert_eq!((dir.as_deref(), relay.unwrap().addr.as_str()), (Some("d:7"), "[::1]:4001"));
+        assert_eq!(split_direct(&k), Some(([0xab; 32], None, None)));
+        // Cortado, sobrando pedaço, endereço sem porta ou chave torta: nada de aceitar pela metade.
+        for bad in [format!("{k}#203.0.113.7:4001#{onion}"), format!("{k}#203.0.113.7:4001#{onion}#{link}#x"), format!("{k}#203.0.113.7#{onion}#{link}"), format!("{k}#1.2.3.4:5#{onion}#zz"), format!("{k}#")] {
+            assert!(split_direct(&bad).is_none(), "{bad}");
+        }
+        let f = Form { contacts: format!("ana {k}#203.0.113.7:4001#{onion}#{link}\nbia {}", "cd".repeat(32)), ..Default::default() };
+        assert_eq!(contact_relays(&f.contacts).len(), 1);
+        assert!(f.relay_for(&[0xab; 32]).is_some() && f.relay_for(&[0xcd; 32]).is_none());
+        assert_eq!(parse_contacts(&f.contacts).len(), 2);
+    }
+
+    #[test]
+    fn my_code_carries_the_relay_only_without_a_directory() {
+        let mut f = Form { secret: "07".repeat(32), ..Default::default() };
+        let key = f.my_code(None).unwrap();
+        let relay = clam::directory::RelayInfo { addr: "10.0.0.2:4001".into(), onion: [1; 32], link: [2; 32] };
+        let direct = f.my_code(Some(&relay)).unwrap();
+        assert_eq!(split_direct(&direct).unwrap().2, Some(relay.clone()));
+        assert!(direct.starts_with(&key));
+        f.directory = "d:7".into();
+        assert_eq!(f.my_code(Some(&relay)).unwrap(), format!("{key}@d:7"));
     }
 
     #[test]

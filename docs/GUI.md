@@ -37,6 +37,18 @@ O diretório só é indispensável no primeiro contato. Depois disso:
 - **Ligar de volta sem diretório.** O convite leva o relay de quem liga (endereço e chaves, cifrados junto com a identidade; telefones antigos ignoram). Quem atende guarda isso como *dica* (`Node::hints()`, devolvida em `NodeConfig::hints`; na GUI são as linhas com `dica` no fim de `~/.clam-gui.known`). Ao discar a ordem é: endereço guardado, dica, diretório. A dica não é autenticada (qualquer um que conheça a chave de um contato pode escrever o convite), por isso nunca sobrescreve o endereço guardado e só vira endereço guardado depois que uma chamada completa por ela. Sem diretório na partida, o nó informa o IP dele na rede local em vez de 127.0.0.1.
 - **Subir com o diretório fora do ar.** `Node::start` não falha mais: registra o problema em `network_note()`/`directory_error()` e tenta publicar de novo a cada 40 s. Enquanto isso, recebe chamadas de quem já tem o seu endereço e liga para quem está em `known`.
 
+### Totalmente P2P: o código de contato direto
+
+Dá para nem ter diretório na primeira conexão. Deixe o campo do servidor vazio e fique online: *Meu código de contato* passa a mostrar o código direto,
+
+```
+<sua chave pública>#<ip:porta do seu relay>#<chave do circuito, 64 hex>#<chave do link, 64 hex>
+```
+
+(com `@host:porta` depois da chave se houver diretório; nesse caso o código continua o curto, `chave@host:porta`). Quem recebe cola o código em *Adicionar contato* ou *Ligar para um código*: a GUI guarda o relay como dica (`Node::add_hint`, e na partida as linhas de contatos com `#` entram em `NodeConfig::hints`) e disca por ele, sem diretório. O primeiro salto é o relay de quem liga, por loopback, e o segundo é o relay do código. Depois de uma chamada completa o endereço vira guardado (`~/.clam-gui.known`) como qualquer outro. Um código com `#` cortado ou torto é recusado inteiro. `split_code` ignora a parte do relay, então os contatos antigos continuam valendo.
+
+Custos: o IP e a porta (4001) de quem recebe precisam ser alcançáveis de fora (UPnP, porta aberta ou endereço público informado; sem diretório não há teste de alcance nem furo de NAT, e CGNAT não funciona); o código muda quando o IP muda; e quem recebe vê o IP de quem liga, porque o primeiro salto é o relay dele. Sem endereço público o código leva o IP da rede local, que só serve dentro dela. Se o endereço do código não responde, o erro (`DialError::NoDirectory`) diz que não há diretório para achar outro.
+
 Endereço guardado velho não trava a ligação: se o circuito não fica pronto em 5 s, a busca no diretório assume e corrige o cache. Quando o diretório volta, `published_addr()` e `network_note()` se atualizam sozinhos.
 
 Limites: sem diretório não há furo de NAT nem sorteio de primeiro salto (usa o próprio relay por loopback), e o endereço publicado fica sendo o local até o diretório voltar. Quem muda de IP só é achado de novo pelo diretório.

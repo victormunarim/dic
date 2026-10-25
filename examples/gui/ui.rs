@@ -235,10 +235,6 @@ impl App {
         if self.form.directory.trim().is_empty() {
             self.form.directory = self.form.directory_addr();
         }
-        if self.form.directory.trim().is_empty() {
-            self.error = "Informe o servidor (diretório), no formato endereço:porta.".into();
-            return;
-        }
         if let Err(e) = self.form.save_checked() {
             self.error = format!("não deu para gravar a configuração em {}: {e}; o servidor e os contatos não ficam salvos", conf_path().display());
         }
@@ -361,7 +357,7 @@ impl App {
                         && let Some(r) = &self.running
                     {
                         self.error.clear();
-                        let _ = r.cmds.send(Cmd::Dial(*key));
+                        let _ = r.cmds.send(Cmd::Dial(*key, self.form.relay_for(key)));
                     }
                 });
             });
@@ -376,7 +372,7 @@ impl App {
             ui.add(egui::TextEdit::singleline(&mut self.form.new_code).hint_text("Código de contato").desired_width(260.0));
             if ui.button("Adicionar contato").clicked() {
                 if split_code(&self.form.new_code).is_none() {
-                    self.error = "Esse código de contato não parece certo (são 64 letras e números).".into();
+                    self.error = "Esse código de contato não parece certo (são 64 letras e números, e o que vem depois deles tem de estar inteiro).".into();
                 } else {
                     let name: String = self.form.new_name.chars().filter(|c| !matches!(c, ';' | '\n')).collect();
                     let line = format!("{} {}", name.trim(), self.form.new_code.trim());
@@ -485,6 +481,7 @@ impl eframe::App for App {
             self.shared.in_call.store(false, Ordering::Relaxed);
             self.shared.in_room.store(false, Ordering::Relaxed);
             self.shared.status.lock().unwrap().clear();
+            *self.shared.relay.lock().unwrap() = None;
             self.shared.room.lock().unwrap().clear();
         }
         self.zoom_window(ctx);
@@ -565,7 +562,8 @@ impl eframe::App for App {
 
                 card(ui, "Meu código de contato", |ui| {
                     ui.weak("Envie este código a quem vai ligar para você.");
-                    match self.form.my_code() {
+                    let relay = self.shared.relay.lock().unwrap().clone();
+                    match self.form.my_code(relay.as_ref()) {
                         Some(code) => {
                             ui.horizontal(|ui| {
                                 ui.monospace(if code.len() > 36 { format!("{}...", &code[..36]) } else { code.clone() });
@@ -594,7 +592,7 @@ impl eframe::App for App {
                                     self.error.clear();
                                     self.form.save();
                                     if let Some(r) = &self.running {
-                                        let _ = r.cmds.send(Cmd::Dial(k));
+                                        let _ = r.cmds.send(Cmd::Dial(k, self.form.relay_for(&k)));
                                     }
                                 }
                                 Err(e) => self.error = e,

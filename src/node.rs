@@ -95,6 +95,8 @@ pub enum DialError {
     NoStoredAddress(io::Error),
     #[error("o endereço guardado do contato não respondeu (ele pode ter reaberto com outras chaves ou mudado de rede) e o diretório não atende: {0}")]
     StoredAddressDead(io::Error),
+    #[error("{}", if *.tried_stored { "o endereço guardado do contato não respondeu e não há diretório para achar outro (peça um código de contato novo)" } else { "sem endereço desse contato e sem diretório: use o código de contato direto dele" })]
+    NoDirectory { tried_stored: bool },
     #[error("essa chave não está online no diretório")]
     NotFound,
     #[error("{0}")]
@@ -191,6 +193,17 @@ impl Dialer {
         v
     }
 
+    /// Há um diretório configurado (sem ele só o código de contato direto leva a alguém).
+    pub fn has_directory(&self) -> bool {
+        !self.directory.trim().is_empty()
+    }
+
+    /// Guarda o relay que `peer` informou fora do diretório (o código de contato direto) como dica: é o
+    /// primeiro endereço que [`Dialer::dial`] tenta e só vira endereço de confiança depois de uma chamada completa.
+    pub fn add_hint(&self, peer: [u8; 32], relay: RelayInfo) {
+        self.hints.lock().unwrap().insert(peer, relay);
+    }
+
     /// Primeiro relay de `stored` cujo circuito fica pronto em 5 s, com o cliente já aberto.
     /// Endereço velho (relay sumiu, ou outra máquina no mesmo IP) nunca completa o handshake.
     async fn stored_client(&self, peer: &[u8; 32], stored: Vec<RelayInfo>, options: fn() -> ClientOptions) -> Option<(CircuitClient, RelayInfo)> {
@@ -217,6 +230,9 @@ impl Dialer {
     /// Procura o relay de `peer` no diretório e guarda o endereço. `tried_stored`: o endereço guardado já
     /// foi tentado e falhou, o que muda o motivo do erro quando o diretório também não atende.
     async fn lookup_after_stored(&self, peer: &[u8; 32], tried_stored: bool) -> Result<RelayInfo, DialError> {
+        if self.directory.trim().is_empty() {
+            return Err(DialError::NoDirectory { tried_stored });
+        }
         let exit = match directory::lookup(&self.directory, peer).await {
             Ok(found) => found.ok_or(DialError::NotFound)?,
             Err(e) if tried_stored => return Err(DialError::StoredAddressDead(e)),
@@ -315,6 +331,8 @@ pub struct Node {
     dialer: Dialer,
     known: Known,
     hints: Known,
+    /// Relay desta máquina como os outros o alcançam (o que vai no código de contato direto).
+    own: Arc<Mutex<Option<RelayInfo>>>,
 }
 
 impl Node {
@@ -352,6 +370,8 @@ impl Node {
         let last_error = Arc::new(Mutex::new(None));
         // Diretório na internet e nenhum endereço público informado: tenta abrir a porta no roteador.
         let (mut public_addr, mut mapping, mut note) = (public_addr, None, None);
+        // Sem diretório (`no_dir`): só chega ao relay quem tem o código de contato direto; nada é publicado.
+        let no_dir = directory.trim().is_empty();
         if upnp && public_addr.is_none() && !upnp::directory_is_local(&directory).await {
             match upnp::map(port).await {
                 Ok(m) => {
@@ -362,7 +382,7 @@ impl Node {
                 Err(e) => note = Some(format!("não deu para abrir a porta automaticamente: {e}. Libere a porta {port} no roteador/firewall ou informe o endereço público")),
             }
         }
-        let punch = if punch {
+        let punch = if punch && !no_dir {
             match Punch::start(&directory, &secret, phone.datagram_port()).await {
                 Ok(p) => Some(Arc::new(p)),
                 Err(e) => {
@@ -373,17 +393,22 @@ impl Node {
         } else {
             None
         };
-        let (addr, published) = match directory::publish(&directory, &secret, port, onion, link, public_addr.as_deref()).await {
-            Ok(a) => (a, true),
-            Err(e) => {
-                *last_error.lock().unwrap() = Some(e.to_string());
-                (public_addr.clone().unwrap_or_else(|| format!("127.0.0.1:{port}")), false)
+        let (addr, published) = if no_dir {
+            (public_addr.clone().unwrap_or_else(|| format!("127.0.0.1:{port}")), public_addr.is_some())
+        } else {
+            match directory::publish(&directory, &secret, port, onion, link, public_addr.as_deref()).await {
+                Ok(a) => (a, true),
+                Err(e) => {
+                    *last_error.lock().unwrap() = Some(e.to_string());
+                    (public_addr.clone().unwrap_or_else(|| format!("127.0.0.1:{port}")), false)
+                }
             }
         };
         let addr_now = Arc::new(Mutex::new(addr.clone()));
         let mine = RelayInfo { addr, onion, link };
         // Pede ao diretório para conectar de fora ao relay publicado: avisa cedo se ninguém consegue ligar para você.
         if published
+            && !no_dir
             && !upnp::directory_is_local(&directory).await
             && let Ok(false) = directory::reachable(&directory, &secret).await
         {
@@ -397,15 +422,17 @@ impl Node {
         let dialer = Dialer { secret: secret.clone(), directory: directory.clone(), mine: mine.clone(), relay_port: port, punch, known: known.clone(), hints: hints.clone(), no_punch: Arc::default(), link: phone.link() };
         // Os convites levam este relay, para o outro lado ligar de volta sem diretório.
         let link_to_phone = phone.link();
+        let own = Arc::new(Mutex::new(relay_hint(&mine, published).map(|h| RelayInfo { addr: h.addr.to_string(), onion, link })));
         link_to_phone.set_relay_hint(relay_hint(&mine, published));
         let republish = {
+            let own = own.clone();
             let (directory, secret, last_error, public_addr, addr_now) = (directory.clone(), secret.clone(), last_error.clone(), public_addr, addr_now.clone());
             let (contacts, known) = (phone.contacts(), known.clone());
             tokio::spawn(async move {
                 let mut round = 0u32;
                 loop {
                     // Guarda o endereço dos contatos agora (e de tempos em tempos) para ligar a eles com o diretório fora.
-                    if round.is_multiple_of(REFRESH_KNOWN_EVERY) {
+                    if !no_dir && round.is_multiple_of(REFRESH_KNOWN_EVERY) {
                         refresh_known(&directory, &contacts, &known).await;
                     }
                     round = round.wrapping_add(1);
@@ -413,10 +440,15 @@ impl Node {
                     if let Some(m) = &mapping {
                         let _ = m.renew().await;
                     }
+                    if no_dir {
+                        continue;
+                    }
                     let r = directory::publish(&directory, &secret, port, onion, link, public_addr.as_deref()).await;
                     match r {
                         Ok(a) => {
-                            link_to_phone.set_relay_hint(relay_hint(&RelayInfo { addr: a.clone(), onion, link }, true));
+                            let info = RelayInfo { addr: a.clone(), onion, link };
+                            *own.lock().unwrap() = relay_hint(&info, true).map(|h| RelayInfo { addr: h.addr.to_string(), onion, link });
+                            link_to_phone.set_relay_hint(relay_hint(&info, true));
                             *addr_now.lock().unwrap() = a;
                             *last_error.lock().unwrap() = None;
                         }
@@ -425,7 +457,7 @@ impl Node {
                 }
             })
         };
-        Ok(Self { secret, directory, phone, _relay: relay, last_error, republish, note, dialer, known, hints, addr: addr_now })
+        Ok(Self { secret, directory, phone, _relay: relay, last_error, republish, note, dialer, known, hints, own, addr: addr_now })
     }
 
     /// Aceita convites de `keys` além dos contatos (membros de uma sala).
@@ -450,6 +482,17 @@ impl Node {
     /// Endereço publicado no diretório (o que os outros usam para chegar ao seu relay).
     pub fn published_addr(&self) -> String {
         self.addr.lock().unwrap().clone()
+    }
+
+    /// Relay desta máquina como os outros o alcançam (endereço público ou, na falta, o da rede local), para
+    /// montar o código de contato direto. `None` se não há endereço que alguém de fora use.
+    pub fn relay_info(&self) -> Option<RelayInfo> {
+        self.own.lock().unwrap().clone()
+    }
+
+    /// Guarda o relay que `peer` informou fora do diretório (veja [`Dialer::add_hint`]).
+    pub fn add_hint(&self, peer: [u8; 32], relay: RelayInfo) {
+        self.dialer.add_hint(peer, relay);
     }
 
     /// Aviso sobre a rede (porta aberta por UPnP, ou por que não foi possível), se houver.

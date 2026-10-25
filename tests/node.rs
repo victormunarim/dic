@@ -829,3 +829,47 @@ async fn a_dead_hint_never_becomes_the_stored_address() {
     assert!(a.known().is_empty());
     assert_eq!(a.hints().len(), 1);
 }
+
+/// Sem diretório nenhum: o relay de quem atende, passado fora de banda (o código de contato direto), basta
+/// para a primeira chamada, e depois dela vira o endereço guardado.
+#[tokio::test]
+async fn first_call_needs_no_directory_with_the_direct_code() {
+    let free_port = || std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let no_dir = |secret: StaticSecret, contacts: Vec<[u8; 32]>| {
+        let port = free_port();
+        NodeConfig { relay_port: port, public_addr: Some(format!("127.0.0.1:{port}")), upnp: false, punch: false, ..NodeConfig::new(secret, "", contacts) }
+    };
+    let (sa, sb) = (key(), key());
+    let (pa, pb) = (*PublicKey::from(&sa).as_bytes(), *PublicKey::from(&sb).as_bytes());
+    let mut b = Node::start(no_dir(sb, vec![pa])).await.unwrap();
+    let a = Node::start(no_dir(sa, vec![pb])).await.unwrap();
+    assert!(a.directory_error().is_none() && b.network_note().is_none());
+    // Sem o código, não há como achar o contato.
+    let err = a.dial(pb, Mulaw::new(), Duration::from_secs(3)).await.err().unwrap();
+    assert!(matches!(err, DialError::NoDirectory { tried_stored: false }), "{err}");
+
+    let code = b.relay_info().expect("relay com endereço público informado");
+    a.add_hint(pb, code.clone());
+    let answer = tokio::spawn(async move {
+        let inc = timeout(Duration::from_secs(15), b.next_incoming()).await.unwrap().unwrap();
+        (inc.accept(Mulaw::new()).await.unwrap(), b)
+    });
+    let ca = a.dial(pb, Mulaw::new(), Duration::from_secs(15)).await.unwrap();
+    let (_cb, _b) = answer.await.unwrap();
+    ca.hangup();
+    let known = a.known();
+    assert_eq!((known.len(), known[0].1.clone()), (1, code));
+    assert!(a.hints().is_empty());
+}
+
+/// O endereço do código direto não responde e não há diretório: o erro diz que tentou o guardado.
+#[tokio::test]
+async fn dead_direct_code_without_directory_says_so() {
+    use clam::directory::RelayInfo;
+    let pb = *PublicKey::from(&key()).as_bytes();
+    let a = Node::start(NodeConfig { relay_port: 0, punch: false, upnp: false, ..NodeConfig::new(key(), "", vec![]) }).await.unwrap();
+    a.add_hint(pb, RelayInfo { addr: "127.0.0.1:1".into(), onion: [7; 32], link: [8; 32] });
+    let err = a.dial(pb, Mulaw::new(), Duration::from_secs(3)).await.err().unwrap();
+    assert!(matches!(err, DialError::NoDirectory { tried_stored: true }), "{err}");
+    assert!(a.known().is_empty());
+}

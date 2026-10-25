@@ -6,14 +6,16 @@ use super::*;
 pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, shared: Arc<Shared>, stop: Arc<AtomicBool>, out: Sink) -> Result<(), String> {
     let secret = form.identity()?;
     let ident = secret.clone();
-    if form.directory_addr().is_empty() {
-        return Err("informe o diretório (host:porta), ou cole um código de contato com @host:porta".into());
-    }
     // Só contatos são atendidos sozinhos; apelidos servem apenas para exibir nomes.
     let contacts: Vec<_> = parse_contacts(&form.contacts);
     let names = form.names();
     let mut cfg = NodeConfig::new(secret, form.directory_addr(), contacts.iter().map(|(_, k)| *k).collect());
     (cfg.known, cfg.hints) = load_known();
+    // Códigos diretos na lista de contatos trazem o relay deles: dica para ligar sem diretório.
+    for (k, r) in contact_relays(&form.contacts) {
+        cfg.hints.retain(|(h, _)| *h != k);
+        cfg.hints.push((k, r));
+    }
     let (relay_keys, keys_error) = load_relay_keys();
     cfg.relay_keys = Some(relay_keys);
     if let Some(e) = keys_error {
@@ -23,9 +25,14 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
         cfg.public_addr = Some(form.public_addr.trim().to_string());
     }
     out.line(format!("{} endereço(s) de contatos guardados em {} ({} deles só vieram de convites)", cfg.known.len() + cfg.hints.len(), known_path().display(), cfg.hints.len()));
-    out.line("conectando ao diretório...");
+    if cfg.directory.trim().is_empty() {
+        out.line("sem diretório: só ligo e recebo por código de contato direto (veja \"Meu código de contato\")");
+    } else {
+        out.line("conectando ao diretório...");
+    }
     let mut node = Node::start(cfg).await.map_err(|e| format!("não ficou online: {e}"))?;
     *shared.status.lock().unwrap() = format!("online em {}", node.published_addr());
+    *shared.relay.lock().unwrap() = node.relay_info();
     out.line(format!("online; os outros chegam em {}", node.published_addr()));
     if let Some(n) = node.network_note() {
         out.line(n);
@@ -42,7 +49,8 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
             tokio::time::sleep(delay).await;
             out.line(match dialer.stored_address(&peer) {
                 Some(a) => format!("ligando: tento antes o endereço guardado do contato ({a}); o diretório só entra se ele não responder"),
-                None => "ligando: não há endereço guardado deste contato; vou consultar o diretório".to_string(),
+                None if dialer.has_directory() => "ligando: não há endereço guardado deste contato; vou consultar o diretório".to_string(),
+                None => "ligando: não há endereço deste contato e não há diretório; precisa do código de contato direto dele".to_string(),
             });
             let r = until_hangup(dialer.dial(peer, G722::new(), Duration::from_secs(15)), &sh.hangup).await;
             let _ = tx.send((peer, attempt, r));
@@ -119,12 +127,15 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
                 }
             }
             cmd = rx.recv() => match cmd {
-                Some(Cmd::Dial(peer)) => {
+                Some(Cmd::Dial(peer, relay)) => {
                     if shared.in_call.swap(true, Ordering::Relaxed) {
                         out.line("já há uma chamada em andamento");
                         continue;
                     }
                     shared.hangup.store(false, Ordering::Relaxed);
+                    if let Some(r) = relay {
+                        node.add_hint(peer, r);
+                    }
                     out.line("ligando...");
                     // Discar demora (furo de NAT, endereço guardado, espera de resposta): numa tarefa, para a
                     // janela seguir atendendo comandos; "Desligar" cancela a ligação.

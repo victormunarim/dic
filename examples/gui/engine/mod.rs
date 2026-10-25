@@ -60,7 +60,8 @@ impl Sink {
 }
 
 pub(crate) enum Cmd {
-    Dial([u8; 32]),
+    /// Contato a ligar e, se o código dele veio com o relay (código direto), onde achá-lo sem diretório.
+    Dial([u8; 32], Option<clam::directory::RelayInfo>),
     /// Segredo, dono da sala (se conhecido) e nome.
     Join([u8; 32], Option<[u8; 32]>, String),
     /// O dono tira um membro: troca o segredo e avisa só quem fica.
@@ -87,6 +88,8 @@ pub(crate) struct Shared {
     pub(crate) mic_test: AtomicBool,
     /// Texto de estado do nó ("online em ...").
     pub(crate) status: Mutex<String>,
+    /// Relay desta máquina como os outros o alcançam (vai no código de contato direto); vazio offline.
+    pub(crate) relay: Mutex<Option<clam::directory::RelayInfo>>,
     /// Está numa sala (as chamadas da sala não usam `in_call`, mas ele fica ligado).
     pub(crate) in_room: AtomicBool,
     /// Resumo da sala atual.
