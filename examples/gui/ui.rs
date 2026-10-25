@@ -299,8 +299,18 @@ impl App {
             }
         }
         for (who, seq, color) in shown {
-            let tex = ui.ctx().load_texture(format!("tela-{}", who[0]), color, egui::TextureOptions::LINEAR);
-            self.screen_tex.insert(who, (seq, tex));
+            // Atualiza a textura que já existe: criar uma nova na GPU a cada quadro (15 por segundo, em
+            // 1080p) enche a memória de vídeo de texturas à espera de serem liberadas.
+            match self.screen_tex.get_mut(&who) {
+                Some((n, tex)) => {
+                    tex.set(color, egui::TextureOptions::LINEAR);
+                    *n = seq;
+                }
+                None => {
+                    let tex = ui.ctx().load_texture(format!("tela-{}", who[0]), color, egui::TextureOptions::LINEAR);
+                    self.screen_tex.insert(who, (seq, tex));
+                }
+            }
         }
         let mut order: Vec<_> = self.screen_tex.iter().collect();
         order.sort_by_key(|(k, _)| **k);
