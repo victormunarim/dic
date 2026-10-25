@@ -121,7 +121,7 @@ const WRITE_QUEUE: usize = 256;
 /// Células esperando acima das quais o escritor com cover manda mais algumas por intervalo.
 const BACKLOG: usize = 4;
 /// Células a mais por intervalo quando há fila acumulada.
-const MAX_EXTRA: usize = 3;
+const MAX_EXTRA: usize = 5;
 
 // ---------------------------------------------------------------------------
 // Leitura/escrita de links
@@ -249,7 +249,7 @@ async fn write_loop(mut wr: LinkWriter, mut rx: mpsc::Receiver<Cell>, mut cover:
         if wr.write_cell(&cell).await.is_err() {
             return;
         }
-        // Há fila acumulada (um circuito mais rápido que o cover do link, como o da tela a 3 ms):
+        // Há fila acumulada (um circuito mais rápido que o cover do link, como o da tela a 2 ms):
         // escoa mais algumas, senão a fila enche e o excesso é descartado.
         if rx.len() > BACKLOG {
             for _ in 0..MAX_EXTRA {

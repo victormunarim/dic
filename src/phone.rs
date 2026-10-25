@@ -57,7 +57,7 @@ use crate::{
 };
 
 /// Intervalo entre pacotes do circuito da tela: 200 pacotes/s, ≈ 277 kbps de vídeo.
-pub const SCREEN_SLOT_MS: u64 = 3;
+pub const SCREEN_SLOT_MS: u64 = 2;
 
 /// Maior quadro `[u16][dados]` aceito do circuito; os de mídia e sinalização têm 200 B.
 const MAX_FRAME: usize = 1024;
