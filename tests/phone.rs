@@ -416,7 +416,7 @@ async fn synthetic_screen_goes_through_h264_and_the_screen_circuit() {
 #[cfg(feature = "video")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn full_size_screen_gets_through_at_the_circuit_slot_rate() {
-    use clam::video::{H264Decoder, H264Encoder, RawFrame, ScreenSource, pump};
+    use clam::video::{FPS, H264Decoder, H264Encoder, RawFrame, ScreenSource, pump};
 
     /// Fundo muito detalhado e parado, com um quadrado que anda: o pior caso para o quadro-chave.
     struct Bars(usize, Vec<u8>);
@@ -459,7 +459,7 @@ async fn full_size_screen_gets_through_at_the_circuit_slot_rate() {
     let mut lost = 0;
     while t0.elapsed() < Duration::from_secs(8) {
         pump(&mut src, &mut enc, &share).unwrap();
-        let end = tokio::time::Instant::now() + Duration::from_millis(125);
+        let end = tokio::time::Instant::now() + Duration::from_secs_f32(1.0 / FPS);
         while let Ok(Some(ev)) = tokio::time::timeout_at(end, b.next_screen()).await {
             if let ScreenEvent::Lost(n) = ev {
                 lost = n;
