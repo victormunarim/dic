@@ -20,6 +20,10 @@ use thiserror::Error;
 /// Quadros por segundo da transmissão.
 pub const FPS: f32 = 8.0;
 
+/// Largura máxima enviada: telas maiores são reduzidas por média de blocos, senão o quadro-chave
+/// passa de [`MAX_FRAME`] e nada chega a quem assiste.
+pub const MAX_WIDTH: usize = 1280;
+
 #[derive(Debug, Error)]
 pub enum VideoError {
     #[error("codec de vídeo: {0}")]
@@ -48,6 +52,31 @@ impl RawFrame {
             return Err(VideoError::Size(width, height));
         }
         Ok(Self { width, height, rgba })
+    }
+
+    /// Reduz por média de blocos `k`×`k` até caber em [`MAX_WIDTH`]; sem efeito se já cabe.
+    fn shrunk(&self) -> Option<RawFrame> {
+        let k = self.width.div_ceil(MAX_WIDTH);
+        if k <= 1 || self.rgba.len() != self.width * self.height * 4 {
+            return None;
+        }
+        let (w, h) = (self.width / k, self.height / k);
+        let mut rgba = Vec::with_capacity(w * h * 4);
+        for y in 0..h {
+            for x in 0..w {
+                let mut sum = [0u32; 4];
+                for dy in 0..k {
+                    let row = ((y * k + dy) * self.width + x * k) * 4;
+                    for px in self.rgba[row..row + k * 4].chunks_exact(4) {
+                        for c in 0..4 {
+                            sum[c] += px[c] as u32;
+                        }
+                    }
+                }
+                rgba.extend(sum.map(|v| (v / (k * k) as u32) as u8));
+            }
+        }
+        Some(RawFrame { width: w, height: h, rgba })
     }
 
     /// Corta para dimensões pares, como o H.264 (4:2:0) exige.
@@ -112,6 +141,8 @@ impl H264Encoder {
     /// Codifica um quadro. `force_key` pede quadro-chave. `Ok(None)`: o codificador pulou o quadro
     /// ou ele passou de [`MAX_FRAME`] (o próximo sai como quadro-chave).
     pub fn encode(&mut self, frame: &RawFrame, force_key: bool) -> Result<Option<EncodedFrame>, VideoError> {
+        let small = frame.shrunk();
+        let frame = small.as_ref().unwrap_or(frame);
         let frame = frame.even().ok_or(VideoError::Size(frame.width, frame.height))?;
         let dims = (frame.width, frame.height);
         // O H.264 do openh264 fixa a resolução na abertura: tela nova, codificador novo.
@@ -239,6 +270,16 @@ mod tests {
         let f = enc.encode(&scene(101, 75, 0), false).unwrap().expect("quadro");
         let out = dec.decode(&f.data).unwrap().expect("imagem");
         assert_eq!((out.width, out.height), (100, 74));
+    }
+
+    #[test]
+    fn wide_screens_are_shrunk_to_fit_the_frame_limit() {
+        let mut enc = H264Encoder::new(H264Encoder::default_bitrate()).unwrap();
+        let f = enc.encode(&scene(2560, 1440, 0), false).unwrap().expect("quadro-chave cabe");
+        assert!(f.keyframe && f.data.len() <= MAX_FRAME);
+        let mut dec = H264Decoder::new().unwrap();
+        let img = dec.decode(&f.data).unwrap().expect("imagem");
+        assert_eq!((img.width, img.height), (1280, 720));
     }
 
     #[test]
