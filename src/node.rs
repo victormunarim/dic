@@ -59,11 +59,28 @@ pub struct NodeConfig {
     /// Últimos endereços de relay conhecidos por contato (veja [`Node::known`]). Ligar para quem está
     /// aqui funciona mesmo com o diretório fora do ar, enquanto o endereço não mudar.
     pub known: Vec<([u8; 32], RelayInfo)>,
+    /// Segredos do relay (circuito, link). `None` gera chaves novas a cada início, e então o endereço
+    /// que os contatos guardaram de você (veja `known`) deixa de valer a cada reinício; gere o par uma vez
+    /// com [`RelayKeys::random`], guarde-o e passe-o aqui.
+    pub relay_keys: Option<RelayKeys>,
+}
+
+/// Segredos do relay do nó: o do circuito (`onion`) e o do link (Noise NK).
+#[derive(Clone)]
+pub struct RelayKeys {
+    pub onion: StaticSecret,
+    pub link: StaticSecret,
+}
+
+impl RelayKeys {
+    pub fn random() -> Self {
+        Self { onion: StaticSecret::random_from_rng(rand_core::OsRng), link: StaticSecret::random_from_rng(rand_core::OsRng) }
+    }
 }
 
 impl NodeConfig {
     pub fn new(secret: StaticSecret, directory: impl Into<String>, contacts: Vec<[u8; 32]>) -> Self {
-        Self { secret, directory: directory.into(), contacts, relay_port: DEFAULT_RELAY_PORT, public_addr: None, upnp: true, punch: true, known: Vec::new() }
+        Self { secret, directory: directory.into(), contacts, relay_port: DEFAULT_RELAY_PORT, public_addr: None, upnp: true, punch: true, known: Vec::new(), relay_keys: None }
     }
 }
 
@@ -237,15 +254,17 @@ impl Node {
     pub async fn start(cfg: NodeConfig) -> io::Result<Self> {
         let me = PublicKey::from(&cfg.secret);
         let phone = Phone::bind("127.0.0.1:0".parse().unwrap(), cfg.secret.clone(), cfg.contacts.clone()).await?;
-        let relay_node = RelayNode::new(StaticSecret::random_from_rng(rand_core::OsRng), RelayConfig::default(), 0);
+        let keys = cfg.relay_keys.clone().unwrap_or_else(RelayKeys::random);
+        let relay_node = RelayNode::new(keys.onion.clone(), RelayConfig::default(), 0);
         let onion = relay_node.public_key();
         let mut scfg = ServerConfig::new(SocketAddr::from(([0, 0, 0, 0], cfg.relay_port)));
+        scfg.link_secret = Some(keys.link.clone());
         scfg.exit = allow_list(vec![(dest_for(&me.to_bytes()), phone.local_addr().to_string())]);
         let relay = match RelayServer::spawn(relay_node, scfg.clone()).await {
             Ok(r) => r,
             // Porta ocupada: o sistema escolhe outra. `RelayNode` foi consumido, então recria.
             Err(e) if e.kind() == io::ErrorKind::AddrInUse && cfg.relay_port != 0 => {
-                let n = RelayNode::new(StaticSecret::random_from_rng(rand_core::OsRng), RelayConfig::default(), 0);
+                let n = RelayNode::new(keys.onion.clone(), RelayConfig::default(), 0);
                 let onion = n.public_key();
                 scfg.listen = SocketAddr::from(([0, 0, 0, 0], 0));
                 let r = RelayServer::spawn(n, scfg).await?;

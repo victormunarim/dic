@@ -643,3 +643,29 @@ async fn call_reports_whether_peer_hung_up() {
     timeout(Duration::from_secs(5), async { while cb.next_pcm().await.is_some() {} }).await.expect("a chamada deveria acabar");
     assert!(cb.peer_hung_up());
 }
+
+/// Com as mesmas chaves de relay, reiniciar o nó mantém o que os contatos guardaram (onion e link);
+/// sem elas, cada início tem chaves novas.
+#[tokio::test]
+async fn relay_keys_survive_a_restart() {
+    use clam::node::RelayKeys;
+    let (_d, addr) = dir().await;
+    let (s, keys) = (key(), RelayKeys::random());
+    let me = *PublicKey::from(&s).as_bytes();
+    let published = |node: Node| {
+        let addr = addr.clone();
+        async move {
+            let r = directory::lookup(&addr, &me).await.unwrap().unwrap();
+            node.stop();
+            (r.onion, r.link)
+        }
+    };
+    let with = |n: Option<RelayKeys>| NodeConfig { relay_keys: n, ..cfg(s.clone(), &addr, vec![]) };
+    let first = published(Node::start(with(Some(keys.clone()))).await.unwrap()).await;
+    let second = published(Node::start(with(Some(keys.clone()))).await.unwrap()).await;
+    assert_eq!(first, second);
+    assert_eq!(first.0, PublicKey::from(&keys.onion).to_bytes());
+    let third = published(Node::start(with(None)).await.unwrap()).await;
+    assert_ne!(first.0, third.0);
+    assert_ne!(first.1, third.1);
+}

@@ -168,6 +168,27 @@ pub(crate) fn load_known() -> Vec<([u8; 32], clam::directory::RelayInfo)> {
         .collect()
 }
 
+/// Chaves do relay deste computador, num arquivo à parte (`onion link`, em hex). Mantê-las entre execuções
+/// faz o endereço que os contatos guardaram de você continuar valendo depois de reabrir ou recompilar.
+pub(crate) fn relay_keys_path() -> PathBuf {
+    conf_path().with_file_name(".clam-gui.relay")
+}
+
+/// Lê as chaves do relay; sem arquivo (ou ilegível) gera um par novo e grava.
+pub(crate) fn load_relay_keys() -> clam::node::RelayKeys {
+    let read = || {
+        let text = std::fs::read_to_string(relay_keys_path()).ok()?;
+        let mut p = text.split_whitespace();
+        let (onion, link) = (unhex(p.next()?).ok()?, unhex(p.next()?).ok()?);
+        Some(clam::node::RelayKeys { onion: StaticSecret::from(onion), link: StaticSecret::from(link) })
+    };
+    read().unwrap_or_else(|| {
+        let keys = clam::node::RelayKeys::random();
+        let _ = write_private(&relay_keys_path(), &format!("{} {}\n", hex(&keys.onion.to_bytes()), hex(&keys.link.to_bytes())));
+        keys
+    })
+}
+
 /// Grava `text` em `path` de uma vez só (arquivo temporário + rename) e, no Unix, já com permissão 0600:
 /// o conteúdo nunca fica legível por outros nem pela metade.
 pub(crate) fn write_private(path: &std::path::Path, text: &str) -> std::io::Result<()> {
