@@ -25,6 +25,10 @@ fn tone(n: usize) -> Vec<i16> {
     (0..160).map(|i| (9000.0 * (std::f64::consts::TAU * 440.0 * (n * 160 + i) as f64 / 8000.0).sin()) as i16).collect()
 }
 
+fn wide_tone(n: usize) -> Vec<i16> {
+    (0..320).map(|i| (9000.0 * (std::f64::consts::TAU * 440.0 * (n * 320 + i) as f64 / 16000.0).sin()) as i16).collect()
+}
+
 async fn dir() -> (DirectoryServer, String) {
     let d = DirectoryServer::spawn("127.0.0.1:0".parse().unwrap()).await.unwrap();
     let a = d.local_addr().to_string();
@@ -244,4 +248,89 @@ async fn directory_time_overrides_wrong_local_clock() {
     directory::seen_ip(&addr).await.unwrap();
     // O desvio medido contra um servidor na mesma máquina é ~0.
     assert!(clam::clock::offset_secs().abs() <= 1);
+}
+
+#[tokio::test]
+async fn room_needs_the_secret_and_first_member_is_host() {
+    let (_d, addr) = dir().await;
+    let secret = clam::room::new_secret();
+    let key = clam::room::room_key(&secret);
+    let (a, b) = ([1u8; 32], [2u8; 32]);
+    assert!(directory::room_members(&addr, &key).await.unwrap().is_empty());
+    directory::room_join(&addr, &key, &a).await.unwrap();
+    directory::room_join(&addr, &key, &b).await.unwrap();
+    directory::room_join(&addr, &key, &a).await.unwrap(); // renovar não muda a ordem
+    assert_eq!(directory::room_members(&addr, &key).await.unwrap(), vec![a, b]);
+
+    // Outra sala (outro segredo) não enxerga nem mexe nesta.
+    let other = clam::room::room_key(&clam::room::new_secret());
+    assert!(directory::room_members(&addr, &other).await.unwrap().is_empty());
+
+    // Sair passa o posto de anfitrião ao próximo.
+    directory::room_leave(&addr, &key, &a).await.unwrap();
+    assert_eq!(directory::room_members(&addr, &key).await.unwrap(), vec![b]);
+}
+
+/// Três pessoas na mesma sala: todas se ligam entre si e ouvem umas às outras.
+#[tokio::test]
+async fn three_nodes_form_a_mesh_room() {
+    use clam::room::{self, Mesh};
+    let (_d, addr) = dir().await;
+    let rkey = room::room_key(&room::new_secret());
+    let mut nodes = vec![];
+    for _ in 0..3 {
+        nodes.push(Node::start(cfg(key(), &addr, vec![])).await.unwrap());
+    }
+    let meshes: Vec<std::sync::Arc<Mesh>> = (0..3).map(|_| std::sync::Arc::new(Mesh::new())).collect();
+    let views = {
+        let mut v = vec![];
+        for n in &nodes {
+            v.push(room::sync(n, &rkey).await.unwrap());
+        }
+        v
+    };
+    assert_eq!(views[0].members.len(), 1, "o primeiro vê só a si");
+    let view = room::sync(&nodes[2], &rkey).await.unwrap();
+    assert_eq!(view.members.len(), 3);
+    assert_eq!(view.host, nodes[0].public_key());
+    assert!(!view.i_am_host && room::sync(&nodes[0], &rkey).await.unwrap().i_am_host);
+
+    // Cada nó atende os convites que chegam e liga para os que faltam.
+    let mut tasks = vec![];
+    for (mut node, mesh) in nodes.into_iter().zip(meshes.iter().cloned()) {
+        let rkey = rkey.clone();
+        tasks.push(tokio::spawn(async move {
+            let end = Instant::now() + Duration::from_secs(25);
+            while Instant::now() < end && mesh.count() < 2 {
+                let view = room::sync(&node, &rkey).await.unwrap();
+                room::connect_missing(&node, &view, &mesh, Duration::from_secs(10)).await;
+                while let Ok(Some(inc)) = timeout(Duration::from_millis(300), node.next_incoming()).await {
+                    room::accept_member(inc, &view, &mesh).await;
+                }
+            }
+            (node, mesh)
+        }));
+    }
+    let mut done = vec![];
+    for t in tasks {
+        done.push(t.await.unwrap());
+    }
+    for (_, m) in &done {
+        assert_eq!(m.count(), 2, "malha completa: cada um com dois pares");
+    }
+    // Todos falam; todos ouvem alguma mistura.
+    let mut heard = [0usize; 3];
+    for n in 0..80 {
+        for (i, (_, m)) in done.iter().enumerate() {
+            m.send(&wide_tone(n));
+            while let Some(f) = m.mix() {
+                heard[i] += f.iter().any(|x| x.abs() > 1000) as usize;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    for (_, m) in &done {
+        m.hangup();
+    }
+    assert!(heard.iter().all(|&h| h >= 5), "ouviram {heard:?}");
 }

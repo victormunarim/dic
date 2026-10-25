@@ -149,6 +149,21 @@ impl Node {
         Ok(Self { secret, directory, phone, relay, mine, last_error, republish, note })
     }
 
+    /// Aceita convites de `keys` além dos contatos (membros de uma sala).
+    pub fn allow(&self, keys: &[[u8; 32]]) {
+        let c = self.phone.contacts();
+        let mut c = c.lock().unwrap();
+        for k in keys {
+            if !c.contains(k) {
+                c.push(*k);
+            }
+        }
+    }
+
+    pub fn directory(&self) -> &str {
+        &self.directory
+    }
+
     pub fn public_key(&self) -> [u8; 32] {
         *PublicKey::from(&self.secret).as_bytes()
     }

@@ -76,6 +76,9 @@ const REQ_LOOKUP: u8 = 2;
 const REQ_SAMPLE: u8 = 3;
 const REQ_HOST: u8 = 4;
 const REQ_ATTACH: u8 = 5;
+const REQ_ROOM_JOIN: u8 = 6;
+const REQ_ROOM_LEAVE: u8 = 7;
+const REQ_ROOM_LIST: u8 = 8;
 const CTL_OPEN: u8 = 1;
 const CTL_PING: u8 = 2;
 const RES_OK: u8 = 0x80;
@@ -83,6 +86,12 @@ const RES_ERR: u8 = 0x81;
 const RES_FOUND: u8 = 0x82;
 const RES_NONE: u8 = 0x83;
 const RES_LIST: u8 = 0x84;
+const RES_MEMBERS: u8 = 0x85;
+/// Contexto das assinaturas de sala (a chave da sala assina `contexto ‖ E ‖ pedido`; `E` impede repetição).
+const ROOM_CONTEXT: &[u8] = b"clam-room-v1";
+/// Membros por sala e salas no servidor.
+pub const MAX_ROOM_MEMBERS: usize = 8;
+const MAX_ROOMS: usize = 1024;
 
 /// Como alcançar um relay: endereço TCP e as duas chaves públicas.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -150,6 +159,15 @@ struct Entry {
 
 type Table = Arc<Mutex<HashMap<[u8; 32], Entry>>>;
 
+struct Member {
+    key: [u8; 32],
+    joined: Instant,
+    seen: Instant,
+}
+
+/// Salas: chave pública da sala → membros vivos, do mais antigo (o anfitrião) ao mais novo.
+type Rooms = Arc<Mutex<HashMap<[u8; 32], Vec<Member>>>>;
+
 /// Servidor de diretório em memória. Encerra ao ser descartado.
 pub struct DirectoryServer {
     addr: SocketAddr,
@@ -187,6 +205,7 @@ impl DirectoryServer {
         let listener = TcpListener::bind(listen).await?;
         let addr = listener.local_addr()?;
         let table: Table = Arc::default();
+        let rooms: Rooms = Arc::default();
         let (host, relay) = match host {
             None => (None, None),
             Some(cfg) => {
@@ -206,9 +225,9 @@ impl DirectoryServer {
         let task = tokio::spawn(async move {
             loop {
                 let Ok((s, peer)) = listener.accept().await else { continue };
-                let (table, host) = (table.clone(), host.clone());
+                let (table, rooms, host) = (table.clone(), rooms.clone(), host.clone());
                 tokio::spawn(async move {
-                    let _ = serve(s, peer, table, host).await;
+                    let _ = serve(s, peer, table, rooms, host).await;
                 });
             }
         });
@@ -231,7 +250,7 @@ impl Drop for DirectoryServer {
     }
 }
 
-async fn serve(mut s: TcpStream, peer: SocketAddr, table: Table, host: Option<Arc<Host>>) -> io::Result<()> {
+async fn serve(mut s: TcpStream, peer: SocketAddr, table: Table, rooms: Rooms, host: Option<Arc<Host>>) -> io::Result<()> {
     // Estática (e não `EphemeralSecret`) porque a chave pública do cliente só chega no pedido de publicar.
     let eph = StaticSecret::random_from_rng(OsRng);
     let e_pub = PublicKey::from(&eph);
@@ -249,7 +268,7 @@ async fn serve(mut s: TcpStream, peer: SocketAddr, table: Table, host: Option<Ar
             Some(&REQ_ATTACH) => return attach(s, &req, host).await,
             _ => {}
         }
-        let reply = handle(&req, &eph, e_pub.as_bytes(), peer, &table);
+        let reply = handle(&req, &eph, e_pub.as_bytes(), peer, &table, &rooms);
         write_frame(&mut s, &reply).await?;
     }
     Ok(())
@@ -359,7 +378,7 @@ async fn attach(mut s: TcpStream, req: &[u8], host: Option<Arc<Host>>) -> io::Re
     Ok(())
 }
 
-fn handle(req: &[u8], eph: &StaticSecret, e_pub: &[u8; 32], peer: SocketAddr, table: &Table) -> Vec<u8> {
+fn handle(req: &[u8], eph: &StaticSecret, e_pub: &[u8; 32], peer: SocketAddr, table: &Table, rooms: &Rooms) -> Vec<u8> {
     let err = |m: &str| [&[RES_ERR][..], m.as_bytes()].concat();
     let Some((&kind, body)) = req.split_first() else { return err("vazio") };
     match kind {
@@ -430,7 +449,62 @@ fn handle(req: &[u8], eph: &StaticSecret, e_pub: &[u8; 32], peer: SocketAddr, ta
             }
             out
         }
+        REQ_ROOM_JOIN | REQ_ROOM_LEAVE | REQ_ROOM_LIST => room_request(kind, body, e_pub, rooms),
         _ => err("pedido desconhecido"),
+    }
+}
+
+/// Entrar, sair ou listar uma sala. Corpo: `sala (32) ‖ [membro (32)] ‖ assinatura da sala (64)`.
+fn room_request(kind: u8, body: &[u8], e_pub: &[u8; 32], rooms: &Rooms) -> Vec<u8> {
+    let err = |m: &str| [&[RES_ERR][..], m.as_bytes()].concat();
+    let want = if kind == REQ_ROOM_LIST { 32 + 64 } else { 32 + 32 + 64 };
+    if body.len() != want {
+        return err("tamanho");
+    }
+    let (data, sig) = body.split_at(body.len() - 64);
+    let room: [u8; 32] = data[..32].try_into().unwrap();
+    let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&room) else { return err("sala inválida") };
+    let Ok(sig) = ed25519_dalek::Signature::from_slice(sig) else { return err("assinatura inválida") };
+    let msg = [ROOM_CONTEXT, e_pub, &[kind], data].concat();
+    if ed25519_dalek::Verifier::verify(&vk, &msg, &sig).is_err() {
+        return err("sem o segredo da sala");
+    }
+    let mut all = rooms.lock().unwrap();
+    for m in all.values_mut() {
+        m.retain(|x| x.seen.elapsed() < TTL);
+    }
+    all.retain(|_, m| !m.is_empty());
+    match kind {
+        REQ_ROOM_JOIN => {
+            let key: [u8; 32] = data[32..].try_into().unwrap();
+            if !all.contains_key(&room) && all.len() >= MAX_ROOMS {
+                return err("servidor cheio de salas");
+            }
+            let list = all.entry(room).or_default();
+            if let Some(m) = list.iter_mut().find(|m| m.key == key) {
+                m.seen = Instant::now();
+            } else if list.len() >= MAX_ROOM_MEMBERS {
+                return err("sala cheia");
+            } else {
+                list.push(Member { key, joined: Instant::now(), seen: Instant::now() });
+            }
+            vec![RES_OK]
+        }
+        REQ_ROOM_LEAVE => {
+            if let Some(list) = all.get_mut(&room) {
+                list.retain(|m| m.key[..] != data[32..]);
+            }
+            vec![RES_OK]
+        }
+        _ => {
+            let mut list: Vec<&Member> = all.get(&room).map(|l| l.iter().collect()).unwrap_or_default();
+            list.sort_by_key(|m| m.joined);
+            let mut out = vec![RES_MEMBERS, list.len() as u8];
+            for m in list {
+                out.extend_from_slice(&m.key);
+            }
+            out
+        }
     }
 }
 
@@ -515,6 +589,43 @@ pub async fn sample(server: &str, n: u8, exclude: &[[u8; 32]]) -> io::Result<Vec
         rest = r;
     }
     Ok(out)
+}
+
+async fn room_ask(server: &str, room: &ed25519_dalek::SigningKey, kind: u8, member: Option<&[u8; 32]>) -> io::Result<Vec<u8>> {
+    let mut sess = connect(server).await?;
+    let mut data = room.verifying_key().to_bytes().to_vec();
+    data.extend_from_slice(member.map_or(&[][..], |m| &m[..]));
+    let msg = [ROOM_CONTEXT, &sess.e_pub, &[kind], &data].concat();
+    let sig = ed25519_dalek::Signer::sign(room, &msg);
+    let mut req = vec![kind];
+    req.extend_from_slice(&data);
+    req.extend_from_slice(&sig.to_bytes());
+    let reply = ask(&mut sess, &req).await?;
+    match reply.first() {
+        Some(&RES_ERR) => Err(bad(&format!("diretório recusou: {}", String::from_utf8_lossy(&reply[1..])))),
+        Some(_) => Ok(reply),
+        None => Err(bad("resposta vazia")),
+    }
+}
+
+/// Registra (ou renova) `member` como presente na sala de chave `room`. Quem entra primeiro e continua
+/// renovando (a cada [`REPUBLISH`]) é o anfitrião: veja [`room_members`].
+pub async fn room_join(server: &str, room: &ed25519_dalek::SigningKey, member: &[u8; 32]) -> io::Result<()> {
+    room_ask(server, room, REQ_ROOM_JOIN, Some(member)).await.map(|_| ())
+}
+
+pub async fn room_leave(server: &str, room: &ed25519_dalek::SigningKey, member: &[u8; 32]) -> io::Result<()> {
+    room_ask(server, room, REQ_ROOM_LEAVE, Some(member)).await.map(|_| ())
+}
+
+/// Membros vivos da sala, do mais antigo (anfitrião) ao mais novo.
+pub async fn room_members(server: &str, room: &ed25519_dalek::SigningKey) -> io::Result<Vec<[u8; 32]>> {
+    let reply = room_ask(server, room, REQ_ROOM_LIST, None).await?;
+    let (Some(&RES_MEMBERS), Some(&n)) = (reply.first(), reply.get(1)) else { return Err(bad("resposta inesperada")) };
+    if reply.len() != 2 + 32 * n as usize {
+        return Err(bad("lista inválida"));
+    }
+    Ok(reply[2..].chunks(32).map(|c| c.try_into().unwrap()).collect())
 }
 
 /// IP que o servidor enxerga para esta máquina (útil para mostrar ao usuário).
