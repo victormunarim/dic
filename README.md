@@ -774,7 +774,7 @@ let mut chamada = call(cliente, &minha_chave, &chave_do_contato, Mulaw::new(), D
 
 ### Conexão simples: diretório só para o primeiro contato
 
-Só o **primeiro contato** usa servidor. Um diretório (`src/directory.rs`) guarda, por 120 s, "chave pública → relay" de quem está online; cada `Node` (`src/node.rs`) republica a sua entrada a cada 40 s. Para ligar, você consulta a chave do contato uma vez, monta o circuito de 2 saltos até o relay dele e o resto (convite, voz) segue P2P pelos relays, sem passar pelo diretório.
+Só o **primeiro contato** usa servidor. Um diretório (`src/directory/`) guarda, por 120 s, "chave pública → relay" de quem está online; cada `Node` (`src/node.rs`) republica a sua entrada a cada 40 s. Para ligar, você consulta a chave do contato uma vez, monta o circuito de 2 saltos até o relay dele e o resto (convite, voz) segue P2P pelos relays, sem passar pelo diretório.
 
 - Quem publica prova a posse da chave sem assinatura (DH com a chave do servidor + HMAC do pedido); ninguém publica por outra chave.
 - O diretório vê IPs e chaves de quem publica e consulta, nunca o conteúdo das chamadas.
