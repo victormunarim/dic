@@ -16,12 +16,95 @@ pub trait Codec {
     fn decode(&mut self, data: Option<&[u8]>) -> Vec<i16>;
 }
 
+/// Quadros de perda seguidos até o som escondido chegar a zero.
+const FADE_FRAMES: usize = 3;
+
+/// Esconde quadros perdidos (PLC): continua a onda repetindo o último período de pitch do quadro anterior,
+/// com um fade linear até o silêncio em [`FADE_FRAMES`] quadros. Quando o áudio volta, o início do primeiro
+/// quadro bom é misturado com a continuação, para não haver degrau.
+#[derive(Default)]
+struct Concealer {
+    /// Último quadro bom.
+    last: Vec<i16>,
+    /// Período repetido, em amostras (0 enquanto não houve perda desde o último quadro bom).
+    period: usize,
+    /// Posição dentro do período da próxima amostra escondida.
+    phase: usize,
+    /// Amostras escondidas desde o último quadro bom.
+    lost: usize,
+}
+
+impl Concealer {
+    /// Período do sinal em `x` (autocorrelação normalizada nos últimos `len/2` amostras, de 8 a 2 períodos por quadro).
+    fn pitch(x: &[i16]) -> usize {
+        let len = x.len();
+        let (min_lag, max_lag, win) = ((len / 8).max(1), len / 2, len / 2);
+        let mut best = (max_lag.max(1), 0.0f64);
+        for lag in min_lag..=max_lag {
+            let (mut corr, mut energy) = (0f64, 0f64);
+            for n in len - win..len {
+                let (a, b) = (x[n] as f64, x[n - lag] as f64);
+                corr += a * b;
+                energy += b * b;
+            }
+            let score = corr / (energy + 1.0).sqrt();
+            if score > best.1 {
+                best = (lag, score);
+            }
+        }
+        best.0
+    }
+
+    /// `n` amostras da continuação, a partir do estado atual, sem alterá-lo.
+    fn render(&self, n: usize) -> Vec<i16> {
+        let (len, total) = (self.last.len(), (FADE_FRAMES * self.last.len()) as f64);
+        (0..n)
+            .map(|i| {
+                let src = self.last[len - self.period + (self.phase + i) % self.period] as f64;
+                let gain = (1.0 - (self.lost + i + 1) as f64 / total).max(0.0);
+                (src * gain) as i16
+            })
+            .collect()
+    }
+
+    /// Um quadro perdido de `n` amostras.
+    fn lost(&mut self, n: usize) -> Vec<i16> {
+        if self.last.is_empty() {
+            return vec![0; n];
+        }
+        if self.period == 0 {
+            self.period = Self::pitch(&self.last);
+            self.phase = 0;
+        }
+        let out = self.render(n);
+        self.phase = (self.phase + n) % self.period;
+        self.lost += n;
+        out
+    }
+
+    /// Um quadro bom. Depois de perda, o começo dele é misturado com a continuação escondida.
+    fn good(&mut self, mut frame: Vec<i16>) -> Vec<i16> {
+        if self.lost > 0 && !self.last.is_empty() {
+            let n = (frame.len() / 4).max(1).min(frame.len());
+            let ext = self.render(n);
+            for i in 0..n {
+                let w = (i + 1) as f64 / (n + 1) as f64;
+                frame[i] = (ext[i] as f64 * (1.0 - w) + frame[i] as f64 * w) as i16;
+            }
+        }
+        // O quadro guardado é o que saiu (já misturado): a próxima perda continua dele.
+        self.last.clone_from(&frame);
+        self.period = 0;
+        self.lost = 0;
+        frame
+    }
+}
+
 /// G.711 µ-law, 8 kHz, 20 ms: 160 amostras ↔ 160 bytes (64 kbps). Banda estreita; é o codec
 /// de referência, não o de produção.
 #[derive(Default)]
 pub struct Mulaw {
-    last: Vec<i16>,
-    losses: u32,
+    plc: Concealer,
 }
 
 impl Mulaw {
@@ -83,24 +166,9 @@ impl Codec for Mulaw {
 
     fn decode(&mut self, data: Option<&[u8]>) -> Vec<i16> {
         match data {
-            Some(d) if d.len() == Self::SAMPLES => {
-                self.losses = 0;
-                self.last = d.iter().map(|b| mulaw_to_lin(*b)).collect();
-                self.last.clone()
-            }
+            Some(d) if d.len() == Self::SAMPLES => self.plc.good(d.iter().map(|b| mulaw_to_lin(*b)).collect()),
             // Quadro de tamanho errado conta como perda: não confiamos nele.
-            _ => {
-                // PLC simples: repete o último quadro com metade da amplitude a cada perda
-                // seguida; depois de 3, silêncio.
-                self.losses += 1;
-                if self.losses > 3 || self.last.is_empty() {
-                    return vec![0; Self::SAMPLES];
-                }
-                for s in &mut self.last {
-                    *s /= 2;
-                }
-                self.last.clone()
-            }
+            _ => self.plc.lost(Self::SAMPLES),
         }
     }
 }
@@ -112,8 +180,7 @@ pub struct G722 {
     dec: Qmf,
     eb: [Band; 2],
     db: [Band; 2],
-    last: Vec<i16>,
-    losses: u32,
+    plc: Concealer,
 }
 
 #[derive(Default)]
@@ -290,8 +357,7 @@ impl G722 {
             dec: Qmf::default(),
             eb: [Band::new(32), Band::new(8)],
             db: [Band::new(32), Band::new(8)],
-            last: Vec::new(),
-            losses: 0,
+            plc: Concealer::default(),
         }
     }
 
@@ -377,27 +443,16 @@ impl Codec for G722 {
     fn decode(&mut self, data: Option<&[u8]>) -> Vec<i16> {
         match data {
             Some(d) if d.len() == Self::SAMPLES / 2 => {
-                self.losses = 0;
-                self.last = d
+                let pcm = d
                     .iter()
                     .flat_map(|c| {
                         let (a, b) = self.decode_pair(*c);
                         [a, b]
                     })
                     .collect();
-                self.last.clone()
+                self.plc.good(pcm)
             }
-            _ => {
-                // PLC simples, como no µ-law: repete o último quadro com metade da amplitude; depois de 3, silêncio.
-                self.losses += 1;
-                if self.losses > 3 || self.last.is_empty() {
-                    return vec![0; Self::SAMPLES];
-                }
-                for s in &mut self.last {
-                    *s /= 2;
-                }
-                self.last.clone()
-            }
+            _ => self.plc.lost(Self::SAMPLES),
         }
     }
 }
@@ -445,8 +500,9 @@ mod tests {
         let peak = |v: &[i16]| v.iter().map(|x| x.unsigned_abs()).max().unwrap();
         let l1 = c.decode(None);
         let l2 = c.decode(None);
-        assert!(peak(&l1) < peak(&first) && peak(&l2) < peak(&l1));
-        c.decode(None);
+        assert!(peak(&l1) <= peak(&first) && peak(&l2) < peak(&l1));
+        let l3 = c.decode(None);
+        assert!(peak(&l3) < peak(&l2));
         assert_eq!(peak(&c.decode(None)), 0);
         // Voltou o áudio: sem resíduo da perda.
         assert!(peak(&c.decode(Some(&enc))) > 10000);
@@ -488,10 +544,41 @@ mod tests {
         let mut c = G722::new();
         let enc = c.encode(&vec![5000; 320]).unwrap();
         c.decode(Some(&enc));
-        for _ in 0..4 {
+        for _ in 0..3 {
             c.decode(None);
         }
         assert!(c.decode(None).iter().all(|&x| x == 0));
         assert!(matches!(c.encode(&[0; 160]), Err(MediaError::FrameLen { got: 160, want: 320 })));
+    }
+
+    /// Dois quadros escondidos de um tom continuam a onda: erro pequeno contra o tom que seguiria, sem degrau na emenda.
+    #[test]
+    fn concealment_continues_the_waveform() {
+        let hz = 300.0;
+        let sig: Vec<i16> = (0..320 * 6).map(|i| (8000.0 * (std::f64::consts::TAU * hz * i as f64 / 16000.0).sin()) as i16).collect();
+        let mut c = Concealer::default();
+        c.good(sig[..320 * 3].to_vec());
+        let hidden = c.lost(320);
+        // Primeira metade do quadro escondido (ainda com ganho alto) ≈ onda original.
+        let (mut err, mut energy) = (0f64, 0f64);
+        for i in 0..160 {
+            let (a, b) = (sig[960 + i] as f64, hidden[i] as f64);
+            err += (a - b).powi(2);
+            energy += a * a;
+        }
+        let snr = 10.0 * (energy / err).log10();
+        assert!(snr > 15.0, "SNR {snr:.1} dB");
+        // A volta do áudio não faz salto na emenda.
+        let back = c.good(sig[1280..1600].to_vec());
+        let jump = (back[0] as i32 - hidden[319] as i32).abs();
+        assert!(jump < 3000, "salto {jump}");
+    }
+
+    #[test]
+    fn pitch_finds_the_period_of_a_tone() {
+        let x: Vec<i16> = (0..320).map(|i| (8000.0 * (std::f64::consts::TAU * 200.0 * i as f64 / 16000.0).sin()) as i16).collect();
+        let p = Concealer::pitch(&x);
+        // 200 Hz a 16 kHz: 80 amostras (ou um múltiplo).
+        assert_eq!(p % 80, 0, "{p}");
     }
 }

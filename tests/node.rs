@@ -333,6 +333,37 @@ async fn punch_falls_back_to_circuit() {
     talk(ca, cb).await;
 }
 
+/// Depois de um furo que falhou, as ligações seguintes ao mesmo contato seguem pelo circuito sem esperar o furo.
+#[tokio::test]
+async fn failed_punch_is_skipped_on_the_next_call() {
+    let (_d, addr) = dir().await;
+    let (sa, sb) = (key(), key());
+    let (pa, pb) = (*PublicKey::from(&sa).as_bytes(), *PublicKey::from(&sb).as_bytes());
+    let a = Node::start(punching(sa, &addr, vec![])).await.unwrap();
+    let mut b = Node::start(cfg(sb, &addr, vec![pa])).await.unwrap();
+    let answer = tokio::spawn(async move {
+        for _ in 0..2 {
+            let inc = timeout(Duration::from_secs(15), b.next_incoming()).await.unwrap().unwrap();
+            let mut c = inc.accept(Mulaw::new()).await.unwrap();
+            // A linha só livra quando quem chamou desliga.
+            timeout(Duration::from_secs(10), async { while c.next_pcm().await.is_some() {} }).await.unwrap();
+            c.hangup();
+        }
+    });
+    let t = std::time::Instant::now();
+    let first = a.dial(pb, Mulaw::new(), Duration::from_secs(15)).await.unwrap();
+    let first_took = t.elapsed();
+    first.hangup();
+    let t = std::time::Instant::now();
+    let second = a.dial(pb, Mulaw::new(), Duration::from_secs(15)).await.unwrap();
+    let second_took = t.elapsed();
+    second.hangup();
+    answer.await.unwrap();
+    // Em loopback o furo falha na hora (o alvo nem tem ouvinte), então só a segunda não pode demorar.
+    assert!(first_took < Duration::from_secs(8), "{first_took:?}");
+    assert!(second_took < Duration::from_secs(4), "a segunda ligação deveria pular o furo: {second_took:?}");
+}
+
 /// Discagem não bloqueia por membro ausente, e uma chamada derrubada volta sozinha na tentativa seguinte.
 #[tokio::test]
 async fn room_dials_in_background_and_reconnects() {

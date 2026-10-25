@@ -55,6 +55,8 @@ struct Sinc {
     m: i64,
     /// Amostras de entrada por amostra de saída.
     step: f64,
+    /// Fator sobre `step` (1.0 = taxa nominal), para absorver a diferença entre relógios.
+    scale: f64,
     /// Posição (índice de entrada, fracionário) da próxima saída.
     t: f64,
     /// Índice de entrada de `hist[0]`.
@@ -65,7 +67,7 @@ struct Sinc {
 impl Sinc {
     fn new(from: u32, to: u32) -> Self {
         let low = from.min(to) as f64 / from as f64;
-        Self { fc: SINC_CUTOFF * low, m: (SINC_LOBES / low).ceil() as i64, step: from as f64 / to as f64, t: 0.0, base: 0, hist: VecDeque::new() }
+        Self { fc: SINC_CUTOFF * low, m: (SINC_LOBES / low).ceil() as i64, step: from as f64 / to as f64, scale: 1.0, t: 0.0, base: 0, hist: VecDeque::new() }
     }
 
     /// Há entrada suficiente para calcular a próxima saída?
@@ -93,7 +95,7 @@ impl Sinc {
                 acc += h * *x as f64;
             }
         }
-        self.t += self.step;
+        self.t += self.step * self.scale;
         let keep_from = (self.t - m).ceil() as i64;
         while self.base < keep_from && !self.hist.is_empty() {
             self.hist.pop_front();
@@ -126,6 +128,12 @@ impl Upsampler {
         Self(Sinc::new(from, to))
     }
 
+    /// Consome a entrada `scale` vezes mais rápido (1.0 = nominal). Perto de 1.0 não se ouve; serve para
+    /// acompanhar um relógio de rede ligeiramente diferente do da placa de som.
+    pub fn set_scale(&mut self, scale: f64) {
+        self.0.scale = scale;
+    }
+
     /// Próxima amostra de saída, ou `None` se a fila secou (o chamador toca silêncio).
     pub fn pull(&mut self, q: &mut VecDeque<i16>) -> Option<f32> {
         while !self.0.ready() {
@@ -136,6 +144,33 @@ impl Upsampler {
 }
 
 type Queue = Arc<Mutex<VecDeque<i16>>>;
+
+/// Maior desvio de velocidade aplicado à reprodução (0,5%: inaudível).
+const MAX_DRIFT: f64 = 0.005;
+/// Nível desejado da fila de reprodução, em quadros de 20 ms.
+const TARGET_FRAMES: f64 = 2.0;
+
+/// Mantém a fila de reprodução perto do alvo ajustando de leve a velocidade de consumo. Sem isso, o relógio
+/// da placa de som e o da rede (nunca iguais) esvaziam a fila, que então toca silêncio, ou a enchem até o
+/// teto, que então descarta o mais antigo de uma vez: ambos estalam.
+struct Drift {
+    /// Média móvel do tamanho da fila, em amostras.
+    level: f64,
+    target: f64,
+}
+
+impl Drift {
+    fn new(rate: u32) -> Self {
+        let target = rate as f64 / 50.0 * TARGET_FRAMES;
+        Self { level: target, target }
+    }
+
+    /// Fator de velocidade para o nível atual da fila (`len` amostras). Fila acima do alvo → consome mais rápido.
+    fn scale(&mut self, len: usize) -> f64 {
+        self.level += (len as f64 - self.level) * 0.02;
+        1.0 + ((self.level - self.target) / self.target * MAX_DRIFT).clamp(-MAX_DRIFT, MAX_DRIFT)
+    }
+}
 
 /// Microfone + alto-falante padrão do sistema, abertos enquanto o valor existir.
 /// Último erro dos fluxos de áudio (dispositivo removido, driver caiu), guardado pelos callbacks.
@@ -377,10 +412,12 @@ where
 {
     let ch = cfg.channels as usize;
     let mut up = Upsampler::new(rate, cfg.sample_rate);
+    let mut drift = Drift::new(rate);
     dev.build_output_stream(
         cfg,
         move |data: &mut [T], _| {
             let mut q = q.lock().unwrap();
+            up.set_scale(drift.scale(q.len()));
             for frame in data.chunks_mut(ch) {
                 let (before, front) = (q.len(), q.front().copied());
                 let v = T::from_sample(up.pull(&mut q).unwrap_or(0.0));
@@ -431,6 +468,52 @@ mod tests {
             // 7 kHz dobraria para 1 kHz sem filtro; 1 kHz passa quase inteiro.
             assert!(run(7000.0, from) < 0.05, "{from}: {}", run(7000.0, from));
             assert!((0.95..1.05).contains(&run(1000.0, from)), "{from}: {}", run(1000.0, from));
+        }
+    }
+
+    #[test]
+    fn drift_speeds_up_a_full_queue_and_slows_a_starved_one() {
+        let mut d = Drift::new(16000);
+        for _ in 0..500 {
+            d.scale(3200);
+        }
+        assert!(d.scale(3200) > 1.0);
+        let mut d = Drift::new(16000);
+        for _ in 0..500 {
+            d.scale(0);
+        }
+        let s = d.scale(0);
+        assert!((1.0 - MAX_DRIFT..1.0).contains(&s), "{s}");
+    }
+
+    /// Rede 0,4% mais rápida ou mais lenta que a placa de som (bem mais que a deriva real), por 20 s: a fila
+    /// não chega ao teto de 400 ms nem seca.
+    #[test]
+    fn drift_keeps_the_queue_bounded_when_clocks_differ() {
+        for skew in [1.004, 0.996] {
+            let (rate, out_rate) = (16000u32, 48000u32);
+            let mut up = Upsampler::new(rate, out_rate);
+            let mut drift = Drift::new(rate);
+            let mut q: VecDeque<i16> = VecDeque::new();
+            let (mut produced, mut dry, mut peak) = (0.0f64, 0usize, 0usize);
+            for ms in 0..20_000u32 {
+                // Chega de 20 em 20 ms, em rajada, no ritmo da rede.
+                if ms % 20 == 0 {
+                    produced += 320.0 * skew;
+                    let n = produced as usize;
+                    produced -= n as f64;
+                    q.extend(std::iter::repeat_n(1000i16, n));
+                }
+                up.set_scale(drift.scale(q.len()));
+                for _ in 0..48 {
+                    if up.pull(&mut q).is_none() {
+                        dry += 1;
+                    }
+                }
+                peak = peak.max(q.len());
+            }
+            assert!(peak < max_queued(rate), "skew {skew}: pico {peak}");
+            assert!(dry < 500, "skew {skew}: {dry} saídas sem dado");
         }
     }
 

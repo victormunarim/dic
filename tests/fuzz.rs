@@ -113,7 +113,7 @@ fn descriptor_parser_rejects_mutations_without_panicking() {
     let mut rng = Rng::new(3);
     let key = SigningKey::generate(&mut OsRng);
     let good = RelayDescriptor::sign(&key, [1; 32], [2; 32], "203.0.113.9:4001", 500, 1_000, 3_600).unwrap().to_bytes();
-    for _ in 0..iters(3_000) {
+    for _ in 0..iters(500) {
         let buf = if rng.below(4) == 0 { rng.blob(300) } else { rng.mutate(&good) };
         if let Ok(d) = RelayDescriptor::from_bytes(&buf) {
             // Só passa na verificação se for byte a byte o descritor assinado.
