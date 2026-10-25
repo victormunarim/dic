@@ -148,6 +148,12 @@ async fn ready_within(client: &CircuitClient, limit: Duration) -> bool {
 }
 
 impl Dialer {
+    /// Endereço de relay guardado de `peer` (da última ligação ou consulta), se houver; é por ele que
+    /// [`Dialer::dial`] tenta primeiro, sem passar pelo diretório.
+    pub fn stored_address(&self, peer: &[u8; 32]) -> Option<String> {
+        self.known.lock().unwrap().get(peer).map(|r| r.addr.clone())
+    }
+
     /// Cliente de circuito até `exit`. Sem outros relays, o primeiro salto é o próprio relay (por loopback).
     fn client(&self, peer: &[u8; 32], exit: &RelayInfo, relays: Vec<Candidate>) -> CircuitClient {
         self.client_with(peer, exit, relays, ClientOptions::default())
