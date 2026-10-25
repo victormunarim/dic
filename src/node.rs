@@ -27,7 +27,7 @@ use crate::{
     upnp,
     directory::{self, REPUBLISH, RelayInfo, dest_for},
     media::codec::Codec,
-    phone::{self, ActiveCall, CallError, IncomingCall, Phone, call, call_over},
+    phone::{self, ActiveCall, CallError, IncomingCall, Phone, PhoneLink, ScreenShare, call_linked, call_over_linked, screen_client_options, share_screen},
     punch::Punch,
     transport::{CircuitClient, ClientOptions, RelayServer, ServerConfig, allow_list},
 };
@@ -88,6 +88,8 @@ pub struct Dialer {
     known: Known,
     /// Contatos que não deixaram furar o NAT há pouco: pula o furo até a data indicada.
     no_punch: Arc<Mutex<HashMap<[u8; 32], Instant>>>,
+    /// Registra as chamadas que esta máquina faz no telefone dela (para receber a tela do outro lado).
+    link: PhoneLink,
 }
 
 type Known = Arc<Mutex<HashMap<[u8; 32], RelayInfo>>>;
@@ -130,14 +132,19 @@ async fn ready_within(client: &CircuitClient, limit: Duration) -> bool {
 
 impl Dialer {
     /// Cliente de circuito até `exit`. Sem outros relays, o primeiro salto é o próprio relay (por loopback).
-    fn client(&self, peer: &[u8; 32], exit: &RelayInfo, mut relays: Vec<Candidate>) -> CircuitClient {
+    fn client(&self, peer: &[u8; 32], exit: &RelayInfo, relays: Vec<Candidate>) -> CircuitClient {
+        self.client_with(peer, exit, relays, ClientOptions::default())
+    }
+
+    fn client_with(&self, peer: &[u8; 32], exit: &RelayInfo, mut relays: Vec<Candidate>, options: ClientOptions) -> CircuitClient {
         // Último recurso para o primeiro salto: o próprio relay (por loopback). Perde o anonimato
         // perante o outro lado, mas permite ligar quando só há duas pessoas online.
         relays.push(Candidate { addr: format!("127.0.0.1:{}", self.relay_port), public: self.mine.onion, link_public: self.mine.link, score: 0.5 });
         relays.push(exit.candidate());
         let cfg = ManagerConfig { exit_addr: Some(exit.addr.clone()), ..Default::default() };
-        CircuitClient::spawn_with(CircuitManager::new(cfg, &dest_for(peer), relays), Duration::from_secs(3), ClientOptions::default())
+        CircuitClient::spawn_with(CircuitManager::new(cfg, &dest_for(peer), relays), Duration::from_secs(3), options)
     }
+
     pub fn public_key(&self) -> [u8; 32] {
         *PublicKey::from(&self.secret).as_bytes()
     }
@@ -148,7 +155,7 @@ impl Dialer {
         let skip = self.no_punch.lock().unwrap().get(&peer).is_some_and(|until| *until > Instant::now());
         let codec = match &self.punch {
             Some(p) if !skip => match p.dial(&peer, Duration::from_secs(6)).await {
-                Ok(c) => return Ok(call_over(c.tx, c.rx, &self.secret, &PublicKey::from(peer), codec, wait).await?),
+                Ok(c) => return Ok(call_over_linked(c.tx, c.rx, &self.secret, &PublicKey::from(peer), codec, wait, Some(&self.link)).await?),
                 Err(_) => {
                     self.no_punch.lock().unwrap().insert(peer, Instant::now() + NO_PUNCH_FOR);
                     codec
@@ -163,7 +170,7 @@ impl Dialer {
         if let Some(k) = cached {
             let client = self.client(&peer, &k, Vec::new());
             if ready_within(&client, Duration::from_secs(5)).await {
-                return Ok(call(client, &self.secret, &PublicKey::from(peer), codec, wait).await?);
+                return Ok(call_linked(client, &self.secret, &PublicKey::from(peer), codec, wait, Some(&self.link)).await?);
             }
             client.stop();
         }
@@ -171,7 +178,36 @@ impl Dialer {
         self.known.lock().unwrap().insert(peer, exit.clone());
         let relays = directory::sample(&self.directory, 3, &[me, peer]).await?.iter().map(RelayInfo::candidate).collect();
         let client = self.client(&peer, &exit, relays);
-        Ok(call(client, &self.secret, &PublicKey::from(peer), codec, wait).await?)
+        Ok(call_linked(client, &self.secret, &PublicKey::from(peer), codec, wait, Some(&self.link)).await?)
+    }
+
+    /// Transmite a tela da chamada `call` para `peer`, por um circuito só da tela (cover de
+    /// [`phone::SCREEN_SLOT_MS`] ms). Sempre por circuito, mesmo que a voz vá direto pelo furo de NAT.
+    pub async fn share_screen(&self, peer: [u8; 32], call: &ActiveCall, wait: Duration) -> Result<ScreenShare, DialError> {
+        let me = *PublicKey::from(&self.secret).as_bytes();
+        let cached = self.known.lock().unwrap().get(&peer).cloned();
+        let client = match cached {
+            Some(k) => {
+                let client = self.client_with(&peer, &k, Vec::new(), screen_client_options());
+                if ready_within(&client, Duration::from_secs(5)).await {
+                    Some(client)
+                } else {
+                    client.stop();
+                    None
+                }
+            }
+            None => None,
+        };
+        let client = match client {
+            Some(c) => c,
+            None => {
+                let exit = directory::lookup(&self.directory, &peer).await?.ok_or(DialError::NotFound)?;
+                self.known.lock().unwrap().insert(peer, exit.clone());
+                let relays = directory::sample(&self.directory, 3, &[me, peer]).await?.iter().map(RelayInfo::candidate).collect();
+                self.client_with(&peer, &exit, relays, screen_client_options())
+            }
+        };
+        Ok(share_screen(client, call.share_keys(), wait).await?)
     }
 }
 
@@ -263,7 +299,7 @@ impl Node {
             };
             push_note(&mut note, warn);
         }
-        let dialer = Dialer { secret: secret.clone(), directory: directory.clone(), mine: mine.clone(), relay_port: port, punch, known: known.clone(), no_punch: Arc::default() };
+        let dialer = Dialer { secret: secret.clone(), directory: directory.clone(), mine: mine.clone(), relay_port: port, punch, known: known.clone(), no_punch: Arc::default(), link: phone.link() };
         let republish = {
             let (directory, secret, last_error, public_addr, addr_now) = (directory.clone(), secret.clone(), last_error.clone(), public_addr, addr_now.clone());
             let (contacts, known) = (phone.contacts(), known.clone());
@@ -351,6 +387,11 @@ impl Node {
     /// Liga para `peer` (veja [`Dialer::dial`]).
     pub async fn dial<C: Codec + Send + 'static>(&self, peer: [u8; 32], codec: C, wait: Duration) -> Result<ActiveCall, DialError> {
         self.dialer.dial(peer, codec, wait).await
+    }
+
+    /// Transmite a tela da chamada para `peer` (veja [`Dialer::share_screen`]).
+    pub async fn share_screen(&self, peer: [u8; 32], call: &ActiveCall, wait: Duration) -> Result<ScreenShare, DialError> {
+        self.dialer.share_screen(peer, call, wait).await
     }
 
     /// Cópia barata que sabe ligar sem emprestar o `Node`: serve para discar em tarefas em segundo plano.

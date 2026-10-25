@@ -39,6 +39,7 @@ const MAX_PENDING: usize = 4;
 const KEYFRAME: u8 = 1;
 const IDLE: u8 = 2;
 const WANT_KEY: u8 = 4;
+const STOP: u8 = 8;
 
 /// Quadro de vídeo remontado, pronto para o decodificador.
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -86,6 +87,7 @@ pub struct ScreenStream {
     /// Faltou quadro: descarta até chegar um quadro-chave.
     broken: bool,
     peer_wants_key: bool,
+    peer_stopped: bool,
     stats: ScreenStats,
 }
 
@@ -102,6 +104,7 @@ impl ScreenStream {
             last_id: None,
             broken: false,
             peer_wants_key: false,
+            peer_stopped: false,
             stats: ScreenStats::default(),
         }
     }
@@ -144,6 +147,28 @@ impl ScreenStream {
     /// Fragmentos esperando saída.
     pub fn queued(&self) -> usize {
         self.queue.len()
+    }
+
+    /// Há fragmento esperando saída (quem não tem nada a mandar deixa o cover do circuito preencher).
+    pub fn has_data(&self) -> bool {
+        !self.queue.is_empty()
+    }
+
+    /// Faltou quadro e a imagem está parada à espera de um quadro-chave: vale mandar um pedido.
+    pub fn needs_key(&self) -> bool {
+        self.broken
+    }
+
+    /// O outro lado avisou que parou de transmitir.
+    pub fn peer_stopped(&self) -> bool {
+        self.peer_stopped
+    }
+
+    /// Pacote de "parei de transmitir" (mesmo tamanho e cifra dos outros).
+    pub fn stop_packet(&mut self) -> Result<[u8; PACKET_LEN], MediaError> {
+        let mut buf = [0u8; HEADER];
+        buf[0] = STOP | IDLE;
+        self.sealer.seal(&buf)
     }
 
     /// O emissor deve forçar um quadro-chave no codec (o outro lado pediu, ou a fila estourou).
@@ -190,9 +215,14 @@ impl ScreenStream {
         if flags & WANT_KEY != 0 {
             self.peer_wants_key = true;
         }
+        if flags & STOP != 0 {
+            self.peer_stopped = true;
+            return Ok(());
+        }
         if flags & IDLE != 0 {
             return Ok(());
         }
+        self.peer_stopped = false;
         let id = u16::from_be_bytes([frame[1], frame[2]]);
         let (idx, total) = (frame[3] as usize, frame[4] as usize);
         if total == 0 || idx >= total {
@@ -436,6 +466,32 @@ mod tests {
         assert!(a.push_frame(&[], true).is_err());
         assert!(a.push_frame(&vec![0; MAX_FRAME + 1], true).is_err());
         assert!(a.push_frame(&vec![0; MAX_FRAME], true).unwrap());
+    }
+
+    #[test]
+    fn stop_is_signalled_and_cleared_by_new_video() {
+        let (mut a, mut b) = pair();
+        b.receive(&a.stop_packet().unwrap()).unwrap();
+        assert!(b.peer_stopped());
+        a.push_frame(&frame(10, 0), true).unwrap();
+        slot(&mut a, &mut b, false);
+        assert!(!b.peer_stopped());
+        assert_eq!(b.poll_frame().unwrap().data, frame(10, 0));
+    }
+
+    #[test]
+    fn viewer_asks_only_while_it_needs_a_keyframe() {
+        let (mut a, mut b) = pair();
+        assert!(!b.needs_key() && !a.has_data());
+        a.push_frame(&frame(100, 0), true).unwrap();
+        a.push_frame(&frame(400, 1), false).unwrap();
+        a.push_frame(&frame(100, 2), false).unwrap();
+        let mut n = 0;
+        while a.has_data() {
+            slot(&mut a, &mut b, n == 2);
+            n += 1;
+        }
+        assert!(b.needs_key());
     }
 
     #[test]
