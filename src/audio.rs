@@ -184,7 +184,7 @@ pub struct Audio {
     info: String,
     frame: usize,
     rate: u32,
-    apm: Mutex<AudioProcessing>,
+    apm: Mutex<(AudioProcessing, Processing)>,
     tap: Queue,
     played: Arc<AtomicUsize>,
     failure: Failure,
@@ -226,7 +226,7 @@ impl Audio {
             }
         });
         match ready_rx.recv() {
-            Ok(Ok(info)) => Ok(Self { capture, playback, stop, thread: Some(thread), info, played, frame: (rate / 50) as usize, rate, apm: Mutex::new(voice_processor(rate)), tap, failure }),
+            Ok(Ok(info)) => Ok(Self { capture, playback, stop, thread: Some(thread), info, played, frame: (rate / 50) as usize, rate, apm: Mutex::new((voice_processor(rate, Processing::default()), Processing::default())), tap, failure }),
             Ok(Err(e)) => {
                 let _ = thread.join();
                 Err(e)
@@ -259,7 +259,8 @@ impl Audio {
             t.drain(..n).collect()
         };
         render.resize(self.frame, 0);
-        let (chunk, mut apm) = (self.frame / 2, self.apm.lock().unwrap());
+        let (chunk, mut guard) = (self.frame / 2, self.apm.lock().unwrap());
+        let apm = &mut guard.0;
         let mut sink = vec![0i16; chunk];
         for (r, c) in render.chunks(chunk).zip(pcm.chunks_mut(chunk)) {
             let src = c.to_vec();
@@ -267,6 +268,20 @@ impl Audio {
             let _ = apm.process_capture_i16(&src, c);
         }
         Some(pcm)
+    }
+
+    /// Liga ou desliga estágios do tratamento do microfone. Só refaz o processador (e o cancelador de eco
+    /// recomeça a aprender) quando algo mudou.
+    pub fn set_processing(&self, on: Processing) {
+        let mut guard = self.apm.lock().unwrap();
+        if guard.1 != on {
+            *guard = (voice_processor(self.rate, on), on);
+        }
+    }
+
+    /// Tratamento do microfone em uso.
+    pub fn processing(&self) -> Processing {
+        self.apm.lock().unwrap().1
     }
 
     /// Dispositivos e formatos em uso, para diagnóstico.
@@ -294,18 +309,33 @@ impl Drop for Audio {
     }
 }
 
+/// Quais estágios do tratamento WebRTC do microfone ficam ligados. Quem já faz um deles por conta própria
+/// (a GUI tem filtro de graves, ganho automático e remoção de ruído próprios) desliga o daqui para não
+/// tratar duas vezes: um ganho automático antes de outro reforça o ruído, e uma supressão antes de outra
+/// distorce a voz.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Processing {
+    pub high_pass: bool,
+    pub echo_cancel: bool,
+    pub noise_suppression: bool,
+    pub auto_gain: bool,
+}
+
+impl Default for Processing {
+    fn default() -> Self {
+        Processing { high_pass: true, echo_cancel: true, noise_suppression: true, auto_gain: true }
+    }
+}
+
 /// Tratamento da voz do microfone (WebRTC, em Rust puro): filtro passa-altas, cancelamento de eco (usa o
-/// que foi tocado como referência), supressão de ruído e ganho automático.
-fn voice_processor(rate: u32) -> AudioProcessing {
+/// que foi tocado como referência), supressão de ruído e ganho automático, conforme `on`.
+fn voice_processor(rate: u32, on: Processing) -> AudioProcessing {
     use sonora::config::{AdaptiveDigital, EchoCanceller, GainController2, HighPassFilter, NoiseSuppression, NoiseSuppressionLevel};
     let config = Config {
-        high_pass_filter: Some(HighPassFilter::default()),
-        echo_canceller: Some(EchoCanceller::default()),
-        noise_suppression: Some(NoiseSuppression { level: NoiseSuppressionLevel::High, ..Default::default() }),
-        gain_controller2: Some(GainController2 {
-            adaptive_digital: Some(AdaptiveDigital::default()),
-            ..Default::default()
-        }),
+        high_pass_filter: on.high_pass.then(HighPassFilter::default),
+        echo_canceller: on.echo_cancel.then(EchoCanceller::default),
+        noise_suppression: on.noise_suppression.then(|| NoiseSuppression { level: NoiseSuppressionLevel::High, ..Default::default() }),
+        gain_controller2: on.auto_gain.then(|| GainController2 { adaptive_digital: Some(AdaptiveDigital::default()), ..Default::default() }),
         ..Default::default()
     };
     AudioProcessing::builder()
@@ -566,7 +596,7 @@ mod tests {
 
     #[test]
     fn voice_processor_suppresses_steady_noise_and_keeps_speech_level() {
-        let mut apm = voice_processor(16000);
+        let mut apm = voice_processor(16000, Processing::default());
         let rms = |v: &[i16]| (v.iter().map(|&x| (x as f64).powi(2)).sum::<f64>() / v.len() as f64).sqrt();
         let (mut seed, mut sink, mut out) = (12345u32, vec![0i16; 160], vec![0i16; 160]);
         let mut noise = move || {
@@ -585,6 +615,34 @@ mod tests {
             }
         }
         assert!(last_out < last_in, "in {last_in} out {last_out}");
+    }
+
+    #[test]
+    fn processing_stages_can_be_turned_off_one_by_one() {
+        let rms = |v: &[i16]| (v.iter().map(|&x| (x as f64).powi(2)).sum::<f64>() / v.len() as f64).sqrt();
+        let run = |on: Processing| {
+            let mut apm = voice_processor(16000, on);
+            let (mut seed, mut sink, mut out) = (12345u32, vec![0i16; 160], vec![0i16; 160]);
+            let (mut last_in, mut last_out) = (0.0, 0.0);
+            for n in 0..300 {
+                let frame: Vec<i16> = (0..160)
+                    .map(|_| {
+                        seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                        ((seed >> 16) as i16) / 40
+                    })
+                    .collect();
+                apm.process_render_i16(&[0i16; 160], &mut sink).unwrap();
+                apm.process_capture_i16(&frame, &mut out).unwrap();
+                if n >= 250 {
+                    last_in += rms(&frame);
+                    last_out += rms(&out);
+                }
+            }
+            last_out / last_in
+        };
+        let none = Processing { high_pass: false, echo_cancel: false, noise_suppression: false, auto_gain: false };
+        assert!((run(none) - 1.0).abs() < 0.01, "tudo desligado deveria deixar passar");
+        assert!(run(Processing { noise_suppression: true, ..none }) < 0.95, "a supressão de ruído ligada deveria baixar o ruído");
     }
 
     #[test]

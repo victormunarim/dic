@@ -25,6 +25,18 @@ impl Sound {
     }
 }
 
+/// Diz ao tratamento WebRTC do microfone quais estágios ficam: os que a janela já faz (filtro de graves,
+/// ganho automático, remoção de ruído) saem de lá, para não serem aplicados duas vezes.
+#[cfg(feature = "audio")]
+fn tune(sound: &Sound, p: &AudioPrefs) {
+    sound.set_processing(clam::audio::Processing { high_pass: false, echo_cancel: true, noise_suppression: !p.denoise, auto_gain: false });
+}
+
+#[cfg(not(feature = "audio"))]
+fn tune(sound: &Sound, _: &AudioPrefs) {
+    match *sound {}
+}
+
 /// Abre microfone/alto-falante se pedido; sem eles, cai para o tom de teste.
 pub(crate) fn open_sound(want: bool, form: &Form, out: &Sink) -> Option<Sound> {
     if !want {
@@ -118,7 +130,10 @@ pub(crate) fn tone(hz: f64, n: usize) -> Vec<i16> {
 /// ou, sem áudio, o tom de teste.
 pub(crate) fn mic_frames(sound: Option<&Sound>, hz: f64, n: usize, shared: &Shared) -> Vec<Vec<i16>> {
     let mut frames: Vec<Vec<i16>> = match sound {
-        Some(s) => std::iter::from_fn(|| s.mic_frame()).take(2).collect(),
+        Some(s) => {
+            tune(s, &shared.audio.prefs());
+            std::iter::from_fn(|| s.mic_frame()).take(2).collect()
+        }
         None => vec![tone(hz, n)],
     };
     frames.iter_mut().for_each(|f| shared.audio.outgoing(f));
@@ -147,6 +162,7 @@ pub(crate) async fn mic_test(sound: Sound, shared: Arc<Shared>, stop: Arc<Atomic
     let mut n = 0u32;
     while shared.mic_test.load(Ordering::Relaxed) && !stop.load(Ordering::Relaxed) {
         tick.tick().await;
+        tune(&sound, &shared.audio.prefs());
         while let Some(mut f) = sound.mic_frame() {
             shared.audio.outgoing(&mut f);
             play_scaled(Some(&sound), f, &shared);
@@ -187,7 +203,7 @@ mod tests {
         assert!(c.level() > 0.5, "o medidor deve mostrar o microfone mesmo mudo");
         assert!(!c.speaking(), "mudo nunca aparece como falando");
         c.muted.store(false, Ordering::Relaxed);
-        c.set_prefs(AudioPrefs { high_pass: false, denoise: false, mic_gain: 0.5, ..AudioPrefs::default() });
+        c.set_prefs(AudioPrefs { high_pass: false, denoise: false, agc: false, mic_gain: 0.5, ..AudioPrefs::default() });
         let mut f = vec![4000i16; 320];
         c.outgoing(&mut f);
         assert!(f.iter().all(|x| *x == 2000));

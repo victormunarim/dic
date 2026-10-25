@@ -84,7 +84,7 @@ impl AudioPrefs {
 
 impl Default for AudioPrefs {
     fn default() -> Self {
-        AudioPrefs { volume: 1.0, mic_gain: 1.0, high_pass: true, gate: false, gate_db: -45.0, gate_depth_db: 40.0, agc: false, denoise: true }
+        AudioPrefs { volume: 1.0, mic_gain: 1.0, high_pass: true, gate: false, gate_db: -45.0, gate_depth_db: 40.0, agc: true, denoise: true }
     }
 }
 
