@@ -147,6 +147,27 @@ pub(crate) fn conf_path() -> PathBuf {
     home.join(".clam-gui.conf")
 }
 
+/// Últimos endereços de relay dos contatos, num arquivo à parte (`chave addr onion link` por linha).
+pub(crate) fn known_path() -> PathBuf {
+    conf_path().with_file_name(".clam-gui.known")
+}
+
+pub(crate) fn load_known() -> Vec<([u8; 32], clam::directory::RelayInfo)> {
+    let Ok(text) = std::fs::read_to_string(known_path()) else { return Vec::new() };
+    text.lines()
+        .filter_map(|l| {
+            let mut p = l.split_whitespace();
+            let (k, addr, o, link) = (p.next()?, p.next()?, p.next()?, p.next()?);
+            Some((unhex(k).ok()?, clam::directory::RelayInfo { addr: addr.to_string(), onion: unhex(o).ok()?, link: unhex(link).ok()? }))
+        })
+        .collect()
+}
+
+pub(crate) fn save_known(known: &[([u8; 32], clam::directory::RelayInfo)]) {
+    let text: String = known.iter().map(|(k, r)| format!("{} {} {} {}\n", hex(k), r.addr, hex(&r.onion), hex(&r.link))).collect();
+    let _ = std::fs::write(known_path(), text);
+}
+
 impl Form {
     /// Primeira abertura: já nasce com uma identidade, para a pessoa não precisar gerar nada.
     pub(crate) fn first_run() -> Self {
