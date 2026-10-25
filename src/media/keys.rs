@@ -78,6 +78,18 @@ fn derive(dh: [SharedSecret; 3], s_i: &[u8; 32], e_i: &[u8; 32], s_r: &[u8; 32],
 }
 
 impl CallKeys {
+    /// Chaves independentes para outro fluxo da mesma chamada (ex.: a tela, que anda noutro
+    /// circuito). Os dois lados passam o mesmo `label` e obtêm chaves espelhadas; o `seq` de cada
+    /// fluxo recomeça sem risco de reusar nonce.
+    pub fn sub(&self, label: &[u8]) -> CallKeys {
+        let expand = |key: &[u8; 32]| {
+            let mut out = [0u8; 32];
+            Hkdf::<Sha256>::new(Some(b"clam/v1/sub"), key).expand(label, &mut out).expect("32 bytes é válido");
+            out
+        };
+        CallKeys { send: expand(&self.send), recv: expand(&self.recv) }
+    }
+
     /// Chamador: `my_static` é a chave do dispositivo; `peer_static`, a do contato (pareamento);
     /// `my_eph` é a efêmera enviada no convite; `peer_eph`, a que veio na resposta.
     pub fn initiator(my_static: &StaticSecret, my_eph: &Ephemeral, peer_static: &PublicKey, peer_eph: &[u8; 32]) -> Result<Self, MediaError> {
@@ -121,6 +133,19 @@ mod tests {
         assert_eq!(ka.send, kb.recv);
         assert_eq!(ka.recv, kb.send);
         assert_ne!(ka.send, ka.recv);
+    }
+
+    #[test]
+    fn sub_keys_mirror_and_differ_per_label() {
+        let (a, b) = pair();
+        let (ea, eb) = (Ephemeral::generate(), Ephemeral::generate());
+        let ka = CallKeys::initiator(&a, &ea, &PublicKey::from(&b), &eb.public()).unwrap();
+        let kb = CallKeys::responder(&b, &eb, &PublicKey::from(&a), &ea.public()).unwrap();
+        let (sa, sb) = (ka.sub(b"screen"), kb.sub(b"screen"));
+        assert_eq!(sa.send, sb.recv);
+        assert_eq!(sa.recv, sb.send);
+        assert_ne!(sa.send, ka.send);
+        assert_ne!(sa.send, ka.sub(b"other").send);
     }
 
     #[test]
