@@ -228,11 +228,17 @@ impl App {
             self.error = e;
             return;
         }
+        // Sem o campo preenchido, vale o servidor que veio num código de contato (`chave@host:porta`).
+        if self.form.directory.trim().is_empty() {
+            self.form.directory = self.form.directory_addr();
+        }
         if self.form.directory.trim().is_empty() {
             self.error = "Informe o servidor (diretório), no formato endereço:porta.".into();
             return;
         }
-        self.form.save();
+        if let Err(e) = self.form.save_checked() {
+            self.error = format!("não deu para gravar a configuração em {}: {e}; o servidor e os contatos não ficam salvos", conf_path().display());
+        }
         self.log.lock().unwrap().clear();
         let (tx, rx) = mpsc::unbounded_channel();
         let stop = Arc::new(AtomicBool::new(false));
