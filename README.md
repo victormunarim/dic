@@ -723,7 +723,7 @@ for quadro in call.playout(agora_ms) { /* despeje no alto-falante */ }
 - **Chaves (`keys`)**: handshake de 3 DH no estilo Noise `KK` (efêmera×efêmera, estática×efêmera nos dois sentidos) + HKDF-SHA256 com a transcrição. Sigilo adiante por chamada, autenticação mútua pelas chaves do pareamento, uma chave por direção. Não há mensagem de confirmação: o primeiro pacote válido confirma. Pontos de ordem baixa são recusados (`MediaError::BadKey`).
 - **Pacote (`packet`)**: `seq (4, autenticado) ‖ ChaCha20-Poly1305(len ‖ quadro ‖ zeros)`, **sempre 200 bytes**, cabe nos 203 de uma célula de 2 saltos. Quadro de fala, de silêncio ou de tamanho diferente: mesmo tamanho. Janela anti-replay de 128 pacotes; o `seq` só é marcado como visto depois de autenticar.
 - **Jitter (`jitter`)**: reordena, marca perda e adapta o atraso. Começa em 2 quadros (40 ms); sobe 1 quadro a cada quadro que chega tarde demais, desce 1 depois de 250 quadros em dia; limite 200 ms. Salto de 50 quadros para frente reinicia o buffer.
-- **Codec (`codec`)**: trait `Codec` (`encode`, `decode(None)` = perda com PLC). Vem o G.711 µ-law, 8 kHz, 160 B por quadro de 20 ms (64 kbps, banda estreita). PLC: repete o último quadro com metade da amplitude, silêncio depois de 3 perdas seguidas.
+- **Codec (`codec`)**: trait `Codec` (`encode`, `decode(None)` = perda com PLC). Vêm o G.722 (16 kHz, 320 amostras ↔ 160 B por quadro de 20 ms, 64 kbps, banda larga; usado pela GUI) e o G.711 µ-law (8 kHz, 160 B, banda estreita). Os dois lados precisam usar o mesmo codec. PLC: repete o último quadro com metade da amplitude, silêncio depois de 3 perdas seguidas.
 - **Sinalização (`signal`)**: `Caller::invite` → `Incoming::parse` → `accept`/`reject` → `Caller::answer`, em quadros de 200 B. O convite leva a identidade de quem liga **cifrada** (chave de `DH(e_i, s_r)`) e a hora (válido por 60 s): o relay de saída vê que há um convite, mas não quem liga. Quem finge ser um contato não deriva as chaves da chamada. Replay de um convite gravado, dentro dos 60 s, só faz o telefone tocar.
 - **Desligar**: pacote autenticado do mesmo tamanho dos de voz (campo `tipo` dentro da cifra); ninguém de fora derruba a chamada.
 - **Sem DTX**: o cover do circuito já manda 1 célula a cada 20 ms, então calar não economiza banda e só revelaria quando você fala.
@@ -803,7 +803,7 @@ cargo run --release --features gui --example gui
 2. **Diretório**: `host:porta` do servidor. **Contatos**: chaves públicas que podem ligar para você, separadas por `;` (quem não estiver na lista não recebe resposta; contatos são atendidos automaticamente).
 3. **Ficar online** publica você no diretório. **Ligar** pede o código (ou só a chave) do outro; **Desligar** encerra.
 4. Os campos são gravados em `~/.clam-gui.conf` (`%USERPROFILE%` no Windows), **inclusive a chave secreta**; no Unix o arquivo fica `0600`.
-5. **Áudio real** (feature `audio`): `--features gui,audio` e marque *Microfone e alto-falante*. Usa `cpal`, 8 kHz mono, filas de 400 ms. **Use fones**: sem cancelamento de eco. Sem a opção, cai para tom (440 Hz quem liga, 660 Hz quem atende). No Linux a compilação exige `pkg-config` e `libasound2-dev`.
+5. **Áudio real** (feature `audio`): `--features gui,audio` e marque *Microfone e alto-falante*. Usa `cpal`, 16 kHz mono (G.722), filas de 400 ms. **Use fones**: sem cancelamento de eco. Sem a opção, cai para tom (440 Hz quem liga, 660 Hz quem atende). No Linux a compilação exige `pkg-config` e `libasound2-dev`.
 6. `eframe` fica atrás da feature `gui`, fixado em 0.32 (a 0.37 conflita com o libp2p por `js-sys`).
 
 O fluxo antigo, com relays manuais, continua em `examples/call.rs` e `examples/measure.rs`.
@@ -849,7 +849,7 @@ cargo run --release --features net --example measure -- direct 127.0.0.1:9000
 | `src/net.rs` | `Node`, `NetStore`, `NetConfig` (feature `net`) |
 | `src/circle.rs` | `CircleSecret`, `TopicKind` |
 | `examples/call.rs` | chamada de teste (`keygen`, `phone`, `dial`), usada por `scripts/call.sh` e `scripts/call-windows.ps1` |
-| `src/audio.rs` | microfone/alto-falante via `cpal`, reamostragem 8 kHz (feature `audio`) |
+| `src/audio.rs` | microfone/alto-falante via `cpal`, reamostragem para a taxa do codec (feature `audio`) |
 | `examples/gui.rs` | janela mínima (feature `gui`) para ligar/atender sem terminal |
 | `src/phone.rs` | `Phone`, `IncomingCall`, `call`, `ActiveCall` (feature `net`) |
 | `src/media/` | `VoiceCall`, `keys` (handshake), `packet` (200 B + AEAD), `jitter`, `signal` (convite/aceite), `codec` (`Mulaw`, trait `Codec`) |
