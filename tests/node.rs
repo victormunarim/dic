@@ -1010,7 +1010,7 @@ async fn both_contacts_changed_address_and_find_each_other_through_the_dht() {
     use clam::directory::RelayInfo;
     use clam::rendezvous::DhtOptions;
     let testnet = mainline::Testnet::new(5).unwrap();
-    let dht = || Some(DhtOptions { bootstrap: testnet.bootstrap.clone(), bind: Some(std::net::Ipv4Addr::LOCALHOST) });
+    let dht = || Some(DhtOptions { bootstrap: testnet.bootstrap.clone(), bind: Some(std::net::Ipv4Addr::LOCALHOST), circuit: false });
     let (sa, sb) = (key(), key());
     let (pa, pb) = (*PublicKey::from(&sa).as_bytes(), *PublicKey::from(&sb).as_bytes());
     let stale = || RelayInfo { addr: format!("127.0.0.1:{}", free_port()), onion: [1; 32], link: [2; 32] };
@@ -1038,5 +1038,88 @@ async fn both_contacts_changed_address_and_find_each_other_through_the_dht() {
     let cb = call.expect("B achou A pela DHT");
     let (_ca, _a) = answer.await.unwrap();
     assert!(b.known().iter().any(|(k, r)| *k == pa && *r == fresh_a), "o endereço da DHT vira o guardado");
+    cb.hangup();
+}
+
+/// Nós C e D servem de gateway da DHT; A e B não têm acesso direto a ela (o nó inicial deles não existe) e
+/// só chegam lá por circuitos de dois relays de contatos. Se B acha A, foi pelo circuito.
+#[tokio::test]
+async fn the_dht_is_reached_through_two_contact_relays() {
+    use clam::directory::RelayInfo;
+    use clam::rendezvous::DhtOptions;
+    let testnet = mainline::Testnet::new(5).unwrap();
+    let gateway = || Some(DhtOptions { bootstrap: testnet.bootstrap.clone(), bind: Some(std::net::Ipv4Addr::LOCALHOST), circuit: false });
+    let private = || Some(DhtOptions { bootstrap: vec!["127.0.0.1:9".into()], bind: Some(std::net::Ipv4Addr::LOCALHOST), circuit: true });
+    let (sa, sb, sc, sd) = (key(), key(), key(), key());
+    let (pa, pb, pc, pd) = (*PublicKey::from(&sa).as_bytes(), *PublicKey::from(&sb).as_bytes(), *PublicKey::from(&sc).as_bytes(), *PublicKey::from(&sd).as_bytes());
+    let c = Node::start(NodeConfig { updates: false, dht: gateway(), ..fixed(sc, free_port(), vec![]) }).await.unwrap();
+    let d = Node::start(NodeConfig { updates: false, dht: gateway(), ..fixed(sd, free_port(), vec![]) }).await.unwrap();
+    let relays = [(pc, c.relay_info().unwrap()), (pd, d.relay_info().unwrap())];
+    let stale = || RelayInfo { addr: format!("127.0.0.1:{}", free_port()), onion: [1; 32], link: [2; 32] };
+    let mut cfg_a = NodeConfig { updates: false, dht: private(), ..fixed(sa, free_port(), vec![pb]) };
+    cfg_a.known = relays.iter().cloned().chain([(pb, stale())]).collect();
+    let mut cfg_b = NodeConfig { updates: false, dht: private(), ..fixed(sb, free_port(), vec![pa]) };
+    cfg_b.known = relays.iter().cloned().chain([(pa, stale())]).collect();
+    let mut a = Node::start(cfg_a).await.unwrap();
+    let b = Node::start(cfg_b).await.unwrap();
+    let fresh_a = a.relay_info().unwrap();
+
+    let answer = tokio::spawn(async move {
+        let inc = timeout(Duration::from_secs(90), a.next_incoming()).await.unwrap().unwrap();
+        (inc.accept(Mulaw::new()).await.unwrap(), a)
+    });
+    let mut call = None;
+    for _ in 0..12 {
+        if let Ok(c) = b.dial(pa, Mulaw::new(), Duration::from_secs(15)).await {
+            call = Some(c);
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    let cb = call.expect("B achou A pela DHT, por circuito");
+    let (_ca, _a) = answer.await.unwrap();
+    assert!(b.known().iter().any(|(k, r)| *k == pa && *r == fresh_a));
+    cb.hangup();
+}
+
+/// Com o modo circuito e sem dois relays de contatos, a DHT não é consultada, nem direto: o IP não vaza.
+#[tokio::test]
+async fn circuit_mode_never_falls_back_to_the_direct_dht() {
+    use clam::directory::RelayInfo;
+    use clam::rendezvous::DhtOptions;
+    let testnet = mainline::Testnet::new(5).unwrap();
+    let options = |circuit| Some(DhtOptions { bootstrap: testnet.bootstrap.clone(), bind: Some(std::net::Ipv4Addr::LOCALHOST), circuit });
+    let (sa, sb, sc) = (key(), key(), key());
+    let (pa, pb, pc) = (*PublicKey::from(&sa).as_bytes(), *PublicKey::from(&sb).as_bytes(), *PublicKey::from(&sc).as_bytes());
+    let c = Node::start(NodeConfig { updates: false, dht: options(false), ..fixed(sc, free_port(), vec![]) }).await.unwrap();
+    let stale = RelayInfo { addr: format!("127.0.0.1:{}", free_port()), onion: [1; 32], link: [2; 32] };
+    let known = vec![(pa, stale), (pc, c.relay_info().unwrap())];
+    let mut a = Node::start(NodeConfig { updates: false, dht: options(false), ..fixed(sa, free_port(), vec![pb]) }).await.unwrap();
+    // Só um relay de contato (C): não dá para montar um circuito de dois relays.
+    let mut cfg_b = NodeConfig { updates: false, dht: options(true), ..fixed(sb.clone(), free_port(), vec![pa]) };
+    cfg_b.known = known.clone();
+    let b = Node::start(cfg_b).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    assert!(b.dial(pa, Mulaw::new(), Duration::from_secs(5)).await.is_err(), "sem circuito, nada de DHT direto");
+    drop(b);
+
+    // Controle: o mesmo B pelo acesso direto acha A, então o item estava lá.
+    let mut cfg_b = NodeConfig { updates: false, dht: options(false), ..fixed(sb, free_port(), vec![pa]) };
+    cfg_b.known = known;
+    let b = Node::start(cfg_b).await.unwrap();
+    let answer = tokio::spawn(async move {
+        let inc = timeout(Duration::from_secs(60), a.next_incoming()).await.unwrap().unwrap();
+        (inc.accept(Mulaw::new()).await.unwrap(), a)
+    });
+    let mut call = None;
+    for _ in 0..10 {
+        if let Ok(c) = b.dial(pa, Mulaw::new(), Duration::from_secs(15)).await {
+            call = Some(c);
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    let cb = call.expect("pelo acesso direto B acha A");
+    let (_ca, _a) = answer.await.unwrap();
     cb.hangup();
 }

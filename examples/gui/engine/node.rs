@@ -26,8 +26,12 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
         cfg.public_addr = Some(form.public_addr.trim().to_string());
     }
     if form.use_dht {
-        cfg.dht = Some(clam::rendezvous::DhtOptions::default());
-        out.line("DHT ligada: o endereço é guardado, cifrado para cada contato, na DHT do BitTorrent (quem opera nós da DHT vê o seu IP)");
+        cfg.dht = Some(clam::rendezvous::DhtOptions { circuit: form.dht_circuit, ..Default::default() });
+        if form.dht_circuit {
+            out.line("DHT ligada por circuito: o endereço é guardado e lido pelos relays de dois contatos, sem expor o seu IP à DHT (sem dois relays de contatos a DHT fica parada)");
+        } else {
+            out.line("DHT ligada: o endereço é guardado, cifrado para cada contato, na DHT do BitTorrent (quem opera nós da DHT vê o seu IP)");
+        }
     }
     out.line(format!("{} endereço(s) de contatos guardados em {} ({} deles só vieram de convites)", cfg.known.len() + cfg.hints.len(), known_path().display(), cfg.hints.len()));
     if cfg.directory.trim().is_empty() {

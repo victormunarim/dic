@@ -1,6 +1,6 @@
 # Proposta: reencontrar contatos sem diretório
 
-Estado: **as camadas 1 (fila de saída) e 2 (ponto de encontro na DHT, sem privacidade extra) e o histórico de endereços estão implementados** (fases 1 e 2, veja [GUI.md](GUI.md#mudou-de-endereço-sem-diretório)). A camada 3 continua só como proposta. O código de contato direto e os endereços guardados (camada 0) vieram antes ([GUI.md](GUI.md#totalmente-p2p-o-código-de-contato-direto)).
+Estado: **as camadas 1 (fila de saída) e 2 (ponto de encontro na DHT), o histórico de endereços e a privacidade da camada 2 (consultas pelo circuito) estão implementados** (fases 1 a 3, veja [GUI.md](GUI.md#mudou-de-endereço-sem-diretório)). A camada 3 (réplicas e âncoras) continua só como proposta. O código de contato direto e os endereços guardados (camada 0) vieram antes ([GUI.md](GUI.md#totalmente-p2p-o-código-de-contato-direto)).
 
 ## Problema
 
@@ -94,6 +94,17 @@ item   = cifrado(registro de endereço), assinado por sk, no alvo (pk, sal)
 - Os testes usam `mainline::Testnet` em loopback (`tests/node.rs`: `both_contacts_changed_address_and_find_each_other_through_the_dht`: os dois começam com o endereço velho um do outro, sem fila de saída, e se acham pela DHT).
 - Na GUI é a caixa "Usar a DHT (BitTorrent) para reencontrar contatos", desligada por padrão.
 
+### Consultas pelo circuito (fase 3)
+
+O relay de saída atual só abre fluxo para o telefone do destino e a DHT fala UDP, então a saída não podia só repassar bytes. Em vez de um proxy UDP aberto (que serviria de refletor e de varredor de portas), a saída faz **ela mesma** a consulta, como *gateway* (`src/rendezvous.rs`):
+
+- **Quem serve.** Todo nó com `NodeConfig::dht` liga, além do cliente, um ouvinte em loopback que a política de saída do relay mapeia para o destino `dht:9` (`GATEWAY_DEST`). Só entende dois pedidos: ler o alvo `(chave, sal)` e gravar um item **já assinado** por quem pediu. A semente de assinatura não sai do nó de origem (ele assina antes), então o gateway não forja item; o valor é cifrado para o contato, então ele não o lê. Limites: pedido de até 400 B, 4 pedidos ao mesmo tempo e 60 por minuto somando todos os circuitos.
+- **Formato.** Cada célula do circuito leva até 203 B, então pedido e resposta são `u16 BE tamanho ‖ corpo` em pedaços de 200 B (o gravar tem 299 B e cabe em dois). Leitura: `1 ‖ chave ‖ sal`; gravação: `2 ‖ chave ‖ assinatura ‖ seq ‖ sal ‖ valor`; respostas `1 ‖ valor`, `1` ou `0`.
+- **Quem pede.** `NodeConfig::dht` com `circuit: true`: o `Dialer` monta um circuito de dois relays que não são o dele, sorteados entre os relays guardados dos contatos (`known`, `hints`, `history`, sem o do contato procurado) e os do diretório, se houver; tenta até 3 saídas, cada uma com 8 s para ficar pronta, e faz os três dias de uma consulta, ou todas as gravações de uma rodada, na mesma sessão. O primeiro salto vê o IP e não o pedido; a saída vê o pedido (um alvo que muda por dia e não liga a ninguém sem as chaves do par) e não o IP; a DHT só vê o IP da saída.
+- **Falha fechada.** Com menos de dois relays utilizáveis, ou sem saída que sirva de gateway, a DHT não é consultada nem gravada, e nunca cai para o acesso direto: o IP não vaza por causa da falha. A ligação segue para o diretório, se houver.
+- **O que não muda.** Quem controla o primeiro salto e a saída ao mesmo tempo liga o IP ao alvo (o mesmo limite dos circuitos de chamada). Sem diretório, os relays disponíveis são os dos contatos, então o circuito só esconde o seu IP de um contato do outro (o contato da saída não vê o seu IP; o do primeiro salto vê, mas não o pedido). Um nó que serve de gateway aparece na DHT fazendo consultas que não são só dele, o que também mistura o tráfego dele.
+- **Testes** (`tests/node.rs`): `the_dht_is_reached_through_two_contact_relays` (A e B sem acesso direto à DHT, só C e D têm; B acha A) e `circuit_mode_never_falls_back_to_the_direct_dht` (com um só relay de contato a DHT não é usada, e o controle direto acha o item).
+
 ## Camada 3: réplicas e âncoras (se for preciso)
 
 - **Âncora:** um contato com endereço estável (IP fixo ou DNS) que concorda em guardar registros dos outros. O dono envia o registro a ela com a mesma mensagem da camada 1; quem quer ligar a consulta. É o mesmo papel do diretório, mas voluntário e federado.
@@ -105,7 +116,7 @@ Só entra se a DHT estiver bloqueada ou for pouco confiável para o público do 
 
 - **Conteúdo:** protegido pela cifra (acima).
 - **Quem fala com quem:** os nós da DHT que guardam um item veem o IP de quem escreve e o de quem lê. Quem controla vários nós próximos do alvo pode ligar os dois IPs e concluir que são contatos. A chave de busca muda por dia, o que limita a janela, mas não impede.
-- **Mitigação desejada:** fazer as consultas e publicações da DHT saírem por um circuito de 2 saltos. Isso exige relays que aceitem encaminhar tráfego da DHT para a saída, o que o relay atual (que só encaminha para o telefone do destino) não faz. Fica como fase própria e opção na GUI ("consultar a DHT por circuito"). Até lá, a camada 2 expõe o IP a quem opera nós da DHT.
+- **Mitigação (fase 3, opcional):** as consultas e gravações da DHT saem por um circuito de 2 saltos (`DhtOptions::circuit`, na GUI "Falar com a DHT pelos relays dos contatos"). Sem essa opção, a camada 2 expõe o IP a quem opera nós da DHT. Veja "Consultas pelo circuito" abaixo.
 - **Disponibilidade:** nós maliciosos perto do alvo podem esconder ou descartar o item (ataque de eclipse). Eles não leem nem forjam. Mitigação: replicação da própria DHT, período anterior e seguinte, e as outras camadas como alternativa.
 - **Sem sigilo futuro:** vazar a chave secreta de uma identidade revela registros antigos que alguém tenha gravado. O dano é limitado a endereços antigos.
 - **Relógio:** hoje a hora certa vem do diretório (`src/clock.rs`). Sem ele, o relógio local pode errar. A tolerância de um período para cada lado cobre desvio de até algumas horas; além disso a camada 2 falha e a camada 1 (que usa `seq`, não relógio) continua valendo.
@@ -124,7 +135,7 @@ Nenhuma dependência criptográfica nova: `chacha20poly1305`, `hkdf`, `sha2` e `
 
 1. **Camada 1** com memória de endereços antigos por contato (guardar os últimos N, não só um). Testes em loopback: A muda de endereço com B offline, B volta, recebe e liga. **Pronta** (`tests/node.rs`: `a_new_address_reaches_the_contact_that_was_offline`, `an_old_address_in_the_history_still_reaches_the_contact`, `address_updates_from_strangers_are_ignored`).
 2. **Camada 2** sem privacidade extra, com a DHT local nos testes. Teste: os dois mudam de endereço e se encontram. **Pronta** (`tests/node.rs`: `both_contacts_changed_address_and_find_each_other_through_the_dht`).
-3. **Privacidade da camada 2:** consultas pelo circuito.
+3. **Privacidade da camada 2:** consultas pelo circuito. **Pronta** (`tests/node.rs`: `the_dht_is_reached_through_two_contact_relays`, `circuit_mode_never_falls_back_to_the_direct_dht`).
 4. **Camada 3**, só se a prática mostrar que precisa.
 
 ## Perguntas em aberto
