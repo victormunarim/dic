@@ -163,9 +163,25 @@ pub(crate) fn load_known() -> Vec<([u8; 32], clam::directory::RelayInfo)> {
         .collect()
 }
 
+/// Grava `text` em `path` de uma vez só (arquivo temporário + rename) e, no Unix, já com permissão 0600:
+/// o conteúdo nunca fica legível por outros nem pela metade.
+pub(crate) fn write_private(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let tmp = path.with_extension("tmp");
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+    let result = opts.open(&tmp).and_then(|mut f| f.write_all(text.as_bytes())).and_then(|()| std::fs::rename(&tmp, path));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
 pub(crate) fn save_known(known: &[([u8; 32], clam::directory::RelayInfo)]) {
     let text: String = known.iter().map(|(k, r)| format!("{} {} {} {}\n", hex(k), r.addr, hex(&r.onion), hex(&r.link))).collect();
-    let _ = std::fs::write(known_path(), text);
+    let _ = write_private(&known_path(), &text);
 }
 
 impl Form {
@@ -216,14 +232,8 @@ impl Form {
             self.nicks.trim().replace('\n', ";")
         );
         let path = conf_path();
-        // Contém a chave secreta: no Unix, só o dono lê.
-        if std::fs::write(&path, text).is_ok() {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-            }
-        }
+        // Contém a chave secreta: só o dono lê.
+        let _ = write_private(&path, &text);
     }
 
     /// Nomes conhecidos: contatos e apelidos (o apelido vale para quem não é contato).
@@ -321,6 +331,23 @@ pub(crate) fn remove_contact(text: &str, idx: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn write_private_replaces_atomically_with_owner_only_mode() {
+        let dir = std::env::temp_dir().join(format!("clam-private-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("conf");
+        write_private(&path, "um").unwrap();
+        write_private(&path, "dois").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "dois");
+        assert!(!path.with_extension("tmp").exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn contact_code_parses() {
