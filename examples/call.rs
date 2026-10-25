@@ -42,7 +42,12 @@ fn identity(path: &str) -> Result<StaticSecret, Box<dyn std::error::Error>> {
         Ok(s) => Ok(StaticSecret::from(unhex(&s)?)),
         Err(_) => {
             let k = StaticSecret::random_from_rng(OsRng);
-            std::fs::write(path, hex(&k.to_bytes()))?;
+            // Chave secreta: só o dono lê.
+            let mut opts = std::fs::OpenOptions::new();
+            opts.write(true).create_new(true);
+            #[cfg(unix)]
+            std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+            std::io::Write::write_all(&mut opts.open(path)?, hex(&k.to_bytes()).as_bytes())?;
             eprintln!("identidade nova gravada em {path} (guarde; é a chave secreta)");
             Ok(k)
         }
