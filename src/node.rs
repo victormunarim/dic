@@ -35,11 +35,11 @@ use crate::{
         codec::Codec,
         keys::CallKeys,
         signal::RelayHint,
-        update::{self, AddressRecord, MAX_ADDR},
+        update::{self, AddressRecord, Intro, MAX_ADDR},
     },
-    phone::{self, ActiveCall, AddressUpdate, CallError, IncomingCall, Phone, PhoneLink, ScreenShare, call_linked, call_over_linked, screen_client_options, share_screen},
+    phone::{self, ActiveCall, AddressUpdate, CallError, IncomingCall, Introduction, Phone, PhoneLink, ScreenShare, call_linked, call_over_linked, screen_client_options, share_screen},
     punch::Punch,
-    rendezvous::{self, DhtOptions, GATEWAY_DEST, Remote, Rendezvous, Signed},
+    rendezvous::{self, ANCHOR_DEST, Anchor, DhtOptions, GATEWAY_DEST, Remote, Rendezvous, Signed},
     transport::{CircuitClient, ClientOptions, RelayServer, ServerConfig, allow_list},
 };
 
@@ -78,6 +78,9 @@ const DHT_LOOKUP_LIMIT: Duration = Duration::from_secs(45);
 
 /// Contatos gravados ou consultados na DHT por rodada.
 const DHT_CONTACTS: usize = 32;
+
+/// Espera a confirmação de uma apresentação (como [`UPDATE_ACK_WAIT`]).
+const INTRO_ACK_WAIT: Duration = Duration::from_secs(8);
 
 /// Porta de relay preferida; se estiver ocupada, o sistema escolhe outra.
 pub const DEFAULT_RELAY_PORT: u16 = 4001;
@@ -119,6 +122,14 @@ pub struct NodeConfig {
     /// Guarda o endereço deste relay na DHT do BitTorrent, cifrado para cada contato, e a consulta ao ligar
     /// para quem mudou de endereço sem avisar (veja [`crate::rendezvous`]). `None`: desligado, que é o padrão.
     pub dht: Option<DhtOptions>,
+    /// Como esta pessoa quer ser chamada nas apresentações que manda ([`Node::introduce`]); vazio: sem nome.
+    pub name: String,
+    /// Aceita apresentações de quem adicionou esta pessoa (veja [`Node::take_introductions`]). Padrão: sim.
+    pub introductions: bool,
+    /// Serve de âncora: guarda os registros de endereço dos outros nós (veja [`crate::rendezvous`]). Padrão: não.
+    pub anchor: bool,
+    /// Âncoras onde este nó grava o endereço e consulta o dos contatos, em ordem de preferência. Padrão: nenhuma.
+    pub anchors: Vec<RelayInfo>,
 }
 
 /// Segredos do relay do nó: o do circuito (`onion`) e o do link (Noise NK).
@@ -138,7 +149,7 @@ impl NodeConfig {
     pub fn new(secret: StaticSecret, directory: impl Into<String>, contacts: Vec<[u8; 32]>) -> Self {
         let directory = directory.into();
         let updates = directory.trim().is_empty();
-        Self { secret, directory, contacts, relay_port: DEFAULT_RELAY_PORT, public_addr: None, upnp: true, punch: true, known: Vec::new(), hints: Vec::new(), relay_keys: None, history: Vec::new(), updates, update_retry: UPDATE_RETRY, dht: None }
+        Self { secret, directory, contacts, relay_port: DEFAULT_RELAY_PORT, public_addr: None, upnp: true, punch: true, known: Vec::new(), hints: Vec::new(), relay_keys: None, history: Vec::new(), updates, update_retry: UPDATE_RETRY, dht: None, name: String::new(), introductions: true, anchor: false, anchors: Vec::new() }
     }
 }
 
@@ -181,6 +192,16 @@ pub struct Dialer {
     dht: Option<Arc<Rendezvous>>,
     /// Fala com a DHT pelos relays de dois contatos em vez do próprio IP (veja [`DhtOptions::circuit`]).
     dht_circuit: bool,
+    /// Âncoras do usuário (veja [`NodeConfig::anchors`]).
+    anchors: Vec<RelayInfo>,
+}
+
+/// Quem adicionou esta pessoa e se apresentou ([`Node::introduce`] do outro lado): ainda não é contato.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Introduced {
+    pub peer: [u8; 32],
+    pub name: String,
+    pub reach: update::Reach,
 }
 
 /// O registro do endereço atual deste relay (veja [`track_address`]); vazio até o endereço ficar conhecido.
@@ -258,6 +279,13 @@ fn push_note(note: &mut Option<String>, add: String) {
         Some(n) => format!("{n}; {add}"),
         None => add,
     });
+}
+
+/// Embaralha `list` (Fisher-Yates com o gerador do sistema).
+fn shuffle<T>(list: &mut [T]) {
+    for i in (1..list.len()).rev() {
+        list.swap(i, OsRng.next_u32() as usize % (i + 1));
+    }
 }
 
 /// Espera o circuito do cliente ficar pronto, até `limit`.
@@ -376,6 +404,41 @@ impl Dialer {
         acked
     }
 
+    /// Entrega a apresentação `intro` a `peer` e espera a confirmação cifrada. O endereço dele vem do código que
+    /// se tem (o guardado ou a dica), da DHT e das âncoras ou, na falta, do diretório. `true`: ele abriu e confirmou.
+    async fn deliver_intro(&self, peer: [u8; 32], intro: &Intro, wait: Duration) -> bool {
+        let pk = PublicKey::from(peer);
+        let Ok(frame) = update::seal_intro(&self.secret, &pk, intro) else { return false };
+        let (found, tried) = self.reachable_client(&peer, ClientOptions::default).await;
+        let (mut client, used) = match found {
+            Some((client, used)) => (client, Some(used)),
+            None => {
+                let Ok(exit) = self.lookup_after_stored(&peer, tried).await else { return false };
+                let me = *PublicKey::from(&self.secret).as_bytes();
+                let Ok(sample) = directory::sample(&self.directory, 3, &[me, peer]).await else { return false };
+                (self.client(&peer, &exit, sample.iter().map(RelayInfo::candidate).collect()), None)
+            }
+        };
+        let acked = ready_within(&client, wait).await
+            && client.send(&frame).await.is_ok()
+            && tokio::time::timeout(wait, async {
+                loop {
+                    match client.next_event().await {
+                        Some(Event::Data(d)) if update::open_ack(&self.secret, &pk, intro.seq, &d) => return true,
+                        Some(_) => {}
+                        None => return false,
+                    }
+                }
+            })
+            .await
+            .unwrap_or(false);
+        client.stop();
+        if acked && let Some(used) = used {
+            self.remember(&peer, used);
+        }
+        acked
+    }
+
     /// Relays de contatos (e do diretório, se houver) para montar o circuito até um gateway da DHT, sem o
     /// deste nó e sem os dos contatos em `exclude`.
     async fn gateway_pool(&self, exclude: &[[u8; 32]]) -> Vec<RelayInfo> {
@@ -411,21 +474,83 @@ impl Dialer {
         if pool.len() < 2 {
             return None;
         }
-        for i in (1..pool.len()).rev() {
-            pool.swap(i, OsRng.next_u32() as usize % (i + 1));
-        }
+        shuffle(&mut pool);
         for n in 0..pool.len().min(3) {
             let exit = pool[n].clone();
-            let mut relays: Vec<Candidate> = pool.iter().filter(|r| r.addr != exit.addr).take(3).map(RelayInfo::candidate).collect();
-            relays.push(exit.candidate());
-            let cfg = ManagerConfig { exit_addr: Some(exit.addr.clone()), ..Default::default() };
-            let client = CircuitClient::spawn_with(CircuitManager::new(cfg, GATEWAY_DEST, relays), Duration::from_secs(3), ClientOptions::default());
-            if ready_within(&client, Duration::from_secs(8)).await {
-                return Some(Remote::new(client));
+            let relays: Vec<Candidate> = pool.iter().filter(|r| r.addr != exit.addr).take(3).map(RelayInfo::candidate).collect();
+            if let Some(remote) = self.remote_to(GATEWAY_DEST, &exit, relays).await {
+                return Some(remote);
             }
-            client.stop();
         }
         None
+    }
+
+    /// Sessão com o serviço `dest` da saída `exit` por um circuito que passa por `relays` antes dela.
+    async fn remote_to(&self, dest: &str, exit: &RelayInfo, mut relays: Vec<Candidate>) -> Option<Remote> {
+        relays.push(exit.candidate());
+        let cfg = ManagerConfig { exit_addr: Some(exit.addr.clone()), ..Default::default() };
+        let client = CircuitClient::spawn_with(CircuitManager::new(cfg, dest, relays), Duration::from_secs(3), ClientOptions::default());
+        if ready_within(&client, Duration::from_secs(8)).await {
+            return Some(Remote::new(client));
+        }
+        client.stop();
+        None
+    }
+
+    /// Sessão com a âncora `anchor`, por relays de contatos e, na falta deles, pelo relay deste nó (por
+    /// loopback): nesse caso a âncora vê o IP de quem pergunta, como o diretório veria.
+    async fn anchor_remote(&self, anchor: &RelayInfo, exclude: &[[u8; 32]]) -> Option<Remote> {
+        let mut pool = self.gateway_pool(exclude).await;
+        pool.retain(|r| r.addr != anchor.addr);
+        shuffle(&mut pool);
+        let mut relays: Vec<Candidate> = pool.iter().take(2).map(RelayInfo::candidate).collect();
+        relays.push(Candidate { addr: format!("127.0.0.1:{}", self.relay_port), public: self.mine.onion, link_public: self.mine.link, score: 0.5 });
+        self.remote_to(ANCHOR_DEST, anchor, relays).await
+    }
+
+    /// Valores guardados nas âncoras para os alvos `(chave, sal)`: todos os que alguma âncora devolveu.
+    async fn anchor_values(&self, targets: &[([u8; 32], [u8; 32])], exclude: &[[u8; 32]]) -> Vec<Vec<u8>> {
+        let sessions = futures::future::join_all(self.anchors.iter().map(|a| async move {
+            let mut found = Vec::new();
+            if let Some(mut remote) = self.anchor_remote(a, exclude).await {
+                for (key, salt) in targets {
+                    match remote.get(key, salt).await {
+                        Ok(Some(value)) => found.push(value),
+                        Ok(None) => {}
+                        Err(_) => break,
+                    }
+                }
+                remote.stop();
+            }
+            found
+        }))
+        .await;
+        sessions.into_iter().flatten().collect()
+    }
+
+    /// Grava os itens em cada âncora; um `bool` por item: `true` se alguma âncora guardou.
+    async fn anchor_put(&self, items: &[Signed]) -> Vec<bool> {
+        let sessions = futures::future::join_all(self.anchors.iter().map(|a| async move {
+            let mut done = vec![false; items.len()];
+            if let Some(mut remote) = self.anchor_remote(a, &[]).await {
+                for (i, item) in items.iter().enumerate() {
+                    match remote.put(item).await {
+                        Ok(ok) => done[i] = ok,
+                        Err(_) => break,
+                    }
+                }
+                remote.stop();
+            }
+            done
+        }))
+        .await;
+        (0..items.len()).map(|i| sessions.iter().any(|s| s[i])).collect()
+    }
+
+    /// Grava os itens na DHT e nas âncoras ao mesmo tempo; um `bool` por item: `true` se algum lugar guardou.
+    async fn store_put(&self, items: &[Signed]) -> Vec<bool> {
+        let (dht, anchors) = futures::future::join(self.dht_put(items), self.anchor_put(items)).await;
+        dht.into_iter().zip(anchors).map(|(a, b)| a || b).collect()
     }
 
     /// Lê os alvos `(chave, sal)` da DHT, um valor (ou `None`) por alvo, direto ou pelo circuito conforme a
@@ -467,10 +592,12 @@ impl Dialer {
         out
     }
 
-    /// O endereço mais novo que `peer` deixou para nós na DHT: consulta o dia anterior, o atual e o seguinte
-    /// (o relógio de um dos dois pode estar errado) e fica com o registro de maior `seq`.
-    async fn dht_record(&self, peer: &[u8; 32]) -> Option<AddressRecord> {
-        self.dht.as_ref()?;
+    /// O endereço mais novo que `peer` deixou para nós na DHT e nas âncoras: consulta o dia anterior, o atual e o
+    /// seguinte (o relógio de um dos dois pode estar errado) e fica com o registro de maior `seq`.
+    async fn rendezvous_record(&self, peer: &[u8; 32]) -> Option<AddressRecord> {
+        if self.dht.is_none() && self.anchors.is_empty() {
+            return None;
+        }
         let pk = PublicKey::from(*peer);
         let today = unix_secs() / 86400;
         let targets: Vec<([u8; 32], [u8; 32])> = [today, today.saturating_sub(1), today + 1]
@@ -478,19 +605,21 @@ impl Dialer {
             .filter_map(|period| update::rendezvous(&self.secret, &pk, &pk, period))
             .map(|(seed, salt)| (rendezvous::public_key(&seed), salt))
             .collect();
-        let values = tokio::time::timeout(DHT_LOOKUP_LIMIT, self.dht_get(&targets, &[*peer])).await.ok()?;
-        values.into_iter().flatten().filter_map(|v| update::open_record(&self.secret, &pk, &v)).max_by_key(|r| r.seq)
+        let exclude = [*peer];
+        let lookup = futures::future::join(self.dht_get(&targets, &exclude), self.anchor_values(&targets, &exclude));
+        let (dht, anchors) = tokio::time::timeout(DHT_LOOKUP_LIMIT, lookup).await.ok()?;
+        dht.into_iter().flatten().chain(anchors).filter_map(|v| update::open_record(&self.secret, &pk, &v)).max_by_key(|r| r.seq)
     }
 
     /// Primeiro relay de `peer` cujo circuito fica pronto: os guardados e, se nenhum responder, o que o
-    /// contato deixou na DHT. O `bool` diz se algum endereço foi tentado (muda o motivo do erro de quem liga).
+    /// contato deixou na DHT ou nas âncoras. O `bool` diz se algum endereço foi tentado (muda o motivo do erro de quem liga).
     async fn reachable_client(&self, peer: &[u8; 32], options: fn() -> ClientOptions) -> (Option<(CircuitClient, RelayInfo)>, bool) {
         let stored = self.stored_for(peer);
         let mut tried = !stored.is_empty();
         if let Some(found) = self.stored_client(peer, stored.clone(), options).await {
             return (Some(found), tried);
         }
-        if let Some(record) = self.dht_record(peer).await {
+        if let Some(record) = self.rendezvous_record(peer).await {
             let relay = RelayInfo { addr: record.addr.clone(), onion: record.onion, link: record.link };
             self.apply_update(&AddressUpdate { peer: *peer, record });
             if !stored.contains(&relay) {
@@ -638,9 +767,9 @@ async fn outbox(dialer: Dialer, contacts: phone::Contacts, current: Current, ret
     }
 }
 
-/// Grava o registro de `current` na DHT para cada contato: ao mudar o endereço, ao entrar um contato novo, ao
+/// Grava o registro de `current` na DHT e nas âncoras para cada contato: ao mudar o endereço, ao entrar um contato novo, ao
 /// virar o dia (o alvo muda) e a cada [`DHT_REPUBLISH`]. Uma gravação que falha é refeita em [`DHT_RETRY`].
-async fn dht_publisher(dialer: Dialer, contacts: phone::Contacts, current: Current) {
+async fn rendezvous_publisher(dialer: Dialer, contacts: phone::Contacts, current: Current) {
     let (secret, me) = (dialer.secret.clone(), PublicKey::from(&dialer.secret));
     // Por contato: o `seq` do registro e o dia gravados, e quando gravar de novo.
     let mut state: HashMap<[u8; 32], (u64, u64, Instant)> = HashMap::new();
@@ -665,7 +794,7 @@ async fn dht_publisher(dialer: Dialer, contacts: phone::Contacts, current: Curre
                 signed.push(rendezvous::sign(&seed, &salt, &value, base + i as i64));
                 sent.push(*k);
             }
-            let done = if signed.is_empty() { Vec::new() } else { dialer.dht_put(&signed).await };
+            let done = if signed.is_empty() { Vec::new() } else { dialer.store_put(&signed).await };
             for (k, ok) in sent.into_iter().zip(done) {
                 let wait = if ok { DHT_REPUBLISH } else { DHT_RETRY };
                 state.insert(k, (record.seq, period, Instant::now() + wait));
@@ -694,11 +823,12 @@ async fn push_address(dialer: Dialer, contacts: phone::Contacts, peer: [u8; 32],
     }
 }
 
-/// O que a DHT precisa de `Node::start` (o relay é criado lá, com o gateway na política de saída) em `finish`.
+/// O que a DHT e a âncora precisam de `Node::start` (o relay é criado lá, com os serviços na política de saída)
+/// em `finish`.
 #[derive(Default)]
-struct DhtParts {
+struct Services {
     client: Option<Arc<Rendezvous>>,
-    gateway: Option<JoinHandle<()>>,
+    servers: Vec<JoinHandle<()>>,
     note: Option<String>,
 }
 
@@ -720,6 +850,14 @@ pub struct Node {
     own: Arc<Mutex<Option<RelayInfo>>>,
     /// Último aviso de endereço novo recebido de um contato, para o app mostrar (veja [`Node::take_notice`]).
     update_notice: Arc<Mutex<Option<String>>>,
+    /// Como esta pessoa se apresenta (veja [`NodeConfig::name`]).
+    name: String,
+    /// Espera inicial entre tentativas de entrega (veja [`NodeConfig::update_retry`]).
+    retry: Duration,
+    /// Apresentações recebidas que o app ainda não retirou ([`Node::take_introductions`]).
+    introduced: Arc<Mutex<Vec<Introduced>>>,
+    /// Apresentações em entrega: por contato, a tarefa que insiste até a confirmação ([`Node::introduce`]).
+    introducing: Arc<Mutex<HashMap<[u8; 32], JoinHandle<()>>>>,
     /// Tarefas de fundo: a que aplica os avisos de endereço dos contatos e a fila de saída dos nossos.
     background: Vec<JoinHandle<()>>,
 }
@@ -737,7 +875,7 @@ impl Node {
         scfg.link_secret = Some(keys.link.clone());
         let mut exit = vec![(dest_for(&me.to_bytes()), phone.local_addr().to_string())];
         // Com a DHT ligada, o nó também é gateway dela para quem monta um circuito até aqui (veja `rendezvous`).
-        let mut dht = DhtParts::default();
+        let mut dht = Services::default();
         if let Some(options) = &cfg.dht {
             match Rendezvous::start(options).await {
                 Ok(client) => {
@@ -745,13 +883,22 @@ impl Node {
                     match tokio::net::TcpListener::bind("127.0.0.1:0").await {
                         Ok(listener) => {
                             exit.push((GATEWAY_DEST.to_string(), listener.local_addr()?.to_string()));
-                            dht.gateway = Some(tokio::spawn(rendezvous::serve_gateway(listener, client.clone())));
+                            dht.servers.push(tokio::spawn(rendezvous::serve_gateway(listener, client.clone())));
                         }
                         Err(e) => dht.note = Some(format!("sem gateway da DHT: {e}")),
                     }
                     dht.client = Some(client);
                 }
                 Err(e) => dht.note = Some(format!("sem DHT: {e}")),
+            }
+        }
+        if cfg.anchor {
+            match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+                Ok(listener) => {
+                    exit.push((ANCHOR_DEST.to_string(), listener.local_addr()?.to_string()));
+                    dht.servers.push(tokio::spawn(rendezvous::serve_anchor(listener, Arc::new(Anchor::new()))));
+                }
+                Err(e) => push_note(&mut dht.note, format!("sem âncora: {e}")),
             }
         }
         scfg.exit = allow_list(exit);
@@ -770,8 +917,8 @@ impl Node {
         Self::finish(cfg, phone, relay, onion, dht).await
     }
 
-    async fn finish(cfg: NodeConfig, mut phone: Phone, relay: RelayServer, onion: [u8; 32], dht: DhtParts) -> io::Result<Self> {
-        let NodeConfig { secret, directory, public_addr, upnp, punch, known, hints, history, updates, update_retry, dht: dht_options, .. } = cfg;
+    async fn finish(cfg: NodeConfig, mut phone: Phone, relay: RelayServer, onion: [u8; 32], dht: Services) -> io::Result<Self> {
+        let NodeConfig { secret, directory, public_addr, upnp, punch, known, hints, history, updates, update_retry, dht: dht_options, name, introductions, anchors, .. } = cfg;
         let known: Known = Arc::new(Mutex::new(known.into_iter().collect()));
         let hints: Known = Arc::new(Mutex::new(hints.into_iter().collect()));
         // A lista guarda do mais novo ao mais velho de cada contato; ao reler, a ordem se mantém.
@@ -836,11 +983,11 @@ impl Node {
             };
             push_note(&mut note, warn);
         }
-        let DhtParts { client: dht_client, gateway: dht_gateway, note: dht_note } = dht;
+        let Services { client: dht_client, servers, note: dht_note } = dht;
         if let Some(n) = dht_note {
             push_note(&mut note, n);
         }
-        let dialer = Dialer { secret: secret.clone(), directory: directory.clone(), mine: mine.clone(), relay_port: port, punch, known: known.clone(), hints: hints.clone(), history: history.clone(), seen_seq: Arc::default(), no_punch: Arc::default(), link: phone.link(), dht: dht_client.clone(), dht_circuit: dht_options.as_ref().is_some_and(|o| o.circuit) };
+        let dialer = Dialer { secret: secret.clone(), directory: directory.clone(), mine: mine.clone(), relay_port: port, punch, known: known.clone(), hints: hints.clone(), history: history.clone(), seen_seq: Arc::default(), no_punch: Arc::default(), link: phone.link(), dht: dht_client.clone(), dht_circuit: dht_options.as_ref().is_some_and(|o| o.circuit), anchors };
         // Os convites levam este relay, para o outro lado ligar de volta sem diretório.
         let link_to_phone = phone.link();
         let own = Arc::new(Mutex::new(own_relay(&mine, published)));
@@ -892,17 +1039,31 @@ impl Node {
             }));
         }
         let current: Current = Arc::default();
-        if updates || dht_client.is_some() {
+        let publishes = dht_client.is_some() || !dialer.anchors.is_empty();
+        if updates || publishes {
             background.push(tokio::spawn(track_address(own.clone(), current.clone())));
         }
         if updates {
             background.push(tokio::spawn(outbox(dialer.clone(), phone.contacts(), current.clone(), update_retry)));
         }
-        if dht_client.is_some() {
-            background.push(tokio::spawn(dht_publisher(dialer.clone(), phone.contacts(), current)));
+        if publishes {
+            background.push(tokio::spawn(rendezvous_publisher(dialer.clone(), phone.contacts(), current)));
         }
-        background.extend(dht_gateway);
-        Ok(Self { secret, directory, phone, _relay: relay, last_error, republish, note, dialer, known, hints, history, own, update_notice, background, addr: addr_now })
+        background.extend(servers);
+        phone.accept_introductions(introductions);
+        let introduced: Arc<Mutex<Vec<Introduced>>> = Arc::default();
+        if let Some(mut rx) = phone.take_introductions() {
+            let introduced = introduced.clone();
+            background.push(tokio::spawn(async move {
+                while let Some(Introduction { peer, intro }) = rx.recv().await {
+                    let mut queue = introduced.lock().unwrap();
+                    // Quem se apresenta de novo (a confirmação se perdeu) não entra duas vezes na fila.
+                    queue.retain(|i| i.peer != peer);
+                    queue.push(Introduced { peer, name: intro.name, reach: intro.reach });
+                }
+            }));
+        }
+        Ok(Self { secret, directory, name, retry: update_retry, phone, _relay: relay, last_error, republish, note, dialer, known, hints, history, own, update_notice, background, addr: addr_now, introduced, introducing: Arc::default() })
     }
 
     /// Aceita convites de `keys` além dos contatos (membros de uma sala).
@@ -924,8 +1085,64 @@ impl Node {
         }
     }
 
+    /// Apresenta esta pessoa a `peer`, que ela acabou de adicionar: manda, cifrada para ele, a chave (provada pelo
+    /// quadro), o nome e o relay deste nó, para ele ter este contato também (veja [`Node::take_introductions`]).
+    /// Insiste com espera crescente até a confirmação ou `UPDATE_GIVE_UP` (3 dias); o endereço dele vem do código que se
+    /// tem, da DHT, das âncoras ou do diretório. Chamar de novo para o mesmo contato não duplica a entrega.
+    pub fn introduce(&self, peer: [u8; 32]) {
+        let mut tasks = self.introducing.lock().unwrap();
+        if tasks.contains_key(&peer) {
+            return;
+        }
+        let (dialer, own, contacts, name, tasks_done, retry) = (self.dialer.clone(), self.own.clone(), self.phone.contacts(), self.name.clone(), self.introducing.clone(), self.retry);
+        tasks.insert(
+            peer,
+            tokio::spawn(async move {
+                let (mut wait, give_up) = (retry, Instant::now() + UPDATE_GIVE_UP);
+                let seq = unix_millis() as u64;
+                loop {
+                    if !contacts.lock().unwrap().contains(&peer) {
+                        break;
+                    }
+                    // O relay é o de agora (pode ter mudado entre as tentativas); sem ele, o diretório.
+                    let reach = match own.lock().unwrap().clone() {
+                        Some(r) => Some(update::Reach::Relay { addr: r.addr, onion: r.onion, link: r.link }),
+                        None => dialer.has_directory().then(|| update::Reach::Directory(dialer.directory.clone())),
+                    };
+                    if let Some(reach) = reach
+                        && dialer.deliver_intro(peer, &Intro { seq, name: name.clone(), reach }, INTRO_ACK_WAIT).await
+                    {
+                        break;
+                    }
+                    if Instant::now() >= give_up {
+                        break;
+                    }
+                    tokio::time::sleep(wait).await;
+                    wait = (wait * 2).min(UPDATE_MAX_WAIT);
+                }
+                tasks_done.lock().unwrap().remove(&peer);
+            }),
+        );
+    }
+
+    /// Contatos a quem [`Node::introduce`] ainda não entregou (sem confirmação até agora), para o app guardar e
+    /// chamar `introduce` de novo no próximo início.
+    pub fn pending_introductions(&self) -> Vec<[u8; 32]> {
+        self.introducing.lock().unwrap().keys().copied().collect()
+    }
+
+    /// Quem adicionou esta pessoa e se apresentou desde a última chamada. Cada um já foi confirmado a quem
+    /// mandou, mas nada mudou aqui: o app decide se vira contato ([`Node::add_contact`]). Fica vazio com
+    /// [`NodeConfig::introductions`] desligado.
+    pub fn take_introductions(&self) -> Vec<Introduced> {
+        std::mem::take(&mut *self.introduced.lock().unwrap())
+    }
+
     /// Contato removido: deixa de ser atendido e some o endereço dele guardado (`known` e `hints`).
     pub fn forget(&self, peer: &[u8; 32]) {
+        if let Some(task) = self.introducing.lock().unwrap().remove(peer) {
+            task.abort();
+        }
         self.phone.contacts().lock().unwrap().retain(|k| k != peer);
         self.known.lock().unwrap().remove(peer);
         self.hints.lock().unwrap().remove(peer);
@@ -1027,6 +1244,9 @@ impl Node {
 impl Drop for Node {
     fn drop(&mut self) {
         self.republish.abort();
+        for t in self.introducing.lock().unwrap().values() {
+            t.abort();
+        }
         for t in &self.background {
             t.abort();
         }

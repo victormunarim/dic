@@ -336,6 +336,21 @@ impl App {
     }
 
     pub(crate) fn contacts_ui(&mut self, ui: &mut egui::Ui, online: bool, in_call: bool) {
+        // Quem adicionou esta pessoa se apresentou (o nó já o atende): entra na lista, também na tela dele.
+        let introduced: Vec<_> = std::mem::take(&mut *self.shared.introduced.lock().unwrap());
+        let mut added = false;
+        for i in introduced {
+            if !parse_contacts(&self.form.contacts).iter().any(|(_, k)| *k == i.peer) {
+                if !self.form.contacts.trim().is_empty() {
+                    self.form.contacts.push('\n');
+                }
+                self.form.contacts.push_str(&intro_line(&i.name, &i.peer, &i.reach));
+                added = true;
+            }
+        }
+        if added {
+            self.form.save();
+        }
         let contacts = parse_contacts(&self.form.contacts);
         if contacts.is_empty() {
             ui.weak("Nenhum contato ainda. Peça o código de contato de um amigo e adicione abaixo.");
@@ -368,7 +383,7 @@ impl App {
                         let _ = r.cmds.send(Cmd::Forget(key));
                     }
                     None => {
-                        if let Err(e) = forget_known(&key) {
+                        if let Err(e) = forget_known(&key).and_then(|()| mark_pending(key, false)) {
                             self.error = format!("não deu para tirar o endereço do contato de {}: {e}", known_path().display());
                         }
                     }
@@ -396,12 +411,12 @@ impl App {
                             (Some(r), relay) => {
                                 let _ = r.cmds.send(Cmd::Contact(key, relay));
                             }
-                            (None, Some(relay)) => {
-                                if let Err(e) = remember_hint(key, relay) {
-                                    self.error = format!("não deu para guardar o endereço do contato em {}: {e}", known_path().display());
+                            (None, relay) => {
+                                // Com o nó parado: o endereço entra como dica e a apresentação fica na fila do próximo início.
+                                if let Err(e) = relay.map_or(Ok(()), |r| remember_hint(key, r)).and_then(|()| mark_pending(key, true)) {
+                                    self.error = format!("não deu para guardar o contato em {}: {e}", known_path().display());
                                 }
                             }
-                            (None, None) => {}
                         }
                     }
                     let line = format!("{} {}", name.trim(), self.form.new_code.trim());
@@ -657,7 +672,28 @@ impl eframe::App for App {
                             ui.checkbox(&mut self.form.dht_circuit, "Falar com a DHT pelos relays dos contatos (esconde o seu IP)")
                                 .on_hover_text("Usa um circuito de dois relays de contatos: o primeiro vê o seu IP mas não o pedido, o segundo vê o pedido mas não o seu IP. Precisa de ao menos dois contatos com endereço guardado; sem eles a DHT não é usada.");
                         });
+                        ui.separator();
+                        ui.label("Seu nome (aparece na lista de contatos de quem você adiciona):");
+                        ui.add(egui::TextEdit::singleline(&mut self.form.my_name).char_limit(clam::media::update::MAX_NAME).desired_width(240.0));
+                        ui.checkbox(&mut self.form.intros, "Aceitar quem me adiciona como contato")
+                            .on_hover_text("Quando alguém adiciona o seu código, ele manda uma apresentação cifrada e passa a aparecer na sua lista, para os dois se ligarem. Desligado, só entra na lista quem você adicionar. Só aceita de quem já tem o seu endereço; no máximo 20 por minuto.");
+                        ui.separator();
+                        ui.checkbox(&mut self.form.anchor, "Servir de âncora para os registros de endereço dos outros")
+                            .on_hover_text("Guarda, em memória, o endereço cifrado de quem usa este computador como âncora, para os contatos dele o acharem. Não lê o conteúdo nem forja item. Precisa de um endereço que os outros alcancem; quem a usa vê o IP do relay dela.");
+                        ui.label("Âncoras que você usa (uma por linha: ip:porta#chave-do-circuito#chave-do-link):");
+                        ui.add(egui::TextEdit::multiline(&mut self.form.anchors).desired_rows(2).desired_width(f32::INFINITY));
                     });
+                    if self.form.anchor
+                        && let Some(r) = self.shared.relay.lock().unwrap().clone()
+                    {
+                        ui.horizontal(|ui| {
+                            ui.label("Código da sua âncora:");
+                            ui.monospace(format!("{}...", &anchor_code(&r)[..24]));
+                            if ui.button("Copiar").clicked() {
+                                ui.ctx().copy_text(anchor_code(&r));
+                            }
+                        });
+                    }
                 });
 
                 egui::CollapsingHeader::new("Registro de atividade").default_open(true).show(ui, |ui| {

@@ -1,6 +1,6 @@
 # Proposta: reencontrar contatos sem diretório
 
-Estado: **as camadas 1 (fila de saída) e 2 (ponto de encontro na DHT), o histórico de endereços e a privacidade da camada 2 (consultas pelo circuito) estão implementados** (fases 1 a 3, veja [GUI.md](GUI.md#mudou-de-endereço-sem-diretório)). A camada 3 (réplicas e âncoras) continua só como proposta. O código de contato direto e os endereços guardados (camada 0) vieram antes ([GUI.md](GUI.md#totalmente-p2p-o-código-de-contato-direto)).
+Estado: **as camadas 1 (fila de saída), 2 (ponto de encontro na DHT) e 3 (âncoras), o histórico de endereços, a privacidade da camada 2 (consultas pelo circuito) e o contato de duas vias (apresentação) estão implementados** (fases 1 a 4, veja [GUI.md](GUI.md#mudou-de-endereço-sem-diretório)). Réplicas em terceiros quaisquer, a outra metade da proposta da camada 3, continuam só como ideia. O código de contato direto e os endereços guardados (camada 0) vieram antes ([GUI.md](GUI.md#totalmente-p2p-o-código-de-contato-direto)).
 
 ## Problema
 
@@ -105,17 +105,33 @@ O relay de saída atual só abre fluxo para o telefone do destino e a DHT fala U
 - **O que não muda.** Quem controla o primeiro salto e a saída ao mesmo tempo liga o IP ao alvo (o mesmo limite dos circuitos de chamada). Sem diretório, os relays disponíveis são os dos contatos, então o circuito só esconde o seu IP de um contato do outro (o contato da saída não vê o seu IP; o do primeiro salto vê, mas não o pedido). Um nó que serve de gateway aparece na DHT fazendo consultas que não são só dele, o que também mistura o tráfego dele.
 - **Testes** (`tests/node.rs`): `the_dht_is_reached_through_two_contact_relays` (A e B sem acesso direto à DHT, só C e D têm; B acha A) e `circuit_mode_never_falls_back_to_the_direct_dht` (com um só relay de contato a DHT não é usada, e o controle direto acha o item).
 
-## Camada 3: réplicas e âncoras (se for preciso)
+## Camada 3: âncoras (fase 4)
 
-- **Âncora:** um contato com endereço estável (IP fixo ou DNS) que concorda em guardar registros dos outros. O dono envia o registro a ela com a mesma mensagem da camada 1; quem quer ligar a consulta. É o mesmo papel do diretório, mas voluntário e federado.
-- **Réplicas em terceiros:** o registro cifrado é enviado a k nós online quaisquer. Eles não leem o conteúdo; guardam por poucos dias.
+Para quem a DHT está bloqueada ou não basta, um nó com endereço estável (IP fixo ou DNS) pode guardar os registros dos outros: a *âncora* (`NodeConfig::anchor`, na GUI "Servir de âncora"). É o mesmo papel do diretório, mas voluntário e federado: cada pessoa escolhe em quais âncoras confia para estar no ar (`NodeConfig::anchors`, na GUI "Âncoras que você usa", uma por linha, `ip:porta#chave-do-circuito#chave-do-link`), e quem opera uma não precisa ser ninguém especial.
 
-Só entra se a DHT estiver bloqueada ou for pouco confiável para o público do projeto.
+- **Mesmo item, outro depósito.** O dono grava em cada âncora que usa o mesmo item assinado que grava na DHT (mesmo alvo, mesma cifra: só o contato abre) e as renova a cada hora junto com a DHT (`rendezvous_publisher`). Quem quer ligar lê os mesmos três dias (anterior, atual e seguinte) em todas as âncoras e fica com o registro de maior `seq`. As várias âncoras são as réplicas: basta uma estar no ar. A ordem ao ligar passa a ser: endereço guardado, DHT e âncoras (ao mesmo tempo), diretório.
+- **Protocolo.** O mesmo do gateway da DHT (`rendezvous::Remote`), no destino `anchor:9` da política de saída do relay, por um circuito até o relay da âncora. A âncora implementa `Store` com um depósito em memória (`Anchor`) em vez da DHT; o gateway e a âncora usam o mesmo código de atendimento.
+- **O que a âncora aceita.** Só item de tamanho de registro cifrado, com assinatura que confere com a chave do alvo (`Signed::verify`, a mesma conta da DHT), e só substitui por `seq` maior. Guarda até 2048 itens por 3 dias sem gravação nova; passando disso sai o expirado ou, na falta, o mais antigo. Atende 600 pedidos por minuto, somados. Não lê o conteúdo (a cifra é do par) nem forja item (não tem a semente).
+- **Limites.** A âncora é um depósito aberto e limitado: quem a enche de itens falsos assinados com chaves descartáveis pode empurrar os verdadeiros para fora, e o dono repõe o seu a cada hora, então o efeito dura enquanto durar o ataque. Quem opera a âncora vê o IP de quem pergunta e grava quando o primeiro salto é o relay do próprio usuário (sem relays de contatos guardados, o primeiro salto é ele por loopback, como numa chamada); com relays de contatos o circuito passa por eles e a âncora só vê o IP do último. Ela também vê quantos itens existem e a frequência de renovação, não a quem pertencem.
+- **Testes:** unitários em `rendezvous` (assinatura, só `seq` maior, tamanho, expulsão do mais antigo) e `tests/node.rs::an_anchor_lets_two_moved_contacts_find_each_other` (sem DHT nem diretório, B acha A só pela âncora R).
+
+Réplicas em terceiros quaisquer (enviar o registro a k nós online sem combinar) ficam de fora: sem uma lista combinada de quem guarda, o leitor não sabe onde procurar. A âncora resolve isso pedindo que a pessoa a escolha.
+
+## Contato de duas vias: a apresentação (fase 4)
+
+Quem adiciona um contato pelo código só tem o código do outro; o outro lado não sabe de nada e precisaria colar o código de volta. Para os dois terem o contato na tela, quem adiciona manda uma *apresentação* (`Node::introduce`; a GUI chama ao "Adicionar contato"):
+
+- **Quadro.** Um quadro novo de 200 bytes, só no telefone (etiqueta 7, `media::update::seal_intro`): a chave pública de quem manda em claro (o destinatário precisa dela para derivar a chave do par) e o resto cifrado com a chave do par, com o dono do quadro sendo o autor: o nome (até 32 bytes), o `seq` e como chegar nele, que é o relay dele (endereço, chave do circuito e do link) ou o diretório. Quem não tem a chave do destinatário não abre; quem tem a chave de outra pessoa não consegue forjar um quadro em nome dela, pois a cifra do par só abre com as duas chaves. O destinatário confirma com a mesma resposta cifrada da atualização de endereço (etiqueta 5), com o `seq` repetido.
+- **Quem pode.** Qualquer um que saiba a chave e o relay do destinatário pode se apresentar, não só contatos: foi justamente o que quem adiciona fez sem o outro saber. Por isso o destinatário tem o interruptor "Aceitar quem me adiciona como contato" (`NodeConfig::introductions`, ligado de início); desligado, o quadro é descartado sem resposta como o de qualquer estranho. Ligado, aceita no máximo 20 apresentações por minuto, somadas. O nó não adiciona sozinho: entrega a apresentação ao app (`Node::take_introductions`), que decide. A GUI adiciona direto, escreve o nome que a pessoa deu (limpo de caracteres de controle, `;`, `#` e `@`) e avisa no registro de atividade.
+- **Entrega.** A fila é a da camada 1: tenta pelo endereço que se tem do outro (o do código, o guardado, a DHT, as âncoras e o diretório, nessa ordem), com espera que dobra, e desiste em 3 dias ou quando o contato é removido (`Node::forget`). As entregas pendentes ficam em `~/.clam-gui.intro` e voltam no próximo início.
+- **O que não acompanha.** Remover um contato de um lado não remove do outro, e trocar o nome não é reenviado; a apresentação é só a primeira vez.
+- **Testes** (`tests/node.rs`): `adding_a_contact_introduces_us_to_it` (B, que não tinha A, recebe, adiciona e os dois se ligam), `the_introduction_waits_for_the_contact_to_come_online`, `introductions_are_ignored_when_switched_off`, `forgetting_a_contact_cancels_its_introduction`; unitários em `media::update` (autoria, sigilo do nome, diretório, nome cortado, ack).
 
 ## Rede e privacidade
 
 - **Conteúdo:** protegido pela cifra (acima).
 - **Quem fala com quem:** os nós da DHT que guardam um item veem o IP de quem escreve e o de quem lê. Quem controla vários nós próximos do alvo pode ligar os dois IPs e concluir que são contatos. A chave de busca muda por dia, o que limita a janela, mas não impede.
+- **Âncoras (fase 4):** quem opera uma vê o IP de quem pergunta quando o primeiro salto é o relay do próprio usuário (veja a camada 3). A âncora que o usuário escolhe é uma confiança que ele dá, como a do diretório.
 - **Mitigação (fase 3, opcional):** as consultas e gravações da DHT saem por um circuito de 2 saltos (`DhtOptions::circuit`, na GUI "Falar com a DHT pelos relays dos contatos"). Sem essa opção, a camada 2 expõe o IP a quem opera nós da DHT. Veja "Consultas pelo circuito" abaixo.
 - **Disponibilidade:** nós maliciosos perto do alvo podem esconder ou descartar o item (ataque de eclipse). Eles não leem nem forjam. Mitigação: replicação da própria DHT, período anterior e seguinte, e as outras camadas como alternativa.
 - **Sem sigilo futuro:** vazar a chave secreta de uma identidade revela registros antigos que alguém tenha gravado. O dano é limitado a endereços antigos.
@@ -136,7 +152,7 @@ Nenhuma dependência criptográfica nova: `chacha20poly1305`, `hkdf`, `sha2` e `
 1. **Camada 1** com memória de endereços antigos por contato (guardar os últimos N, não só um). Testes em loopback: A muda de endereço com B offline, B volta, recebe e liga. **Pronta** (`tests/node.rs`: `a_new_address_reaches_the_contact_that_was_offline`, `an_old_address_in_the_history_still_reaches_the_contact`, `address_updates_from_strangers_are_ignored`).
 2. **Camada 2** sem privacidade extra, com a DHT local nos testes. Teste: os dois mudam de endereço e se encontram. **Pronta** (`tests/node.rs`: `both_contacts_changed_address_and_find_each_other_through_the_dht`).
 3. **Privacidade da camada 2:** consultas pelo circuito. **Pronta** (`tests/node.rs`: `the_dht_is_reached_through_two_contact_relays`, `circuit_mode_never_falls_back_to_the_direct_dht`).
-4. **Camada 3**, só se a prática mostrar que precisa.
+4. **Camada 3 (âncoras) e contato de duas vias.** **Pronta** (`tests/node.rs`: `an_anchor_lets_two_moved_contacts_find_each_other`, `adding_a_contact_introduces_us_to_it`, `the_introduction_waits_for_the_contact_to_come_online`, `introductions_are_ignored_when_switched_off`, `forgetting_a_contact_cancels_its_introduction`).
 
 ## Perguntas em aberto
 

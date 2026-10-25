@@ -25,6 +25,10 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
     if !form.public_addr.trim().is_empty() {
         cfg.public_addr = Some(form.public_addr.trim().to_string());
     }
+    cfg.name = form.my_name.trim().to_string();
+    cfg.introductions = form.intros;
+    cfg.anchor = form.anchor;
+    cfg.anchors = parse_anchors(&form.anchors);
     if form.use_dht {
         cfg.dht = Some(clam::rendezvous::DhtOptions { circuit: form.dht_circuit, ..Default::default() });
         if form.dht_circuit {
@@ -46,6 +50,14 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
     if let Some(n) = node.network_note() {
         out.line(n);
     }
+    // Apresentações que ficaram sem confirmação da última vez (só de quem ainda é contato).
+    let pending = load_pending();
+    for (_, key) in &contacts {
+        if pending.contains(key) {
+            node.introduce(*key);
+        }
+    }
+    let mut pending_saved = pending_now(&node);
     let dialer = node.dialer();
     let mut saver = KnownSaver::new(&book_of(&node));
     let (dialed_tx, mut dialed_rx) = mpsc::unbounded_channel::<([u8; 32], u32, Option<Result<ActiveCall, clam::node::DialError>>)>();
@@ -207,10 +219,14 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
                 }
                 Some(Cmd::Contact(key, relay)) => {
                     node.add_contact(key, relay);
+                    // A pessoa adicionada também passa a ter este contato (veja `Node::introduce`).
+                    node.introduce(key);
+                    save_pending_if_changed(&node, &mut pending_saved, &out);
                     saver.sync(&book_of(&node), &out);
                 }
                 Some(Cmd::Forget(key)) => {
                     node.forget(&key);
+                    save_pending_if_changed(&node, &mut pending_saved, &out);
                     saver.sync(&book_of(&node), &out);
                 }
                 Some(Cmd::MicTest) => {
@@ -301,10 +317,24 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
         if let Some(n) = node.take_notice() {
             out.line(n);
         }
+        let introduced = node.take_introductions();
+        if !introduced.is_empty() {
+            for i in &introduced {
+                let relay = match &i.reach {
+                    clam::media::update::Reach::Relay { addr, onion, link } => Some(clam::directory::RelayInfo { addr: addr.clone(), onion: *onion, link: *link }),
+                    clam::media::update::Reach::Directory(_) => None,
+                };
+                node.add_contact(i.peer, relay);
+                out.line(format!("{} ({}) adicionou você e se apresentou: já está nos seus contatos", if i.name.is_empty() { "alguém" } else { &i.name }, &hex(&i.peer)[..8]));
+            }
+            shared.introduced.lock().unwrap().extend(introduced);
+            saver.sync(&book_of(&node), &out);
+        }
         // Os endereços mudam sozinhos (renovação com o diretório, convites): grava quando mudam, não só
         // depois de uma ligação, para um fechamento brusco não perder o que foi aprendido.
         if saver.due() {
             saver.sync(&book_of(&node), &out);
+            save_pending_if_changed(&node, &mut pending_saved, &out);
         }
     }
     saver.sync(&book_of(&node), &out);
@@ -313,6 +343,25 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
     }
     shared.hangup.store(true, Ordering::Relaxed);
     Ok(())
+}
+
+/// Contatos a quem a apresentação ainda não foi confirmada, em ordem estável.
+fn pending_now(node: &Node) -> Vec<[u8; 32]> {
+    let mut keys = node.pending_introductions();
+    keys.sort();
+    keys
+}
+
+/// Grava `.clam-gui.intro` quando a fila de apresentações pendentes mudou (entregue, adicionada ou removida).
+fn save_pending_if_changed(node: &Node, saved: &mut Vec<[u8; 32]>, out: &Sink) {
+    let now = pending_now(node);
+    if now == *saved {
+        return;
+    }
+    if let Err(e) = save_pending(&now) {
+        out.line(format!("não consegui gravar as apresentações pendentes em {}: {e}", pending_path().display()));
+    }
+    *saved = now;
 }
 
 /// O que o nó sabe dos endereços dos contatos, no formato do arquivo.

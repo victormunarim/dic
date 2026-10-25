@@ -1123,3 +1123,112 @@ async fn circuit_mode_never_falls_back_to_the_direct_dht() {
     let (_ca, _a) = answer.await.unwrap();
     cb.hangup();
 }
+
+/// A adiciona B pelo código; B, que não tem A, recebe a apresentação (chave provada, nome e relay) e, ao adicionar
+/// A, os dois se ligam. A confirmação encerra a entrega.
+#[tokio::test]
+async fn adding_a_contact_introduces_us_to_it() {
+    use clam::media::update::Reach;
+    let (sa, sb) = (key(), key());
+    let (pa, pb) = (*PublicKey::from(&sa).as_bytes(), *PublicKey::from(&sb).as_bytes());
+    let mut a = Node::start(NodeConfig { updates: false, name: "Ana".into(), ..fixed(sa, free_port(), vec![pb]) }).await.unwrap();
+    let b = Node::start(NodeConfig { updates: false, ..fixed(sb, free_port(), vec![]) }).await.unwrap();
+    a.add_hint(pb, b.relay_info().unwrap());
+    a.introduce(pb);
+    assert_eq!(a.pending_introductions(), vec![pb]);
+
+    let got = until("B recebe a apresentação", || Some(b.take_introductions()).filter(|v| !v.is_empty())).await;
+    assert_eq!(got.len(), 1);
+    let relay = a.relay_info().unwrap();
+    assert_eq!((got[0].peer, got[0].name.as_str()), (pa, "Ana"));
+    assert_eq!(got[0].reach, Reach::Relay { addr: relay.addr.clone(), onion: relay.onion, link: relay.link });
+    until("A recebe o ack", || a.pending_introductions().is_empty().then_some(())).await;
+
+    // O app de B decide adicionar: agora os dois se ligam.
+    b.add_contact(pa, Some(relay));
+    let answer = tokio::spawn(async move {
+        let inc = timeout(Duration::from_secs(15), a.next_incoming()).await.unwrap().unwrap();
+        (inc.accept(Mulaw::new()).await.unwrap(), a)
+    });
+    let cb = b.dial(pa, Mulaw::new(), Duration::from_secs(15)).await.unwrap();
+    let (_ca, _a) = answer.await.unwrap();
+    cb.hangup();
+}
+
+/// B ainda não está no ar quando A o adiciona: a entrega insiste e chega quando ele sobe.
+#[tokio::test]
+async fn the_introduction_waits_for_the_contact_to_come_online() {
+    let (sa, sb) = (key(), key());
+    let (pa, pb) = (*PublicKey::from(&sa).as_bytes(), *PublicKey::from(&sb).as_bytes());
+    let a = Node::start(NodeConfig { updates: false, ..fixed(sa, free_port(), vec![pb]) }).await.unwrap();
+    a.introduce(pb);
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(a.pending_introductions(), vec![pb], "sem ack, segue pendente");
+
+    let b = Node::start(NodeConfig { updates: false, ..fixed(sb, free_port(), vec![]) }).await.unwrap();
+    a.add_hint(pb, b.relay_info().unwrap());
+    let got = until("B recebe a apresentação", || Some(b.take_introductions()).filter(|v| !v.is_empty())).await;
+    assert_eq!(got[0].peer, pa);
+    until("A recebe o ack", || a.pending_introductions().is_empty().then_some(())).await;
+}
+
+/// Com as apresentações desligadas, o quadro é descartado sem resposta e a entrega fica pendente.
+#[tokio::test]
+async fn introductions_are_ignored_when_switched_off() {
+    let (sa, sb) = (key(), key());
+    let pb = *PublicKey::from(&sb).as_bytes();
+    let a = Node::start(NodeConfig { updates: false, ..fixed(sa, free_port(), vec![pb]) }).await.unwrap();
+    let b = Node::start(NodeConfig { updates: false, introductions: false, ..fixed(sb, free_port(), vec![]) }).await.unwrap();
+    a.add_hint(pb, b.relay_info().unwrap());
+    a.introduce(pb);
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(b.take_introductions().is_empty());
+    assert_eq!(a.pending_introductions(), vec![pb]);
+}
+
+/// Remover o contato cancela a entrega que ainda estava pendente.
+#[tokio::test]
+async fn forgetting_a_contact_cancels_its_introduction() {
+    let (sa, sb) = (key(), key());
+    let pb = *PublicKey::from(&sb).as_bytes();
+    let a = Node::start(NodeConfig { updates: false, ..fixed(sa, free_port(), vec![pb]) }).await.unwrap();
+    a.introduce(pb);
+    assert_eq!(a.pending_introductions(), vec![pb]);
+    a.forget(&pb);
+    assert!(a.pending_introductions().is_empty());
+}
+
+/// A e B mudaram de endereço e não têm DHT: uma âncora (nó R) guarda o registro de A e B o acha por ela.
+#[tokio::test]
+async fn an_anchor_lets_two_moved_contacts_find_each_other() {
+    use clam::directory::RelayInfo;
+    let (sa, sb, sr) = (key(), key(), key());
+    let (pa, pb) = (*PublicKey::from(&sa).as_bytes(), *PublicKey::from(&sb).as_bytes());
+    let r = Node::start(NodeConfig { anchor: true, ..fixed(sr, free_port(), vec![]) }).await.unwrap();
+    let anchors = vec![r.relay_info().unwrap()];
+    let stale = || RelayInfo { addr: format!("127.0.0.1:{}", free_port()), onion: [1; 32], link: [2; 32] };
+    let mut cfg_a = NodeConfig { updates: false, anchors: anchors.clone(), ..fixed(sa, free_port(), vec![pb]) };
+    cfg_a.known = vec![(pb, stale())];
+    let mut cfg_b = NodeConfig { updates: false, anchors, ..fixed(sb, free_port(), vec![pa]) };
+    cfg_b.known = vec![(pa, stale())];
+    let mut a = Node::start(cfg_a).await.unwrap();
+    let b = Node::start(cfg_b).await.unwrap();
+    let fresh_a = a.relay_info().unwrap();
+
+    let answer = tokio::spawn(async move {
+        let inc = timeout(Duration::from_secs(60), a.next_incoming()).await.unwrap().unwrap();
+        (inc.accept(Mulaw::new()).await.unwrap(), a)
+    });
+    let mut call = None;
+    for _ in 0..15 {
+        if let Ok(c) = b.dial(pa, Mulaw::new(), Duration::from_secs(15)).await {
+            call = Some(c);
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    let cb = call.expect("B achou A pela âncora");
+    let (_ca, _a) = answer.await.unwrap();
+    assert!(b.known().iter().any(|(k, r)| *k == pa && *r == fresh_a));
+    cb.hangup();
+}

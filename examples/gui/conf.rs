@@ -109,6 +109,14 @@ pub(crate) struct Form {
     pub(crate) use_dht: bool,
     /// Fala com a DHT por circuito de dois relays de contatos (veja `DhtOptions::circuit`).
     pub(crate) dht_circuit: bool,
+    /// Como esta pessoa se apresenta a quem ela adiciona (veja `NodeConfig::name`).
+    pub(crate) my_name: String,
+    /// Aceita quem adiciona esta pessoa e vira contato sozinho (veja `NodeConfig::introductions`).
+    pub(crate) intros: bool,
+    /// Serve de âncora para os registros de endereço dos outros (veja `NodeConfig::anchor`).
+    pub(crate) anchor: bool,
+    /// Âncoras que usa, uma por linha: `ip:porta#chave-do-circuito#chave-do-link`.
+    pub(crate) anchors: String,
     pub(crate) use_audio: bool,
     pub(crate) audio: AudioPrefs,
     /// Microfone e alto-falante escolhidos (vazio = padrão do sistema).
@@ -332,6 +340,64 @@ pub(crate) fn remember_hint(key: [u8; 32], relay: clam::directory::RelayInfo) ->
     save_known(&book)
 }
 
+/// Contatos a quem a apresentação ainda não foi confirmada, num arquivo à parte (uma chave em hex por linha).
+/// Ao ficar online o nó volta a entregá-las; o que for entregue (ou removido) sai do arquivo.
+pub(crate) fn pending_path() -> PathBuf {
+    conf_path().with_file_name(".clam-gui.intro")
+}
+
+pub(crate) fn load_pending() -> Vec<[u8; 32]> {
+    std::fs::read_to_string(pending_path()).unwrap_or_default().lines().filter_map(|l| unhex(l.trim()).ok()).collect()
+}
+
+pub(crate) fn save_pending(keys: &[[u8; 32]]) -> std::io::Result<()> {
+    let mut keys = keys.to_vec();
+    keys.sort();
+    keys.dedup();
+    write_private(&pending_path(), &keys.iter().map(|k| format!("{}\n", hex(k))).collect::<String>())
+}
+
+/// Contato adicionado ou removido com o nó parado: a apresentação entra na fila do próximo início, ou sai dela.
+pub(crate) fn mark_pending(key: [u8; 32], pending: bool) -> std::io::Result<()> {
+    let mut keys = load_pending();
+    keys.retain(|k| *k != key);
+    if pending {
+        keys.push(key);
+    }
+    save_pending(&keys)
+}
+
+/// Âncoras do campo de texto: `ip:porta#chave-do-circuito#chave-do-link` por linha (linhas tortas são ignoradas).
+pub(crate) fn parse_anchors(text: &str) -> Vec<clam::directory::RelayInfo> {
+    text.split_whitespace()
+        .filter_map(|t| {
+            let mut p = t.split('#');
+            let (addr, onion, link) = (p.next()?, p.next()?, p.next()?);
+            if p.next().is_some() || addr.is_empty() || addr.len() > 60 || !addr.contains(':') {
+                return None;
+            }
+            Some(clam::directory::RelayInfo { addr: addr.to_string(), onion: unhex(onion).ok()?, link: unhex(link).ok()? })
+        })
+        .collect()
+}
+
+/// O texto que outra pessoa cola em "Âncoras" para usar o relay `r` como âncora.
+pub(crate) fn anchor_code(r: &clam::directory::RelayInfo) -> String {
+    format!("{}#{}#{}", r.addr, hex(&r.onion), hex(&r.link))
+}
+
+/// A linha de contato de quem se apresentou: o nome que ele deu (limpo) e o código que a apresentação traz.
+pub(crate) fn intro_line(name: &str, key: &[u8; 32], reach: &clam::media::update::Reach) -> String {
+    use clam::media::update::Reach;
+    let name: String = name.chars().filter(|c| !c.is_control() && !matches!(c, ';' | '#' | '@')).collect();
+    let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
+    let name = if name.is_empty() { hex(key)[..8].to_string() } else { name };
+    match reach {
+        Reach::Directory(d) => format!("{name} {}@{d}", hex(key)),
+        Reach::Relay { addr, onion, link } => format!("{name} {}#{addr}#{}#{}", hex(key), hex(onion), hex(link)),
+    }
+}
+
 /// Chaves do relay deste computador, num arquivo à parte (`onion link`, em hex). Mantê-las entre execuções
 /// faz o endereço que os contatos guardaram de você continuar valendo depois de reabrir ou recompilar.
 pub(crate) fn relay_keys_path() -> PathBuf {
@@ -379,7 +445,7 @@ pub(crate) fn save_known(book: &Book) -> std::io::Result<()> {
 impl Form {
     /// Primeira abertura: já nasce com uma identidade, para a pessoa não precisar gerar nada.
     pub(crate) fn first_run() -> Self {
-        Form { secret: hex(&StaticSecret::random_from_rng(OsRng).to_bytes()), ..Form::default() }
+        Form { secret: hex(&StaticSecret::random_from_rng(OsRng).to_bytes()), intros: true, ..Form::default() }
     }
 
     pub(crate) fn load() -> Self {
@@ -400,6 +466,11 @@ impl Form {
             public_addr: get("public_addr"),
             use_dht: get("dht") == "1",
             dht_circuit: get("dht_circuit") == "1",
+            my_name: get("name"),
+            // Ligado de início: o arquivo antigo, sem a chave, também aceita.
+            intros: get("intros") != "0",
+            anchor: get("anchor") == "1",
+            anchors: get("anchors").replace(';', "\n"),
             use_audio: get("audio") == "1",
             input_dev: get("input_dev"),
             output_dev: get("output_dev"),
@@ -422,7 +493,7 @@ impl Form {
         // Chave de identidade no chaveiro do sistema; só cai para o arquivo se ele não estiver disponível.
         let secret = if vault_set(self.secret.trim()) { KEYRING_MARK } else { self.secret.trim() };
         let text = format!(
-            "audio={}\nsecret={}\ndirectory={}\ncontacts={}\npeer={}\npublic_addr={}\ndht={}\ndht_circuit={}\nrooms={}\ninput_dev={}\noutput_dev={}\nnicks={}\n{}",
+            "audio={}\nsecret={}\ndirectory={}\ncontacts={}\npeer={}\npublic_addr={}\ndht={}\ndht_circuit={}\nname={}\nintros={}\nanchor={}\nanchors={}\nrooms={}\ninput_dev={}\noutput_dev={}\nnicks={}\n{}",
             u8::from(self.use_audio),
             secret,
             self.directory.trim(),
@@ -431,6 +502,10 @@ impl Form {
             self.public_addr.trim(),
             u8::from(self.use_dht),
             u8::from(self.dht_circuit),
+            self.my_name.trim().replace(['\n', ';'], " "),
+            u8::from(self.intros),
+            u8::from(self.anchor),
+            self.anchors.trim().replace('\n', ";"),
             self.rooms.trim().replace('\n', ";"),
             self.input_dev.trim(),
             self.output_dev.trim(),
@@ -671,5 +746,26 @@ mod tests {
         f.replace_room_secret(&[1; 32], &[9; 32]);
         let r = parse_rooms(&f.rooms);
         assert_eq!((r[0].secret, r[0].owner, r[1].secret), ([9; 32], Some([2; 32]), [3; 32]));
+    }
+
+    #[test]
+    fn an_introduction_becomes_a_contact_line_that_parses_back() {
+        use clam::media::update::Reach;
+        let key = [9u8; 32];
+        let relay = Reach::Relay { addr: "203.0.113.7:4001".into(), onion: [1; 32], link: [2; 32] };
+        let line = intro_line("Ana  Maria; #x", &key, &relay);
+        assert_eq!(parse_contacts(&line), vec![("Ana Maria x".to_string(), key)]);
+        let (k, _, r) = split_direct(line.split_whitespace().last().unwrap()).unwrap();
+        assert_eq!((k, r.unwrap().addr), (key, "203.0.113.7:4001".to_string()));
+        let line = intro_line("", &key, &Reach::Directory("dir.exemplo.com:7000".into()));
+        assert_eq!(parse_contacts(&line), vec![(hex(&key)[..8].to_string(), key)]);
+        assert_eq!(split_code(line.split_whitespace().last().unwrap()), Some((key, Some("dir.exemplo.com:7000".into()))));
+    }
+
+    #[test]
+    fn anchors_round_trip_and_skip_bad_lines() {
+        let r = clam::directory::RelayInfo { addr: "198.51.100.2:4001".into(), onion: [3; 32], link: [4; 32] };
+        let text = format!("{}\nlixo\n198.51.100.3:4001#curto#curto\n", anchor_code(&r));
+        assert_eq!(parse_anchors(&text), vec![r]);
     }
 }

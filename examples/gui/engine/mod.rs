@@ -106,6 +106,8 @@ pub(crate) struct Shared {
     pub(crate) owner: AtomicBool,
     /// Segredos de sala trocados pelo dono, `(antigo, novo)`, para a janela atualizar o que está salvo.
     pub(crate) rekeyed: Mutex<Vec<([u8; 32], [u8; 32])>>,
+    /// Quem adicionou esta pessoa e se apresentou; a janela põe cada um na lista de contatos.
+    pub(crate) introduced: Mutex<Vec<clam::node::Introduced>>,
 }
 
 pub(crate) struct Running {

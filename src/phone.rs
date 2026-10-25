@@ -52,7 +52,7 @@ use crate::{
         keys::CallKeys,
         screen::{ScreenFrame, ScreenStats, ScreenStream},
         signal::{Answer, Caller, Incoming, RelayHint},
-        update::{self, AddressRecord},
+        update::{self, AddressRecord, Intro},
     },
     transport::{CircuitClient, ClientOptions},
 };
@@ -706,8 +706,21 @@ pub struct Phone {
     link_tx: mpsc::Sender<Msg>,
     hint: Arc<Mutex<Option<RelayHint>>>,
     updates: Option<mpsc::Receiver<AddressUpdate>>,
+    introductions: Option<mpsc::Receiver<Introduction>>,
+    accept_intros: Arc<AtomicBool>,
     tasks: Vec<JoinHandle<()>>,
 }
+
+/// Apresentação de alguém que adicionou esta pessoa ([`crate::media::update`]): a chave dele está provada pelo
+/// quadro, mas ele ainda não é contato; quem decide é o dono do telefone.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Introduction {
+    pub peer: [u8; 32],
+    pub intro: Intro,
+}
+
+/// Apresentações aceitas por minuto, de todos juntos; passando disto, o excesso é descartado sem resposta.
+const INTRO_PER_MINUTE: usize = 20;
 
 /// Endereço novo que um contato mandou ([`crate::media::update`]), já aberto e autenticado.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -754,8 +767,11 @@ impl Phone {
         });
         let port = DatagramPort { actor: actor_tx.clone(), next: Arc::new(AtomicU64::new(DATAGRAM_CONN_BASE)) };
         let (upd_tx, upd_rx) = mpsc::channel(64);
-        let actor = tokio::spawn(run_actor(actor_rx, actor_tx.clone(), ActorOut { incoming: inc_tx, updates: upd_tx, notice: notice.clone() }, my_static, contacts.clone(), ids.clone()));
-        Ok(Self { addr, incoming: inc_rx, notice, contacts, port, ids, link_tx: actor_tx, hint: Arc::default(), updates: Some(upd_rx), tasks: vec![accept, actor] })
+        let (intro_tx, intro_rx) = mpsc::channel(64);
+        let accept_intros = Arc::new(AtomicBool::new(true));
+        let out = ActorOut { incoming: inc_tx, updates: upd_tx, introductions: intro_tx, accept_intros: accept_intros.clone(), notice: notice.clone() };
+        let actor = tokio::spawn(run_actor(actor_rx, actor_tx.clone(), out, my_static, contacts.clone(), ids.clone()));
+        Ok(Self { addr, incoming: inc_rx, notice, contacts, port, ids, link_tx: actor_tx, hint: Arc::default(), updates: Some(upd_rx), introductions: Some(intro_rx), accept_intros, tasks: vec![accept, actor] })
     }
 
     /// Porta para ligações que chegam por datagramas (furo de NAT) em vez de TCP.
@@ -787,6 +803,18 @@ impl Phone {
     /// retira uma vez; sem quem a leia, as atualizações novas se perdem quando a fila enche.
     pub fn take_updates(&mut self) -> Option<mpsc::Receiver<AddressUpdate>> {
         self.updates.take()
+    }
+
+    /// Fila das apresentações de quem adicionou esta pessoa (cada uma já foi confirmada a quem mandou). Só se retira
+    /// uma vez; sem quem a leia, as novas se perdem quando a fila enche.
+    pub fn take_introductions(&mut self) -> Option<mpsc::Receiver<Introduction>> {
+        self.introductions.take()
+    }
+
+    /// Liga ou desliga o recebimento de apresentações (ligado de início). Desligado, o telefone as descarta sem
+    /// resposta, como faz com qualquer outro quadro de estranho.
+    pub fn accept_introductions(&self, on: bool) {
+        self.accept_intros.store(on, Ordering::Relaxed);
     }
 
     /// Próximo convite de um contato. `None` = o telefone parou.
@@ -860,6 +888,8 @@ impl SeenInvites {
 struct ActorOut {
     incoming: mpsc::Sender<IncomingCall>,
     updates: mpsc::Sender<AddressUpdate>,
+    introductions: mpsc::Sender<Introduction>,
+    accept_intros: Arc<AtomicBool>,
     notice: Arc<Mutex<Option<String>>>,
 }
 
@@ -871,7 +901,8 @@ async fn run_actor(
     contacts: Contacts,
     ids: Arc<AtomicU64>,
 ) {
-    let ActorOut { incoming, updates, notice } = out;
+    let ActorOut { incoming, updates, introductions, accept_intros, notice } = out;
+    let mut intro_window: (Instant, usize) = (Instant::now(), 0);
     let mut writers: HashMap<u64, mpsc::Sender<Vec<u8>>> = HashMap::new();
     let mut binds: HashMap<u64, Bind> = HashMap::new();
     let mut calls: HashMap<u64, mpsc::Sender<WireIn>> = HashMap::new();
@@ -916,6 +947,23 @@ async fn run_actor(
                 }
                 Some(Bind::Pending) => {}
                 None => {
+                    // Apresentação de quem adicionou esta pessoa: confirma e entrega, sem tocar o telefone.
+                    if accept_intros.load(Ordering::Relaxed)
+                        && let Some((peer, intro)) = update::open_intro(&secret, &data)
+                    {
+                        if intro_window.0.elapsed() >= Duration::from_secs(60) {
+                            intro_window = (Instant::now(), 0);
+                        }
+                        intro_window.1 += 1;
+                        if intro_window.1 <= INTRO_PER_MINUTE
+                            && introductions.try_send(Introduction { peer, intro: intro.clone() }).is_ok()
+                            && let Ok(ack) = update::seal_ack(&secret, &PublicKey::from(peer), intro.seq)
+                            && let Some(w) = writers.get(&conn)
+                        {
+                            let _ = w.try_send(ack.to_vec());
+                        }
+                        continue;
+                    }
                     // Aviso de endereço de um contato: confirma e entrega, sem tocar o telefone.
                     let known: Vec<[u8; 32]> = contacts.lock().unwrap().clone();
                     if let Some((peer, record)) = update::open_update(&secret, known, &data) {

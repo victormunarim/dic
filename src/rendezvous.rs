@@ -15,6 +15,15 @@
 //! (o *gateway*, [`GATEWAY_DEST`]): o primeiro salto vê o IP mas não o pedido, a saída vê o pedido mas não o IP, e a
 //! DHT só vê a saída. Todo nó com a DHT ligada serve de gateway para os outros.
 //!
+//! # Âncoras
+//!
+//! Para quem a DHT está bloqueada ou não basta, um nó com endereço estável pode guardar os registros dos outros:
+//! a *âncora* ([`Anchor`], `NodeConfig::anchor`). É o papel do diretório, mas voluntário e federado: cada pessoa
+//! escolhe em quais âncoras confia para estar no ar, e quem opera uma não precisa ser ninguém especial. O dono grava o
+//! mesmo item assinado da DHT (mesmo alvo, mesma cifra) em cada âncora que ele usa (as réplicas), e quem liga lê as
+//! mesmas três datas. A âncora fala o protocolo do gateway pelo destino [`ANCHOR_DEST`]; só guarda, não consulta nada
+//! fora, e não lê o conteúdo nem forja item (confere a assinatura de cada gravação).
+//!
 //! O gateway não é um proxy aberto: só entende dois pedidos, ler o alvo `(chave, sal)` e gravar um item **já
 //! assinado** por quem pediu (a semente de assinatura nunca sai do nó), com valor pequeno e limite de pedidos por
 //! minuto. O gateway não lê o valor (é cifrado para o contato) e não consegue forjar um item.
@@ -24,12 +33,14 @@
 //! Respostas: `1 ‖ valor` ou `1` (achou/gravou) e `0` (não achou/falhou).
 
 use std::{
+    collections::HashMap,
     io,
     net::Ipv4Addr,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use mainline::{Dht, MutableItem, SigningKey, async_dht::AsyncDht};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -37,10 +48,13 @@ use tokio::{
     sync::Semaphore,
 };
 
-use crate::{circuit::manager::Event, transport::CircuitClient};
+use crate::{circuit::manager::Event, media::update::RECORD_LEN, transport::CircuitClient};
 
 /// Destino que o relay de saída mapeia para o gateway da DHT (veja o módulo).
 pub const GATEWAY_DEST: &str = "dht:9";
+
+/// Destino que o relay de saída mapeia para a âncora (veja o módulo).
+pub const ANCHOR_DEST: &str = "anchor:9";
 
 /// Bytes de um pedido ou resposta por célula do circuito (cabem em `circuit::max_data(1)` = 203).
 pub const CHUNK: usize = 200;
@@ -54,8 +68,17 @@ const MAX_REPLY: usize = 1100;
 /// Pedidos que um gateway atende por minuto, somando todos os circuitos.
 const GATEWAY_PER_MINUTE: u32 = 60;
 
+/// Pedidos que uma âncora atende por minuto: ela serve a todos os contatos de quem a usa.
+const ANCHOR_PER_MINUTE: u32 = 600;
+
 /// Pedidos que um gateway atende ao mesmo tempo.
 const GATEWAY_PARALLEL: usize = 4;
+
+/// Itens que uma âncora guarda; passando disto sai o mais antigo.
+pub const ANCHOR_ITEMS: usize = 2048;
+
+/// Quanto tempo uma âncora guarda um item sem gravação nova (o dono grava a cada hora).
+pub const ANCHOR_KEEP: Duration = Duration::from_secs(3 * 24 * 3600);
 
 /// Quanto esperar a resposta de um gateway a uma leitura e a uma gravação.
 const REMOTE_GET_WAIT: Duration = Duration::from_secs(15);
@@ -112,6 +135,16 @@ impl Signed {
         out.extend_from_slice(&self.salt);
         out.extend_from_slice(&self.value);
         out
+    }
+
+    /// A assinatura confere com a chave, o sal e o valor (a mesma conta que a DHT faz).
+    pub fn verify(&self) -> bool {
+        let Ok(key) = VerifyingKey::from_bytes(&self.key) else { return false };
+        let mut signable = format!("4:salt{}:", self.salt.len()).into_bytes();
+        signable.extend_from_slice(&self.salt);
+        signable.extend(format!("3:seqi{}e1:v{}:", self.seq, self.value.len()).into_bytes());
+        signable.extend_from_slice(&self.value);
+        key.verify(&signable, &Signature::from_bytes(&self.signature)).is_ok()
     }
 
     fn decode(body: &[u8]) -> Option<Self> {
@@ -185,34 +218,127 @@ impl Rendezvous {
 }
 
 // ---------------------------------------------------------------------------
-// Gateway (lado da saída)
+// Gateway e âncora (lado da saída)
 // ---------------------------------------------------------------------------
 
+/// Onde o gateway lê e grava: a DHT ([`Rendezvous`]) ou o depósito de uma âncora ([`Anchor`]).
+pub trait Store: Send + Sync + 'static {
+    fn read(&self, key: &[u8; 32], salt: &[u8; 32]) -> impl std::future::Future<Output = Option<Vec<u8>>> + Send;
+    /// `true`: o item foi guardado.
+    fn write(&self, item: &Signed) -> impl std::future::Future<Output = bool> + Send;
+}
+
+impl Store for Rendezvous {
+    async fn read(&self, key: &[u8; 32], salt: &[u8; 32]) -> Option<Vec<u8>> {
+        self.get(key, salt).await
+    }
+
+    async fn write(&self, item: &Signed) -> bool {
+        self.put(item).await.is_ok()
+    }
+}
+
+/// Depósito de uma âncora: guarda em memória, por alvo, o item de `seq` mais alto que recebeu.
+///
+/// Só aceita o que prova ser de quem tem a chave do alvo (assinatura), no tamanho de um registro cifrado, e só
+/// substitui por `seq` maior. Passando de [`ANCHOR_ITEMS`] sai o expirado ou, na falta, o mais antigo; quem
+/// encher a âncora de itens falsos pode empurrar os verdadeiros para fora, e o dono repõe o seu a cada hora.
+#[derive(Default)]
+pub struct Anchor {
+    items: Mutex<Stored>,
+}
+
+/// Por alvo `(chave, sal)`: o item e quando chegou.
+type Stored = HashMap<([u8; 32], [u8; 32]), (Signed, Instant)>;
+
+impl Anchor {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Itens guardados agora (sem contar os expirados que ainda não saíram).
+    pub fn len(&self) -> usize {
+        self.items.lock().unwrap().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn store(&self, item: &Signed, now: Instant) -> bool {
+        if item.value.len() != RECORD_LEN || !item.verify() {
+            return false;
+        }
+        let mut items = self.items.lock().unwrap();
+        let target = (item.key, item.salt);
+        if items.get(&target).is_some_and(|(old, at)| at.elapsed() < ANCHOR_KEEP && old.seq >= item.seq) {
+            return false;
+        }
+        if !items.contains_key(&target) && items.len() >= ANCHOR_ITEMS {
+            items.retain(|_, (_, at)| at.elapsed() < ANCHOR_KEEP);
+            if items.len() >= ANCHOR_ITEMS
+                && let Some(oldest) = items.iter().min_by_key(|(_, (_, at))| *at).map(|(k, _)| *k)
+            {
+                items.remove(&oldest);
+            }
+        }
+        items.insert(target, (item.clone(), now));
+        true
+    }
+}
+
+impl Store for Anchor {
+    async fn read(&self, key: &[u8; 32], salt: &[u8; 32]) -> Option<Vec<u8>> {
+        let items = self.items.lock().unwrap();
+        items.get(&(*key, *salt)).filter(|(_, at)| at.elapsed() < ANCHOR_KEEP).map(|(item, _)| item.value.clone())
+    }
+
+    async fn write(&self, item: &Signed) -> bool {
+        self.store(item, Instant::now())
+    }
+}
+
 /// Teto de pedidos por minuto, somado entre os circuitos.
-struct Budget(Mutex<(Instant, u32)>);
+struct Budget {
+    window: Mutex<(Instant, u32)>,
+    per_minute: u32,
+}
 
 impl Budget {
+    fn new(per_minute: u32) -> Self {
+        Self { window: Mutex::new((Instant::now(), 0)), per_minute }
+    }
+
     fn take(&self) -> bool {
-        let mut b = self.0.lock().unwrap();
+        let mut b = self.window.lock().unwrap();
         if b.0.elapsed() >= Duration::from_secs(60) {
             *b = (Instant::now(), 0);
         }
         b.1 += 1;
-        b.1 <= GATEWAY_PER_MINUTE
+        b.1 <= self.per_minute
     }
 }
 
 /// Atende os circuitos que o relay de saída encaminha a `listener` (veja [`GATEWAY_DEST`]) com a DHT de `dht`.
 pub async fn serve_gateway(listener: TcpListener, dht: Arc<Rendezvous>) {
-    let budget = Arc::new(Budget(Mutex::new((Instant::now(), 0))));
+    serve(listener, dht, GATEWAY_PER_MINUTE).await
+}
+
+/// Atende os circuitos que o relay de saída encaminha a `listener` (veja [`ANCHOR_DEST`]) com o depósito de `anchor`.
+pub async fn serve_anchor(listener: TcpListener, anchor: Arc<Anchor>) {
+    serve(listener, anchor, ANCHOR_PER_MINUTE).await
+}
+
+async fn serve<S: Store>(listener: TcpListener, store: Arc<S>, per_minute: u32) {
+    let budget = Arc::new(Budget::new(per_minute));
     let parallel = Arc::new(Semaphore::new(GATEWAY_PARALLEL));
     while let Ok((stream, _)) = listener.accept().await {
-        tokio::spawn(gateway_conn(stream, dht.clone(), budget.clone(), parallel.clone()));
+        tokio::spawn(gateway_conn(stream, store.clone(), budget.clone(), parallel.clone()));
     }
 }
 
 /// Uma conexão é um circuito: lê quadros `[u16 tamanho][pedaço]`, junta os pedaços em pedidos e responde na ordem.
-async fn gateway_conn(mut stream: TcpStream, dht: Arc<Rendezvous>, budget: Arc<Budget>, parallel: Arc<Semaphore>) {
+async fn gateway_conn<S: Store>(mut stream: TcpStream, store: Arc<S>, budget: Arc<Budget>, parallel: Arc<Semaphore>) {
     let mut acc: Vec<u8> = Vec::new();
     let mut len = [0u8; 2];
     while stream.read_exact(&mut len).await.is_ok() {
@@ -231,7 +357,7 @@ async fn gateway_conn(mut stream: TcpStream, dht: Arc<Rendezvous>, budget: Arc<B
             }
             let body: Vec<u8> = acc.drain(..2 + total).skip(2).collect();
             let reply = match parallel.acquire().await {
-                Ok(_slot) if budget.take() => answer(&dht, &body).await,
+                Ok(_slot) if budget.take() => answer(&*store, &body).await,
                 _ => vec![0],
             };
             let mut message = (reply.len() as u16).to_be_bytes().to_vec();
@@ -247,16 +373,16 @@ async fn gateway_conn(mut stream: TcpStream, dht: Arc<Rendezvous>, budget: Arc<B
     }
 }
 
-async fn answer(dht: &Rendezvous, body: &[u8]) -> Vec<u8> {
+async fn answer<S: Store>(store: &S, body: &[u8]) -> Vec<u8> {
     match body.first() {
         Some(&REQ_GET) if body.len() == 1 + 32 + 32 => {
-            match dht.get(body[1..33].try_into().unwrap(), body[33..65].try_into().unwrap()).await {
+            match store.read(body[1..33].try_into().unwrap(), body[33..65].try_into().unwrap()).await {
                 Some(value) => [&[1u8][..], &value].concat(),
                 None => vec![0],
             }
         }
         Some(&REQ_PUT) => match Signed::decode(body) {
-            Some(signed) if dht.put(&signed).await.is_ok() => vec![1],
+            Some(signed) if store.write(&signed).await => vec![1],
             _ => vec![0],
         },
         _ => vec![0],
@@ -361,8 +487,49 @@ mod tests {
 
     #[test]
     fn the_budget_runs_out_within_a_minute() {
-        let budget = Budget(Mutex::new((Instant::now(), 0)));
+        let budget = Budget::new(GATEWAY_PER_MINUTE);
         assert!((0..GATEWAY_PER_MINUTE).all(|_| budget.take()));
         assert!(!budget.take());
+    }
+
+    fn record(secret: &[u8; 32], seq: i64) -> Signed {
+        sign(secret, &[9; 32], &[3; RECORD_LEN], seq)
+    }
+
+    #[test]
+    fn a_signed_item_verifies_and_a_changed_one_does_not() {
+        let item = record(&[7; 32], 5);
+        assert!(item.verify());
+        assert!(!Signed { seq: 6, ..item.clone() }.verify());
+        assert!(!Signed { value: vec![4; RECORD_LEN], ..item.clone() }.verify());
+        assert!(!Signed { key: [8; 32], ..item }.verify());
+    }
+
+    #[test]
+    fn the_anchor_keeps_only_signed_records_and_only_newer_ones() {
+        let anchor = Anchor::new();
+        let now = Instant::now();
+        assert!(anchor.store(&record(&[7; 32], 5), now));
+        assert!(!anchor.store(&record(&[7; 32], 5), now), "mesmo seq");
+        assert!(!anchor.store(&record(&[7; 32], 4), now), "seq menor");
+        assert!(anchor.store(&record(&[7; 32], 6), now));
+        let forged = Signed { value: vec![4; RECORD_LEN], ..record(&[7; 32], 7) };
+        assert!(!anchor.store(&forged, now), "assinatura não confere");
+        let short = sign(&[7; 32], &[9; 32], b"curto", 9);
+        assert!(!anchor.store(&short, now), "tamanho de registro");
+        assert_eq!(anchor.len(), 1);
+    }
+
+    #[test]
+    fn a_full_anchor_drops_the_oldest_item() {
+        let anchor = Anchor::new();
+        for i in 0..ANCHOR_ITEMS {
+            let mut secret = [1; 32];
+            secret[..8].copy_from_slice(&(i as u64).to_be_bytes());
+            assert!(anchor.store(&record(&secret, 1), Instant::now()));
+        }
+        assert_eq!(anchor.len(), ANCHOR_ITEMS);
+        assert!(anchor.store(&record(&[2; 32], 1), Instant::now()));
+        assert_eq!(anchor.len(), ANCHOR_ITEMS);
     }
 }
