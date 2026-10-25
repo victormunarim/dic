@@ -99,6 +99,8 @@ impl RawFrame {
 
 /// Fragmentos na fila (≈ 0,3 s de circuito) a partir dos quais a resolução cai.
 const BACKLOG_HIGH: usize = 150;
+/// Fragmentos na fila a partir dos quais um quadro de camada alta é largado em vez de enfileirado.
+const DROP_BACKLOG: usize = 60;
 /// Fila a partir da qual conta como calma.
 const BACKLOG_LOW: usize = 30;
 /// Quadros calmos seguidos (2 s) antes de voltar à resolução cheia.
@@ -115,6 +117,9 @@ pub trait ScreenSource {
 pub struct EncodedFrame {
     pub data: Vec<u8>,
     pub keyframe: bool,
+    /// Camada temporal superior: nenhum outro quadro depende dele, então pode ser largado sem quebrar
+    /// a imagem (só cai a taxa de quadros). [`pump_all`] larga estes quando a fila do circuito enche.
+    pub droppable: bool,
 }
 
 /// Codificador H.264 em taxa constante.
@@ -125,12 +130,16 @@ pub struct H264Encoder {
     need_key: bool,
     /// Fator mínimo de redução; sobe quando o quadro-chave não cabe em [`MAX_FRAME`] (tela muito detalhada).
     min_k: usize,
+    /// As duas camadas temporais já foram ligadas neste codificador.
+    layered: bool,
     /// Fator de redução extra enquanto a fila do circuito está cheia (movimento brusco): menos pixels,
     /// menos bits por quadro, mais quadros por segundo. Volta a 1 depois de 2 s calmos.
     motion_k: usize,
     calm: u32,
     /// Quadros que o codificador recebeu e não devolveu (pulados pelo controle de taxa ou grandes demais).
     pub skipped: u64,
+    /// Quadros largados da camada alta porque a fila do circuito estava cheia.
+    pub layer_dropped: u64,
     /// Média móvel, em ms, do tempo gasto em `encode`.
     pub encode_ms: f32,
 }
@@ -142,7 +151,7 @@ impl H264Encoder {
     }
 
     pub fn new(bitrate: u32) -> Result<Self, VideoError> {
-        Ok(Self { inner: Self::open(bitrate)?, size: None, bitrate, need_key: true, min_k: 1, motion_k: 1, calm: 0, skipped: 0, encode_ms: 0.0 })
+        Ok(Self { inner: Self::open(bitrate)?, size: None, bitrate, need_key: true, min_k: 1, layered: false, motion_k: 1, calm: 0, skipped: 0, layer_dropped: 0, encode_ms: 0.0 })
     }
 
     fn open(bitrate: u32) -> Result<Encoder, VideoError> {
@@ -195,6 +204,7 @@ impl H264Encoder {
         // O H.264 do openh264 fixa a resolução na abertura: tela nova, codificador novo.
         if self.size.is_some_and(|s| s != dims) {
             self.inner = Self::open(self.bitrate)?;
+            self.layered = false;
             self.need_key = true;
         }
         self.size = Some(dims);
@@ -202,8 +212,16 @@ impl H264Encoder {
             self.inner.force_intra_frame();
         }
         let yuv = YUVBuffer::from_rgba8_source(RgbaSliceU8::new(&frame.rgba, dims));
+        if !self.layered {
+            // O openh264 só inicializa no primeiro quadro; as camadas temporais entram depois disso.
+            self.inner.encode(&yuv).map_err(codec_err)?;
+            enable_temporal_layers(&mut self.inner)?;
+            self.inner.force_intra_frame();
+            self.layered = true;
+        }
         let bits = self.inner.encode(&yuv).map_err(codec_err)?;
         let key = matches!(bits.frame_type(), FrameType::IDR | FrameType::I);
+        let droppable = !key && bits.num_layers().checked_sub(1).and_then(|i| bits.layer(i)).is_some_and(|l| l.raw_info().uiTemporalId > 0);
         if matches!(bits.frame_type(), FrameType::Skip | FrameType::Invalid) {
             return Ok(None);
         }
@@ -223,8 +241,28 @@ impl H264Encoder {
         if key {
             self.need_key = false;
         }
-        Ok(Some(EncodedFrame { data, keyframe: key }))
+        Ok(Some(EncodedFrame { data, keyframe: key, droppable }))
     }
+}
+
+/// Liga duas camadas temporais: quadros pares (camada 0) servem de referência, os ímpares (camada 1) não.
+/// O crate `openh264` não expõe a opção; ela entra pela API crua depois da inicialização.
+fn enable_temporal_layers(enc: &mut Encoder) -> Result<(), VideoError> {
+    use openh264_sys2::{ENCODER_OPTION_SVC_ENCODE_PARAM_EXT, SEncParamExt};
+    // SAFETY: `SEncParamExt` é só dados; o codificador preenche a estrutura inteira em `get_option`,
+    // e `set_option` a lê sem guardar o ponteiro.
+    unsafe {
+        let mut params: SEncParamExt = std::mem::zeroed();
+        let raw = enc.raw_api();
+        if raw.get_option(ENCODER_OPTION_SVC_ENCODE_PARAM_EXT, (&raw mut params).cast()) != 0 {
+            return Err(VideoError::Codec("não deu para ler os parâmetros do codificador".into()));
+        }
+        params.iTemporalLayerNum = 2;
+        if raw.set_option(ENCODER_OPTION_SVC_ENCODE_PARAM_EXT, (&raw mut params).cast()) != 0 {
+            return Err(VideoError::Codec("não deu para ligar as camadas temporais".into()));
+        }
+    }
+    Ok(())
 }
 
 /// Decodificador H.264.
@@ -263,6 +301,11 @@ pub fn pump_all(source: &mut dyn ScreenSource, encoder: &mut H264Encoder, shares
     let Some(frame) = encoder.encode(&raw, wanted)? else { return Ok(0) };
     let mut sent = 0;
     for share in shares {
+        // Fila cheia: larga o quadro que ninguém usa de referência em vez de atrasar todos os seguintes.
+        if frame.droppable && share.queued() >= DROP_BACKLOG {
+            encoder.layer_dropped += 1;
+            continue;
+        }
         match share.push(&frame.data, frame.keyframe) {
             Ok(true) => sent += 1,
             Ok(false) => encoder.need_key = true,
@@ -366,6 +409,27 @@ mod tests {
         }
         let mut dec = H264Decoder::new().unwrap();
         assert_eq!(size(&mut enc, &mut dec, 2), Some(1280));
+    }
+
+    #[test]
+    fn odd_frames_are_droppable_and_the_rest_still_decodes_without_them() {
+        let mut enc = H264Encoder::new(H264Encoder::default_bitrate()).unwrap();
+        let mut full = H264Decoder::new().unwrap();
+        let mut base = H264Decoder::new().unwrap();
+        let (mut droppable, mut kept) = (0, 0);
+        for t in 0..30 {
+            let Some(f) = enc.encode(&scene(640, 360, t), false).unwrap() else { continue };
+            assert!(full.decode(&f.data).unwrap().is_some() || t == 0);
+            if f.droppable {
+                assert!(!f.keyframe);
+                droppable += 1;
+            } else {
+                kept += 1;
+                let img = base.decode(&f.data).unwrap();
+                assert!(img.is_some(), "quadro {t} não decodificou sem a camada alta");
+            }
+        }
+        assert!(droppable >= 10 && kept >= 10, "{droppable} largáveis, {kept} mantidos");
     }
 
     #[test]
