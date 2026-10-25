@@ -23,6 +23,7 @@ pub const FPS: f32 = 8.0;
 /// Largura máxima enviada: telas maiores são reduzidas por média de blocos, senão o quadro-chave
 /// passa de [`MAX_FRAME`] e nada chega a quem assiste.
 pub const MAX_WIDTH: usize = 1280;
+const MAX_SHRINK: usize = 8;
 
 #[derive(Debug, Error)]
 pub enum VideoError {
@@ -55,8 +56,8 @@ impl RawFrame {
     }
 
     /// Reduz por média de blocos `k`×`k` até caber em [`MAX_WIDTH`]; sem efeito se já cabe.
-    fn shrunk(&self) -> Option<RawFrame> {
-        let k = self.width.div_ceil(MAX_WIDTH);
+    fn shrunk(&self, min_k: usize) -> Option<RawFrame> {
+        let k = self.width.div_ceil(MAX_WIDTH).max(min_k);
         if k <= 1 || self.rgba.len() != self.width * self.height * 4 {
             return None;
         }
@@ -115,6 +116,8 @@ pub struct H264Encoder {
     size: Option<(usize, usize)>,
     bitrate: u32,
     need_key: bool,
+    /// Fator mínimo de redução; sobe quando o quadro-chave não cabe em [`MAX_FRAME`] (tela muito detalhada).
+    min_k: usize,
 }
 
 impl H264Encoder {
@@ -124,7 +127,7 @@ impl H264Encoder {
     }
 
     pub fn new(bitrate: u32) -> Result<Self, VideoError> {
-        Ok(Self { inner: Self::open(bitrate)?, size: None, bitrate, need_key: true })
+        Ok(Self { inner: Self::open(bitrate)?, size: None, bitrate, need_key: true, min_k: 1 })
     }
 
     fn open(bitrate: u32) -> Result<Encoder, VideoError> {
@@ -141,7 +144,7 @@ impl H264Encoder {
     /// Codifica um quadro. `force_key` pede quadro-chave. `Ok(None)`: o codificador pulou o quadro
     /// ou ele passou de [`MAX_FRAME`] (o próximo sai como quadro-chave).
     pub fn encode(&mut self, frame: &RawFrame, force_key: bool) -> Result<Option<EncodedFrame>, VideoError> {
-        let small = frame.shrunk();
+        let small = frame.shrunk(self.min_k);
         let frame = small.as_ref().unwrap_or(frame);
         let frame = frame.even().ok_or(VideoError::Size(frame.width, frame.height))?;
         let dims = (frame.width, frame.height);
@@ -166,6 +169,10 @@ impl H264Encoder {
             return Ok(None);
         }
         if data.len() > MAX_FRAME {
+            if key {
+                // Nem o quadro-chave cabe: menos pixels no próximo.
+                self.min_k = (self.min_k + 1).min(MAX_SHRINK);
+            }
             self.need_key = true;
             return Ok(None);
         }
@@ -280,6 +287,21 @@ mod tests {
         let mut dec = H264Decoder::new().unwrap();
         let img = dec.decode(&f.data).unwrap().expect("imagem");
         assert_eq!((img.width, img.height), (1280, 720));
+    }
+
+    #[test]
+    fn a_keyframe_that_does_not_fit_makes_the_encoder_send_fewer_pixels() {
+        let detailed = |t: usize| {
+            let rgba = (0..1280 * 720).flat_map(|i| {
+                let n = (((i % 1280 / 3 * 7 + i / 1280 / 3 * 13 + t) * 2654435761usize) >> 24) as u8;
+                [n, n / 2, 90, 255]
+            });
+            RawFrame::new(1280, 720, rgba.collect()).unwrap()
+        };
+        let mut enc = H264Encoder::new(H264Encoder::default_bitrate()).unwrap();
+        let key = (0..10).find_map(|t| enc.encode(&detailed(t), false).unwrap()).expect("um quadro-chave acaba cabendo");
+        assert!(key.keyframe && key.data.len() <= MAX_FRAME);
+        assert!(enc.min_k > 1);
     }
 
     #[test]
