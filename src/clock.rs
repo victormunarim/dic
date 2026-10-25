@@ -1,9 +1,10 @@
 //! Hora usada nos convites (feature `net`).
 //!
-//! O convite de chamada só vale por 60 s, medidos pelo relógio de cada ponta. Dois computadores com a hora
-//! desencontrada por mais que isso não conseguiam se ligar, e o telefone descartava o convite em silêncio.
-//! Por isso cada contato com o diretório, que manda a hora dele no `hello`, ajusta um desvio comum: todos
-//! que falam com o mesmo diretório passam a usar a hora dele, não a do sistema.
+//! O convite de chamada não depende mais do relógio de quem o recebe (a repetição é barrada por uma
+//! memória de convites vistos), então a hora errada de uma máquina não impede a chamada, com ou sem
+//! diretório. Esta hora ainda segue no convite, para telefones de versão anterior que a conferem em 60 s:
+//! cada contato com o diretório, que manda a hora dele no `hello`, ajusta um desvio comum, e todos que
+//! falam com o mesmo diretório passam a usar a hora dele, não a do sistema.
 
 use std::{
     sync::atomic::{AtomicI64, Ordering},
