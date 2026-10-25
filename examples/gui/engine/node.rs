@@ -64,8 +64,9 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
                 }
                 out.line(format!("chamada de {name}"));
                 shared.hangup.store(false, Ordering::Relaxed);
+                let caller = *inc.caller().as_bytes();
                 match inc.accept(G722::new()).await {
-                    Ok(c) => start_talk(c, 660.0, &shared, &out, &form, None),
+                    Ok(c) => start_talk(c, 660.0, &shared, &out, &form, None, Peer { key: caller, dialer: dialer.clone() }),
                     Err(e) => {
                         out.line(format!("não atendeu: {e}"));
                         shared.in_call.store(false, Ordering::Relaxed);
@@ -77,7 +78,7 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
                 match (dial_step(attempt, r.as_ref().map(|r| r.is_ok())), r) {
                     (DialStep::Talk, Some(Ok(c))) => {
                         out.line(if attempt > 0 { "religada" } else { "atendida" });
-                        start_talk(c, 440.0, &shared, &out, &form, Some((redial_tx.clone(), peer)));
+                        start_talk(c, 440.0, &shared, &out, &form, Some((redial_tx.clone(), peer)), Peer { key: peer, dialer: dialer.clone() });
                     }
                     (DialStep::Retry, Some(Err(e))) => {
                         out.line(format!("não religou ({attempt}/{REDIAL_TRIES}): {e}"));

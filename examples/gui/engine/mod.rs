@@ -1,6 +1,6 @@
 //! Motor: nó, chamadas e salas. Não conhece a janela; só recebe comandos e escreve no log.
 //!
-//! `sound` (áudio e controles), `call` (conversa 1:1), `rooms` (salas), `node` (laço do nó que recebe os comandos).
+//! `sound` (áudio e controles), `screen` (tela compartilhada), `call` (conversa 1:1), `rooms` (salas), `node` (laço do nó que recebe os comandos).
 
 use std::{
     sync::{
@@ -26,11 +26,13 @@ use crate::conf::*;
 mod call;
 mod node;
 mod rooms;
+mod screen;
 mod sound;
 
 pub(crate) use call::*;
 pub(crate) use node::run_node;
 pub(crate) use rooms::*;
+pub(crate) use screen::*;
 pub(crate) use sound::*;
 
 pub(crate) type Log = Arc<Mutex<Vec<String>>>;
@@ -75,6 +77,8 @@ pub(crate) struct Shared {
     pub(crate) hangup: AtomicBool,
     /// Qualidade da linha na chamada atual (vazio fora de chamada).
     pub(crate) link: Mutex<String>,
+    /// Tela: o que a pessoa pediu, o que está rodando e o que chegou do outro lado.
+    pub(crate) screen: ScreenState,
     /// Mudo, volume, ganho e nível do microfone.
     pub(crate) audio: Controls,
     /// Teste do microfone em andamento (a pessoa se ouve); desligar este sinalizador encerra o teste.

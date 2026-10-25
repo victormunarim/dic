@@ -27,7 +27,7 @@ openh264 = { version = "0.9.9", optional = true }
 x11rb = { version = "0.14.0", optional = true }
 
 [features]
-gui = ["net", "dep:eframe", "dep:keyring"]
+gui = ["net", "capture", "dep:eframe", "dep:keyring"]
 audio = ["dep:cpal", "dep:sonora"]
 net = ["dep:igd-next", "dep:libp2p", "dep:tokio", "dep:futures", "dep:snow"]
 video = ["net", "dep:openh264"]

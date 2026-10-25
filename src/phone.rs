@@ -123,6 +123,12 @@ impl ActiveCall {
         self.screen.recv().await
     }
 
+    /// Tira o canal de eventos da tela para ouvi-lo ao lado de [`Self::next_pcm`] (que também pede `&mut`).
+    /// Depois disso, [`Self::next_screen`] devolve `None`.
+    pub fn take_screen(&mut self) -> mpsc::Receiver<ScreenEvent> {
+        std::mem::replace(&mut self.screen, mpsc::channel(1).1)
+    }
+
     /// Chaves do circuito de tela quando *você* transmite (use em [`share_screen`]).
     pub fn share_keys(&self) -> &CallKeys {
         &self.share_keys
