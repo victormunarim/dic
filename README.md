@@ -861,7 +861,7 @@ cargo run --release --features net --example measure -- direct 127.0.0.1:9000
 | `src/circle.rs` | `CircleSecret`, `TopicKind` |
 | `examples/call.rs` | chamada de teste (`keygen`, `phone`, `dial`), usada por `scripts/call.sh` e `scripts/call-windows.ps1` |
 | `src/audio.rs` | microfone/alto-falante via `cpal`, reamostragem para a taxa do codec (feature `audio`) |
-| `examples/gui.rs` | janela mínima (feature `gui`) para ligar/atender sem terminal |
+| `examples/gui/` | janela mínima (feature `gui`) para ligar/atender sem terminal; `conf`, `engine` (sem janela, testável) e `ui` |
 | `src/phone.rs` | `Phone`, `IncomingCall`, `call`, `ActiveCall` (feature `net`) |
 | `src/media/` | `VoiceCall`, `keys` (handshake), `packet` (200 B + AEAD), `jitter`, `signal` (convite/aceite), `codec` (`Mulaw`, trait `Codec`) |
 | `src/path.rs` | `PathMode`, `PathRequest`, `PathError` |
@@ -884,3 +884,7 @@ Ainda **não** existem: TLS/QUIC e travessia de NAT no adaptador (só TCP + Nois
 - **Limite por IP no diretório.** Cada IP (IPv6 por /64) tem um balde de fichas (`RateLimit`, padrão 50/s, rajada 200). Pedido simples custa 1; operações de sala, avisos e punch custam 5; teste de alcançabilidade custa 20. Conexões novas também gastam ficha. `DirectoryServer::spawn_limited` troca os valores.
 - **Troca de segredo da sala.** O dono (chave de identidade que criou a sala) chama `room::rotate(server, owner, old_secret, keep)`: gera um segredo novo e deixa, no diretório, um aviso por membro mantido, cifrado com o DH entre as identidades do dono e do membro. Quem foi removido não recebe aviso e não abre o dos outros. Cada membro chama `room::follow(server, me, owner, old_secret)` ao entrar e adota o segredo novo. Avisos expiram em 3 dias; o diretório guarda no máximo 8192.
 - **Chaveiro.** A GUI guarda a chave de identidade no chaveiro do sistema (`secret=@keyring` no `~/.clam-gui.conf`); sem chaveiro disponível, continua no arquivo (0600).
+
+## Estado do diretório em disco
+
+`directory [escuta] [estado]` grava as publicações e as salas em `estado` a cada 5 s (arquivo temporário + renomear) e relê ao subir, descartando o que passou de 120 s. Um reinício não esvazia as salas nem muda o anfitrião. Sem o argumento, o estado fica só em memória.

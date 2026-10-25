@@ -1,0 +1,333 @@
+//! Janela (egui): desenha o formulário e fala com o motor.
+
+use std::{sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+}, time::Duration};
+
+use clam::{rand_core::OsRng, x25519_dalek::StaticSecret};
+use eframe::egui;
+use tokio::sync::mpsc;
+
+use clam::room;
+
+use crate::{conf::*, engine::*};
+
+
+pub(crate) struct App {
+    pub(crate) rt: tokio::runtime::Runtime,
+    pub(crate) form: Form,
+    pub(crate) log: Log,
+    pub(crate) shared: Arc<Shared>,
+    pub(crate) running: Option<Running>,
+    pub(crate) done: Arc<AtomicBool>,
+    pub(crate) error: String,
+}
+
+impl App {
+    /// Salas guardadas neste computador: entrar de novo é um clique, sem combinar nada.
+    pub(crate) fn rooms_ui(&mut self, ui: &mut egui::Ui, offline: bool, in_room: bool, in_call: bool) {
+        ui.weak("Ficam salvas neste computador. Entre de novo quando quiser; o primeiro a entrar é o anfitrião.");
+        let rooms = parse_rooms(&self.form.rooms);
+        let mut forget = None;
+        for (i, (name, secret)) in rooms.iter().enumerate() {
+            ui.horizontal(|ui| {
+                ui.label(name);
+                if ui.add_enabled(!offline && !in_call, egui::Button::new("Entrar")).clicked()
+                    && let Some(r) = &self.running
+                {
+                    let _ = r.cmds.send(Cmd::Join(*secret, name.clone()));
+                }
+                if ui.button("Copiar código").clicked() {
+                    let dir = self.form.directory_addr();
+                    ui.ctx().copy_text(if dir.is_empty() { hex(secret) } else { format!("{}@{dir}", hex(secret)) });
+                }
+                if ui.add_enabled(!in_room, egui::Button::new("Esquecer")).clicked() {
+                    forget = Some(i);
+                }
+            });
+        }
+        if let Some(i) = forget {
+            let kept: Vec<String> = rooms.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, (n, s))| format!("{n} {}", hex(s))).collect();
+            self.form.rooms = kept.join("\n");
+            self.form.save();
+        }
+        ui.horizontal(|ui| {
+            ui.label("Nova sala:");
+            ui.add(egui::TextEdit::singleline(&mut self.form.room_name).hint_text("nome").desired_width(110.0));
+            ui.label("Código:");
+            ui.add(egui::TextEdit::singleline(&mut self.form.room_code).hint_text("vazio = criar; ou cole o código de uma sala").desired_width(280.0));
+            if ui.add_enabled(!offline && !in_call, egui::Button::new("Criar / entrar")).clicked() {
+                let secret = if self.form.room_code.trim().is_empty() {
+                    Some(room::new_secret())
+                } else {
+                    split_code(&self.form.room_code).map(|(k, _)| k)
+                };
+                match secret {
+                    Some(secret) => {
+                        let name: String = self.form.room_name.chars().filter(|c| !matches!(c, ';' | '\n')).collect();
+                        let name = if name.trim().is_empty() { format!("sala {}", rooms.len() + 1) } else { name.trim().to_string() };
+                        if !rooms.iter().any(|(_, s)| *s == secret) {
+                            if !self.form.rooms.trim().is_empty() {
+                                self.form.rooms.push('\n');
+                            }
+                            self.form.rooms.push_str(&format!("{name} {}", hex(&secret)));
+                        }
+                        self.form.room_name.clear();
+                        self.form.room_code.clear();
+                        self.error.clear();
+                        self.form.save();
+                        if let Some(r) = &self.running {
+                            let _ = r.cmds.send(Cmd::Join(secret, name));
+                        }
+                    }
+                    None => self.error = "código de sala inválido (64 hex, com @host:porta opcional)".into(),
+                }
+            }
+            if ui.add_enabled(in_room, egui::Button::new("Sair da sala")).clicked()
+                && let Some(r) = &self.running
+            {
+                let _ = r.cmds.send(Cmd::Leave);
+            }
+        });
+        let status = self.shared.room.lock().unwrap().clone();
+        if !status.is_empty() {
+            ui.label(status);
+        }
+    }
+
+    pub(crate) fn go_online(&mut self, ctx: &egui::Context) {
+        self.error.clear();
+        if let Err(e) = self.form.identity() {
+            self.error = e;
+            return;
+        }
+        if self.form.directory.trim().is_empty() {
+            self.error = "Informe o servidor (diretório), no formato endereço:porta.".into();
+            return;
+        }
+        self.form.save();
+        self.log.lock().unwrap().clear();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let done = Arc::new(AtomicBool::new(false));
+        let out = Sink {
+            log: self.log.clone(),
+            repaint: {
+                let ctx = ctx.clone();
+                Arc::new(move || ctx.request_repaint())
+            },
+        };
+        let (form, shared, stop2, done2) = (self.form.clone(), self.shared.clone(), stop.clone(), done.clone());
+        self.rt.spawn(async move {
+            if let Err(e) = run_node(form, rx, shared, stop2, out.clone()).await {
+                out.line(format!("ERRO: {e}"));
+            }
+            out.line("offline");
+            done2.store(true, Ordering::Relaxed);
+            (out.repaint)();
+        });
+        self.running = Some(Running { cmds: tx, stop });
+        self.done = done;
+    }
+}
+
+pub(crate) fn card(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
+    egui::Frame::group(ui.style()).inner_margin(10.0).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.label(egui::RichText::new(title).strong().size(15.0));
+        ui.add_space(4.0);
+        add(ui);
+    });
+    ui.add_space(8.0);
+}
+
+impl App {
+    pub(crate) fn contacts_ui(&mut self, ui: &mut egui::Ui, online: bool, in_call: bool) {
+        let contacts = parse_contacts(&self.form.contacts);
+        if contacts.is_empty() {
+            ui.weak("Nenhum contato ainda. Peça o código de contato de um amigo e adicione abaixo.");
+        }
+        let mut remove = None;
+        for (i, (name, key)) in contacts.iter().enumerate() {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(name).size(14.0));
+                ui.weak(&hex(key)[..8]);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button("Remover").clicked() {
+                        remove = Some(i);
+                    }
+                    if ui.add_enabled(online && !in_call, egui::Button::new("📞 Ligar")).clicked()
+                        && let Some(r) = &self.running
+                    {
+                        self.error.clear();
+                        let _ = r.cmds.send(Cmd::Dial(*key));
+                    }
+                });
+            });
+        }
+        if let Some(i) = remove {
+            self.form.contacts = remove_contact(&self.form.contacts, i);
+            self.form.save();
+        }
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.add(egui::TextEdit::singleline(&mut self.form.new_name).hint_text("Nome").desired_width(110.0));
+            ui.add(egui::TextEdit::singleline(&mut self.form.new_code).hint_text("Código de contato").desired_width(260.0));
+            if ui.button("Adicionar contato").clicked() {
+                if split_code(&self.form.new_code).is_none() {
+                    self.error = "Esse código de contato não parece certo (são 64 letras e números).".into();
+                } else {
+                    let name: String = self.form.new_name.chars().filter(|c| !matches!(c, ';' | '\n')).collect();
+                    let line = format!("{} {}", name.trim(), self.form.new_code.trim());
+                    if !self.form.contacts.trim().is_empty() {
+                        self.form.contacts.push('\n');
+                    }
+                    self.form.contacts.push_str(line.trim());
+                    self.form.new_name.clear();
+                    self.form.new_code.clear();
+                    self.error.clear();
+                    self.form.save();
+                }
+            }
+        });
+    }
+}
+
+impl eframe::App for App {
+    fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        if self.done.swap(false, Ordering::Relaxed) {
+            self.running = None;
+            self.shared.in_call.store(false, Ordering::Relaxed);
+            self.shared.in_room.store(false, Ordering::Relaxed);
+            self.shared.status.lock().unwrap().clear();
+            self.shared.room.lock().unwrap().clear();
+        }
+        let offline = self.running.is_none();
+        let in_call = self.shared.in_call.load(Ordering::Relaxed);
+        let in_room = self.shared.in_room.load(Ordering::Relaxed);
+        let status = self.shared.status.lock().unwrap().clone();
+        egui::CentralPanel::default().show(ctx, |ui| {
+            egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.heading("Clam");
+                    ui.weak("chamadas de voz entre pessoas, sem servidor no meio");
+                });
+                ui.add_space(6.0);
+
+                card(ui, "Conexão", |ui| {
+                    ui.horizontal(|ui| {
+                        let (color, text) = if offline {
+                            (egui::Color32::GRAY, "Offline".to_string())
+                        } else if status.is_empty() {
+                            (egui::Color32::YELLOW, "Conectando...".to_string())
+                        } else {
+                            (egui::Color32::LIGHT_GREEN, "Online".to_string())
+                        };
+                        ui.colored_label(color, format!("● {text}"));
+                        if !status.is_empty() {
+                            ui.weak(&status);
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Servidor (diretório):");
+                        ui.add_enabled(
+                            offline,
+                            egui::TextEdit::singleline(&mut self.form.directory).hint_text("exemplo: meu-servidor.com:7000").desired_width(260.0),
+                        );
+                    });
+                    ui.add_enabled(offline, egui::Checkbox::new(&mut self.form.use_audio, "Usar microfone e alto-falante (use fones para não dar eco)"));
+                    ui.add_space(4.0);
+                    if offline {
+                        if ui.add_sized([160.0, 30.0], egui::Button::new("Ficar online")).clicked() {
+                            self.go_online(ctx);
+                        }
+                    } else if ui.add_enabled(!in_call, egui::Button::new("Ficar offline")).clicked()
+                        && let Some(r) = &self.running
+                    {
+                        r.stop.store(true, Ordering::Relaxed);
+                    }
+                    if !self.error.is_empty() {
+                        ui.colored_label(egui::Color32::LIGHT_RED, &self.error);
+                    }
+                });
+
+                if in_call && !in_room {
+                    card(ui, "Em chamada", |ui| {
+                        ui.label("Conversando agora.");
+                        if ui.add_sized([160.0, 30.0], egui::Button::new("Desligar")).clicked() {
+                            self.shared.hangup.store(true, Ordering::Relaxed);
+                        }
+                    });
+                }
+
+                card(ui, "Meu código de contato", |ui| {
+                    ui.weak("Envie este código a quem vai ligar para você.");
+                    match self.form.my_code() {
+                        Some(code) => {
+                            ui.horizontal(|ui| {
+                                ui.monospace(if code.len() > 36 { format!("{}...", &code[..36]) } else { code.clone() });
+                                if ui.button("Copiar").clicked() {
+                                    ui.ctx().copy_text(code);
+                                }
+                            });
+                        }
+                        None => {
+                            ui.weak("(identidade inválida: veja Configurações)");
+                        }
+                    }
+                });
+
+                card(ui, "Contatos", |ui| self.contacts_ui(ui, !offline, in_call));
+
+                card(ui, "Ligar para um código", |ui| {
+                    ui.horizontal(|ui| {
+                        ui.add_enabled(
+                            !offline && !in_call,
+                            egui::TextEdit::singleline(&mut self.form.peer).hint_text("cole o código de contato ou o nome de um contato").desired_width(380.0),
+                        );
+                        if ui.add_enabled(!offline && !in_call, egui::Button::new("📞 Ligar")).clicked() {
+                            match self.form.target() {
+                                Ok(k) => {
+                                    self.error.clear();
+                                    self.form.save();
+                                    if let Some(r) = &self.running {
+                                        let _ = r.cmds.send(Cmd::Dial(k));
+                                    }
+                                }
+                                Err(e) => self.error = e,
+                            }
+                        }
+                    });
+                    if offline {
+                        ui.weak("Fique online primeiro.");
+                    }
+                });
+
+                card(ui, "Salas", |ui| self.rooms_ui(ui, offline, in_room, in_call));
+
+                egui::CollapsingHeader::new("Configurações avançadas").show(ui, |ui| {
+                    ui.add_enabled_ui(offline, |ui| {
+                        ui.label("Identidade (chave secreta, 64 hex). Não compartilhe com ninguém.");
+                        ui.add(egui::TextEdit::singleline(&mut self.form.secret).password(true).desired_width(f32::INFINITY));
+                        if ui.button("Gerar nova identidade").on_hover_text("O seu código de contato muda e os outros precisarão do novo.").clicked() {
+                            self.form.secret = hex(&StaticSecret::random_from_rng(OsRng).to_bytes());
+                        }
+                        ui.separator();
+                        ui.label("Endereço público ip:porta (só se o servidor enxergar um IP que não serve, como atrás de NAT; a porta precisa estar aberta no roteador):");
+                        ui.text_edit_singleline(&mut self.form.public_addr);
+                    });
+                });
+
+                egui::CollapsingHeader::new("Registro de atividade").default_open(true).show(ui, |ui| {
+                    egui::ScrollArea::vertical().max_height(220.0).stick_to_bottom(true).show(ui, |ui| {
+                        for l in self.log.lock().unwrap().iter() {
+                            ui.monospace(l);
+                        }
+                    });
+                });
+            });
+        });
+        ctx.request_repaint_after(Duration::from_millis(300));
+    }
+}

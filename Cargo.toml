@@ -35,6 +35,8 @@ tokio = { version = "1.54.1", features = ["test-util", "rt", "macros", "time", "
 
 [[example]]
 name = "gui"
+path = "examples/gui/main.rs"
+test = true
 required-features = ["gui"]
 
 [[example]]
