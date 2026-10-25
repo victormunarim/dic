@@ -331,15 +331,31 @@ pub struct Devices {
 }
 
 fn name_of(d: &cpal::Device) -> String {
-    d.description().map(|d| d.to_string()).unwrap_or_default()
+    clean_name(&d.description().map(|d| d.to_string()).unwrap_or_default())
+}
+
+/// O ALSA descreve placas sem nome de porta como `"placa, "`; tira a vírgula e o espaço sobrando, para
+/// o nome da lista e o salvo na configuração serem os mesmos.
+fn clean_name(n: &str) -> String {
+    n.trim().trim_end_matches(',').trim_end().to_string()
+}
+
+/// Dispositivo que não é microfone nem alto-falante de verdade (o "null" do ALSA, que descarta o som).
+fn is_pseudo(name: &str) -> bool {
+    name.starts_with("Discard all samples")
 }
 
 /// Nomes dos microfones e dos alto-falantes disponíveis agora: `(entradas, saídas)`.
 pub fn devices() -> (Vec<String>, Vec<String>) {
     let host = cpal::default_host();
     let list = |it: Result<Vec<cpal::Device>, _>| -> Vec<String> {
-        let mut v: Vec<String> = it.map(|d| d.iter().map(name_of).filter(|n| !n.is_empty()).collect()).unwrap_or_default();
-        v.dedup();
+        let mut v: Vec<String> = Vec::new();
+        for n in it.map(|d| d.iter().map(name_of).collect::<Vec<_>>()).unwrap_or_default() {
+            // O ALSA repete a mesma placa em várias entradas (hw, plughw, surround…): uma só basta.
+            if !n.is_empty() && !is_pseudo(&n) && !v.contains(&n) {
+                v.push(n);
+            }
+        }
         v
     };
     (list(host.input_devices().map(Iterator::collect)), list(host.output_devices().map(Iterator::collect)))
@@ -350,12 +366,12 @@ fn open_streams(capture: Queue, playback: Queue, played: Arc<AtomicUsize>, rate:
     let input = if want.input.is_empty() {
         host.default_input_device().ok_or_else(|| AudioError("sem microfone padrão".into()))?
     } else {
-        host.input_devices().map_err(err)?.find(|d| name_of(d) == want.input).ok_or_else(|| AudioError(format!("microfone \"{}\" não encontrado", want.input)))?
+        host.input_devices().map_err(err)?.find(|d| name_of(d) == clean_name(&want.input)).ok_or_else(|| AudioError(format!("microfone \"{}\" não encontrado", want.input)))?
     };
     let output = if want.output.is_empty() {
         host.default_output_device().ok_or_else(|| AudioError("sem alto-falante padrão".into()))?
     } else {
-        host.output_devices().map_err(err)?.find(|d| name_of(d) == want.output).ok_or_else(|| AudioError(format!("alto-falante \"{}\" não encontrado", want.output)))?
+        host.output_devices().map_err(err)?.find(|d| name_of(d) == clean_name(&want.output)).ok_or_else(|| AudioError(format!("alto-falante \"{}\" não encontrado", want.output)))?
     };
     let (inp, outp) = (input.default_input_config().map_err(err)?, output.default_output_config().map_err(err)?);
 
@@ -439,6 +455,15 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn device_names_lose_alsa_trailing_separators_and_pseudo_devices_are_known() {
+        assert_eq!(clean_name("sof-hda-dsp, "), "sof-hda-dsp");
+        assert_eq!(clean_name("sof-hda-dsp, HDMI 1"), "sof-hda-dsp, HDMI 1");
+        assert_eq!(clean_name("  PipeWire Sound Server "), "PipeWire Sound Server");
+        assert!(is_pseudo("Discard all samples (playback) or generate zero samples (capture)"));
+        assert!(!is_pseudo("PipeWire Sound Server"));
+    }
 
     #[test]
     fn downsample_48k_yields_one_in_six() {
