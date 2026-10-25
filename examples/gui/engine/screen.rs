@@ -23,7 +23,7 @@ pub(crate) struct ScreenState {
     pub(crate) images: Mutex<HashMap<[u8; 32], (u64, RawFrame)>>,
     seq: AtomicU64,
     /// Contadores para diagnóstico: quadros que chegaram, que viraram imagem e que não decodificaram.
-    rx: [AtomicU64; 3],
+    rx: [AtomicU64; 4],
     /// Resumo de quem transmite (quadros enviados, pulados pelo codec, descartados), para a janela.
     pub(crate) tx_info: Mutex<String>,
     /// Motivo de a transmissão não ter começado, para a janela.
@@ -52,11 +52,11 @@ impl ScreenState {
     pub(crate) fn diagnostics(&self) -> String {
         let n = |i: usize| self.rx[i].load(Ordering::Relaxed);
         let mut out = self.tx_info.lock().unwrap().clone();
-        if n(0) > 0 {
+        if n(0) + n(3) > 0 {
             if !out.is_empty() {
                 out.push_str(" · ");
             }
-            out.push_str(&format!("recebidos {} quadros, {} viraram imagem, {} com erro", n(0), n(1), n(2)));
+            out.push_str(&format!("recebidos {} quadros, {} viraram imagem, {} com erro, {} perdidos no caminho", n(0), n(1), n(2), n(3)));
         }
         out
     }
@@ -77,6 +77,10 @@ pub(crate) fn on_screen_event(state: &ScreenState, who: [u8; 32], dec: &mut Opti
         ScreenEvent::Stopped => {
             *dec = None;
             state.set_image(who, None);
+            true
+        }
+        ScreenEvent::Lost(n) => {
+            state.rx[3].store(n, Ordering::Relaxed);
             true
         }
         ScreenEvent::Frame(f) => {

@@ -271,7 +271,7 @@ async fn collect_frames(viewer: &mut ActiveCall, n: usize) -> Vec<clam::media::s
         while got.len() < n {
             match viewer.next_screen().await {
                 Some(ScreenEvent::Frame(f)) => got.push(f),
-                Some(ScreenEvent::Stopped) => {}
+                Some(ScreenEvent::Stopped | ScreenEvent::Lost(_)) => {}
                 None => break,
             }
         }

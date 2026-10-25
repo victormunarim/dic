@@ -115,6 +115,8 @@ pub enum ScreenEvent {
     Frame(ScreenFrame),
     /// Quem transmitia parou.
     Stopped,
+    /// Total de quadros que chegaram incompletos ou sem referência (diagnóstico).
+    Lost(u64),
 }
 
 impl ActiveCall {
@@ -194,6 +196,7 @@ async fn drive<C: Codec>(
     let mut screen = ScreenStream::new(&view_keys);
     let mut screen_conn: Option<u64> = None;
     let mut stopped_told = false;
+    let mut lost_told = 0u64;
     let mut ask = interval(Duration::from_millis(100));
     ask.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let t0 = Instant::now();
@@ -230,6 +233,11 @@ async fn drive<C: Codec>(
                             }
                             while let Some(f) = screen.poll_frame() {
                                 let _ = screen_tx.try_send(ScreenEvent::Frame(f));
+                            }
+                            let lost = screen.stats().frames_lost;
+                            if lost != lost_told {
+                                lost_told = lost;
+                                let _ = screen_tx.try_send(ScreenEvent::Lost(lost));
                             }
                             if screen.peer_stopped() != stopped_told {
                                 stopped_told = screen.peer_stopped();
