@@ -399,12 +399,13 @@ impl Form {
             peer: get("peer"),
             public_addr: get("public_addr"),
             // Ligadas de início: o arquivo antigo, sem a chave, também aceita.
-            use_dht: get("dht") != "0",
+            // As chaves guardam o "não": o `dht=0` e o `anchor=0` do tempo em que desligadas era o padrão são ignorados.
+            use_dht: get("no_dht") != "1",
             dht_circuit: get("dht_circuit") == "1",
             my_name: get("name"),
             // Ligado de início: o arquivo antigo, sem a chave, também aceita.
             intros: get("intros") != "0",
-            anchor: get("anchor") != "0",
+            anchor: get("no_anchor") != "1",
             anchors: get("anchors").replace(';', "\n"),
             use_audio: get("audio") == "1",
             input_dev: get("input_dev"),
@@ -426,17 +427,17 @@ impl Form {
         // Chave de identidade no chaveiro do sistema; só cai para o arquivo se ele não estiver disponível.
         let secret = if vault_set(self.secret.trim()) { KEYRING_MARK } else { self.secret.trim() };
         let text = format!(
-            "audio={}\nsecret={}\ncontacts={}\npeer={}\npublic_addr={}\ndht={}\ndht_circuit={}\nname={}\nintros={}\nanchor={}\nanchors={}\ninput_dev={}\noutput_dev={}\n{}",
+            "audio={}\nsecret={}\ncontacts={}\npeer={}\npublic_addr={}\nno_dht={}\ndht_circuit={}\nname={}\nintros={}\nno_anchor={}\nanchors={}\ninput_dev={}\noutput_dev={}\n{}",
             u8::from(self.use_audio),
             secret,
             self.contacts.trim().replace('\n', ";"),
             self.peer.trim(),
             self.public_addr.trim(),
-            u8::from(self.use_dht),
+            u8::from(!self.use_dht),
             u8::from(self.dht_circuit),
             self.my_name.trim().replace(['\n', ';'], " "),
             u8::from(self.intros),
-            u8::from(self.anchor),
+            u8::from(!self.anchor),
             self.anchors.trim().replace('\n', ";"),
             self.input_dev.trim(),
             self.output_dev.trim(),
