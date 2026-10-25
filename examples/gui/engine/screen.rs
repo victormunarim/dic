@@ -189,7 +189,10 @@ pub(crate) async fn share_task(dialer: Dialer, peer: [u8; 32], keys: clam::media
                 Err(e) => *flag.screen.note.lock().unwrap() = format!("codec: {e}"),
             }
             let t = share.stats();
-            *flag.screen.tx_info.lock().unwrap() = format!("enviados {pushed}, pulados {skipped}, descartados na fila {}", t.frames_dropped);
+            *flag.screen.tx_info.lock().unwrap() = format!(
+                "enviados {pushed}, pulados {skipped} ({} pelo codificador), descartados na fila {}, codificar leva {:.0} ms",
+                enc.skipped, t.frames_dropped, enc.encode_ms
+            );
             next += every;
             std::thread::sleep(next.saturating_duration_since(std::time::Instant::now()));
         }
@@ -280,7 +283,12 @@ pub(crate) async fn room_share_task(dialer: Dialer, mesh: Mesh, shared: Arc<Shar
                 Ok(_) => pushed += 1,
                 Err(e) => *flag.screen.note.lock().unwrap() = format!("codec: {e}"),
             }
-            *flag.screen.tx_info.lock().unwrap() = format!("enviados {pushed}, pulados {skipped}, para {} pessoas", refs.len());
+            *flag.screen.tx_info.lock().unwrap() = format!(
+                "enviados {pushed}, pulados {skipped} ({} pelo codificador), para {} pessoas, codificar leva {:.0} ms",
+                enc.skipped,
+                refs.len(),
+                enc.encode_ms
+            );
             next += every;
             std::thread::sleep(next.saturating_duration_since(Instant::now()));
         }

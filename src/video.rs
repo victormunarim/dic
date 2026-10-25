@@ -118,6 +118,10 @@ pub struct H264Encoder {
     need_key: bool,
     /// Fator mínimo de redução; sobe quando o quadro-chave não cabe em [`MAX_FRAME`] (tela muito detalhada).
     min_k: usize,
+    /// Quadros que o codificador recebeu e não devolveu (pulados pelo controle de taxa ou grandes demais).
+    pub skipped: u64,
+    /// Média móvel, em ms, do tempo gasto em `encode`.
+    pub encode_ms: f32,
 }
 
 impl H264Encoder {
@@ -127,7 +131,7 @@ impl H264Encoder {
     }
 
     pub fn new(bitrate: u32) -> Result<Self, VideoError> {
-        Ok(Self { inner: Self::open(bitrate)?, size: None, bitrate, need_key: true, min_k: 1 })
+        Ok(Self { inner: Self::open(bitrate)?, size: None, bitrate, need_key: true, min_k: 1, skipped: 0, encode_ms: 0.0 })
     }
 
     fn open(bitrate: u32) -> Result<Encoder, VideoError> {
@@ -144,6 +148,16 @@ impl H264Encoder {
     /// Codifica um quadro. `force_key` pede quadro-chave. `Ok(None)`: o codificador pulou o quadro
     /// ou ele passou de [`MAX_FRAME`] (o próximo sai como quadro-chave).
     pub fn encode(&mut self, frame: &RawFrame, force_key: bool) -> Result<Option<EncodedFrame>, VideoError> {
+        let started = std::time::Instant::now();
+        let out = self.encode_inner(frame, force_key);
+        self.encode_ms += (started.elapsed().as_secs_f32() * 1000.0 - self.encode_ms) * 0.1;
+        if matches!(out, Ok(None)) {
+            self.skipped += 1;
+        }
+        out
+    }
+
+    fn encode_inner(&mut self, frame: &RawFrame, force_key: bool) -> Result<Option<EncodedFrame>, VideoError> {
         let small = frame.shrunk(self.min_k);
         let frame = small.as_ref().unwrap_or(frame);
         let frame = frame.even().ok_or(VideoError::Size(frame.width, frame.height))?;
