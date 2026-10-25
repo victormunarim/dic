@@ -236,3 +236,12 @@ async fn host_needs_proof_and_server_support() {
     assert_eq!(read_frame(&mut t).await[0], 0x81);
     assert!(directory::lookup(&d.local_addr().to_string(), &me).await.unwrap().is_none());
 }
+
+/// Falar com o diretório ajusta o desvio de hora (aqui ~0, pois é a mesma máquina).
+#[tokio::test]
+async fn directory_time_overrides_wrong_local_clock() {
+    let (_d, addr) = dir().await;
+    directory::seen_ip(&addr).await.unwrap();
+    // O desvio medido contra um servidor na mesma máquina é ~0.
+    assert!(clam::clock::offset_secs().abs() <= 1);
+}

@@ -18,7 +18,7 @@
 //!   (`REQ_ATTACH` + ficha de 16 bytes) e o servidor emenda as duas. Nenhuma porta precisa ser aberta.
 //!   O servidor passa a ver o IP do nó hospedado e o tráfego (já cifrado de ponta a ponta) dele.
 //!
-//! Formato: quadros `[u16 BE tamanho][dados]`. O servidor abre com `E (32) ‖ IP visto (texto)`.
+//! Formato: quadros `[u16 BE tamanho][dados]`. O servidor abre com `E (32) ‖ hora Unix em s (8, BE) ‖ IP visto (texto)`. A hora sincroniza o relógio dos convites ([`crate::clock`]).
 
 use std::{
     collections::HashMap,
@@ -236,6 +236,7 @@ async fn serve(mut s: TcpStream, peer: SocketAddr, table: Table, host: Option<Ar
     let eph = StaticSecret::random_from_rng(OsRng);
     let e_pub = PublicKey::from(&eph);
     let mut hello = e_pub.as_bytes().to_vec();
+    hello.extend_from_slice(&crate::clock::now_secs().to_be_bytes());
     hello.extend_from_slice(peer.ip().to_string().as_bytes());
     write_frame(&mut s, &hello).await?;
     for _ in 0..MAX_REQUESTS {
@@ -443,10 +444,11 @@ struct Session {
 async fn connect(server: &str) -> io::Result<Session> {
     let mut s = timeout(IO_TIMEOUT, TcpStream::connect(server)).await.map_err(|_| io::ErrorKind::TimedOut)??;
     let hello = read_frame(&mut s).await?;
-    if hello.len() < 33 {
+    if hello.len() < 41 {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "hello inválido"));
     }
-    Ok(Session { e_pub: hello[..32].try_into().unwrap(), seen_ip: String::from_utf8_lossy(&hello[32..]).into(), s })
+    crate::clock::sync_to(u64::from_be_bytes(hello[32..40].try_into().unwrap()));
+    Ok(Session { e_pub: hello[..32].try_into().unwrap(), seen_ip: String::from_utf8_lossy(&hello[40..]).into(), s })
 }
 
 async fn ask(sess: &mut Session, req: &[u8]) -> io::Result<Vec<u8>> {

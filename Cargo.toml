@@ -20,11 +20,12 @@ thiserror = "2"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"], optional = true }
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 zeroize = { version = "1", features = ["derive"] }
+igd-next = { version = "0.18.0", features = ["aio_tokio"], optional = true }
 
 [features]
 gui = ["net", "dep:eframe"]
 audio = ["dep:cpal"]
-net = ["dep:libp2p", "dep:tokio", "dep:futures", "dep:snow"]
+net = ["dep:igd-next", "dep:libp2p", "dep:tokio", "dep:futures", "dep:snow"]
 
 [dev-dependencies]
 libp2p = "0.57"

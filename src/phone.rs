@@ -26,7 +26,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 use tokio::{
@@ -84,7 +84,7 @@ impl From<MediaError> for CallError {
 }
 
 fn unix_secs() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
+    crate::clock::now_secs()
 }
 
 /// Uma chamada em andamento. Largar o valor (ou chamar [`hangup`](Self::hangup)) desliga.

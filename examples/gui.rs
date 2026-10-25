@@ -277,6 +277,9 @@ async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, shared: Arc<
     let mut node = Node::start(cfg).await.map_err(|e| format!("não ficou online: {e}"))?;
     *shared.status.lock().unwrap() = format!("online em {}", node.published_addr());
     out.line(format!("online; os outros chegam em {}", node.published_addr()));
+    if let Some(n) = node.network_note() {
+        out.line(n);
+    }
     loop {
         if stop.load(Ordering::Relaxed) {
             break;

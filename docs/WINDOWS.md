@@ -37,7 +37,7 @@ cargo run --release --features gui,audio --example gui
 4. *Ficar online*.
 5. Para ligar, cole a chave pública do outro em *Ligar*. Use fones.
 
-Atrás de NAT: ou redirecione a porta 4001 e preencha o endereço público (`ip:4001`), ou, se o servidor foi iniciado com `--relay`, marque *Atrás de NAT: usar o relay do servidor* (não precisa abrir porta; o servidor passa a ver seu IP).
+Atrás de roteador: com o diretório na internet, o programa tenta abrir a porta 4001 sozinho por UPnP e avisa o resultado no log. Se não der, ou redirecione a porta 4001 e preencha o endereço público (`ip:4001`), ou, se o servidor foi iniciado com `--relay`, marque *Atrás de NAT: usar o relay do servidor* (não precisa abrir porta; o servidor passa a ver seu IP).
 Config em `%USERPROFILE%\.clam-gui.conf` (contém a chave secreta).
 O programa pede timers de 1 ms ao Windows (`timeBeginPeriod`) para manter a cadência da voz.
 
