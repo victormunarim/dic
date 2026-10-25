@@ -98,9 +98,9 @@ impl RawFrame {
 }
 
 /// Fragmentos na fila (≈ 0,3 s de circuito) a partir dos quais a resolução cai.
-const BACKLOG_HIGH: usize = 150;
+const BACKLOG_HIGH: usize = 120;
 /// Fragmentos na fila a partir dos quais um quadro de camada alta é largado em vez de enfileirado.
-const DROP_BACKLOG: usize = 60;
+const DROP_BACKLOG: usize = 40;
 /// Fila a partir da qual conta como calma.
 const BACKLOG_LOW: usize = 30;
 /// Quadros calmos seguidos (2 s) antes de voltar à resolução cheia.
@@ -145,9 +145,10 @@ pub struct H264Encoder {
 }
 
 impl H264Encoder {
-    /// Taxa em bits/s do vídeo: 80% do que o circuito de tela carrega, sobra para o cabeçalho.
+    /// Taxa em bits/s do vídeo: 90% do que o circuito de tela carrega; a folga absorve a ponta do último
+    /// fragmento de cada quadro, e o excesso de um pico vai para a fila (que larga a camada alta).
     pub fn default_bitrate() -> u32 {
-        (ScreenStream::capacity_bps(SCREEN_SLOT_MS) * 8 / 10) as u32
+        (ScreenStream::capacity_bps(SCREEN_SLOT_MS) * 9 / 10) as u32
     }
 
     pub fn new(bitrate: u32) -> Result<Self, VideoError> {
