@@ -78,6 +78,10 @@ fn open_sound(want: bool, out: &Sink) -> Option<Sound> {
     match Sound::open_rate(G722::RATE) {
         Ok(s) => {
             out.line(format!("microfone e alto-falante abertos (use fones: não há cancelamento de eco): {}", s.info()));
+            // Bipe de 0,3 s: se não soar, o problema é a saída do sistema, não a chamada.
+            let beep: Vec<i16> = (0..4800).map(|i| (8000.0 * (std::f64::consts::TAU * 440.0 * i as f64 / 16000.0).sin()) as i16).collect();
+            s.play(&beep);
+            out.line("tocando um bipe de teste: se você não ouvir, a saída de áudio do sistema é a causa");
             return Some(s);
         }
         Err(e) => out.line(format!("{e}; usando tom de teste")),
