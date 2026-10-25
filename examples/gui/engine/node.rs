@@ -18,6 +18,7 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
     if !form.public_addr.trim().is_empty() {
         cfg.public_addr = Some(form.public_addr.trim().to_string());
     }
+    out.line(format!("{} endereço(s) de contatos guardados em {}", cfg.known.len(), known_path().display()));
     out.line("conectando ao diretório...");
     let mut node = Node::start(cfg).await.map_err(|e| format!("não ficou online: {e}"))?;
     *shared.status.lock().unwrap() = format!("online em {}", node.published_addr());
@@ -31,9 +32,13 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
     // Discar demora (furo de NAT, endereço guardado, espera de resposta): numa tarefa, para a janela seguir
     // atendendo comandos; "Desligar" cancela.
     let spawn_dial = |peer: [u8; 32], attempt: u32, delay: Duration| {
-        let (dialer, sh, tx) = (dialer.clone(), shared.clone(), dialed_tx.clone());
+        let (dialer, sh, tx, out) = (dialer.clone(), shared.clone(), dialed_tx.clone(), out.clone());
         tokio::spawn(async move {
             tokio::time::sleep(delay).await;
+            out.line(match dialer.stored_address(&peer) {
+                Some(a) => format!("ligando: tento antes o endereço guardado do contato ({a}); o diretório só entra se ele não responder"),
+                None => "ligando: não há endereço guardado deste contato; vou consultar o diretório".to_string(),
+            });
             let r = until_hangup(dialer.dial(peer, G722::new(), Duration::from_secs(15)), &sh.hangup).await;
             let _ = tx.send((peer, attempt, r));
         });
