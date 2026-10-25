@@ -895,3 +895,10 @@ Ainda **não** existem: TLS/QUIC e travessia de NAT no adaptador (só TCP + Nois
 - **Volume por pessoa.** Um controle de 0 (mudo) a 200 % por membro; vale só para o que você ouve (`Mesh::set_volume`, antes do limitador da mixagem).
 - **Apelidos.** O campo ao lado de cada membro grava um apelido salvo no `~/.clam-gui.conf` (`nicks=`, só neste computador). Contatos continuam com o nome da lista; o apelido nunca torna alguém "contato" (atendimento automático segue só a lista de contatos).
 - **Dispositivos de áudio.** Em Configurações avançadas, escolha microfone e alto-falante (`clam::audio::devices`, `Audio::open_with`); vazio usa o padrão do sistema. Se o dispositivo escolhido sumiu (fone desconectado), a abertura falha com aviso em vez de trocar de dispositivo em silêncio.
+
+## Remover membro da sala (GUI)
+
+- Quem cria a sala é o **dono**; o código de convite agora é `segredo:dono[@host:porta]` e a sala fica salva com o dono (`nome segredo:dono`). Códigos antigos (só o segredo) continuam entrando, mas sem dono ninguém remove.
+- O dono vê **Remover** ao lado de cada membro, com confirmação ("Sim, remover" / "Cancelar"). Remover troca o segredo (`room::rotate`) e deixa o aviso cifrado só para quem fica; a chamada com o removido cai na hora.
+- Os outros membros conferem o aviso a cada sincronização (10 s) e ao entrar (`room::follow`, até 8 trocas seguidas), passam para o segredo novo e a janela o salva no lugar do antigo. O removido fica no segredo velho, sem ver nem ser alcançado pelos que ficaram.
+- Limite: um membro desconectado por mais de 3 dias perde o aviso (expira no diretório) e precisa de um convite novo.

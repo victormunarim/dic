@@ -22,6 +22,8 @@ pub(crate) struct App {
     pub(crate) running: Option<Running>,
     pub(crate) done: Arc<AtomicBool>,
     pub(crate) error: String,
+    /// Membro cujo "Remover" espera confirmação.
+    pub(crate) confirm_remove: Option<[u8; 32]>,
     /// Microfones e alto-falantes que o sistema listou (atualizável na janela).
     #[cfg_attr(not(feature = "audio"), allow(dead_code))]
     pub(crate) devs: (Vec<String>, Vec<String>),
@@ -31,19 +33,33 @@ impl App {
     /// Salas guardadas neste computador: entrar de novo é um clique, sem combinar nada.
     pub(crate) fn rooms_ui(&mut self, ui: &mut egui::Ui, offline: bool, in_room: bool, in_call: bool) {
         ui.weak("Ficam salvas neste computador. Entre de novo quando quiser; o primeiro a entrar é o anfitrião.");
+        // O dono trocou o segredo de alguma sala (alguém foi removido): guarda o novo.
+        let changed: Vec<_> = std::mem::take(&mut *self.shared.rekeyed.lock().unwrap());
+        if !changed.is_empty() {
+            for (old, new) in changed {
+                self.form.replace_room_secret(&old, &new);
+            }
+            self.form.save();
+        }
         let rooms = parse_rooms(&self.form.rooms);
+        let me = self.form.my_key();
         let mut forget = None;
-        for (i, (name, secret)) in rooms.iter().enumerate() {
+        for (i, room) in rooms.iter().enumerate() {
+            let SavedRoom { name, secret, owner } = room;
             ui.horizontal(|ui| {
                 ui.label(name);
+                if owner.is_some() && *owner == me {
+                    ui.weak("(você é o dono)");
+                }
                 if ui.add_enabled(!offline && !in_call, egui::Button::new("Entrar")).clicked()
                     && let Some(r) = &self.running
                 {
-                    let _ = r.cmds.send(Cmd::Join(*secret, name.clone()));
+                    let _ = r.cmds.send(Cmd::Join(*secret, *owner, name.clone()));
                 }
                 if ui.button("Copiar código").clicked() {
                     let dir = self.form.directory_addr();
-                    ui.ctx().copy_text(if dir.is_empty() { hex(secret) } else { format!("{}@{dir}", hex(secret)) });
+                    let code = room.code();
+                    ui.ctx().copy_text(if dir.is_empty() { code } else { format!("{code}@{dir}") });
                 }
                 if ui.add_enabled(!in_room, egui::Button::new("Esquecer")).clicked() {
                     forget = Some(i);
@@ -51,8 +67,8 @@ impl App {
             });
         }
         if let Some(i) = forget {
-            let kept: Vec<String> = rooms.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, (n, s))| format!("{n} {}", hex(s))).collect();
-            self.form.rooms = kept.join("\n");
+            let kept: Vec<SavedRoom> = rooms.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, r)| r.clone()).collect();
+            self.form.rooms = format_rooms(&kept);
             self.form.save();
         }
         ui.horizontal(|ui| {
@@ -61,27 +77,28 @@ impl App {
             ui.label("Código:");
             ui.add(egui::TextEdit::singleline(&mut self.form.room_code).hint_text("vazio = criar; ou cole o código de uma sala").desired_width(280.0));
             if ui.add_enabled(!offline && !in_call, egui::Button::new("Criar / entrar")).clicked() {
-                let secret = if self.form.room_code.trim().is_empty() {
-                    Some(room::new_secret())
+                // Sala nova: você é o dono. Com código: o dono vem no código (se o código tiver um).
+                let fresh = if self.form.room_code.trim().is_empty() {
+                    me.map(|m| (room::new_secret(), Some(m)))
                 } else {
-                    split_code(&self.form.room_code).map(|(k, _)| k)
+                    split_room_code(&self.form.room_code)
                 };
-                match secret {
-                    Some(secret) => {
+                match fresh {
+                    Some((secret, owner)) => {
                         let name: String = self.form.room_name.chars().filter(|c| !matches!(c, ';' | '\n')).collect();
                         let name = if name.trim().is_empty() { format!("sala {}", rooms.len() + 1) } else { name.trim().to_string() };
-                        if !rooms.iter().any(|(_, s)| *s == secret) {
+                        if !rooms.iter().any(|r| r.secret == secret) {
                             if !self.form.rooms.trim().is_empty() {
                                 self.form.rooms.push('\n');
                             }
-                            self.form.rooms.push_str(&format!("{name} {}", hex(&secret)));
+                            self.form.rooms.push_str(&format!("{name} {}", SavedRoom { name: String::new(), secret, owner }.code()));
                         }
                         self.form.room_name.clear();
                         self.form.room_code.clear();
                         self.error.clear();
                         self.form.save();
                         if let Some(r) = &self.running {
-                            let _ = r.cmds.send(Cmd::Join(secret, name));
+                            let _ = r.cmds.send(Cmd::Join(secret, owner, name));
                         }
                     }
                     None => self.error = "código de sala inválido (64 hex, com @host:porta opcional)".into(),
@@ -133,7 +150,9 @@ impl App {
             return;
         }
         let names = self.form.names();
+        let i_own = self.shared.owner.load(Ordering::Relaxed);
         let mut nick_changes = Vec::new();
+        let mut remove = None;
         for key in members {
             ui.horizontal(|ui| {
                 let (live, speaking) = match (&mesh, key == me) {
@@ -169,7 +188,27 @@ impl App {
                 if !live {
                     ui.label("conectando...");
                 }
+                if i_own {
+                    if self.confirm_remove == Some(key) {
+                        let who = member_name(&names, &key);
+                        ui.colored_label(egui::Color32::from_rgb(200, 70, 60), format!("Remover {who}?"));
+                        if ui.button("Sim, remover").clicked() {
+                            remove = Some(key);
+                        }
+                        if ui.button("Cancelar").clicked() {
+                            self.confirm_remove = None;
+                        }
+                    } else if ui.button("Remover").on_hover_text("Troca o segredo da sala: só quem fica recebe o novo").clicked() {
+                        self.confirm_remove = Some(key);
+                    }
+                }
             });
+        }
+        if let Some(key) = remove {
+            self.confirm_remove = None;
+            if let Some(r) = &self.running {
+                let _ = r.cmds.send(Cmd::Remove(key));
+            }
         }
         if !nick_changes.is_empty() {
             for (k, n) in nick_changes {

@@ -83,14 +83,47 @@ pub(crate) fn parse_nicks(text: &str) -> Vec<(String, [u8; 32])> {
         .collect()
 }
 
-/// Salas guardadas: `(nome, segredo)`. Linhas sem um segredo de 64 hex são ignoradas.
-pub(crate) fn parse_rooms(text: &str) -> Vec<(String, [u8; 32])> {
+/// Sala guardada: o dono (quem criou) é quem pode remover membros; salas antigas não têm dono registrado.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SavedRoom {
+    pub(crate) name: String,
+    pub(crate) secret: [u8; 32],
+    pub(crate) owner: Option<[u8; 32]>,
+}
+
+/// Código de sala: `segredo[:dono][@host:porta]`, tudo em hex. Devolve o segredo e o dono, se houver.
+pub(crate) fn split_room_code(t: &str) -> Option<([u8; 32], Option<[u8; 32]>)> {
+    let t = t.trim();
+    let t = t.split_once('@').map_or(t, |(k, _)| k);
+    match t.split_once(':') {
+        Some((s, o)) => Some((unhex(s).ok()?, Some(unhex(o).ok()?))),
+        None => Some((unhex(t).ok()?, None)),
+    }
+}
+
+/// Salas guardadas, uma por linha: `nome segredo[:dono]`. Linhas sem um segredo de 64 hex são ignoradas.
+pub(crate) fn parse_rooms(text: &str) -> Vec<SavedRoom> {
     text.lines()
         .filter_map(|l| {
-            let (name, secret) = l.trim().rsplit_once(' ')?;
-            Some((name.trim().to_string(), unhex(secret).ok()?))
+            let (name, code) = l.trim().rsplit_once(' ')?;
+            let (secret, owner) = split_room_code(code)?;
+            Some(SavedRoom { name: name.trim().to_string(), secret, owner })
         })
         .collect()
+}
+
+pub(crate) fn format_rooms(rooms: &[SavedRoom]) -> String {
+    rooms.iter().map(|r| format!("{} {}", r.name, r.code())).collect::<Vec<_>>().join("\n")
+}
+
+impl SavedRoom {
+    /// `segredo[:dono]`, o que vai para o arquivo e para quem recebe o convite.
+    pub(crate) fn code(&self) -> String {
+        match &self.owner {
+            Some(o) => format!("{}:{}", hex(&self.secret), hex(o)),
+            None => hex(&self.secret),
+        }
+    }
 }
 
 /// Valor de `secret=` no arquivo quando a chave de verdade está no chaveiro do sistema.
@@ -198,6 +231,20 @@ impl Form {
         clam::audio::Devices { input: self.input_dev.trim().to_string(), output: self.output_dev.trim().to_string() }
     }
 
+    /// Minha chave pública (a identidade que o diretório e as salas conhecem).
+    pub(crate) fn my_key(&self) -> Option<[u8; 32]> {
+        Some(PublicKey::from(&self.identity().ok()?).to_bytes())
+    }
+
+    /// O dono trocou o segredo de uma sala: guarda o novo no lugar do antigo.
+    pub(crate) fn replace_room_secret(&mut self, old: &[u8; 32], new: &[u8; 32]) {
+        let mut rooms = parse_rooms(&self.rooms);
+        for r in rooms.iter_mut().filter(|r| r.secret == *old) {
+            r.secret = *new;
+        }
+        self.rooms = format_rooms(&rooms);
+    }
+
     pub(crate) fn identity(&self) -> Result<StaticSecret, String> {
         unhex(&self.secret).map(StaticSecret::from).map_err(|e| format!("identidade: {e}"))
     }
@@ -269,7 +316,7 @@ mod tests {
     fn rooms_parse_with_spaces_in_names() {
         let k = hex(&[7u8; 32]);
         let rooms = parse_rooms(&format!("noite de jogo {k}\nlixo\nsala {}", &k[..60]));
-        assert_eq!(rooms, vec![("noite de jogo".to_string(), [7u8; 32])]);
+        assert_eq!(rooms, vec![SavedRoom { name: "noite de jogo".into(), secret: [7u8; 32], owner: None }]);
     }
 
     #[test]
@@ -292,5 +339,17 @@ mod tests {
         f.set_nick(&k, "");
         assert_eq!(f.nick(&k), "");
         assert_eq!(f.names(), vec![("bia".to_string(), [8u8; 32])]);
+    }
+
+    #[test]
+    fn room_codes_carry_the_owner_and_rotate() {
+        let (s, o) = (hex(&[1u8; 32]), hex(&[2u8; 32]));
+        assert_eq!(split_room_code(&format!("{s}:{o}@10.0.0.1:7777")), Some(([1; 32], Some([2; 32]))));
+        assert_eq!(split_room_code(&s), Some(([1; 32], None)));
+        assert!(split_room_code(&format!("{s}:zz")).is_none());
+        let mut f = Form { rooms: format!("a {s}:{o}\nb {}", hex(&[3u8; 32])), ..Form::default() };
+        f.replace_room_secret(&[1; 32], &[9; 32]);
+        let r = parse_rooms(&f.rooms);
+        assert_eq!((r[0].secret, r[0].owner, r[1].secret), ([9; 32], Some([2; 32]), [3; 32]));
     }
 }

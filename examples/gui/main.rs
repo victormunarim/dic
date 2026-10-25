@@ -41,6 +41,7 @@ fn main() -> eframe::Result {
                 running: None,
                 done: Arc::default(),
                 error: String::new(),
+                confirm_remove: None,
                 #[cfg(feature = "audio")]
                 devs: clam::audio::devices(),
                 #[cfg(not(feature = "audio"))]
