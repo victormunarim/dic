@@ -79,6 +79,10 @@ pub mod phone;
 pub mod punch;
 #[cfg(feature = "net")]
 pub mod timer;
+#[cfg(feature = "video")]
+pub mod video;
+#[cfg(feature = "capture")]
+pub mod capture;
 #[cfg(feature = "net")]
 pub mod upnp;
 #[cfg(feature = "net")]

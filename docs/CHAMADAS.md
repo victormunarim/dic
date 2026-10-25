@@ -98,7 +98,9 @@ A tela anda num **circuito só dela**, aberto por quem transmite até o telefone
 - Perda: sem FEC (a taxa é fixa). Perdeu fragmento, os quadros seguintes não são entregues até chegar um quadro-chave, que quem assiste pede (`ScreenStream::needs_key`, no máximo 10 pedidos por segundo) e quem transmite lê em `ScreenShare::keyframe_wanted`. Fila de saída acima de 400 fragmentos descarta quadros velhos e exige quadro-chave.
 - Sinalização: `phone::share_screen` manda um pacote de abertura que prende o circuito à chamada do outro lado (só quem tem as chaves da chamada o autentica; outros pacotes nunca viram convite). `ScreenShare::stop` avisa quem assiste (`ScreenEvent::Stopped`).
 - Quem assiste lê `ActiveCall::next_screen`. Para a chamada que *ligou* receber a tela, ela precisa estar registrada no telefone da própria máquina (`Phone::link`, `call_linked`); `Node::dial` já faz isso.
-- Captura de tela e codec de vídeo ainda não existem: o protocolo transporta quadros já codificados.
+- Codec (feature `video`, módulo `clam::video`): `H264Encoder` (openh264, compilado da fonte, sem `cmake` nem `nasm`) em taxa constante, 80% da capacidade do circuito (`H264Encoder::default_bitrate`), 8 quadros/s, quadro-chave a cada 4 s e sob demanda; `H264Decoder` devolve `RawFrame` RGBA. `pump(fonte, codificador, share)` faz um passo captura → codifica → `ScreenShare::push` e atende `keyframe_wanted`. Dimensões ímpares são cortadas para pares; mudar de resolução reabre o codificador com quadro-chave. Quadro acima de `MAX_FRAME` é descartado e o próximo sai como quadro-chave.
+- Captura (feature `capture`, módulo `clam::capture`): `X11Screen` lê a janela raiz por `GetImage`. Sob Wayland o XWayland recusa a leitura (`BadMatch`) e `X11Screen::open` devolve `Unreadable`: capturar no Wayland exige o portal do compositor (PipeWire), que ainda não está implementado. Outra fonte entra implementando `ScreenSource`.
+- Ainda falta a GUI (botão de compartilhar e janela de visualização).
 
 ### Conexão simples: diretório só para o primeiro contato
 

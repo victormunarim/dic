@@ -366,3 +366,49 @@ async fn screen_circuit_with_foreign_keys_shows_nothing() {
     share.push(&video(500, 1), true).unwrap();
     assert!(timeout(Duration::from_millis(800), b.next_screen()).await.is_err());
 }
+
+#[cfg(feature = "video")]
+#[tokio::test]
+async fn synthetic_screen_goes_through_h264_and_the_screen_circuit() {
+    use clam::video::{H264Decoder, H264Encoder, RawFrame, ScreenSource, pump};
+
+    struct Bars(usize);
+    impl ScreenSource for Bars {
+        fn grab(&mut self) -> Option<RawFrame> {
+            self.0 += 1;
+            let (w, h) = (160, 96);
+            let rgba = (0..w * h).flat_map(|i| if (i % w + self.0 * 8) % 64 < 32 { [220, 40, 40, 255] } else { [40, 40, 220, 255] }).collect();
+            RawFrame::new(w, h, rgba).ok()
+        }
+    }
+
+    let (alice, bob) = ids();
+    let mut phone = Phone::bind("127.0.0.1:0".parse().unwrap(), bob.clone(), vec![*PublicKey::from(&alice).as_bytes()]).await.unwrap();
+    let (_srv, cands) = relays(4, &phone.local_addr().to_string()).await;
+    let bob_pub = PublicKey::from(&bob);
+    let voice = cands.clone();
+    let caller = tokio::spawn(async move { call(client(voice), &alice, &bob_pub, Mulaw::new(), WAIT).await });
+    let incoming = timeout(WAIT, phone.next_incoming()).await.unwrap().unwrap();
+    let mut b = incoming.accept(Mulaw::new()).await.unwrap();
+    let a = caller.await.unwrap().unwrap();
+
+    let share = share_screen(screen_client(cands), a.share_keys(), WAIT).await.unwrap();
+    let mut src = Bars(0);
+    let mut enc = H264Encoder::new(H264Encoder::default_bitrate()).unwrap();
+    let mut dec = H264Decoder::new().unwrap();
+    let mut shown = None;
+    let mut sent = 0;
+    while sent < 6 {
+        if pump(&mut src, &mut enc, &share).unwrap() {
+            sent += 1;
+        }
+        while let Ok(Some(ScreenEvent::Frame(f))) = timeout(Duration::from_millis(150), b.next_screen()).await {
+            if let Some(img) = dec.decode(&f.data).unwrap() {
+                shown = Some(img);
+            }
+        }
+    }
+    let img = shown.expect("a tela chegou");
+    assert_eq!((img.width, img.height), (160, 96));
+    share.stop().await;
+}
