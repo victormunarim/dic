@@ -173,7 +173,13 @@ impl ScreenStream {
 
     /// O emissor deve forçar um quadro-chave no codec (o outro lado pediu, ou a fila estourou).
     pub fn take_keyframe_request(&mut self) -> bool {
-        std::mem::take(&mut self.peer_wants_key) | self.need_key_out
+        let wanted = std::mem::take(&mut self.peer_wants_key);
+        // Um quadro-chave ainda saindo já atende o pedido; outro o esvaziaria no meio e, como ele
+        // leva centenas de ms para sair, os pedidos repetidos do receptor nunca o deixariam chegar.
+        if self.queue.iter().any(|q| q.0 & KEYFRAME != 0) {
+            return false;
+        }
+        wanted | self.need_key_out
     }
 
     /// O pacote do próximo slot: fragmento da fila ou preenchimento. Sempre 200 B.
@@ -319,6 +325,22 @@ mod tests {
         if !drop {
             b.receive(&p).unwrap();
         }
+    }
+
+    #[test]
+    fn repeated_key_requests_do_not_restart_a_keyframe_still_going_out() {
+        let (mut a, mut b) = pair();
+        assert!(a.push_frame(&frame(5000, 1), true).unwrap());
+        slot(&mut a, &mut b, false);
+        b.broken = true;
+        // O receptor pede quadro-chave enquanto o primeiro ainda sai.
+        let ask = b.next_packet().unwrap();
+        a.receive(&ask).unwrap();
+        assert!(!a.take_keyframe_request());
+        while a.has_data() {
+            slot(&mut a, &mut b, false);
+        }
+        assert!(b.poll_frame().is_some());
     }
 
     #[test]
