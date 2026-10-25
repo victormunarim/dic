@@ -107,7 +107,7 @@ pub struct Audio {
     info: String,
     frame: usize,
     rate: u32,
-    gain: Mutex<f32>,
+    gain: Mutex<Agc>,
     played: Arc<AtomicUsize>,
 }
 
@@ -138,7 +138,7 @@ impl Audio {
             }
         });
         match ready_rx.recv() {
-            Ok(Ok(info)) => Ok(Self { capture, playback, stop, thread: Some(thread), info, played, frame: (rate / 50) as usize, rate, gain: Mutex::new(1.0) }),
+            Ok(Ok(info)) => Ok(Self { capture, playback, stop, thread: Some(thread), info, played, frame: (rate / 50) as usize, rate, gain: Mutex::new(Agc::new()) }),
             Ok(Err(e)) => {
                 let _ = thread.join();
                 Err(e)
@@ -155,7 +155,7 @@ impl Audio {
         }
         let mut pcm: Vec<i16> = q.drain(..self.frame).collect();
         drop(q);
-        agc(&mut self.gain.lock().unwrap(), &mut pcm);
+        self.gain.lock().unwrap().process(&mut pcm);
         Some(pcm)
     }
 
@@ -187,19 +187,49 @@ impl Drop for Audio {
 /// Alvo de nível da voz (RMS) e ganho máximo do controle automático de ganho do microfone.
 const AGC_TARGET: f32 = 3000.0;
 const AGC_MAX_GAIN: f32 = 30.0;
-/// Abaixo disto o quadro é tratado como silêncio/ruído: o ganho não muda, para não amplificar chiado.
-const AGC_GATE: f32 = 40.0;
+/// Quadros (20 ms) que a porta de ruído fica aberta depois da última voz.
+const AGC_HANG: u32 = 12;
+/// Atenuação do que não é voz (fundo, chiado, teclado ao longe).
+const AGC_FLOOR_ATTEN: f32 = 0.03;
 
-/// Ajusta o ganho para levar a voz perto de [`AGC_TARGET`] (sobe devagar, desce rápido) e o aplica ao quadro.
-fn agc(gain: &mut f32, pcm: &mut [i16]) {
-    let rms = (pcm.iter().map(|&x| (x as f32).powi(2)).sum::<f32>() / pcm.len().max(1) as f32).sqrt();
-    if rms > AGC_GATE {
-        let want = (AGC_TARGET / rms).clamp(1.0, AGC_MAX_GAIN);
-        let k = if want < *gain { 0.5 } else { 0.05 };
-        *gain += (want - *gain) * k;
+/// Controle automático de ganho com porta de ruído. Estima o piso de ruído (desce rápido, sobe devagar);
+/// só é voz o que passa bem do piso. Voz: o ganho leva o nível perto de [`AGC_TARGET`] (sem amplificar
+/// o ruído além de ~600 de RMS). Sem voz: a porta fecha e o quadro é quase silenciado.
+struct Agc {
+    gain: f32,
+    floor: f32,
+    open: f32,
+    hang: u32,
+}
+
+impl Agc {
+    fn new() -> Self {
+        Self { gain: 1.0, floor: 60.0, open: 0.0, hang: 0 }
     }
-    for x in pcm {
-        *x = (*x as f32 * *gain).clamp(-32768.0, 32767.0) as i16;
+
+    fn process(&mut self, pcm: &mut [i16]) {
+        let rms = (pcm.iter().map(|&x| (x as f32).powi(2)).sum::<f32>() / pcm.len().max(1) as f32).sqrt();
+        let k = if rms < self.floor { 0.3 } else { 0.003 };
+        self.floor += (rms - self.floor) * k;
+        let voice = rms > (self.floor * 3.0).max(80.0);
+        if voice {
+            self.hang = AGC_HANG;
+            let cap = AGC_MAX_GAIN.min(600.0 / self.floor.max(1.0)).max(1.0);
+            let want = (AGC_TARGET / rms).clamp(1.0, cap);
+            let k = if want < self.gain { 0.5 } else { 0.1 };
+            self.gain += (want - self.gain) * k;
+        } else if self.hang > 0 {
+            self.hang -= 1;
+        } else {
+            self.gain += (1.0 - self.gain) * 0.1;
+        }
+        let target = if self.hang > 0 { 1.0 } else { AGC_FLOOR_ATTEN };
+        let k = if target > self.open { 0.7 } else { 0.25 };
+        self.open += (target - self.open) * k;
+        let g = self.gain * self.open;
+        for x in pcm {
+            *x = (*x as f32 * g).clamp(-32768.0, 32767.0) as i16;
+        }
     }
 }
 
@@ -330,20 +360,34 @@ mod tests {
         assert!((0.85..1.05).contains(&ratio), "{ratio}");
     }
 
+    fn rms(v: &[i16]) -> f32 {
+        (v.iter().map(|&x| (x as f32).powi(2)).sum::<f32>() / v.len() as f32).sqrt()
+    }
+
     #[test]
-    fn agc_lifts_quiet_voice_and_leaves_silence() {
-        let quiet: Vec<i16> = (0..160).map(|i| (150.0 * (i as f32 * 0.3).sin()) as i16).collect();
-        let (mut g, mut f) = (1.0f32, quiet.clone());
-        for _ in 0..200 {
-            f = quiet.clone();
-            agc(&mut g, &mut f);
+    fn agc_lifts_quiet_voice_and_gates_noise() {
+        let mut agc = Agc::new();
+        let noise = |n: usize| -> Vec<i16> { (0..160).map(|i| (((n * 160 + i) * 7919 % 61) as i16 - 30)).collect() };
+        // 2 s de ruído (RMS ~17): o piso é aprendido e a saída fica quase muda.
+        let mut out = Vec::new();
+        for n in 0..100 {
+            out = noise(n);
+            agc.process(&mut out);
         }
-        let rms = (f.iter().map(|&x| (x as f32).powi(2)).sum::<f32>() / 160.0).sqrt();
-        assert!(rms > 2000.0, "{rms}");
-        let mut g = 1.0f32;
-        let mut hiss = vec![10i16; 160];
-        agc(&mut g, &mut hiss);
-        assert_eq!((g, hiss[0]), (1.0, 10));
+        assert!(rms(&out) < 3.0, "{}", rms(&out));
+        // Voz fraca (RMS ~300): sobe para perto do alvo.
+        let voice: Vec<i16> = (0..160).map(|i| (420.0 * (i as f32 * 0.3).sin()) as i16).collect();
+        for _ in 0..60 {
+            out = voice.clone();
+            agc.process(&mut out);
+        }
+        assert!(rms(&out) > 1500.0, "{}", rms(&out));
+        // Volta o ruído: a porta fecha.
+        for n in 0..60 {
+            out = noise(n);
+            agc.process(&mut out);
+        }
+        assert!(rms(&out) < 3.0, "{}", rms(&out));
     }
 
     #[test]
