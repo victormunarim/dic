@@ -48,7 +48,8 @@ pub struct RelayConfig {
     pub max_circuits: usize,
     /// Banda total do relay em bytes/s (células, nos dois sentidos). Padrão: 1 MB/s.
     pub relay_bytes_per_sec: u64,
-    /// Teto por circuito em bytes/s. Padrão: 64 kB/s (sobra para voz).
+    /// Teto por circuito em bytes/s, nos dois sentidos. Padrão: 150 kB/s (voz usa ~25 kB/s; um circuito
+    /// de tela com cover de 5 ms, ~105 kB/s).
     pub circuit_bytes_per_sec: u64,
     /// Rajada tolerada, em ms de banda. Padrão: 500.
     pub burst_ms: u64,
@@ -69,7 +70,7 @@ impl Default for RelayConfig {
         Self {
             max_circuits: 256,
             relay_bytes_per_sec: 1_000_000,
-            circuit_bytes_per_sec: 64_000,
+            circuit_bytes_per_sec: 150_000,
             burst_ms: 500,
             idle_ms: 60_000,
             max_auth_failures: 16,
