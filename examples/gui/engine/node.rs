@@ -14,6 +14,7 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
     let names = form.names();
     let mut cfg = NodeConfig::new(secret, form.directory_addr(), contacts.iter().map(|(_, k)| *k).collect());
     cfg.known = load_known();
+    cfg.relay_keys = Some(load_relay_keys());
     if !form.public_addr.trim().is_empty() {
         cfg.public_addr = Some(form.public_addr.trim().to_string());
     }

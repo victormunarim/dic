@@ -23,7 +23,7 @@ Uso da GUI (`examples/gui`): quem fala, volume, apelidos, dispositivos, remover 
 
 O diretório só é indispensável no primeiro contato. Depois disso:
 
-- **Endereço guardado.** O `Node` lembra o último relay de cada contato para quem ligou (`Node::known()`, devolvido em `NodeConfig::known`). Ao discar, se esse relay ainda aceita conexão, a chamada vai direto, sem consultar o diretório. Se não responde, cai na busca normal e atualiza o endereço. A GUI guarda a lista em `~/.clam-gui.known`.
+- **Endereço guardado.** O `Node` lembra o último relay de cada contato para quem ligou (`Node::known()`, devolvido em `NodeConfig::known`). Ao discar, se esse relay ainda aceita conexão, a chamada vai direto, sem consultar o diretório. Se não responde, cai na busca normal e atualiza o endereço. A GUI guarda a lista em `~/.clam-gui.known`. Para esse endereço valer também depois de reabrir ou recompilar o programa de quem recebe, o relay do nó mantém as mesmas chaves (circuito e link) entre execuções: `NodeConfig::relay_keys`, que a GUI guarda em `~/.clam-gui.relay` (0600). Sem isso cada início gerava chaves novas e o endereço que os contatos tinham guardado deixava de servir, obrigando a consultar o diretório na primeira ligação.
 - **Subir com o diretório fora do ar.** `Node::start` não falha mais: registra o problema em `network_note()`/`directory_error()` e tenta publicar de novo a cada 40 s. Enquanto isso, recebe chamadas de quem já tem o seu endereço e liga para quem está em `known`.
 
 Endereço guardado velho não trava a ligação: se o circuito não fica pronto em 5 s, a busca no diretório assume e corrige o cache. Quando o diretório volta, `published_addr()` e `network_note()` se atualizam sozinhos.
