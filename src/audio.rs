@@ -159,6 +159,12 @@ impl Audio {
 
     /// Como [`Audio::open`], mas entregando e recebendo PCM na taxa `rate` (quadros de 20 ms).
     pub fn open_rate(rate: u32) -> Result<Self, AudioError> {
+        Self::open_with(rate, &Devices::default())
+    }
+
+    /// Como [`Audio::open_rate`], escolhendo os dispositivos por nome (ver [`devices`]). Nome vazio = padrão;
+    /// um nome que não existe mais (fone desconectado) erra em vez de cair no padrão sem avisar.
+    pub fn open_with(rate: u32, devices: &Devices) -> Result<Self, AudioError> {
         let capture = Queue::default();
         let playback = Queue::default();
         let stop = Arc::new(AtomicBool::new(false));
@@ -166,7 +172,8 @@ impl Audio {
         let played = Arc::new(AtomicUsize::new(0));
         let tap = Queue::default();
         let (c, p, s, n, tap2) = (capture.clone(), playback.clone(), stop.clone(), played.clone(), tap.clone());
-        let thread = std::thread::spawn(move || match open_streams(c, p, n, rate, tap2) {
+        let devices = devices.clone();
+        let thread = std::thread::spawn(move || match open_streams(c, p, n, rate, tap2, &devices) {
             Ok((streams, info)) => {
                 let _ = ready_tx.send(Ok(info));
                 while !s.load(Ordering::Relaxed) {
@@ -271,10 +278,40 @@ fn push_capped(q: &mut VecDeque<i16>, it: impl Iterator<Item = i16>, max: usize)
     }
 }
 
-fn open_streams(capture: Queue, playback: Queue, played: Arc<AtomicUsize>, rate: u32, tap: Queue) -> Result<((Stream, Stream), String), AudioError> {
+/// Dispositivos de áudio a abrir, pelo nome que [`devices`] lista. Vazio = o padrão do sistema.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Devices {
+    pub input: String,
+    pub output: String,
+}
+
+fn name_of(d: &cpal::Device) -> String {
+    d.description().map(|d| d.to_string()).unwrap_or_default()
+}
+
+/// Nomes dos microfones e dos alto-falantes disponíveis agora: `(entradas, saídas)`.
+pub fn devices() -> (Vec<String>, Vec<String>) {
     let host = cpal::default_host();
-    let input = host.default_input_device().ok_or_else(|| AudioError("sem microfone padrão".into()))?;
-    let output = host.default_output_device().ok_or_else(|| AudioError("sem alto-falante padrão".into()))?;
+    let list = |it: Result<Vec<cpal::Device>, _>| -> Vec<String> {
+        let mut v: Vec<String> = it.map(|d| d.iter().map(name_of).filter(|n| !n.is_empty()).collect()).unwrap_or_default();
+        v.dedup();
+        v
+    };
+    (list(host.input_devices().map(Iterator::collect)), list(host.output_devices().map(Iterator::collect)))
+}
+
+fn open_streams(capture: Queue, playback: Queue, played: Arc<AtomicUsize>, rate: u32, tap: Queue, want: &Devices) -> Result<((Stream, Stream), String), AudioError> {
+    let host = cpal::default_host();
+    let input = if want.input.is_empty() {
+        host.default_input_device().ok_or_else(|| AudioError("sem microfone padrão".into()))?
+    } else {
+        host.input_devices().map_err(err)?.find(|d| name_of(d) == want.input).ok_or_else(|| AudioError(format!("microfone \"{}\" não encontrado", want.input)))?
+    };
+    let output = if want.output.is_empty() {
+        host.default_output_device().ok_or_else(|| AudioError("sem alto-falante padrão".into()))?
+    } else {
+        host.output_devices().map_err(err)?.find(|d| name_of(d) == want.output).ok_or_else(|| AudioError(format!("alto-falante \"{}\" não encontrado", want.output)))?
+    };
     let (inp, outp) = (input.default_input_config().map_err(err)?, output.default_output_config().map_err(err)?);
 
     let info = format!(

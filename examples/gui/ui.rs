@@ -22,6 +22,9 @@ pub(crate) struct App {
     pub(crate) running: Option<Running>,
     pub(crate) done: Arc<AtomicBool>,
     pub(crate) error: String,
+    /// Microfones e alto-falantes que o sistema listou (atualizável na janela).
+    #[cfg_attr(not(feature = "audio"), allow(dead_code))]
+    pub(crate) devs: (Vec<String>, Vec<String>),
 }
 
 impl App {
@@ -93,6 +96,86 @@ impl App {
         let status = self.shared.room.lock().unwrap().clone();
         if !status.is_empty() {
             ui.label(status);
+        }
+        self.members_ui(ui);
+    }
+
+    /// Escolha de microfone e alto-falante (vazio = padrão do sistema); vale na próxima chamada.
+    #[cfg(feature = "audio")]
+    fn devices_ui(&mut self, ui: &mut egui::Ui, offline: bool) {
+        let _ = offline;
+        let pick = |ui: &mut egui::Ui, label: &str, cur: &mut String, list: &[String]| {
+            ui.horizontal(|ui| {
+                ui.label(label);
+                let shown = if cur.is_empty() { "padrão do sistema".to_string() } else { cur.clone() };
+                egui::ComboBox::from_id_salt(label).selected_text(shown).width(320.0).show_ui(ui, |ui| {
+                    ui.selectable_value(cur, String::new(), "padrão do sistema");
+                    for d in list {
+                        ui.selectable_value(cur, d.clone(), d);
+                    }
+                });
+            });
+        };
+        let (ins, outs) = self.devs.clone();
+        pick(ui, "Microfone", &mut self.form.input_dev, &ins);
+        pick(ui, "Alto-falante", &mut self.form.output_dev, &outs);
+        if ui.small_button("Atualizar lista de dispositivos").clicked() {
+            self.devs = clam::audio::devices();
+        }
+    }
+
+    /// Quem está na sala: indicador de fala, apelido e volume de cada pessoa.
+    fn members_ui(&mut self, ui: &mut egui::Ui) {
+        let members = self.shared.members.lock().unwrap().clone();
+        let mesh = self.shared.mesh.lock().unwrap().clone();
+        let me = *self.shared.me.lock().unwrap();
+        if members.is_empty() {
+            return;
+        }
+        let names = self.form.names();
+        let mut nick_changes = Vec::new();
+        for key in members {
+            ui.horizontal(|ui| {
+                let (live, speaking) = match (&mesh, key == me) {
+                    (_, true) => (true, false),
+                    (Some(m), false) => (m.has(&key), m.is_speaking(&key)),
+                    _ => (false, false),
+                };
+                let color = if speaking {
+                    egui::Color32::from_rgb(60, 190, 90)
+                } else if live {
+                    egui::Color32::GRAY
+                } else {
+                    egui::Color32::from_rgb(200, 150, 60)
+                };
+                let (dot, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+                ui.painter().circle_filled(dot.center(), if speaking { 6.0 } else { 4.0 }, color);
+                if key == me {
+                    ui.label("você");
+                    return;
+                }
+                let mut nick = self.form.nick(&key);
+                let hint = member_name(&names, &key);
+                if ui.add(egui::TextEdit::singleline(&mut nick).hint_text(hint).desired_width(130.0)).changed() {
+                    nick_changes.push((key, nick));
+                }
+                if let Some(m) = &mesh {
+                    let mut v = m.volume(&key);
+                    if ui.add(egui::Slider::new(&mut v, 0.0..=room::MAX_VOLUME).show_value(false)).changed() {
+                        m.set_volume(&key, v);
+                    }
+                    ui.label(if v == 0.0 { "mudo".to_string() } else { format!("{:.0}%", v * 100.0) });
+                }
+                if !live {
+                    ui.label("conectando...");
+                }
+            });
+        }
+        if !nick_changes.is_empty() {
+            for (k, n) in nick_changes {
+                self.form.set_nick(&k, &n);
+            }
+            self.form.save();
         }
     }
 
@@ -237,6 +320,8 @@ impl eframe::App for App {
                         );
                     });
                     ui.add_enabled(offline, egui::Checkbox::new(&mut self.form.use_audio, "Usar microfone e alto-falante (use fones para não dar eco)"));
+                    #[cfg(feature = "audio")]
+                    self.devices_ui(ui, offline);
                     ui.add_space(4.0);
                     if offline {
                         if ui.add_sized([160.0, 30.0], egui::Button::new("Ficar online")).clicked() {

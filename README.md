@@ -888,3 +888,10 @@ Ainda **não** existem: TLS/QUIC e travessia de NAT no adaptador (só TCP + Nois
 ## Estado do diretório em disco
 
 `directory [escuta] [estado]` grava as publicações e as salas em `estado` a cada 5 s (arquivo temporário + renomear) e relê ao subir, descartando o que passou de 120 s. Um reinício não esvazia as salas nem muda o anfitrião. Sem o argumento, o estado fica só em memória.
+
+## Interface da sala: quem fala, volume, apelidos e dispositivos
+
+- **Quem fala.** Cada membro da sala tem uma bolinha: verde e maior enquanto fala (energia do áudio recebido, com 400 ms de retenção), cinza quando conectado e quieto, laranja enquanto a ligação não completou. Na API: `Mesh::is_speaking`.
+- **Volume por pessoa.** Um controle de 0 (mudo) a 200 % por membro; vale só para o que você ouve (`Mesh::set_volume`, antes do limitador da mixagem).
+- **Apelidos.** O campo ao lado de cada membro grava um apelido salvo no `~/.clam-gui.conf` (`nicks=`, só neste computador). Contatos continuam com o nome da lista; o apelido nunca torna alguém "contato" (atendimento automático segue só a lista de contatos).
+- **Dispositivos de áudio.** Em Configurações avançadas, escolha microfone e alto-falante (`clam::audio::devices`, `Audio::open_with`); vazio usa o padrão do sistema. Se o dispositivo escolhido sumiu (fone desconectado), a abertura falha com aviso em vez de trocar de dispositivo em silêncio.

@@ -19,6 +19,7 @@ use tokio::{
 
 use crate::conf::*;
 
+#[cfg(feature = "audio")]
 pub(crate) type Sound = clam::audio::Audio;
 
 /// Sem a feature `audio` nenhum `Sound` existe: o tipo é vazio.
@@ -39,12 +40,12 @@ impl Sound {
 }
 
 /// Abre microfone/alto-falante se pedido; sem eles, cai para o tom de teste.
-pub(crate) fn open_sound(want: bool, out: &Sink) -> Option<Sound> {
+pub(crate) fn open_sound(want: bool, form: &Form, out: &Sink) -> Option<Sound> {
     if !want {
         return None;
     }
     #[cfg(feature = "audio")]
-    match Sound::open_rate(G722::RATE) {
+    match Sound::open_with(G722::RATE, &form.devices()) {
         Ok(s) => {
             out.line(format!("microfone e alto-falante abertos (use fones: não há cancelamento de eco): {}", s.info()));
             // Bipe de 0,3 s: se não soar, o problema é a saída do sistema, não a chamada.
@@ -55,6 +56,8 @@ pub(crate) fn open_sound(want: bool, out: &Sink) -> Option<Sound> {
         }
         Err(e) => out.line(format!("{e}; usando tom de teste")),
     }
+    #[cfg(not(feature = "audio"))]
+    let _ = form;
     #[cfg(not(feature = "audio"))]
     out.line("compilado sem a feature audio; usando tom de teste");
     None
@@ -159,6 +162,10 @@ pub(crate) struct Shared {
     pub(crate) in_room: AtomicBool,
     /// Resumo da sala atual.
     pub(crate) room: Mutex<String>,
+    /// Sala atual: a malha (volume e quem fala) e os membros vivos, você incluído.
+    pub(crate) mesh: Mutex<Option<Mesh>>,
+    pub(crate) members: Mutex<Vec<[u8; 32]>>,
+    pub(crate) me: Mutex<[u8; 32]>,
 }
 
 /// Roda o nó até `stop`: atende contatos sozinho e disca quando a janela pede.
@@ -167,7 +174,9 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
     if form.directory_addr().is_empty() {
         return Err("informe o diretório (host:porta), ou cole um código de contato com @host:porta".into());
     }
+    // Só contatos são atendidos sozinhos; apelidos servem apenas para exibir nomes.
     let contacts: Vec<_> = parse_contacts(&form.contacts);
+    let names = form.names();
     let mut cfg = NodeConfig::new(secret, form.directory_addr(), contacts.iter().map(|(_, k)| *k).collect());
     if !form.public_addr.trim().is_empty() {
         cfg.public_addr = Some(form.public_addr.trim().to_string());
@@ -199,7 +208,7 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
                     }
                     continue;
                 }
-                let name = contacts.iter().find(|(_, k)| k == inc.caller().as_bytes()).map(|(n, _)| n.clone()).unwrap_or_else(|| hex(inc.caller().as_bytes())[..8].to_string());
+                let name = member_name(&names, inc.caller().as_bytes());
                 if shared.in_call.swap(true, Ordering::Relaxed) {
                     out.line(format!("{name} ligou, mas já há uma chamada; recusada"));
                     inc.reject().await;
@@ -208,7 +217,7 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
                 out.line(format!("chamada de {name}"));
                 shared.hangup.store(false, Ordering::Relaxed);
                 match inc.accept(G722::new()).await {
-                    Ok(c) => start_talk(c, 660.0, &shared, &out, form.use_audio),
+                    Ok(c) => start_talk(c, 660.0, &shared, &out, &form),
                     Err(e) => {
                         out.line(format!("não atendeu: {e}"));
                         shared.in_call.store(false, Ordering::Relaxed);
@@ -226,7 +235,7 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
                     match node.dial(peer, G722::new(), Duration::from_secs(15)).await {
                         Ok(c) => {
                             out.line("atendida");
-                            start_talk(c, 440.0, &shared, &out, form.use_audio);
+                            start_talk(c, 440.0, &shared, &out, &form);
                         }
                         Err(e) => {
                             out.line(format!("não completou: {e}"));
@@ -241,12 +250,15 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
                     }
                     out.line(format!("entrando na sala {name}..."));
                     shared.in_room.store(true, Ordering::Relaxed);
+                    let mesh = Mesh::new();
+                    *shared.mesh.lock().unwrap() = Some(mesh.clone());
+                    *shared.me.lock().unwrap() = node.public_key();
                     room = Some(RoomRun {
                         name,
                         key: room::room_key(&secret),
-                        mesh: Mesh::new(),
+                        mesh,
                         view: None,
-                        sound: open_sound(form.use_audio, &out),
+                        sound: open_sound(form.use_audio, &form, &out),
                         next_sync: tokio::time::Instant::now(),
                         next_dial: tokio::time::Instant::now(),
                         shown: (0, 0, [0; 32]),
@@ -290,11 +302,12 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
                             let shown = (view.members.len(), r.mesh.count(), view.host);
                             if shown != r.shown {
                                 r.shown = shown;
-                                let host = if view.i_am_host { "você".to_string() } else { member_name(&contacts, &view.host) };
+                                let host = if view.i_am_host { "você".to_string() } else { member_name(&names, &view.host) };
                                 let text = format!("sala {}: {} pessoa(s), {} conectada(s); anfitrião: {host}", r.name, shown.0, shown.1);
                                 out.line(text.clone());
                                 *shared.room.lock().unwrap() = text;
                             }
+                            *shared.members.lock().unwrap() = view.members.clone();
                             r.view = Some(view);
                         }
                         Err(e) => out.line(format!("sala {}: diretório: {e}", r.name)),
@@ -337,13 +350,15 @@ pub(crate) async fn leave_room(node: &Node, r: RoomRun, shared: &Shared, out: &S
     let _ = room::leave(node, &r.key).await;
     out.line(format!("saiu da sala {}", r.name));
     shared.room.lock().unwrap().clear();
+    shared.members.lock().unwrap().clear();
+    *shared.mesh.lock().unwrap() = None;
     shared.in_room.store(false, Ordering::Relaxed);
     shared.in_call.store(false, Ordering::Relaxed);
 }
 
 /// Inicia a conversa numa tarefa própria; `hangup` (da janela) encerra.
-pub(crate) fn start_talk(c: ActiveCall, hz: f64, shared: &Arc<Shared>, out: &Sink, want_audio: bool) {
-    let sound = open_sound(want_audio, out);
+pub(crate) fn start_talk(c: ActiveCall, hz: f64, shared: &Arc<Shared>, out: &Sink, form: &Form) {
+    let sound = open_sound(form.use_audio, form, out);
     let (shared, out) = (shared.clone(), out.clone());
     // `talk` olha este sinalizador local; um vigia o liga quando a janela pede para desligar.
     let stop = Arc::new(AtomicBool::new(false));

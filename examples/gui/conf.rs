@@ -33,6 +33,11 @@ pub(crate) struct Form {
     pub(crate) peer: String,
     pub(crate) public_addr: String,
     pub(crate) use_audio: bool,
+    /// Microfone e alto-falante escolhidos (vazio = padrão do sistema).
+    pub(crate) input_dev: String,
+    pub(crate) output_dev: String,
+    /// Apelidos, um por linha: `chave-hex apelido`. Valem só neste computador.
+    pub(crate) nicks: String,
     /// Salas guardadas, uma por linha: `nome segredo-hex`.
     pub(crate) rooms: String,
     pub(crate) room_name: String,
@@ -64,6 +69,16 @@ pub(crate) fn parse_contacts(text: &str) -> Vec<(String, [u8; 32])> {
                 }
             }
             key.map(|k| (if name.is_empty() { hex(&k)[..8].to_string() } else { name.join(" ") }, k))
+        })
+        .collect()
+}
+
+/// Apelidos: `chave-hex apelido` por linha.
+pub(crate) fn parse_nicks(text: &str) -> Vec<(String, [u8; 32])> {
+    text.lines()
+        .filter_map(|l| {
+            let (key, nick) = l.trim().split_once(' ')?;
+            Some((nick.trim().to_string(), unhex(key).ok()?)).filter(|(n, _)| !n.is_empty())
         })
         .collect()
 }
@@ -122,6 +137,9 @@ impl Form {
             peer: get("peer"),
             public_addr: get("public_addr"),
             use_audio: get("audio") == "1",
+            input_dev: get("input_dev"),
+            output_dev: get("output_dev"),
+            nicks: get("nicks").replace(';', "\n"),
             rooms: get("rooms").replace(';', "\n"),
             ..Form::default()
         }
@@ -131,14 +149,17 @@ impl Form {
         // Chave de identidade no chaveiro do sistema; só cai para o arquivo se ele não estiver disponível.
         let secret = if vault_set(self.secret.trim()) { KEYRING_MARK } else { self.secret.trim() };
         let text = format!(
-            "audio={}\nsecret={}\ndirectory={}\ncontacts={}\npeer={}\npublic_addr={}\nrooms={}\n",
+            "audio={}\nsecret={}\ndirectory={}\ncontacts={}\npeer={}\npublic_addr={}\nrooms={}\ninput_dev={}\noutput_dev={}\nnicks={}\n",
             u8::from(self.use_audio),
             secret,
             self.directory.trim(),
             self.contacts.trim().replace('\n', ";"),
             self.peer.trim(),
             self.public_addr.trim(),
-            self.rooms.trim().replace('\n', ";")
+            self.rooms.trim().replace('\n', ";"),
+            self.input_dev.trim(),
+            self.output_dev.trim(),
+            self.nicks.trim().replace('\n', ";")
         );
         let path = conf_path();
         // Contém a chave secreta: no Unix, só o dono lê.
@@ -149,6 +170,32 @@ impl Form {
                 let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
             }
         }
+    }
+
+    /// Nomes conhecidos: contatos e apelidos (o apelido vale para quem não é contato).
+    pub(crate) fn names(&self) -> Vec<(String, [u8; 32])> {
+        let mut v = parse_contacts(&self.contacts);
+        v.extend(parse_nicks(&self.nicks));
+        v
+    }
+
+    pub(crate) fn nick(&self, key: &[u8; 32]) -> String {
+        parse_nicks(&self.nicks).into_iter().find(|(_, k)| k == key).map(|(n, _)| n).unwrap_or_default()
+    }
+
+    /// Define (ou, vazio, remove) o apelido de `key`.
+    pub(crate) fn set_nick(&mut self, key: &[u8; 32], nick: &str) {
+        let mut v: Vec<(String, [u8; 32])> = parse_nicks(&self.nicks).into_iter().filter(|(_, k)| k != key).collect();
+        let nick = nick.trim().replace(['\n', ';'], " ");
+        if !nick.is_empty() {
+            v.push((nick, *key));
+        }
+        self.nicks = v.iter().map(|(n, k)| format!("{} {n}", hex(k))).collect::<Vec<_>>().join("\n");
+    }
+
+    #[cfg(feature = "audio")]
+    pub(crate) fn devices(&self) -> clam::audio::Devices {
+        clam::audio::Devices { input: self.input_dev.trim().to_string(), output: self.output_dev.trim().to_string() }
     }
 
     pub(crate) fn identity(&self) -> Result<StaticSecret, String> {
@@ -231,5 +278,19 @@ mod tests {
         let text = format!("ana {a}\nlixo\nbia {b}");
         assert_eq!(remove_contact(&text, 0), format!("lixo\nbia {b}"));
         assert_eq!(remove_contact(&text, 1), format!("ana {a}\nlixo"));
+    }
+
+    #[test]
+    fn nicknames_set_replace_and_clear() {
+        let mut f = Form::default();
+        let k = [9u8; 32];
+        f.set_nick(&k, " Zé da Silva ");
+        f.set_nick(&[8u8; 32], "bia");
+        assert_eq!(f.nick(&k), "Zé da Silva");
+        f.set_nick(&k, "Zé");
+        assert_eq!((f.nick(&k), f.nick(&[8u8; 32])), ("Zé".to_string(), "bia".to_string()));
+        f.set_nick(&k, "");
+        assert_eq!(f.nick(&k), "");
+        assert_eq!(f.names(), vec![("bia".to_string(), [8u8; 32])]);
     }
 }

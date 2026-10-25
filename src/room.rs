@@ -173,6 +173,12 @@ pub async fn accept_member(inc: IncomingCall, view: &RoomView, mesh: &Mesh) -> b
 const RETRY_BASE: Duration = Duration::from_secs(2);
 /// Pico (de 32767) a partir do qual a mixagem reduz o ganho.
 const LIMIT: f32 = 30000.0;
+/// Energia (RMS, de 32767) abaixo da qual um quadro conta como silêncio ou ruído de fundo.
+const SPEAKING_RMS: f32 = 400.0;
+/// Quanto tempo depois do último quadro com voz o membro ainda aparece falando.
+const SPEAKING_HOLD: Duration = Duration::from_millis(400);
+/// Volume máximo por membro (2× = +6 dB).
+pub const MAX_VOLUME: f32 = 2.0;
 
 type Queues = Arc<Mutex<HashMap<[u8; 32], VecDeque<Vec<i16>>>>>;
 
@@ -184,6 +190,10 @@ pub struct Mesh {
     /// Ganho do limitador da mixagem (1,0 = sem redução).
     gain: Arc<Mutex<f32>>,
     dials: Arc<Mutex<HashMap<[u8; 32], Dial>>>,
+    /// Volume de cada membro (1,0 = normal, 0 = mudo); quem não está aqui toca no normal.
+    volumes: Arc<Mutex<HashMap<[u8; 32], f32>>>,
+    /// Quando cada membro falou por último (energia acima de [`SPEAKING_RMS`]).
+    spoke: Arc<Mutex<HashMap<[u8; 32], Instant>>>,
 }
 
 /// Estado da discagem a um membro: em andamento, ou esperando para tentar de novo depois de falhar.
@@ -203,6 +213,7 @@ impl Mesh {
         let (tx, mut rx) = mpsc::channel::<Vec<i16>>(8);
         self.peers.lock().unwrap().insert(key, tx);
         let queues = self.queues.clone();
+        let spoke = self.spoke.clone();
         tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -212,6 +223,10 @@ impl Mesh {
                     },
                     inc = call.next_pcm() => match inc {
                         Some(pcm) => {
+                            let rms = (pcm.iter().map(|&x| x as f32 * x as f32).sum::<f32>() / pcm.len().max(1) as f32).sqrt();
+                            if rms >= SPEAKING_RMS {
+                                spoke.lock().unwrap().insert(key, Instant::now());
+                            }
                             let mut q = queues.lock().unwrap();
                             let line = q.entry(key).or_default();
                             if line.len() >= MAX_QUEUED_FRAMES {
@@ -250,6 +265,20 @@ impl Mesh {
         }
     }
 
+    /// Ajusta o volume de `key` (de 0, mudo, a [`MAX_VOLUME`]).
+    pub fn set_volume(&self, key: &[u8; 32], volume: f32) {
+        self.volumes.lock().unwrap().insert(*key, volume.clamp(0.0, MAX_VOLUME));
+    }
+
+    pub fn volume(&self, key: &[u8; 32]) -> f32 {
+        self.volumes.lock().unwrap().get(key).copied().unwrap_or(1.0)
+    }
+
+    /// `key` falou há pouco? (O volume mudo não esconde: o indicador mostra quem fala, não o que você ouve.)
+    pub fn is_speaking(&self, key: &[u8; 32]) -> bool {
+        self.spoke.lock().unwrap().get(key).is_some_and(|t| t.elapsed() < SPEAKING_HOLD)
+    }
+
     /// Há chamada viva com `key`?
     pub fn has(&self, key: &[u8; 32]) -> bool {
         let mut p = self.peers.lock().unwrap();
@@ -276,15 +305,18 @@ impl Mesh {
     /// cortar a onda) e volta devagar, em cerca de 200 ms, quando a soma baixa.
     pub fn mix(&self) -> Option<Vec<i16>> {
         let mut q = self.queues.lock().unwrap();
-        let frames: Vec<Vec<i16>> = q.values_mut().filter_map(VecDeque::pop_front).collect();
+        let frames: Vec<([u8; 32], Vec<i16>)> = q.iter_mut().filter_map(|(k, line)| Some((*k, line.pop_front()?))).collect();
         drop(q);
-        let len = frames.iter().map(Vec::len).max()?;
+        let len = frames.iter().map(|(_, f)| f.len()).max()?;
         let mut sum = vec![0i32; len];
-        for f in &frames {
+        let volumes = self.volumes.lock().unwrap();
+        for (k, f) in &frames {
+            let v = volumes.get(k).copied().unwrap_or(1.0);
             for (o, s) in sum.iter_mut().zip(f) {
-                *o += *s as i32;
+                *o += (*s as f32 * v).round() as i32;
             }
         }
+        drop(volumes);
         let peak = sum.iter().map(|x| x.unsigned_abs()).max().unwrap_or(0) as f32;
         let mut g = self.gain.lock().unwrap();
         let from = if *g == 0.0 { 1.0 } else { *g };
@@ -305,6 +337,7 @@ impl Mesh {
 
     /// Desliga todas as chamadas.
     pub fn hangup(&self) {
+        self.spoke.lock().unwrap().clear();
         self.peers.lock().unwrap().clear();
     }
 }
@@ -330,6 +363,21 @@ mod tests {
         assert_eq!(open_rekey(&bob, &opub, &old, &n), Some(new));
         assert_eq!(open_rekey(&eve, &opub, &old, &n), None);
         assert_eq!(open_rekey(&bob, &opub, &new_secret(), &n), None);
+    }
+
+    #[test]
+    fn volume_scales_one_member_and_mute_silences_it() {
+        let mesh = Mesh::new();
+        let (a, b) = ([1u8; 32], [2u8; 32]);
+        let push = |k: [u8; 32], v: i16| mesh.queues.lock().unwrap().entry(k).or_default().push_back(vec![v; 4]);
+        mesh.set_volume(&a, 0.5);
+        mesh.set_volume(&b, 0.0);
+        push(a, 1000);
+        push(b, 9000);
+        assert_eq!(mesh.mix().unwrap(), vec![500; 4]);
+        assert_eq!(mesh.volume(&b), 0.0);
+        mesh.set_volume(&a, 99.0);
+        assert_eq!(mesh.volume(&a), MAX_VOLUME);
     }
 
     #[test]
