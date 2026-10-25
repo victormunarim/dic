@@ -105,6 +105,79 @@ pub(crate) type Redial = (mpsc::UnboundedSender<([u8; 32], u32)>, [u8; 32]);
 /// Tentativas de religar depois de uma queda.
 const REDIAL_TRIES: u32 = 5;
 
+/// Vigia o silêncio da linha: a voz segue em 50 quadros/s, então um tempo longo sem receber nada é queda.
+pub(crate) struct Silence {
+    last_rx: tokio::time::Instant,
+}
+
+impl Silence {
+    pub(crate) fn new(now: tokio::time::Instant) -> Self {
+        Silence { last_rx: now }
+    }
+
+    /// Chamada uma vez por segundo; `grew` diz se chegou algo desde a última. `true` se a ligação foi dada como perdida.
+    pub(crate) fn lost(&mut self, grew: bool, now: tokio::time::Instant) -> bool {
+        if grew {
+            self.last_rx = now;
+            false
+        } else {
+            now.duration_since(self.last_rx) > LOST_AFTER
+        }
+    }
+}
+
+/// O que fazer com o resultado de uma discagem.
+#[derive(Debug, PartialEq)]
+pub(crate) enum DialStep {
+    /// Atendeu: começar a conversa.
+    Talk,
+    /// Religação falhou e ainda há tentativas: tentar de novo.
+    Retry,
+    /// Desistir e liberar a linha.
+    GiveUp,
+    /// A pessoa cancelou.
+    Cancelled,
+}
+
+/// `attempt` é 0 na primeira discagem e 1.. nas religações; `answered` é `None` se foi cancelada.
+pub(crate) fn dial_step(attempt: u32, answered: Option<bool>) -> DialStep {
+    match answered {
+        None => DialStep::Cancelled,
+        Some(true) => DialStep::Talk,
+        Some(false) if attempt > 0 && attempt < REDIAL_TRIES => DialStep::Retry,
+        Some(false) => DialStep::GiveUp,
+    }
+}
+
+/// Espera `fut`, mas devolve `None` assim que `hangup` for ligado.
+pub(crate) async fn until_hangup<T>(fut: impl std::future::Future<Output = T>, hangup: &AtomicBool) -> Option<T> {
+    tokio::select! {
+        r = fut => Some(r),
+        _ = async {
+            while !hangup.load(Ordering::Relaxed) {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        } => None,
+    }
+}
+
+/// Resumo da qualidade da linha no último segundo, para a janela.
+pub(crate) fn quality(received: u64, concealed: u64, delay_ms: u64) -> String {
+    let total = received + concealed;
+    if received == 0 {
+        return "sem sinal".into();
+    }
+    let loss = concealed * 100 / total;
+    let label = if loss < 2 && delay_ms < 150 {
+        "boa"
+    } else if loss < 10 && delay_ms < 300 {
+        "regular"
+    } else {
+        "ruim"
+    };
+    format!("{label} ({loss}% perdidos, atraso {delay_ms} ms)")
+}
+
 /// Como a conversa terminou.
 #[derive(PartialEq)]
 pub(crate) enum End {
@@ -116,8 +189,8 @@ pub(crate) enum End {
     Lost,
 }
 
-pub(crate) async fn talk(mut c: ActiveCall, hz: f64, stop: Arc<AtomicBool>, out: Sink, sound: Option<Sound>) -> End {
-    let mut last_rx = tokio::time::Instant::now();
+pub(crate) async fn talk(mut c: ActiveCall, hz: f64, stop: Arc<AtomicBool>, out: Sink, sound: Option<Sound>, link: &Mutex<String>) -> End {
+    let mut silence = Silence::new(tokio::time::Instant::now());
     let mut end = End::Hangup;
     let mut tick = interval(Duration::from_millis(20));
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -162,13 +235,12 @@ pub(crate) async fn talk(mut c: ActiveCall, hz: f64, stop: Arc<AtomicBool>, out:
                     out.line(format!("áudio: {e}"));
                 }
                 let s = c.stats();
-                if s.received > prev.received {
-                    last_rx = tokio::time::Instant::now();
-                } else if last_rx.elapsed() > LOST_AFTER {
+                if silence.lost(s.received > prev.received, tokio::time::Instant::now()) {
                     out.line("nada chegou há 8 s: a rede caiu ou mudou");
                     end = End::Lost;
                     break;
                 }
+                *link.lock().unwrap() = quality(s.received - prev.received, s.concealed - prev.concealed, s.delay_ms);
                 let rms = if frames > 0 { (energy / frames as f64).sqrt() } else { 0.0 };
                 out.line(format!(
                     "recebidos +{:<3} (total {})  escondidos +{}  atraso {} ms  volume {:.0}  mic {:.0}{}",
@@ -180,6 +252,7 @@ pub(crate) async fn talk(mut c: ActiveCall, hz: f64, stop: Arc<AtomicBool>, out:
             }
         }
     }
+    link.lock().unwrap().clear();
     let s = c.stats();
     out.line(format!("chamada encerrada: enviados {}, recebidos {}, escondidos {}, atrasados {}", s.sent, s.received, s.concealed, s.late));
     c.hangup();
@@ -203,6 +276,8 @@ pub(crate) struct Shared {
     pub(crate) in_call: AtomicBool,
     /// Pedido de desligar a chamada atual.
     pub(crate) hangup: AtomicBool,
+    /// Qualidade da linha na chamada atual (vazio fora de chamada).
+    pub(crate) link: Mutex<String>,
     /// Texto de estado do nó ("online em ...").
     pub(crate) status: Mutex<String>,
     /// Está numa sala (as chamadas da sala não usam `in_call`, mas ele fica ligado).
@@ -250,14 +325,7 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
         let (dialer, sh, tx) = (dialer.clone(), shared.clone(), dialed_tx.clone());
         tokio::spawn(async move {
             tokio::time::sleep(delay).await;
-            let r = tokio::select! {
-                r = dialer.dial(peer, G722::new(), Duration::from_secs(15)) => Some(r),
-                _ = async {
-                    while !sh.hangup.load(Ordering::Relaxed) {
-                        tokio::time::sleep(Duration::from_millis(50)).await;
-                    }
-                } => None,
-            };
+            let r = until_hangup(dialer.dial(peer, G722::new(), Duration::from_secs(15)), &sh.hangup).await;
             let _ = tx.send((peer, attempt, r));
         });
     };
@@ -298,12 +366,12 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
             }
             Some((peer, attempt, r)) = dialed_rx.recv() => {
                 save_known(&node.known());
-                match r {
-                    Some(Ok(c)) => {
+                match (dial_step(attempt, r.as_ref().map(|r| r.is_ok())), r) {
+                    (DialStep::Talk, Some(Ok(c))) => {
                         out.line(if attempt > 0 { "religada" } else { "atendida" });
                         start_talk(c, 440.0, &shared, &out, &form, Some((redial_tx.clone(), peer)));
                     }
-                    Some(Err(e)) if attempt > 0 && attempt < REDIAL_TRIES => {
+                    (DialStep::Retry, Some(Err(e))) => {
                         out.line(format!("não religou ({attempt}/{REDIAL_TRIES}): {e}"));
                         let tx = redial_tx.clone();
                         tokio::spawn(async move {
@@ -311,11 +379,11 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
                             let _ = tx.send((peer, attempt + 1));
                         });
                     }
-                    Some(Err(e)) => {
+                    (_, Some(Err(e))) => {
                         out.line(format!("não completou: {e}"));
                         shared.in_call.store(false, Ordering::Relaxed);
                     }
-                    None => {
+                    _ => {
                         out.line("ligação cancelada");
                         shared.in_call.store(false, Ordering::Relaxed);
                     }
@@ -404,7 +472,7 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
                 None => break,
             },
             _ = room_tick.tick(), if room.is_some() => {
-                let r = room.as_mut().unwrap();
+                let Some(r) = room.as_mut() else { continue };
                 let frames: Vec<Vec<i16>> = match &r.sound {
                     Some(s) => std::iter::from_fn(|| s.mic_frame()).take(2).collect(),
                     None => vec![tone(440.0, r.n)],
@@ -537,7 +605,7 @@ pub(crate) fn start_talk(c: ActiveCall, hz: f64, shared: &Arc<Shared>, out: &Sin
         }
     });
     tokio::spawn(async move {
-        let end = talk(c, hz, stop.clone(), out.clone(), sound).await;
+        let end = talk(c, hz, stop.clone(), out.clone(), sound, &shared.link).await;
         stop.store(true, Ordering::Relaxed);
         if end == End::Lost
             && !shared.hangup.load(Ordering::Relaxed)
@@ -547,6 +615,9 @@ pub(crate) fn start_talk(c: ActiveCall, hz: f64, shared: &Arc<Shared>, out: &Sin
             out.line("conexão perdida; religando...");
             let _ = tx.send((peer, 1));
             return;
+        }
+        if end == End::Lost && !shared.hangup.load(Ordering::Relaxed) {
+            out.line("conexão perdida; aguardando o outro lado religar");
         }
         shared.in_call.store(false, Ordering::Relaxed);
     });
@@ -591,6 +662,52 @@ mod tests {
         assert_eq!(shared.rekeyed.lock().unwrap().len(), 2);
         // Eve foi removida na segunda troca: fica presa no segredo do meio.
         assert_eq!(follow_chain(&addr, &eve, &opub, first, &Shared::default()).await, second);
+    }
+
+    #[test]
+    fn silence_declares_loss_only_after_the_limit() {
+        let t0 = tokio::time::Instant::now();
+        let mut s = Silence::new(t0);
+        assert!(!s.lost(false, t0 + LOST_AFTER));
+        assert!(s.lost(false, t0 + LOST_AFTER + Duration::from_secs(1)));
+        // Chegou algo: a contagem recomeça.
+        assert!(!s.lost(true, t0 + Duration::from_secs(9)));
+        assert!(!s.lost(false, t0 + Duration::from_secs(9) + LOST_AFTER));
+        assert!(s.lost(false, t0 + Duration::from_secs(10) + LOST_AFTER));
+    }
+
+    #[test]
+    fn dial_step_retries_only_redials_within_the_limit() {
+        assert_eq!(dial_step(0, Some(true)), DialStep::Talk);
+        assert_eq!(dial_step(3, Some(true)), DialStep::Talk);
+        assert_eq!(dial_step(0, Some(false)), DialStep::GiveUp);
+        assert_eq!(dial_step(1, Some(false)), DialStep::Retry);
+        assert_eq!(dial_step(REDIAL_TRIES - 1, Some(false)), DialStep::Retry);
+        assert_eq!(dial_step(REDIAL_TRIES, Some(false)), DialStep::GiveUp);
+        assert_eq!(dial_step(2, None), DialStep::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn hangup_cancels_a_pending_dial() {
+        let hangup = Arc::new(AtomicBool::new(false));
+        let h = hangup.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            h.store(true, Ordering::Relaxed);
+        });
+        let r = tokio::time::timeout(Duration::from_secs(5), until_hangup(std::future::pending::<u8>(), &hangup)).await;
+        assert_eq!(r, Ok(None));
+        // Sem pedido de desligar, o resultado passa.
+        assert_eq!(until_hangup(async { 7 }, &AtomicBool::new(false)).await, Some(7));
+    }
+
+    #[test]
+    fn quality_grades_loss_and_delay() {
+        assert_eq!(quality(0, 0, 0), "sem sinal");
+        assert!(quality(50, 0, 40).starts_with("boa"));
+        assert!(quality(47, 3, 40).starts_with("regular"));
+        assert!(quality(50, 0, 250).starts_with("regular"));
+        assert!(quality(30, 20, 40).starts_with("ruim"));
     }
 
     #[test]

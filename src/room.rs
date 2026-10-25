@@ -301,7 +301,7 @@ impl Mesh {
 
     /// Um quadro misturado com o próximo de cada membro que tem algo. `None` se ninguém falou.
     ///
-    /// A soma passa por um limitador: se o pico passaria de [`LIMIT`], o ganho cai na hora para caber (sem
+    /// A soma passa por um limitador: se o pico passaria de `LIMIT`, o ganho cai na hora para caber (sem
     /// cortar a onda) e volta devagar, em cerca de 200 ms, quando a soma baixa.
     pub fn mix(&self) -> Option<Vec<i16>> {
         let mut q = self.queues.lock().unwrap();

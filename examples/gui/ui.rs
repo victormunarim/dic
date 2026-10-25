@@ -379,6 +379,10 @@ impl eframe::App for App {
                 if in_call && !in_room {
                     card(ui, "Em chamada", |ui| {
                         ui.label("Conversando agora.");
+                        let link = self.shared.link.lock().unwrap().clone();
+                        if !link.is_empty() {
+                            ui.label(format!("Linha: {link}"));
+                        }
                         if ui.add_sized([160.0, 30.0], egui::Button::new("Desligar")).clicked() {
                             self.shared.hangup.store(true, Ordering::Relaxed);
                         }
