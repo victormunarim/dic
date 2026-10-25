@@ -30,11 +30,11 @@ Libere a porta TCP 4001 (seu relay). Abra a janela:
 cargo run --release --features gui,audio --example gui     # sem áudio: --features gui
 ```
 
-1. *Gerar nova* na identidade e envie sua **chave pública** à outra pessoa.
+1. *Gerar nova* na identidade e envie seu **código de contato** (botão *Copiar*; é a chave pública + `@diretório`) à outra pessoa.
 2. Diretório: `IP-DO-SERVIDOR:7777`.
-3. Contatos: a chave pública de quem pode ligar para você.
+3. Contatos: o código de contato de quem pode ligar para você. Se o campo Diretório estiver vazio, ele é preenchido pelo código.
 4. *Ficar online*.
-5. Para ligar, cole a chave pública do outro em *Ligar*. Use fones.
+5. Para ligar, cole a código do outro em *Ligar*. Use fones.
 
 Atrás de roteador: com o diretório na internet, o programa tenta abrir a porta 4001 sozinho por UPnP e avisa o resultado no log. Se não der, ou redirecione a porta 4001 e preencha o endereço público (`ip:4001`), ou, se o servidor foi iniciado com `--relay`, marque *Atrás de NAT: usar o relay do servidor* (não precisa abrir porta; o servidor passa a ver seu IP).
 Config em `~/.clam-gui.conf` (contém a chave secreta, modo 0600).

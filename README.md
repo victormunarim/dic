@@ -799,9 +799,9 @@ Guias passo a passo por sistema: [`docs/LINUX.md`](docs/LINUX.md) e [`docs/WINDO
 cargo run --release --features gui --example gui
 ```
 
-1. **Identidade**: cole a chave secreta (64 hex) ou *Gerar nova*; a chave pública aparece com *Copiar*. Passe-a a quem vai te chamar.
+1. **Identidade**: cole a chave secreta (64 hex) ou *Gerar nova*; o código de contato (`chave@host:porta`, 64 hex + diretório) aparece com *Copiar*. Passe-o a quem vai te chamar.
 2. **Diretório**: `host:porta` do servidor. **Contatos**: chaves públicas que podem ligar para você, separadas por `;` (quem não estiver na lista não recebe resposta; contatos são atendidos automaticamente).
-3. **Ficar online** publica você no diretório. **Ligar** pede a chave pública do outro; **Desligar** encerra.
+3. **Ficar online** publica você no diretório. **Ligar** pede o código (ou só a chave) do outro; **Desligar** encerra.
 4. Os campos são gravados em `~/.clam-gui.conf` (`%USERPROFILE%` no Windows), **inclusive a chave secreta**; no Unix o arquivo fica `0600`.
 5. **Áudio real** (feature `audio`): `--features gui,audio` e marque *Microfone e alto-falante*. Usa `cpal`, 8 kHz mono, filas de 400 ms. **Use fones**: sem cancelamento de eco. Sem a opção, cai para tom (440 Hz quem liga, 660 Hz quem atende). No Linux a compilação exige `pkg-config` e `libasound2-dev`.
 6. `eframe` fica atrás da feature `gui`, fixado em 0.32 (a 0.37 conflita com o libp2p por `js-sys`).
