@@ -592,3 +592,23 @@ async fn contacts_addresses_are_stored_in_background() {
     .expect("endereço do contato não foi guardado");
     assert_eq!(a.known()[0].0, pb);
 }
+
+/// Desligar de propósito marca `peer_hung_up`; queda de rede não (a GUI só religa neste caso).
+#[tokio::test]
+async fn call_reports_whether_peer_hung_up() {
+    let (_d, addr) = dir().await;
+    let (sa, sb) = (key(), key());
+    let (pa, pb) = (*PublicKey::from(&sa).as_bytes(), *PublicKey::from(&sb).as_bytes());
+    let a = Node::start(cfg(sa, &addr, vec![])).await.unwrap();
+    let mut b = Node::start(cfg(sb, &addr, vec![pa])).await.unwrap();
+    let answer = tokio::spawn(async move {
+        let inc = timeout(Duration::from_secs(15), b.next_incoming()).await.unwrap().unwrap();
+        (inc.accept(Mulaw::new()).await.unwrap(), b)
+    });
+    let ca = a.dial(pb, Mulaw::new(), Duration::from_secs(15)).await.unwrap();
+    let (mut cb, _b) = answer.await.unwrap();
+    assert!(!cb.peer_hung_up());
+    ca.hangup();
+    timeout(Duration::from_secs(5), async { while cb.next_pcm().await.is_some() {} }).await.expect("a chamada deveria acabar");
+    assert!(cb.peer_hung_up());
+}

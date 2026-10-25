@@ -96,7 +96,29 @@ impl Sink {
 
 /// Envia um tom (ou o microfone) a cada 20 ms e relata, por segundo, o que chegou. Termina ao desligar
 /// (`stop`) ou quando o outro lado desliga.
-pub(crate) async fn talk(mut c: ActiveCall, hz: f64, stop: Arc<AtomicBool>, out: Sink, sound: Option<Sound>) {
+/// Sem receber nada por tanto tempo, a ligação é dada como perdida (a voz segue em 50 quadros/s, então silêncio é queda).
+const LOST_AFTER: Duration = Duration::from_secs(8);
+
+/// Para onde pedir a religação e para quem.
+pub(crate) type Redial = (mpsc::UnboundedSender<([u8; 32], u32)>, [u8; 32]);
+
+/// Tentativas de religar depois de uma queda.
+const REDIAL_TRIES: u32 = 5;
+
+/// Como a conversa terminou.
+#[derive(PartialEq)]
+pub(crate) enum End {
+    /// Quem está na janela desligou.
+    Hangup,
+    /// O outro lado desligou.
+    PeerHangup,
+    /// A rede caiu ou mudou: vale religar.
+    Lost,
+}
+
+pub(crate) async fn talk(mut c: ActiveCall, hz: f64, stop: Arc<AtomicBool>, out: Sink, sound: Option<Sound>) -> End {
+    let mut last_rx = tokio::time::Instant::now();
+    let mut end = End::Hangup;
     let mut tick = interval(Duration::from_millis(20));
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut report = interval(Duration::from_secs(1));
@@ -118,7 +140,10 @@ pub(crate) async fn talk(mut c: ActiveCall, hz: f64, stop: Arc<AtomicBool>, out:
                     sent_energy += f.iter().map(|x| (*x as f64).powi(2)).sum::<f64>() / f.len() as f64;
                     closed |= c.send(f).await.is_err();
                 }
-                if closed { break; }
+                if closed {
+                    end = if c.peer_hung_up() { End::PeerHangup } else { End::Lost };
+                    break;
+                }
                 n += 1;
             }
             f = c.next_pcm() => match f {
@@ -127,13 +152,23 @@ pub(crate) async fn talk(mut c: ActiveCall, hz: f64, stop: Arc<AtomicBool>, out:
                     frames += 1;
                     energy += f.iter().map(|x| (*x as f64).powi(2)).sum::<f64>() / f.len() as f64;
                 }
-                None => break,
+                None => {
+                    end = if c.peer_hung_up() { End::PeerHangup } else { End::Lost };
+                    break;
+                }
             },
             _ = report.tick() => {
                 if let Some(e) = sound.as_ref().and_then(Sound::take_error) {
                     out.line(format!("áudio: {e}"));
                 }
                 let s = c.stats();
+                if s.received > prev.received {
+                    last_rx = tokio::time::Instant::now();
+                } else if last_rx.elapsed() > LOST_AFTER {
+                    out.line("nada chegou há 8 s: a rede caiu ou mudou");
+                    end = End::Lost;
+                    break;
+                }
                 let rms = if frames > 0 { (energy / frames as f64).sqrt() } else { 0.0 };
                 out.line(format!(
                     "recebidos +{:<3} (total {})  escondidos +{}  atraso {} ms  volume {:.0}  mic {:.0}{}",
@@ -149,6 +184,7 @@ pub(crate) async fn talk(mut c: ActiveCall, hz: f64, stop: Arc<AtomicBool>, out:
     out.line(format!("chamada encerrada: enviados {}, recebidos {}, escondidos {}, atrasados {}", s.sent, s.received, s.concealed, s.late));
     c.hangup();
     tokio::time::sleep(Duration::from_millis(500)).await;
+    end
 }
 
 pub(crate) enum Cmd {
@@ -206,7 +242,25 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
         out.line(n);
     }
     let dialer = node.dialer();
-    let (dialed_tx, mut dialed_rx) = mpsc::unbounded_channel::<Option<Result<ActiveCall, clam::node::DialError>>>();
+    let (dialed_tx, mut dialed_rx) = mpsc::unbounded_channel::<([u8; 32], u32, Option<Result<ActiveCall, clam::node::DialError>>)>();
+    let (redial_tx, mut redial_rx) = mpsc::unbounded_channel::<([u8; 32], u32)>();
+    // Discar demora (furo de NAT, endereço guardado, espera de resposta): numa tarefa, para a janela seguir
+    // atendendo comandos; "Desligar" cancela.
+    let spawn_dial = |peer: [u8; 32], attempt: u32, delay: Duration| {
+        let (dialer, sh, tx) = (dialer.clone(), shared.clone(), dialed_tx.clone());
+        tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            let r = tokio::select! {
+                r = dialer.dial(peer, G722::new(), Duration::from_secs(15)) => Some(r),
+                _ = async {
+                    while !sh.hangup.load(Ordering::Relaxed) {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                } => None,
+            };
+            let _ = tx.send((peer, attempt, r));
+        });
+    };
     let mut room: Option<RoomRun> = None;
     let mut room_tick = interval(Duration::from_millis(20));
     room_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -235,19 +289,27 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
                 out.line(format!("chamada de {name}"));
                 shared.hangup.store(false, Ordering::Relaxed);
                 match inc.accept(G722::new()).await {
-                    Ok(c) => start_talk(c, 660.0, &shared, &out, &form),
+                    Ok(c) => start_talk(c, 660.0, &shared, &out, &form, None),
                     Err(e) => {
                         out.line(format!("não atendeu: {e}"));
                         shared.in_call.store(false, Ordering::Relaxed);
                     }
                 }
             }
-            Some(r) = dialed_rx.recv() => {
+            Some((peer, attempt, r)) = dialed_rx.recv() => {
                 save_known(&node.known());
                 match r {
                     Some(Ok(c)) => {
-                        out.line("atendida");
-                        start_talk(c, 440.0, &shared, &out, &form);
+                        out.line(if attempt > 0 { "religada" } else { "atendida" });
+                        start_talk(c, 440.0, &shared, &out, &form, Some((redial_tx.clone(), peer)));
+                    }
+                    Some(Err(e)) if attempt > 0 && attempt < REDIAL_TRIES => {
+                        out.line(format!("não religou ({attempt}/{REDIAL_TRIES}): {e}"));
+                        let tx = redial_tx.clone();
+                        tokio::spawn(async move {
+                            tokio::time::sleep(Duration::from_secs(3)).await;
+                            let _ = tx.send((peer, attempt + 1));
+                        });
                     }
                     Some(Err(e)) => {
                         out.line(format!("não completou: {e}"));
@@ -257,6 +319,15 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
                         out.line("ligação cancelada");
                         shared.in_call.store(false, Ordering::Relaxed);
                     }
+                }
+            }
+            Some((peer, attempt)) = redial_rx.recv() => {
+                if shared.hangup.load(Ordering::Relaxed) {
+                    out.line("ligação cancelada");
+                    shared.in_call.store(false, Ordering::Relaxed);
+                } else {
+                    out.line(format!("religando ({attempt}/{REDIAL_TRIES})..."));
+                    spawn_dial(peer, attempt, Duration::ZERO);
                 }
             }
             cmd = rx.recv() => match cmd {
@@ -269,18 +340,7 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
                     out.line("ligando...");
                     // Discar demora (furo de NAT, endereço guardado, espera de resposta): numa tarefa, para a
                     // janela seguir atendendo comandos; "Desligar" cancela a ligação.
-                    let (dialer, sh, tx) = (dialer.clone(), shared.clone(), dialed_tx.clone());
-                    tokio::spawn(async move {
-                        let r = tokio::select! {
-                            r = dialer.dial(peer, G722::new(), Duration::from_secs(15)) => Some(r),
-                            _ = async {
-                                while !sh.hangup.load(Ordering::Relaxed) {
-                                    tokio::time::sleep(Duration::from_millis(50)).await;
-                                }
-                            } => None,
-                        };
-                        let _ = tx.send(r);
-                    });
+                    spawn_dial(peer, 0, Duration::ZERO);
                 }
                 Some(Cmd::Join(mut secret, owner, name)) => {
                     if shared.in_call.swap(true, Ordering::Relaxed) {
@@ -461,7 +521,8 @@ pub(crate) async fn leave_room(node: &Node, r: RoomRun, shared: &Shared, out: &S
 }
 
 /// Inicia a conversa numa tarefa própria; `hangup` (da janela) encerra.
-pub(crate) fn start_talk(c: ActiveCall, hz: f64, shared: &Arc<Shared>, out: &Sink, form: &Form) {
+/// `redial`: se a conexão cair, pede para religar a esse contato (só quem discou religa).
+pub(crate) fn start_talk(c: ActiveCall, hz: f64, shared: &Arc<Shared>, out: &Sink, form: &Form, redial: Option<Redial>) {
     let sound = open_sound(form.use_audio, form, out);
     let (shared, out) = (shared.clone(), out.clone());
     // `talk` olha este sinalizador local; um vigia o liga quando a janela pede para desligar.
@@ -476,8 +537,17 @@ pub(crate) fn start_talk(c: ActiveCall, hz: f64, shared: &Arc<Shared>, out: &Sin
         }
     });
     tokio::spawn(async move {
-        talk(c, hz, stop.clone(), out, sound).await;
+        let end = talk(c, hz, stop.clone(), out.clone(), sound).await;
         stop.store(true, Ordering::Relaxed);
+        if end == End::Lost
+            && !shared.hangup.load(Ordering::Relaxed)
+            && let Some((tx, peer)) = redial
+        {
+            // `in_call` fica ligado: nada mais entra na linha enquanto tenta religar.
+            out.line("conexão perdida; religando...");
+            let _ = tx.send((peer, 1));
+            return;
+        }
         shared.in_call.store(false, Ordering::Relaxed);
     });
 }

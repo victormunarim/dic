@@ -1,7 +1,7 @@
 //! # clam
 //!
 //! Núcleo de privacidade da rede de chamadas P2P: modo privado por padrão e
-//! presença cifrada. Veja o `README.md` para o guia completo.
+//! presença cifrada. Veja o `README.md` e a pasta `docs/` para o guia completo.
 //!
 //! | Módulo | Papel |
 //! | --- | --- |

@@ -1,6 +1,6 @@
 //! Janela mínima para ligar e atender sem usar o terminal.
 //! Código em `examples/gui/`: `conf` (formulário e arquivo), `engine` (nó, chamadas e salas, sem janela), `ui` (egui).
-//! Roteiro no README, seção "Interface gráfica mínima".
+//! Roteiro em `docs/CHAMADAS.md`, seção "Interface gráfica mínima".
 //!
 //! ```text
 //! cargo run --release --features gui,audio --example gui
