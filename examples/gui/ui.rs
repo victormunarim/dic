@@ -584,6 +584,8 @@ impl eframe::App for App {
                 });
             });
         });
-        ctx.request_repaint_after(Duration::from_millis(300));
+        // Com tela chegando a janela repinta a cada ~16 ms; a 300 ms o vídeo parecia ter 3 quadros/s.
+        let watching = !self.shared.screen.images.lock().unwrap().is_empty();
+        ctx.request_repaint_after(Duration::from_millis(if watching { 16 } else { 300 }));
     }
 }
