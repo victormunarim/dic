@@ -45,9 +45,6 @@ pub struct NodeConfig {
     /// Endereço `ip:porta` que os outros devem usar para chegar ao relay, se o IP que o diretório
     /// enxerga não serve (NAT com redirecionamento de porta, VPN). `None`: o diretório decide.
     pub public_addr: Option<String>,
-    /// Atrás de NAT, sem porta aberta: usa o relay do próprio servidor (o servidor precisa ter sido
-    /// iniciado com relay). O servidor passa a ver o seu IP e o tráfego cifrado das suas chamadas.
-    pub via_server: bool,
     /// Tenta abrir a porta do relay no roteador por UPnP quando o diretório está na internet. Padrão: sim.
     pub upnp: bool,
     /// Tenta furar o NAT por UDP para chamadas diretas (sem circuito). Padrão: sim.
@@ -56,7 +53,7 @@ pub struct NodeConfig {
 
 impl NodeConfig {
     pub fn new(secret: StaticSecret, directory: impl Into<String>, contacts: Vec<[u8; 32]>) -> Self {
-        Self { secret, directory: directory.into(), contacts, relay_port: DEFAULT_RELAY_PORT, public_addr: None, via_server: false, upnp: true, punch: true }
+        Self { secret, directory: directory.into(), contacts, relay_port: DEFAULT_RELAY_PORT, public_addr: None, upnp: true, punch: true }
     }
 }
 
@@ -99,18 +96,17 @@ impl Node {
                 let onion = n.public_key();
                 scfg.listen = SocketAddr::from(([0, 0, 0, 0], 0));
                 let r = RelayServer::spawn(n, scfg).await?;
-                return Self::finish(cfg.secret, cfg.directory, cfg.public_addr, cfg.via_server, cfg.upnp, cfg.punch, phone, r, onion).await;
+                return Self::finish(cfg.secret, cfg.directory, cfg.public_addr, cfg.upnp, cfg.punch, phone, r, onion).await;
             }
             Err(e) => return Err(e),
         };
-        Self::finish(cfg.secret, cfg.directory, cfg.public_addr, cfg.via_server, cfg.upnp, cfg.punch, phone, relay, onion).await
+        Self::finish(cfg.secret, cfg.directory, cfg.public_addr, cfg.upnp, cfg.punch, phone, relay, onion).await
     }
 
     async fn finish(
         secret: StaticSecret,
         directory: String,
         public_addr: Option<String>,
-        via_server: bool,
         upnp: bool,
         punch: bool,
         phone: Phone,
@@ -119,11 +115,6 @@ impl Node {
     ) -> io::Result<Self> {
         let (port, link) = (relay.local_addr().port(), relay.link_public_key());
         let last_error = Arc::new(Mutex::new(None));
-        if via_server {
-            let (addr, task) = directory::host(&directory, &secret, phone.local_addr(), last_error.clone()).await?;
-            let mine = RelayInfo { addr, onion, link };
-            return Ok(Self { secret, directory, phone, relay, mine, last_error, republish: task, note: None, punch: None });
-        }
         // Diretório na internet e nenhum endereço público informado: tenta abrir a porta no roteador.
         let (mut public_addr, mut mapping, mut note) = (public_addr, None, None);
         if upnp && public_addr.is_none() && !upnp::directory_is_local(&directory).await {
@@ -152,6 +143,20 @@ impl Node {
         };
         let addr = directory::publish(&directory, &secret, port, onion, link, public_addr.as_deref()).await?;
         let mine = RelayInfo { addr, onion, link };
+        // Pede ao diretório para conectar de fora ao relay publicado: avisa cedo se ninguém consegue ligar para você.
+        if !upnp::directory_is_local(&directory).await
+            && let Ok(false) = directory::reachable(&directory, &secret).await
+        {
+            let warn = if punch.is_some() {
+                format!("o relay {} não é alcançável de fora; chamadas diretas por furo de NAT ainda funcionam, mas libere a porta {port} para o resto", mine.addr)
+            } else {
+                format!("o relay {} não é alcançável de fora: ninguém consegue ligar para você. Libere a porta {port} no roteador/firewall ou informe o endereço público", mine.addr)
+            };
+            note = Some(match note {
+                Some(n) => format!("{n}; {warn}"),
+                None => warn,
+            });
+        }
         let republish = {
             let (directory, secret, last_error, public_addr) = (directory.clone(), secret.clone(), last_error.clone(), public_addr);
             tokio::spawn(async move {

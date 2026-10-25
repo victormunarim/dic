@@ -782,14 +782,12 @@ Só o **primeiro contato** usa servidor. Um diretório (`src/directory.rs`) guar
 - **Relógio:** o diretório manda a hora dele no primeiro contato e todos usam essa hora nos convites (`src/clock.rs`). Computadores com a hora errada deixam de recusar chamadas (o convite vale 60 s).
 - **Atrás de roteador:** com o diretório na internet, o nó pede ao roteador para encaminhar a porta do relay por UPnP (`src/upnp.rs`, renovado a cada 40 s) e publica o IP externo. Sem UPnP, ou com CGNAT, a janela avisa o motivo; então abra a porta 4001 ou informe `public_addr`. Se o diretório está na LAN (IP privado), o UPnP não é usado.
 - **Furo de NAT por UDP** (`src/punch.rs`, `NodeConfig.punch`, padrão ligado): o nó usa um socket UDP que fala com o diretório (mesma porta do TCP; ele responde de onde o pacote veio, como um STUN) e mantém o mapeamento do roteador aberto. Quem aceita chamadas mantém um controle com o diretório (`REQ_PUNCH_LISTEN`); quem chama pede o furo (`REQ_PUNCH_PREP`/`REQ_PUNCH_GO`), o diretório avisa o ouvinte do endereço UDP do chamador e devolve o do ouvinte, e os dois sondam um ao outro até abrir. O convite e a voz (já cifrados ponta a ponta) seguem direto por UDP, sem circuito e sem relay. Se o alvo não aceita furos ou o furo não abre em 6 s, `Node::dial` cai no circuito. **Limite:** NAT simétrico nos dois lados não fura. O diretório vê os dois IPs no momento do furo. Cobertura: `tests/node.rs` (loopback; não prova um NAT real).
-- **Atrás de NAT sem abrir porta** (só pela biblioteca; a GUI não oferece, pois a chamada tem de ser p2p): o servidor pode rodar também um relay (`--relay`). O nó marca "usar o relay do servidor" (`NodeConfig.via_server`): fica com uma conexão de controle de saída aberta e o diretório publica o relay do servidor como o dele. A cada circuito para você, o servidor avisa pelo controle, você abre uma conexão de saída com uma ficha de 16 bytes e o servidor emenda as duas (`REQ_HOST`/`REQ_ATTACH` em `src/directory.rs`). Custo: o servidor vê seu IP e o tráfego cifrado das suas chamadas; ele é o último salto. Cobertura: `tests/node.rs`.
+- **Teste de alcançabilidade** (`directory::reachable`, `REQ_REACH`): depois de publicar, o nó pede ao diretório que tente abrir TCP no relay publicado (só com o diretório na internet). Se não abrir, `Node::network_note` avisa que ninguém consegue ligar pelo circuito (ou que só o furo de NAT funciona). O pedido exige a prova de posse e o servidor espera 20 s entre testes da mesma chave, para não servir de varredor de portas. Cobertura: `tests/node.rs`.
 
 Servidor (uma máquina alcançável pelos dois lados):
 
 ```text
 cargo run --release --features net --example directory -- 0.0.0.0:7777
-# (biblioteca) com relay para nós atrás de NAT; a GUI não usa, pois a chamada tem de ser p2p:
-cargo run --release --features net --example directory -- 0.0.0.0:7777 --relay 0.0.0.0:4000 IP-PUBLICO:4000
 ```
 
 ### Salas persistentes (`clam::room`, feature `net`)

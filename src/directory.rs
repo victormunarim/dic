@@ -11,13 +11,6 @@
 //!   não vê o conteúdo das chamadas. É o custo de ter primeiro contato por servidor.
 //! - As entradas expiram em [`TTL`]; o nó republica a cada [`REPUBLISH`].
 //!
-//! - **Hospedar** (`REQ_HOST`) é para quem está atrás de NAT e não recebe conexões. O servidor, se
-//!   configurado com um relay ([`HostConfig`]), publica a entrada apontando para o relay *dele* e mantém
-//!   uma conexão de controle aberta com o nó. Quando o relay do servidor, como último salto, recebe um
-//!   circuito para esse nó, o servidor avisa pelo controle; o nó abre uma conexão **de saída** de volta
-//!   (`REQ_ATTACH` + ficha de 16 bytes) e o servidor emenda as duas. Nenhuma porta precisa ser aberta.
-//!   O servidor passa a ver o IP do nó hospedado e o tráfego (já cifrado de ponta a ponta) dele.
-//!
 //! Formato: quadros `[u16 BE tamanho][dados]`. O servidor abre com `E (32) ‖ hora Unix em s (8, BE) ‖ IP visto (texto)`. A hora sincroniza o relógio dos convites ([`crate::clock`]).
 
 use std::{
@@ -32,24 +25,24 @@ use hmac::{Hmac, Mac};
 use rand_core::{OsRng, RngCore};
 use sha2::Sha256;
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt, copy_bidirectional},
+    io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream, UdpSocket},
     sync::mpsc,
     task::JoinHandle,
-    time::{interval, sleep, timeout},
+    time::{interval, timeout},
 };
 use x25519_dalek::{PublicKey, StaticSecret};
 
-use crate::circuit::{
-    manager::Candidate,
-    relay::{RelayConfig, RelayNode},
-};
-use crate::transport::{RelayServer, ServerConfig};
+use crate::circuit::manager::Candidate;
 
 /// Validade de uma entrada sem republicar.
 pub const TTL: Duration = Duration::from_secs(120);
 /// Intervalo em que o nó republica.
 pub const REPUBLISH: Duration = Duration::from_secs(40);
+/// Ouvintes de furo de NAT simultâneos no servidor.
+pub const MAX_LISTENERS: usize = 1024;
+/// Intervalo mínimo entre testes de alcançabilidade da mesma chave.
+const REACH_COOLDOWN: Duration = Duration::from_secs(20);
 /// Entradas simultâneas no servidor.
 pub const MAX_ENTRIES: usize = 4096;
 
@@ -57,14 +50,8 @@ const IO_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_FRAME: usize = 512;
 const MAX_REQUESTS: usize = 16;
 const CONTEXT: &[u8] = b"clam-dir-v1";
-/// Nós hospedados simultâneos no servidor.
-pub const MAX_HOSTED: usize = 1024;
-/// Quanto tempo uma conexão do relay espera o nó hospedado se anexar.
-const PENDING_TTL: Duration = Duration::from_secs(10);
-const MAX_PENDING: usize = 256;
 /// Sem nada do servidor por tanto tempo (ele manda um ping a cada [`REPUBLISH`]), o nó reconecta.
 const CONTROL_IDLE: Duration = Duration::from_secs(100);
-const RECONNECT: Duration = Duration::from_secs(5);
 
 /// Nome do destino que o relay de saída mapeia para o telefone de `key`.
 pub fn dest_for(key: &[u8; 32]) -> String {
@@ -75,16 +62,14 @@ pub fn dest_for(key: &[u8; 32]) -> String {
 const REQ_PUBLISH: u8 = 1;
 const REQ_LOOKUP: u8 = 2;
 const REQ_SAMPLE: u8 = 3;
-const REQ_HOST: u8 = 4;
-const REQ_ATTACH: u8 = 5;
 const REQ_PUNCH_LISTEN: u8 = 9;
+const REQ_REACH: u8 = 12;
 const REQ_PUNCH_PREP: u8 = 10;
 const REQ_PUNCH_GO: u8 = 11;
 const CTL_PUNCH: u8 = 3;
 const REQ_ROOM_JOIN: u8 = 6;
 const REQ_ROOM_LEAVE: u8 = 7;
 const REQ_ROOM_LIST: u8 = 8;
-const CTL_OPEN: u8 = 1;
 const CTL_PING: u8 = 2;
 const RES_OK: u8 = 0x80;
 const RES_ERR: u8 = 0x81;
@@ -192,6 +177,7 @@ struct Listener {
 struct PunchState {
     tokens: Mutex<HashMap<[u8; 16], Token>>,
     listeners: Mutex<HashMap<[u8; 32], Listener>>,
+    probed: Mutex<HashMap<[u8; 32], Instant>>,
 }
 
 /// Validade de uma ficha UDP sem reaparecer.
@@ -201,38 +187,12 @@ const MAX_TOKENS: usize = 8192;
 /// Servidor de diretório em memória. Encerra ao ser descartado.
 pub struct DirectoryServer {
     addr: SocketAddr,
-    relay_addr: Option<SocketAddr>,
     task: JoinHandle<()>,
     udp_task: JoinHandle<()>,
-    _relay: Option<RelayServer>,
-}
-
-/// Relay do próprio servidor, para quem está atrás de NAT (veja `REQ_HOST`).
-#[derive(Clone, Debug)]
-pub struct HostConfig {
-    /// Onde o relay escuta.
-    pub relay_listen: SocketAddr,
-    /// `ip:porta` que os outros usam para chegar ao relay. `None`: o IP de `relay_listen` e a porta efetiva
-    /// (serve para testes locais; em produção informe o IP público).
-    pub relay_public: Option<String>,
-    /// Escreve em stderr cada nó hospedado, circuito recebido e conexão emendada (para diagnóstico).
-    pub verbose: bool,
-}
-
-struct Host {
-    info: RelayInfo,
-    verbose: bool,
-    routes: Arc<Mutex<HashMap<String, SocketAddr>>>,
-    pending: Mutex<HashMap<[u8; 16], (TcpStream, Instant)>>,
 }
 
 impl DirectoryServer {
     pub async fn spawn(listen: SocketAddr) -> io::Result<Self> {
-        Self::spawn_with(listen, None).await
-    }
-
-    /// Como [`spawn`](Self::spawn); com `host`, sobe também um relay para nós atrás de NAT.
-    pub async fn spawn_with(listen: SocketAddr, host: Option<HostConfig>) -> io::Result<Self> {
         let listener = TcpListener::bind(listen).await?;
         let addr = listener.local_addr()?;
         let table: Table = Arc::default();
@@ -240,37 +200,16 @@ impl DirectoryServer {
         let punch: Arc<PunchState> = Arc::default();
         let udp = Arc::new(UdpSocket::bind(addr).await?);
         let udp_task = tokio::spawn(udp_loop(udp, punch.clone()));
-        let (host, relay) = match host {
-            None => (None, None),
-            Some(cfg) => {
-                let node = RelayNode::new(StaticSecret::random_from_rng(OsRng), RelayConfig::default(), 0);
-                let onion = node.public_key();
-                let routes: Arc<Mutex<HashMap<String, SocketAddr>>> = Arc::default();
-                let mut scfg = ServerConfig::new(cfg.relay_listen);
-                let r = routes.clone();
-                scfg.exit = Arc::new(move |d: &str| r.lock().unwrap().get(d).map(|a| a.to_string()));
-                let relay = RelayServer::spawn(node, scfg).await?;
-                let public = cfg.relay_public.unwrap_or_else(|| format!("{}:{}", cfg.relay_listen.ip(), relay.local_addr().port()));
-                let info = RelayInfo { addr: public, onion, link: relay.link_public_key() };
-                (Some(Arc::new(Host { info, verbose: cfg.verbose, routes, pending: Mutex::default() })), Some(relay))
-            }
-        };
-        let relay_addr = relay.as_ref().map(RelayServer::local_addr);
         let task = tokio::spawn(async move {
             loop {
                 let Ok((s, peer)) = listener.accept().await else { continue };
-                let (table, rooms, punch, host) = (table.clone(), rooms.clone(), punch.clone(), host.clone());
+                let (table, rooms, punch) = (table.clone(), rooms.clone(), punch.clone());
                 tokio::spawn(async move {
-                    let _ = serve(s, peer, table, rooms, punch, host).await;
+                    let _ = serve(s, peer, table, rooms, punch).await;
                 });
             }
         });
-        Ok(Self { addr, relay_addr, task, udp_task, _relay: relay })
-    }
-
-    /// Endereço do relay hospedado, se houver.
-    pub fn relay_addr(&self) -> Option<SocketAddr> {
-        self.relay_addr
+        Ok(Self { addr, task, udp_task })
     }
 
     pub fn local_addr(&self) -> SocketAddr {
@@ -285,7 +224,7 @@ impl Drop for DirectoryServer {
     }
 }
 
-async fn serve(mut s: TcpStream, peer: SocketAddr, table: Table, rooms: Rooms, punch: Arc<PunchState>, host: Option<Arc<Host>>) -> io::Result<()> {
+async fn serve(mut s: TcpStream, peer: SocketAddr, table: Table, rooms: Rooms, punch: Arc<PunchState>) -> io::Result<()> {
     // Estática (e não `EphemeralSecret`) porque a chave pública do cliente só chega no pedido de publicar.
     let eph = StaticSecret::random_from_rng(OsRng);
     let e_pub = PublicKey::from(&eph);
@@ -299,8 +238,11 @@ async fn serve(mut s: TcpStream, peer: SocketAddr, table: Table, rooms: Rooms, p
             Err(_) => return Ok(()),
         };
         match req.first() {
-            Some(&REQ_HOST) => return host_control(s, peer, &eph, e_pub.as_bytes(), &req, &table, host).await,
-            Some(&REQ_ATTACH) => return attach(s, &req, host).await,
+            Some(&REQ_REACH) => {
+                let reply = reach(&req, &eph, e_pub.as_bytes(), &table, &punch).await;
+                write_frame(&mut s, &reply).await?;
+                continue;
+            }
             Some(&REQ_PUNCH_LISTEN) => return punch_listen(s, &eph, e_pub.as_bytes(), &req, &punch).await,
             Some(&REQ_PUNCH_PREP | &REQ_PUNCH_GO) => {
                 let reply = punch_request(&req, &punch);
@@ -312,110 +254,6 @@ async fn serve(mut s: TcpStream, peer: SocketAddr, table: Table, rooms: Rooms, p
         let reply = handle(&req, &eph, e_pub.as_bytes(), peer, &table, &rooms);
         write_frame(&mut s, &reply).await?;
     }
-    Ok(())
-}
-
-/// Conexão de controle de um nó hospedado: registra a rota, publica a entrada e avisa a cada circuito novo.
-async fn host_control(mut s: TcpStream, peer: SocketAddr, eph: &StaticSecret, e_pub: &[u8; 32], req: &[u8], table: &Table, host: Option<Arc<Host>>) -> io::Result<()> {
-    let refuse = |m: &str| [&[RES_ERR][..], m.as_bytes()].concat();
-    let Some(host) = host else { return write_frame(&mut s, &refuse("servidor sem relay hospedado")).await };
-    if req.len() != 1 + 32 + 32 {
-        return write_frame(&mut s, &refuse("tamanho")).await;
-    }
-    let pubkey: [u8; 32] = req[1..33].try_into().unwrap();
-    let shared = eph.diffie_hellman(&PublicKey::from(pubkey));
-    if !shared.was_contributory() || mac(shared.as_bytes(), e_pub, &req[..33]).verify_slice(&req[33..]).is_err() {
-        return write_frame(&mut s, &refuse("prova de posse inválida")).await;
-    }
-    let key = dest_for(&pubkey);
-    let fwd = TcpListener::bind("127.0.0.1:0").await?;
-    let faddr = fwd.local_addr()?;
-    let full = {
-        let mut r = host.routes.lock().unwrap();
-        let full = r.len() >= MAX_HOSTED && !r.contains_key(&key);
-        if !full {
-            r.insert(key.clone(), faddr);
-        }
-        full
-    };
-    if full {
-        return write_frame(&mut s, &refuse("servidor cheio")).await;
-    }
-    let set_entry = || {
-        let mut t = table.lock().unwrap();
-        t.retain(|_, e| e.seen.elapsed() < TTL);
-        t.insert(pubkey, Entry { info: host.info.clone(), seen: Instant::now() });
-    };
-    set_entry();
-    if host.verbose {
-        eprintln!("[servidor] {key} hospedado, conexão de {peer}");
-    }
-    write_frame(&mut s, &[&[RES_OK][..], host.info.addr.as_bytes()].concat()).await?;
-    let mut tick = interval(REPUBLISH);
-    tick.tick().await;
-    let mut probe = [0u8; 1];
-    loop {
-        tokio::select! {
-            a = fwd.accept() => {
-                let Ok((c, _)) = a else { continue };
-                let mut tok = [0u8; 16];
-                OsRng.fill_bytes(&mut tok);
-                {
-                    let mut p = host.pending.lock().unwrap();
-                    p.retain(|_, (_, t)| t.elapsed() < PENDING_TTL);
-                    if p.len() >= MAX_PENDING {
-                        continue;
-                    }
-                    p.insert(tok, (c, Instant::now()));
-                }
-                if host.verbose {
-                    eprintln!("[servidor] circuito para {key}: avisando o nó");
-                }
-                if write_frame(&mut s, &[&[CTL_OPEN][..], &tok].concat()).await.is_err() {
-                    break;
-                }
-            }
-            _ = tick.tick() => {
-                set_entry();
-                if write_frame(&mut s, &[CTL_PING]).await.is_err() {
-                    break;
-                }
-            }
-            // O nó não manda nada pelo controle: dado ou fim de conexão encerram.
-            r = s.read(&mut probe) => {
-                if !matches!(r, Ok(n) if n > 0) {
-                    break;
-                }
-            }
-        }
-    }
-    if host.verbose {
-        eprintln!("[servidor] {key} saiu");
-    }
-    // Só desfaz se a rota ainda é desta conexão (o nó pode ter reconectado).
-    let mut r = host.routes.lock().unwrap();
-    if r.get(&key) == Some(&faddr) {
-        r.remove(&key);
-        table.lock().unwrap().remove(&pubkey);
-    }
-    drop(r);
-    Ok(())
-}
-
-/// O nó hospedado devolve a ficha por uma conexão de saída; emenda com a que o relay abriu.
-async fn attach(mut s: TcpStream, req: &[u8], host: Option<Arc<Host>>) -> io::Result<()> {
-    let (Some(host), Ok(tok)) = (host, <[u8; 16]>::try_from(&req[1..])) else { return Ok(()) };
-    let taken = host.pending.lock().unwrap().remove(&tok);
-    let Some((mut c, _)) = taken.filter(|(_, t)| t.elapsed() < PENDING_TTL) else {
-        if host.verbose {
-            eprintln!("[servidor] ficha de anexo desconhecida ou vencida");
-        }
-        return Ok(());
-    };
-    if host.verbose {
-        eprintln!("[servidor] nó anexou; emendando");
-    }
-    let _ = copy_bidirectional(&mut s, &mut c).await;
     Ok(())
 }
 
@@ -669,71 +507,25 @@ pub async fn room_members(server: &str, room: &ed25519_dalek::SigningKey) -> io:
     Ok(reply[2..].chunks(32).map(|c| c.try_into().unwrap()).collect())
 }
 
-/// IP que o servidor enxerga para esta máquina (útil para mostrar ao usuário).
-pub async fn seen_ip(server: &str) -> io::Result<String> {
-    Ok(connect(server).await?.seen_ip)
-}
-
-/// Registra `secret` como hospedado no servidor e mantém a conexão de controle: a cada circuito novo
-/// para você, abre uma conexão de saída até o servidor e a emenda com o telefone em `phone`.
-/// Reconecta sozinho se o servidor cair. Devolve o endereço do relay do servidor (o publicado) e a tarefa;
-/// `errors` guarda o último erro de reconexão (`None` = ligado).
-pub async fn host(server: &str, secret: &StaticSecret, phone: SocketAddr, errors: Arc<Mutex<Option<String>>>) -> io::Result<(String, JoinHandle<()>)> {
-    let (first, addr) = register(server, secret).await?;
-    let (server, secret) = (server.to_string(), secret.clone());
-    let task = tokio::spawn(async move {
-        let mut sess = Some(first);
-        loop {
-            if let Some(mut ss) = sess.take() {
-                let e = run_control(&mut ss.s, &server, phone).await.err();
-                *errors.lock().unwrap() = Some(e.map_or_else(|| "servidor encerrou o controle".into(), |e| e.to_string()));
-            }
-            sleep(RECONNECT).await;
-            match register(&server, &secret).await {
-                Ok((ss, _)) => {
-                    *errors.lock().unwrap() = None;
-                    sess = Some(ss);
-                }
-                Err(e) => *errors.lock().unwrap() = Some(e.to_string()),
-            }
-        }
-    });
-    Ok((addr, task))
-}
-
-async fn register(server: &str, secret: &StaticSecret) -> io::Result<(Session, String)> {
+/// Pede ao diretório que tente conectar ao relay que `secret` publicou. `true`: alcançável de fora.
+/// Erra se nada foi publicado ainda ou se o teste foi pedido há pouco.
+pub async fn reachable(server: &str, secret: &StaticSecret) -> io::Result<bool> {
     let mut sess = connect(server).await?;
-    let mut req = vec![REQ_HOST];
+    let mut req = vec![REQ_REACH];
     req.extend_from_slice(PublicKey::from(secret).as_bytes());
     let shared = secret.diffie_hellman(&PublicKey::from(sess.e_pub));
     req.extend_from_slice(&mac(shared.as_bytes(), &sess.e_pub, &req).finalize().into_bytes());
     let reply = ask(&mut sess, &req).await?;
-    match reply.split_first() {
-        Some((&RES_OK, a)) => Ok((sess, String::from_utf8_lossy(a).into())),
-        Some((&RES_ERR, m)) => Err(bad(&format!("servidor recusou: {}", String::from_utf8_lossy(m)))),
+    match reply.as_slice() {
+        [RES_OK, v] => Ok(*v == 1),
+        [RES_ERR, m @ ..] => Err(bad(&format!("servidor recusou: {}", String::from_utf8_lossy(m)))),
         _ => Err(bad("resposta inesperada")),
     }
 }
 
-async fn run_control(s: &mut TcpStream, server: &str, phone: SocketAddr) -> io::Result<()> {
-    loop {
-        let f = timeout(CONTROL_IDLE, read_frame_idle(s)).await.map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
-        if let (Some(&CTL_OPEN), Ok(tok)) = (f.first(), <[u8; 16]>::try_from(f.get(1..).unwrap_or(&[]))) {
-            let server = server.to_string();
-            tokio::spawn(async move {
-                let _ = splice_back(&server, tok, phone).await;
-            });
-        } else if f.first() != Some(&CTL_PING) {
-            return Err(bad("mensagem de controle desconhecida"));
-        }
-    }
-}
-
-async fn splice_back(server: &str, tok: [u8; 16], phone: SocketAddr) -> io::Result<()> {
-    let mut sess = connect(server).await?;
-    write_frame(&mut sess.s, &[&[REQ_ATTACH][..], &tok].concat()).await?;
-    let mut local = timeout(IO_TIMEOUT, TcpStream::connect(phone)).await.map_err(|_| io::ErrorKind::TimedOut)??;
-    copy_bidirectional(&mut sess.s, &mut local).await.map(|_| ())
+/// IP que o servidor enxerga para esta máquina (útil para mostrar ao usuário).
+pub async fn seen_ip(server: &str) -> io::Result<String> {
+    Ok(connect(server).await?.seen_ip)
 }
 
 /// Lê um quadro sem prazo (o controle fica parado até haver chamada).
@@ -807,6 +599,32 @@ fn punch_request(req: &[u8], punch: &PunchState) -> Vec<u8> {
     }
 }
 
+/// Teste de alcançabilidade: o servidor tenta abrir TCP no relay publicado por `pub` (exige a prova de posse
+/// e respeita um intervalo mínimo por chave, para não servir de varredor de portas). Responde `OK ‖ 1|0`.
+async fn reach(req: &[u8], eph: &StaticSecret, e_pub: &[u8; 32], table: &Table, punch: &PunchState) -> Vec<u8> {
+    let err = |m: &str| [&[RES_ERR][..], m.as_bytes()].concat();
+    if req.len() != 1 + 32 + 32 {
+        return err("tamanho");
+    }
+    let pubkey: [u8; 32] = req[1..33].try_into().unwrap();
+    let shared = eph.diffie_hellman(&PublicKey::from(pubkey));
+    if !shared.was_contributory() || mac(shared.as_bytes(), e_pub, &req[..33]).verify_slice(&req[33..]).is_err() {
+        return err("prova de posse inválida");
+    }
+    {
+        let mut p = punch.probed.lock().unwrap();
+        p.retain(|_, t| t.elapsed() < REACH_COOLDOWN);
+        if p.len() >= MAX_ENTRIES || p.contains_key(&pubkey) {
+            return err("tente de novo em instantes");
+        }
+        p.insert(pubkey, Instant::now());
+    }
+    let addr = table.lock().unwrap().get(&pubkey).filter(|e| e.seen.elapsed() < TTL).map(|e| e.info.addr.clone());
+    let Some(addr) = addr else { return err("não publicado") };
+    let ok = matches!(timeout(IO_TIMEOUT, TcpStream::connect(&addr)).await, Ok(Ok(_)));
+    vec![RES_OK, ok as u8]
+}
+
 /// Conexão de um nó que aceita chamadas por furo de NAT: devolve a ficha UDP e depois avisa de cada chamador.
 async fn punch_listen(mut s: TcpStream, eph: &StaticSecret, e_pub: &[u8; 32], req: &[u8], punch: &PunchState) -> io::Result<()> {
     let refuse = |m: &str| [&[RES_ERR][..], m.as_bytes()].concat();
@@ -823,7 +641,7 @@ async fn punch_listen(mut s: TcpStream, eph: &StaticSecret, e_pub: &[u8; 32], re
     let id = OsRng.next_u64();
     let full = {
         let mut ls = punch.listeners.lock().unwrap();
-        let full = ls.len() >= MAX_HOSTED && !ls.contains_key(&pubkey);
+        let full = ls.len() >= MAX_LISTENERS && !ls.contains_key(&pubkey);
         if !full {
             ls.insert(pubkey, Listener { id, token, udp: None, push: tx });
         }
