@@ -22,6 +22,10 @@ pub(crate) struct ScreenState {
     /// textura quando o número muda.
     pub(crate) images: Mutex<HashMap<[u8; 32], (u64, RawFrame)>>,
     seq: AtomicU64,
+    /// Contadores para diagnóstico: quadros que chegaram, que viraram imagem e que não decodificaram.
+    rx: [AtomicU64; 3],
+    /// Resumo de quem transmite (quadros enviados, pulados pelo codec, descartados), para a janela.
+    pub(crate) tx_info: Mutex<String>,
     /// Motivo de a transmissão não ter começado, para a janela.
     pub(crate) note: Mutex<String>,
 }
@@ -44,8 +48,24 @@ impl ScreenState {
         self.images.lock().unwrap().retain(|k, _| keep(k));
     }
 
+    /// Linha de diagnóstico da janela: lado que recebe e lado que envia.
+    pub(crate) fn diagnostics(&self) -> String {
+        let n = |i: usize| self.rx[i].load(Ordering::Relaxed);
+        let mut out = self.tx_info.lock().unwrap().clone();
+        if n(0) > 0 {
+            if !out.is_empty() {
+                out.push_str(" · ");
+            }
+            out.push_str(&format!("recebidos {} quadros, {} viraram imagem, {} com erro", n(0), n(1), n(2)));
+        }
+        out
+    }
+
     /// Fim da chamada ou da sala: somem as imagens e a transmissão é interrompida.
     pub(crate) fn reset(&self) {
+        for c in &self.rx {
+            c.store(0, Ordering::Relaxed);
+        }
         self.want_share.store(false, Ordering::Relaxed);
         self.images.lock().unwrap().clear();
     }
@@ -60,6 +80,7 @@ pub(crate) fn on_screen_event(state: &ScreenState, who: [u8; 32], dec: &mut Opti
             true
         }
         ScreenEvent::Frame(f) => {
+            state.rx[0].fetch_add(1, Ordering::Relaxed);
             let d = match dec {
                 Some(d) => d,
                 None => match H264Decoder::new() {
@@ -69,12 +90,14 @@ pub(crate) fn on_screen_event(state: &ScreenState, who: [u8; 32], dec: &mut Opti
             };
             match d.decode(&f.data) {
                 Ok(Some(img)) => {
+                    state.rx[1].fetch_add(1, Ordering::Relaxed);
                     state.set_image(who, Some(img));
                     true
                 }
                 Ok(None) => true,
                 // Quadro corrompido: recomeça no próximo quadro-chave.
                 Err(_) => {
+                    state.rx[2].fetch_add(1, Ordering::Relaxed);
                     *dec = None;
                     false
                 }
@@ -154,10 +177,15 @@ pub(crate) async fn share_task(dialer: Dialer, peer: [u8; 32], keys: clam::media
     let share = tokio::task::spawn_blocking(move || {
         let every = Duration::from_secs_f32(1.0 / FPS);
         let mut next = std::time::Instant::now();
+        let (mut pushed, mut skipped) = (0u64, 0u64);
         while flag.screen.want_share.load(Ordering::Relaxed) && !flag.hangup.load(Ordering::Relaxed) {
-            if let Err(e) = pump(src.as_mut(), &mut enc, &share) {
-                *flag.screen.note.lock().unwrap() = format!("codec: {e}");
+            match pump(src.as_mut(), &mut enc, &share) {
+                Ok(true) => pushed += 1,
+                Ok(false) => skipped += 1,
+                Err(e) => *flag.screen.note.lock().unwrap() = format!("codec: {e}"),
             }
+            let t = share.stats();
+            *flag.screen.tx_info.lock().unwrap() = format!("enviados {pushed}, pulados {skipped}, descartados na fila {}", t.frames_dropped);
             next += every;
             std::thread::sleep(next.saturating_duration_since(std::time::Instant::now()));
         }
@@ -166,6 +194,7 @@ pub(crate) async fn share_task(dialer: Dialer, peer: [u8; 32], keys: clam::media
     .await;
     st.sharing.store(false, Ordering::Relaxed);
     st.want_share.store(false, Ordering::Relaxed);
+    st.tx_info.lock().unwrap().clear();
     if let Ok(share) = share {
         share.stop().await;
     }
@@ -204,6 +233,7 @@ pub(crate) async fn room_share_task(dialer: Dialer, mesh: Mesh, shared: Arc<Shar
         let mut retry: HashMap<[u8; 32], Instant> = HashMap::new();
         let every = Duration::from_secs_f32(1.0 / FPS);
         let mut next = Instant::now();
+        let (mut pushed, mut skipped) = (0u64, 0u64);
         while flag.screen.want_share.load(Ordering::Relaxed) && !flag.hangup.load(Ordering::Relaxed) {
             let keys = mesh.screen_keys();
             for (who, k) in &keys {
@@ -241,9 +271,12 @@ pub(crate) async fn room_share_task(dialer: Dialer, mesh: Mesh, shared: Arc<Shar
             }
             flag.screen.sharing.store(!shares.is_empty(), Ordering::Relaxed);
             let refs: Vec<_> = shares.values().collect();
-            if let Err(e) = pump_all(src.as_mut(), &mut enc, &refs, joined) {
-                *flag.screen.note.lock().unwrap() = format!("codec: {e}");
+            match pump_all(src.as_mut(), &mut enc, &refs, joined) {
+                Ok(0) => skipped += 1,
+                Ok(_) => pushed += 1,
+                Err(e) => *flag.screen.note.lock().unwrap() = format!("codec: {e}"),
             }
+            *flag.screen.tx_info.lock().unwrap() = format!("enviados {pushed}, pulados {skipped}, para {} pessoas", refs.len());
             next += every;
             std::thread::sleep(next.saturating_duration_since(Instant::now()));
         }

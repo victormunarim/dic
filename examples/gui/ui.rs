@@ -369,6 +369,10 @@ impl App {
                 ui.colored_label(egui::Color32::LIGHT_RED, note);
             }
         }
+        let diag = st.diagnostics();
+        if !diag.is_empty() {
+            ui.weak(diag);
+        }
         let names = self.form.names();
         let mut shown: Vec<([u8; 32], u64, egui::ColorImage)> = Vec::new();
         {
