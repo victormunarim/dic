@@ -22,7 +22,7 @@ use thiserror::Error;
 use crate::video::{FPS, RawFrame, ScreenSource};
 
 /// Largura máxima enviada; telas maiores são reduzidas (a banda do circuito é pequena).
-pub const MAX_WIDTH: usize = 1280;
+pub const MAX_WIDTH: usize = 1920;
 
 #[derive(Debug, Error)]
 pub enum PortalError {
@@ -165,8 +165,8 @@ mod tests {
 
     #[test]
     fn target_size_caps_the_width_keeps_the_ratio_and_stays_even() {
-        assert_eq!(target_size(1920, 1080), Some((1280, 720)));
-        assert_eq!(target_size(1920, 1200), Some((1280, 800)));
+        assert_eq!(target_size(2560, 1440), Some((1920, 1080)));
+        assert_eq!(target_size(1920, 1200), Some((1920, 1200)));
         assert_eq!(target_size(800, 601), Some((800, 600)));
         assert_eq!(target_size(1, 100), None);
     }

@@ -43,6 +43,7 @@ fn main() -> eframe::Result {
                 error: String::new(),
                 confirm_remove: None,
                 screen_tex: Default::default(),
+                zoom: None,
                 #[cfg(feature = "audio")]
                 devs: clam::audio::devices(),
                 #[cfg(not(feature = "audio"))]

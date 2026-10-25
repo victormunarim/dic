@@ -10,7 +10,7 @@
 //! só assiste manda preenchimento e pedidos de quadro-chave.
 //!
 //! Texto claro de cada pacote (dentro do AEAD de [`packet`](super::packet)):
-//! `flags (1) ‖ id do quadro (2) ‖ índice (1) ‖ total (1) ‖ dados`.
+//! `flags (1) ‖ id do quadro (2) ‖ índice (2) ‖ total (2) ‖ dados`.
 //!
 //! - Quadro perdido: a próxima entrega só acontece num quadro-chave; o receptor pede um
 //!   (flag `WANT_KEY`, repetida enquanto precisar) e o emissor consulta
@@ -29,13 +29,13 @@ use super::{
     packet::{MAX_PAYLOAD, Opened, Opener, PACKET_LEN, Sealer},
 };
 
-const HEADER: usize = 5;
+const HEADER: usize = 7;
 /// Bytes de vídeo por pacote.
 pub const FRAGMENT_PAYLOAD: usize = MAX_PAYLOAD - HEADER;
 /// Maior quadro codificado aceito.
-pub const MAX_FRAME: usize = 255 * FRAGMENT_PAYLOAD;
-/// Fragmentos na fila de saída antes de descartar quadros velhos (~2 s a 200 pacotes/s).
-pub const MAX_QUEUE: usize = 400;
+pub const MAX_FRAME: usize = 1000 * FRAGMENT_PAYLOAD;
+/// Fragmentos na fila de saída antes de descartar quadros velhos (~2 s a 333 pacotes/s).
+pub const MAX_QUEUE: usize = 660;
 /// Quadros em remontagem ao mesmo tempo; passou disso, o mais velho é abandonado.
 const MAX_PENDING: usize = 4;
 
@@ -69,7 +69,7 @@ pub struct ScreenStats {
 struct Pending {
     id: u16,
     keyframe: bool,
-    total: u8,
+    total: u16,
     got: usize,
     parts: Vec<Option<Vec<u8>>>,
 }
@@ -83,7 +83,7 @@ fn older(a: u16, b: u16) -> bool {
 pub struct ScreenStream {
     sealer: Sealer,
     opener: Opener,
-    queue: VecDeque<(u8, u16, u8, u8, Vec<u8>)>,
+    queue: VecDeque<(u8, u16, u16, u16, Vec<u8>)>,
     next_id: u16,
     /// Fila estourou: só aceita quadro-chave até limpar.
     need_key_out: bool,
@@ -150,7 +150,7 @@ impl ScreenStream {
         self.next_id = id.wrapping_add(1);
         let flags = if keyframe { KEYFRAME } else { 0 };
         for (i, chunk) in data.chunks(FRAGMENT_PAYLOAD).enumerate() {
-            self.queue.push_back((flags, id, i as u8, total as u8, chunk.to_vec()));
+            self.queue.push_back((flags, id, i as u16, total as u16, chunk.to_vec()));
         }
         self.stats.frames_sent += 1;
         Ok(true)
@@ -202,8 +202,8 @@ impl ScreenStream {
             Some((flags, id, idx, total, data)) => {
                 buf[0] = flags | want;
                 buf[1..3].copy_from_slice(&id.to_be_bytes());
-                buf[3] = idx;
-                buf[4] = total;
+                buf[3..5].copy_from_slice(&idx.to_be_bytes());
+                buf[5..7].copy_from_slice(&total.to_be_bytes());
                 buf[HEADER..HEADER + data.len()].copy_from_slice(&data);
                 HEADER + data.len()
             }
@@ -242,7 +242,7 @@ impl ScreenStream {
         }
         self.peer_stopped = false;
         let id = u16::from_be_bytes([frame[1], frame[2]]);
-        let (idx, total) = (frame[3] as usize, frame[4] as usize);
+        let (idx, total) = (u16::from_be_bytes([frame[3], frame[4]]) as usize, u16::from_be_bytes([frame[5], frame[6]]) as usize);
         if total == 0 || idx >= total {
             self.stats.rejected += 1;
             return Err(MediaError::Malformed);
@@ -253,7 +253,7 @@ impl ScreenStream {
         let slot = match self.pending.iter().position(|p| p.id == id) {
             Some(i) => i,
             None => {
-                self.pending.push(Pending { id, keyframe: flags & KEYFRAME != 0, total: total as u8, got: 0, parts: vec![None; total] });
+                self.pending.push(Pending { id, keyframe: flags & KEYFRAME != 0, total: total as u16, got: 0, parts: vec![None; total] });
                 if self.pending.len() > MAX_PENDING {
                     let oldest = (0..self.pending.len()).fold(0, |o, i| if older(self.pending[i].id, self.pending[o].id) { i } else { o });
                     self.pending.remove(oldest);
@@ -460,7 +460,7 @@ mod tests {
         for _ in 0..10 {
             accepted += a.push_frame(&big, false).unwrap() as usize;
         }
-        assert!(accepted <= 4 && a.queued() <= MAX_QUEUE);
+        assert!(accepted <= 7 && a.queued() <= MAX_QUEUE);
         assert!(a.take_keyframe_request());
         assert!(!a.push_frame(&big, false).unwrap(), "delta recusado até haver quadro-chave");
         assert!(a.push_frame(&frame(300, 5), true).unwrap());
@@ -489,8 +489,8 @@ mod tests {
         // Cabeçalho incoerente (índice >= total) autenticado mas malformado.
         let (mut s, mut r) = pair();
         let mut raw = [0u8; HEADER];
-        raw[3] = 5;
-        raw[4] = 2;
+        raw[4] = 5;
+        raw[6] = 2;
         let pkt = s.sealer.seal(&raw).unwrap();
         assert_eq!(r.receive(&pkt).err(), Some(MediaError::Malformed));
     }
