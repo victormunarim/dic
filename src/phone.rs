@@ -445,6 +445,11 @@ impl ScreenShare {
         self.stream.lock().expect("tela").stats()
     }
 
+    /// Fragmentos esperando saída no circuito.
+    pub fn queued(&self) -> usize {
+        self.stream.lock().expect("tela").queued()
+    }
+
     /// Avisa quem assiste e encerra o circuito.
     pub async fn stop(self) {
         self.stopping.store(true, Ordering::Relaxed);

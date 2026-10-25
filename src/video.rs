@@ -97,6 +97,13 @@ impl RawFrame {
     }
 }
 
+/// Fragmentos na fila (≈ 0,3 s de circuito) a partir dos quais a resolução cai.
+const BACKLOG_HIGH: usize = 150;
+/// Fila a partir da qual conta como calma.
+const BACKLOG_LOW: usize = 30;
+/// Quadros calmos seguidos (2 s) antes de voltar à resolução cheia.
+const CALM_FRAMES: u32 = (FPS * 2.0) as u32;
+
 /// Fonte de imagens da tela.
 pub trait ScreenSource {
     /// Imagem atual; `None` quando não deu para capturar agora (a transmissão pula o quadro).
@@ -118,6 +125,10 @@ pub struct H264Encoder {
     need_key: bool,
     /// Fator mínimo de redução; sobe quando o quadro-chave não cabe em [`MAX_FRAME`] (tela muito detalhada).
     min_k: usize,
+    /// Fator de redução extra enquanto a fila do circuito está cheia (movimento brusco): menos pixels,
+    /// menos bits por quadro, mais quadros por segundo. Volta a 1 depois de 2 s calmos.
+    motion_k: usize,
+    calm: u32,
     /// Quadros que o codificador recebeu e não devolveu (pulados pelo controle de taxa ou grandes demais).
     pub skipped: u64,
     /// Média móvel, em ms, do tempo gasto em `encode`.
@@ -131,7 +142,7 @@ impl H264Encoder {
     }
 
     pub fn new(bitrate: u32) -> Result<Self, VideoError> {
-        Ok(Self { inner: Self::open(bitrate)?, size: None, bitrate, need_key: true, min_k: 1, skipped: 0, encode_ms: 0.0 })
+        Ok(Self { inner: Self::open(bitrate)?, size: None, bitrate, need_key: true, min_k: 1, motion_k: 1, calm: 0, skipped: 0, encode_ms: 0.0 })
     }
 
     fn open(bitrate: u32) -> Result<Encoder, VideoError> {
@@ -148,6 +159,22 @@ impl H264Encoder {
         Encoder::with_api_config(openh264::OpenH264API::from_source(), config).map_err(codec_err)
     }
 
+    /// Informa quantos fragmentos esperam na fila do circuito. Fila alta reduz a resolução; fila baixa
+    /// por 2 s seguidos a restaura (o codificador recomeça com um quadro-chave a cada troca).
+    pub fn set_backlog(&mut self, queued: usize) {
+        if queued >= BACKLOG_HIGH {
+            self.motion_k = 2;
+            self.calm = 0;
+        } else if queued <= BACKLOG_LOW {
+            self.calm += 1;
+            if self.calm >= CALM_FRAMES {
+                self.motion_k = 1;
+            }
+        } else {
+            self.calm = 0;
+        }
+    }
+
     /// Codifica um quadro. `force_key` pede quadro-chave. `Ok(None)`: o codificador pulou o quadro
     /// ou ele passou de [`MAX_FRAME`] (o próximo sai como quadro-chave).
     pub fn encode(&mut self, frame: &RawFrame, force_key: bool) -> Result<Option<EncodedFrame>, VideoError> {
@@ -161,7 +188,7 @@ impl H264Encoder {
     }
 
     fn encode_inner(&mut self, frame: &RawFrame, force_key: bool) -> Result<Option<EncodedFrame>, VideoError> {
-        let small = frame.shrunk(self.min_k);
+        let small = frame.shrunk(self.min_k.max(self.motion_k));
         let frame = small.as_ref().unwrap_or(frame);
         let frame = frame.even().ok_or(VideoError::Size(frame.width, frame.height))?;
         let dims = (frame.width, frame.height);
@@ -232,6 +259,7 @@ pub fn pump_all(source: &mut dyn ScreenSource, encoder: &mut H264Encoder, shares
     // Todos precisam ser consultados: `any` pararia no primeiro e deixaria pedidos pendentes.
     let wanted = shares.iter().fold(force_key, |w, s| s.keyframe_wanted() | w);
     let Some(raw) = source.grab() else { return Ok(0) };
+    encoder.set_backlog(shares.iter().map(|s| s.queued()).max().unwrap_or(0));
     let Some(frame) = encoder.encode(&raw, wanted)? else { return Ok(0) };
     let mut sent = 0;
     for share in shares {
@@ -319,6 +347,25 @@ mod tests {
         let key = (0..10).find_map(|t| enc.encode(&detailed(t), false).unwrap()).expect("um quadro-chave acaba cabendo");
         assert!(key.keyframe && key.data.len() <= MAX_FRAME);
         assert!(enc.min_k > 1);
+    }
+
+    #[test]
+    fn a_full_queue_halves_the_resolution_and_calm_restores_it() {
+        let mut enc = H264Encoder::new(H264Encoder::default_bitrate()).unwrap();
+        let mut dec = H264Decoder::new().unwrap();
+        let size = |enc: &mut H264Encoder, dec: &mut H264Decoder, t| {
+            let f = enc.encode(&scene(1280, 720, t), false).unwrap().expect("quadro");
+            dec.decode(&f.data).unwrap().map(|i| i.width)
+        };
+        assert_eq!(size(&mut enc, &mut dec, 0), Some(1280));
+        enc.set_backlog(BACKLOG_HIGH);
+        let mut dec = H264Decoder::new().unwrap();
+        assert_eq!(size(&mut enc, &mut dec, 1), Some(640));
+        for _ in 0..CALM_FRAMES {
+            enc.set_backlog(0);
+        }
+        let mut dec = H264Decoder::new().unwrap();
+        assert_eq!(size(&mut enc, &mut dec, 2), Some(1280));
     }
 
     #[test]
