@@ -48,7 +48,7 @@ fn parse_candidate(spec: &str) -> Result<Candidate, String> {
     let (Some(addr), Some(onion), Some(link)) = (addr, onion, link) else {
         return Err(format!("relay '{spec}': esperado addr,onion,link"));
     };
-    Ok(Candidate { addr: addr.into(), public: unhex(onion)?.into(), link_public: unhex(link)?, score: 1.0 })
+    Ok(Candidate { addr: addr.into(), public: unhex(onion)?, link_public: unhex(link)?, score: 1.0 })
 }
 
 fn opt<T: std::str::FromStr>(args: &[String], name: &str, default: T) -> T {

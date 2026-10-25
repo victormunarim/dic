@@ -173,7 +173,7 @@ mod tests {
         for n in [0, 1, 80, 160, MAX_PAYLOAD] {
             assert_eq!(s.seal(&vec![7; n]).unwrap().len(), PACKET_LEN);
         }
-        assert_eq!(s.seal(&vec![0; MAX_PAYLOAD + 1]).err(), Some(MediaError::TooLarge(MAX_PAYLOAD + 1)));
+        assert_eq!(s.seal(&[0; MAX_PAYLOAD + 1]).err(), Some(MediaError::TooLarge(MAX_PAYLOAD + 1)));
     }
 
     #[test]

@@ -41,60 +41,97 @@ fn err(e: impl std::fmt::Display) -> AudioError {
     AudioError(e.to_string())
 }
 
-/// Reduz a taxa por média de caixa (filtro simples contra aliasing). Mono, `i16`.
-pub struct Downsampler {
-    from: u64,
-    to: u64,
-    phase: u64,
-    acc: f64,
-    n: u32,
+/// Meia-largura do filtro em cruzamentos por zero do sinc: mais é mais nítido, mas atrasa e custa mais.
+const SINC_LOBES: f64 = 8.0;
+/// Corte do filtro como fração da menor taxa (0,5 seria Nyquist): deixa folga para a banda de transição.
+const SINC_CUTOFF: f64 = 0.45;
+
+/// Interpolador de sinc com janela de Blackman, avaliado na posição fracionária exata de cada saída
+/// (serve a qualquer razão de taxas, inclusive 44,1 kHz → 16 kHz). Atrasa a saída em `m` amostras de entrada.
+struct Sinc {
+    /// Corte em ciclos por amostra de entrada.
+    fc: f64,
+    /// Meia-largura em amostras de entrada.
+    m: i64,
+    /// Amostras de entrada por amostra de saída.
+    step: f64,
+    /// Posição (índice de entrada, fracionário) da próxima saída.
+    t: f64,
+    /// Índice de entrada de `hist[0]`.
+    base: i64,
+    hist: VecDeque<f32>,
 }
+
+impl Sinc {
+    fn new(from: u32, to: u32) -> Self {
+        let low = from.min(to) as f64 / from as f64;
+        Self { fc: SINC_CUTOFF * low, m: (SINC_LOBES / low).ceil() as i64, step: from as f64 / to as f64, t: 0.0, base: 0, hist: VecDeque::new() }
+    }
+
+    /// Há entrada suficiente para calcular a próxima saída?
+    fn ready(&self) -> bool {
+        self.base + self.hist.len() as i64 > self.t.floor() as i64 + self.m
+    }
+
+    fn push(&mut self, x: f32) {
+        self.hist.push_back(x);
+    }
+
+    /// Calcula a próxima saída (exige [`ready`](Self::ready)) e avança.
+    fn next(&mut self) -> f32 {
+        let (mut acc, mut norm) = (0.0f64, 0.0f64);
+        let m = self.m as f64;
+        for i in (self.t - m).ceil() as i64..=(self.t + m).floor() as i64 {
+            let d = i as f64 - self.t;
+            let a = std::f64::consts::PI * 2.0 * self.fc * d;
+            let sinc = if a.abs() < 1e-9 { 1.0 } else { a.sin() / a };
+            let w = 0.42 + 0.5 * (std::f64::consts::PI * d / m).cos() + 0.08 * (2.0 * std::f64::consts::PI * d / m).cos();
+            let h = sinc * w;
+            norm += h;
+            // Antes do primeiro quadro, silêncio.
+            if let Some(x) = i.checked_sub(self.base).filter(|k| *k >= 0).and_then(|k| self.hist.get(k as usize)) {
+                acc += h * *x as f64;
+            }
+        }
+        self.t += self.step;
+        let keep_from = (self.t - m).ceil() as i64;
+        while self.base < keep_from && !self.hist.is_empty() {
+            self.hist.pop_front();
+            self.base += 1;
+        }
+        (acc / norm) as f32
+    }
+}
+
+/// Reduz a taxa com filtro passa-baixas de sinc (polifásico por posição fracionária), sem aliasing audível. Mono, `i16`.
+pub struct Downsampler(Sinc);
 
 impl Downsampler {
     pub fn new(from: u32, to: u32) -> Self {
-        Self { from: from as u64, to: to as u64, phase: 0, acc: 0.0, n: 0 }
+        Self(Sinc::new(from, to))
     }
 
     /// Consome uma amostra (em -1.0..1.0); devolve uma de saída quando completa um período.
     pub fn push(&mut self, x: f32) -> Option<i16> {
-        self.acc += x as f64;
-        self.n += 1;
-        // Aritmética inteira: acumular 1/6 em ponto flutuante perderia uma saída a cada ~800.
-        self.phase += self.to;
-        if self.phase < self.from {
-            return None;
-        }
-        self.phase -= self.from;
-        let v = self.acc / self.n as f64;
-        (self.acc, self.n) = (0.0, 0);
-        Some((v.clamp(-1.0, 1.0) * i16::MAX as f64) as i16)
+        self.0.push(x);
+        self.0.ready().then(|| (self.0.next().clamp(-1.0, 1.0) * i16::MAX as f32) as i16)
     }
 }
 
-/// Aumenta a taxa por interpolação linear.
-pub struct Upsampler {
-    step: f64,
-    t: f64,
-    a: f32,
-    b: f32,
-}
+/// Aumenta a taxa por interpolação de sinc (mesmo filtro do [`Downsampler`]).
+pub struct Upsampler(Sinc);
 
 impl Upsampler {
     pub fn new(from: u32, to: u32) -> Self {
-        // t começa em 1.0: a primeira saída já consome uma amostra da fila.
-        Self { step: from as f64 / to as f64, t: 1.0, a: 0.0, b: 0.0 }
+        Self(Sinc::new(from, to))
     }
 
     /// Próxima amostra de saída, ou `None` se a fila secou (o chamador toca silêncio).
     pub fn pull(&mut self, q: &mut VecDeque<i16>) -> Option<f32> {
-        while self.t >= 1.0 {
-            self.a = self.b;
-            self.b = q.pop_front()? as f32 / i16::MAX as f32;
-            self.t -= 1.0;
+        while !self.0.ready() {
+            self.0.push(q.pop_front()? as f32 / i16::MAX as f32);
         }
-        let v = self.a + (self.b - self.a) * self.t as f32;
-        self.t += self.step;
-        Some(v)
+        Some(self.0.next())
     }
 }
 
@@ -122,6 +159,12 @@ impl Audio {
 
     /// Como [`Audio::open`], mas entregando e recebendo PCM na taxa `rate` (quadros de 20 ms).
     pub fn open_rate(rate: u32) -> Result<Self, AudioError> {
+        Self::open_with(rate, &Devices::default())
+    }
+
+    /// Como [`Audio::open_rate`], escolhendo os dispositivos por nome (ver [`devices`]). Nome vazio = padrão;
+    /// um nome que não existe mais (fone desconectado) erra em vez de cair no padrão sem avisar.
+    pub fn open_with(rate: u32, devices: &Devices) -> Result<Self, AudioError> {
         let capture = Queue::default();
         let playback = Queue::default();
         let stop = Arc::new(AtomicBool::new(false));
@@ -129,7 +172,8 @@ impl Audio {
         let played = Arc::new(AtomicUsize::new(0));
         let tap = Queue::default();
         let (c, p, s, n, tap2) = (capture.clone(), playback.clone(), stop.clone(), played.clone(), tap.clone());
-        let thread = std::thread::spawn(move || match open_streams(c, p, n, rate, tap2) {
+        let devices = devices.clone();
+        let thread = std::thread::spawn(move || match open_streams(c, p, n, rate, tap2, &devices) {
             Ok((streams, info)) => {
                 let _ = ready_tx.send(Ok(info));
                 while !s.load(Ordering::Relaxed) {
@@ -234,10 +278,40 @@ fn push_capped(q: &mut VecDeque<i16>, it: impl Iterator<Item = i16>, max: usize)
     }
 }
 
-fn open_streams(capture: Queue, playback: Queue, played: Arc<AtomicUsize>, rate: u32, tap: Queue) -> Result<((Stream, Stream), String), AudioError> {
+/// Dispositivos de áudio a abrir, pelo nome que [`devices`] lista. Vazio = o padrão do sistema.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Devices {
+    pub input: String,
+    pub output: String,
+}
+
+fn name_of(d: &cpal::Device) -> String {
+    d.description().map(|d| d.to_string()).unwrap_or_default()
+}
+
+/// Nomes dos microfones e dos alto-falantes disponíveis agora: `(entradas, saídas)`.
+pub fn devices() -> (Vec<String>, Vec<String>) {
     let host = cpal::default_host();
-    let input = host.default_input_device().ok_or_else(|| AudioError("sem microfone padrão".into()))?;
-    let output = host.default_output_device().ok_or_else(|| AudioError("sem alto-falante padrão".into()))?;
+    let list = |it: Result<Vec<cpal::Device>, _>| -> Vec<String> {
+        let mut v: Vec<String> = it.map(|d| d.iter().map(name_of).filter(|n| !n.is_empty()).collect()).unwrap_or_default();
+        v.dedup();
+        v
+    };
+    (list(host.input_devices().map(Iterator::collect)), list(host.output_devices().map(Iterator::collect)))
+}
+
+fn open_streams(capture: Queue, playback: Queue, played: Arc<AtomicUsize>, rate: u32, tap: Queue, want: &Devices) -> Result<((Stream, Stream), String), AudioError> {
+    let host = cpal::default_host();
+    let input = if want.input.is_empty() {
+        host.default_input_device().ok_or_else(|| AudioError("sem microfone padrão".into()))?
+    } else {
+        host.input_devices().map_err(err)?.find(|d| name_of(d) == want.input).ok_or_else(|| AudioError(format!("microfone \"{}\" não encontrado", want.input)))?
+    };
+    let output = if want.output.is_empty() {
+        host.default_output_device().ok_or_else(|| AudioError("sem alto-falante padrão".into()))?
+    } else {
+        host.output_devices().map_err(err)?.find(|d| name_of(d) == want.output).ok_or_else(|| AudioError(format!("alto-falante \"{}\" não encontrado", want.output)))?
+    };
     let (inp, outp) = (input.default_input_config().map_err(err)?, output.default_output_config().map_err(err)?);
 
     let info = format!(
@@ -323,15 +397,31 @@ mod tests {
     fn downsample_48k_yields_one_in_six() {
         let mut d = Downsampler::new(48000, 8000);
         let n = (0..4800).filter_map(|_| d.push(0.5)).count();
-        assert_eq!(n, 800);
+        // Uma a cada seis, menos as que esperam a meia-largura do filtro.
+        assert!((790..=800).contains(&n), "{n}");
     }
 
     #[test]
     fn downsample_keeps_level() {
         let mut d = Downsampler::new(44100, 8000);
         let out: Vec<i16> = (0..44100).filter_map(|_| d.push(0.5)).collect();
-        assert!((out.len() as i32 - 8000).abs() <= 1);
-        assert!(out.iter().all(|&x| (x as i32 - 16383).abs() < 3));
+        assert!((7985..=8000).contains(&out.len()), "{}", out.len());
+        assert!(out.iter().skip(20).all(|&x| (x as i32 - 16383).abs() < 40), "{:?}", &out[20..30]);
+    }
+
+    #[test]
+    fn downsample_rejects_aliasing_and_keeps_passband() {
+        let rms = |v: &[i16]| (v.iter().map(|&x| (x as f64).powi(2)).sum::<f64>() / v.len() as f64).sqrt();
+        let run = |hz: f64, from: u32| -> f64 {
+            let mut d = Downsampler::new(from, 8000);
+            let out: Vec<i16> = (0..from as usize).filter_map(|i| d.push((0.5 * (std::f64::consts::TAU * hz * i as f64 / from as f64).sin()) as f32)).collect();
+            rms(&out[50..]) / (0.5 * i16::MAX as f64 / 2f64.sqrt())
+        };
+        for from in [48000, 44100] {
+            // 7 kHz dobraria para 1 kHz sem filtro; 1 kHz passa quase inteiro.
+            assert!(run(7000.0, from) < 0.05, "{from}: {}", run(7000.0, from));
+            assert!((0.95..1.05).contains(&run(1000.0, from)), "{from}: {}", run(1000.0, from));
+        }
     }
 
     #[test]
@@ -339,8 +429,8 @@ mod tests {
         let mut u = Upsampler::new(8000, 48000);
         let mut q: VecDeque<i16> = (0..100).map(|_| i16::MAX / 2).collect();
         let n = std::iter::from_fn(|| u.pull(&mut q)).count();
-        // 100 amostras a 6x, menos o preenchimento do primeiro par.
-        assert!((595..=605).contains(&n), "{n}");
+        // 100 amostras a 6x, menos a meia-largura do filtro.
+        assert!((540..=560).contains(&n), "{n}");
         assert!(u.pull(&mut q).is_none());
     }
 

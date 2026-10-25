@@ -269,20 +269,18 @@ async fn run(
             }
             event = swarm.select_next_some() => match event {
                 SwarmEvent::Behaviour(BehaviourEvent::Kad(kad::Event::OutboundQueryProgressed { id, result, step, .. })) => {
-                    if let kad::QueryResult::GetRecord(res) = result {
-                        match res {
-                            Ok(kad::GetRecordOk::FoundRecord(r)) => {
-                                if let Some(reply) = pending.remove(&id) {
-                                    let _ = reply.send(Some(r.record.value));
-                                }
+                    match result {
+                        kad::QueryResult::GetRecord(Ok(kad::GetRecordOk::FoundRecord(r))) => {
+                            if let Some(reply) = pending.remove(&id) {
+                                let _ = reply.send(Some(r.record.value));
                             }
-                            Ok(_) | Err(_) if step.last => {
-                                if let Some(reply) = pending.remove(&id) {
-                                    let _ = reply.send(None);
-                                }
-                            }
-                            _ => {}
                         }
+                        kad::QueryResult::GetRecord(_) if step.last => {
+                            if let Some(reply) = pending.remove(&id) {
+                                let _ = reply.send(None);
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 SwarmEvent::Behaviour(BehaviourEvent::Identify(identify::Event::Received { peer_id, info, .. })) => {

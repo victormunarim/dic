@@ -12,10 +12,15 @@ use std::{
     collections::{HashMap, VecDeque},
     io,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
+use chacha20poly1305::{
+    ChaCha20Poly1305, Key, Nonce,
+    aead::{Aead, KeyInit},
+};
 use ed25519_dalek::SigningKey;
+use x25519_dalek::{PublicKey, StaticSecret};
 use hkdf::Hkdf;
 use rand_core::{OsRng, RngCore};
 use sha2::Sha256;
@@ -24,12 +29,14 @@ use tokio::sync::mpsc;
 use crate::{
     directory,
     media::codec::G722,
-    node::Node,
+    node::{Dialer, Node},
     phone::{ActiveCall, IncomingCall},
 };
 
 /// Quadros de um mesmo membro guardados à espera da mistura (200 ms): além disso o atraso só cresce.
 const MAX_QUEUED_FRAMES: usize = 10;
+
+type Sender = mpsc::Sender<Vec<i16>>;
 
 /// Segredo novo para uma sala.
 pub fn new_secret() -> [u8; 32] {
@@ -43,6 +50,56 @@ pub fn room_key(secret: &[u8; 32]) -> SigningKey {
     let mut seed = [0u8; 32];
     Hkdf::<Sha256>::new(None, secret).expand(b"clam-room-key-v1", &mut seed).expect("32 bytes cabem no HKDF");
     SigningKey::from_bytes(&seed)
+}
+
+/// Chave que cifra o aviso do dono para um membro: DH entre as identidades dos dois (só eles a têm).
+fn rekey_cipher(shared: &[u8; 32], old_room: &[u8; 32]) -> ChaCha20Poly1305 {
+    let mut k = [0u8; 32];
+    Hkdf::<Sha256>::new(Some(old_room), shared).expand(b"clam-room-rekey-v1", &mut k).expect("32 bytes cabem no HKDF");
+    ChaCha20Poly1305::new(Key::from_slice(&k))
+}
+
+/// Aviso do dono `owner` para o membro `recipient`: o segredo novo, cifrado só para ele. Quem foi removido não
+/// ganha aviso e, mesmo vendo o do diretório, não consegue abrir o dos outros. Tem [`directory::NOTICE_LEN`] bytes.
+pub fn seal_rekey(owner: &StaticSecret, recipient: &[u8; 32], old_secret: &[u8; 32], new_secret: &[u8; 32]) -> Vec<u8> {
+    let shared = owner.diffie_hellman(&PublicKey::from(*recipient));
+    let old_room = room_key(old_secret).verifying_key().to_bytes();
+    let mut nonce = [0u8; 12];
+    OsRng.fill_bytes(&mut nonce);
+    let ct = rekey_cipher(shared.as_bytes(), &old_room)
+        .encrypt(Nonce::from_slice(&nonce), &new_secret[..])
+        .expect("cifrar 32 bytes não falha");
+    [&nonce[..], &ct].concat()
+}
+
+/// Abre um aviso de [`seal_rekey`] com a identidade do membro. `None` se não for para ele ou for adulterado.
+pub fn open_rekey(me: &StaticSecret, owner: &[u8; 32], old_secret: &[u8; 32], notice: &[u8]) -> Option<[u8; 32]> {
+    if notice.len() != directory::NOTICE_LEN {
+        return None;
+    }
+    let shared = me.diffie_hellman(&PublicKey::from(*owner));
+    let old_room = room_key(old_secret).verifying_key().to_bytes();
+    let pt = rekey_cipher(shared.as_bytes(), &old_room).decrypt(Nonce::from_slice(&notice[..12]), &notice[12..]).ok()?;
+    pt.try_into().ok()
+}
+
+/// O dono troca o segredo da sala: gera um novo e deixa um aviso no diretório para cada membro de `keep`
+/// (quem não estiver na lista fica de fora). Devolve o segredo novo; o dono entra nele com [`sync`].
+pub async fn rotate(server: &str, owner: &StaticSecret, old_secret: &[u8; 32], keep: &[[u8; 32]]) -> io::Result<[u8; 32]> {
+    let new = new_secret();
+    let old_room = room_key(old_secret).verifying_key().to_bytes();
+    for m in keep {
+        directory::notice_put(server, owner, &old_room, m, &seal_rekey(owner, m, old_secret, &new)).await?;
+    }
+    Ok(new)
+}
+
+/// Membro: procura o aviso do dono para você e, se houver, devolve o segredo novo da sala.
+pub async fn follow(server: &str, me: &StaticSecret, owner: &[u8; 32], old_secret: &[u8; 32]) -> io::Result<Option<[u8; 32]>> {
+    let old_room = room_key(old_secret).verifying_key().to_bytes();
+    let mine = PublicKey::from(me).to_bytes();
+    let found = directory::notice_get(server, owner, &old_room, &mine).await?;
+    Ok(found.and_then(|n| open_rekey(me, owner, old_secret, &n)))
 }
 
 /// Situação da sala depois de uma sincronização.
@@ -69,21 +126,32 @@ pub async fn leave(node: &Node, key: &SigningKey) -> io::Result<()> {
     directory::room_leave(node.directory(), key, &node.public_key()).await
 }
 
-/// Liga para os membros que faltam e que são de quem tem a chave pública maior (o menor disca).
-/// Devolve quantas chamadas completou.
-pub async fn connect_missing(node: &Node, view: &RoomView, mesh: &Mesh, wait: Duration) -> usize {
-    let me = node.public_key();
-    let mut made = 0;
+/// Liga, em segundo plano e em paralelo, para os membros que faltam e que são de quem tem a chave pública
+/// maior (o menor disca). Devolve quantas discagens iniciou; as chamadas completas entram em `mesh` sozinhas.
+///
+/// Nunca bloqueia: um membro ausente não atrasa os outros nem a sincronização. Cada membro tem uma discagem
+/// por vez, e depois de uma falha só se tenta de novo após uma espera que cresce (2, 4, 8, 16 s). Por isso dá
+/// para chamar a cada poucos segundos: uma chamada que cai volta logo, sem martelar o diretório.
+pub fn connect_missing(dialer: &Dialer, view: &RoomView, mesh: &Mesh, wait: Duration) -> usize {
+    let me = dialer.public_key();
+    let mut started = 0;
     for m in &view.members {
-        if *m == me || me > *m || mesh.has(m) {
+        if *m == me || me > *m || mesh.has(m) || !mesh.begin_dial(m) {
             continue;
         }
-        if let Ok(call) = node.dial(*m, G722::new(), wait).await {
-            mesh.add(*m, call);
-            made += 1;
-        }
+        started += 1;
+        let (dialer, mesh, m) = (dialer.clone(), mesh.clone(), *m);
+        tokio::spawn(async move {
+            match dialer.dial(m, G722::new(), wait).await {
+                Ok(call) => {
+                    mesh.add(m, call);
+                    mesh.end_dial(&m, true);
+                }
+                Err(_) => mesh.end_dial(&m, false),
+            }
+        });
     }
-    made
+    started
 }
 
 /// Atende um convite de um membro da sala e põe na malha. `false` se `inc` não é de um membro.
@@ -101,13 +169,38 @@ pub async fn accept_member(inc: IncomingCall, view: &RoomView, mesh: &Mesh) -> b
     }
 }
 
+/// Espera inicial entre discagens a um membro que não atendeu; dobra a cada falha até 16 s.
+const RETRY_BASE: Duration = Duration::from_secs(2);
+/// Pico (de 32767) a partir do qual a mixagem reduz o ganho.
+const LIMIT: f32 = 30000.0;
+/// Energia (RMS, de 32767) abaixo da qual um quadro conta como silêncio ou ruído de fundo.
+const SPEAKING_RMS: f32 = 400.0;
+/// Quanto tempo depois do último quadro com voz o membro ainda aparece falando.
+const SPEAKING_HOLD: Duration = Duration::from_millis(400);
+/// Volume máximo por membro (2× = +6 dB).
+pub const MAX_VOLUME: f32 = 2.0;
+
 type Queues = Arc<Mutex<HashMap<[u8; 32], VecDeque<Vec<i16>>>>>;
 
 /// Chamadas ativas de uma sala: envia o microfone a todas e mistura o que chega.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Mesh {
-    peers: Mutex<HashMap<[u8; 32], mpsc::Sender<Vec<i16>>>>,
+    peers: Arc<Mutex<HashMap<[u8; 32], Sender>>>,
     queues: Queues,
+    /// Ganho do limitador da mixagem (1,0 = sem redução).
+    gain: Arc<Mutex<f32>>,
+    dials: Arc<Mutex<HashMap<[u8; 32], Dial>>>,
+    /// Volume de cada membro (1,0 = normal, 0 = mudo); quem não está aqui toca no normal.
+    volumes: Arc<Mutex<HashMap<[u8; 32], f32>>>,
+    /// Quando cada membro falou por último (energia acima de [`SPEAKING_RMS`]).
+    spoke: Arc<Mutex<HashMap<[u8; 32], Instant>>>,
+}
+
+/// Estado da discagem a um membro: em andamento, ou esperando para tentar de novo depois de falhar.
+struct Dial {
+    busy: bool,
+    failures: u32,
+    retry_at: Instant,
 }
 
 impl Mesh {
@@ -120,6 +213,7 @@ impl Mesh {
         let (tx, mut rx) = mpsc::channel::<Vec<i16>>(8);
         self.peers.lock().unwrap().insert(key, tx);
         let queues = self.queues.clone();
+        let spoke = self.spoke.clone();
         tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -129,6 +223,10 @@ impl Mesh {
                     },
                     inc = call.next_pcm() => match inc {
                         Some(pcm) => {
+                            let rms = (pcm.iter().map(|&x| x as f32 * x as f32).sum::<f32>() / pcm.len().max(1) as f32).sqrt();
+                            if rms >= SPEAKING_RMS {
+                                spoke.lock().unwrap().insert(key, Instant::now());
+                            }
                             let mut q = queues.lock().unwrap();
                             let line = q.entry(key).or_default();
                             if line.len() >= MAX_QUEUED_FRAMES {
@@ -143,6 +241,42 @@ impl Mesh {
             queues.lock().unwrap().remove(&key);
             call.hangup();
         });
+    }
+
+    /// Reserva a discagem a `key`; `false` se já há uma em andamento ou se ainda é cedo para repetir.
+    fn begin_dial(&self, key: &[u8; 32]) -> bool {
+        let mut d = self.dials.lock().unwrap();
+        let e = d.entry(*key).or_insert(Dial { busy: false, failures: 0, retry_at: Instant::now() });
+        if e.busy || Instant::now() < e.retry_at {
+            return false;
+        }
+        e.busy = true;
+        true
+    }
+
+    fn end_dial(&self, key: &[u8; 32], ok: bool) {
+        let mut d = self.dials.lock().unwrap();
+        if ok {
+            d.remove(key);
+        } else if let Some(e) = d.get_mut(key) {
+            e.busy = false;
+            e.failures += 1;
+            e.retry_at = Instant::now() + RETRY_BASE * (1 << e.failures.min(4).saturating_sub(1));
+        }
+    }
+
+    /// Ajusta o volume de `key` (de 0, mudo, a [`MAX_VOLUME`]).
+    pub fn set_volume(&self, key: &[u8; 32], volume: f32) {
+        self.volumes.lock().unwrap().insert(*key, volume.clamp(0.0, MAX_VOLUME));
+    }
+
+    pub fn volume(&self, key: &[u8; 32]) -> f32 {
+        self.volumes.lock().unwrap().get(key).copied().unwrap_or(1.0)
+    }
+
+    /// `key` falou há pouco? (O volume mudo não esconde: o indicador mostra quem fala, não o que você ouve.)
+    pub fn is_speaking(&self, key: &[u8; 32]) -> bool {
+        self.spoke.lock().unwrap().get(key).is_some_and(|t| t.elapsed() < SPEAKING_HOLD)
     }
 
     /// Há chamada viva com `key`?
@@ -165,22 +299,45 @@ impl Mesh {
         }
     }
 
-    /// Um quadro misturado (soma saturada) com o próximo de cada membro que tem algo. `None` se ninguém falou.
+    /// Um quadro misturado com o próximo de cada membro que tem algo. `None` se ninguém falou.
+    ///
+    /// A soma passa por um limitador: se o pico passaria de [`LIMIT`], o ganho cai na hora para caber (sem
+    /// cortar a onda) e volta devagar, em cerca de 200 ms, quando a soma baixa.
     pub fn mix(&self) -> Option<Vec<i16>> {
         let mut q = self.queues.lock().unwrap();
-        let frames: Vec<Vec<i16>> = q.values_mut().filter_map(VecDeque::pop_front).collect();
-        let len = frames.iter().map(Vec::len).max()?;
-        let mut out = vec![0i32; len];
-        for f in &frames {
-            for (o, s) in out.iter_mut().zip(f) {
-                *o += *s as i32;
+        let frames: Vec<([u8; 32], Vec<i16>)> = q.iter_mut().filter_map(|(k, line)| Some((*k, line.pop_front()?))).collect();
+        drop(q);
+        let len = frames.iter().map(|(_, f)| f.len()).max()?;
+        let mut sum = vec![0i32; len];
+        let volumes = self.volumes.lock().unwrap();
+        for (k, f) in &frames {
+            let v = volumes.get(k).copied().unwrap_or(1.0);
+            for (o, s) in sum.iter_mut().zip(f) {
+                *o += (*s as f32 * v).round() as i32;
             }
         }
-        Some(out.into_iter().map(|x| x.clamp(i16::MIN as i32, i16::MAX as i32) as i16).collect())
+        drop(volumes);
+        let peak = sum.iter().map(|x| x.unsigned_abs()).max().unwrap_or(0) as f32;
+        let mut g = self.gain.lock().unwrap();
+        let from = if *g == 0.0 { 1.0 } else { *g };
+        let needed = if peak > LIMIT { LIMIT / peak } else { 1.0 };
+        // Ataque instantâneo; solta por interpolação ao longo do quadro.
+        let (start, end) = if needed < from { (needed, needed) } else { (from, from + (1.0 - from) * 0.1) };
+        *g = end;
+        let out = sum
+            .into_iter()
+            .enumerate()
+            .map(|(i, x)| {
+                let gain = start + (end - start) * i as f32 / len as f32;
+                (x as f32 * gain).round().clamp(i16::MIN as f32, i16::MAX as f32) as i16
+            })
+            .collect();
+        Some(out)
     }
 
     /// Desliga todas as chamadas.
     pub fn hangup(&self) {
+        self.spoke.lock().unwrap().clear();
         self.peers.lock().unwrap().clear();
     }
 }
@@ -197,15 +354,71 @@ mod tests {
     }
 
     #[test]
-    fn mix_sums_with_saturation() {
+    fn rekey_notice_opens_only_for_its_recipient() {
+        let (owner, bob, eve) = (StaticSecret::random_from_rng(OsRng), StaticSecret::random_from_rng(OsRng), StaticSecret::random_from_rng(OsRng));
+        let (old, new) = (new_secret(), new_secret());
+        let (opub, bpub) = (PublicKey::from(&owner).to_bytes(), PublicKey::from(&bob).to_bytes());
+        let n = seal_rekey(&owner, &bpub, &old, &new);
+        assert_eq!(n.len(), directory::NOTICE_LEN);
+        assert_eq!(open_rekey(&bob, &opub, &old, &n), Some(new));
+        assert_eq!(open_rekey(&eve, &opub, &old, &n), None);
+        assert_eq!(open_rekey(&bob, &opub, &new_secret(), &n), None);
+    }
+
+    #[test]
+    fn volume_scales_one_member_and_mute_silences_it() {
+        let mesh = Mesh::new();
+        let (a, b) = ([1u8; 32], [2u8; 32]);
+        let push = |k: [u8; 32], v: i16| mesh.queues.lock().unwrap().entry(k).or_default().push_back(vec![v; 4]);
+        mesh.set_volume(&a, 0.5);
+        mesh.set_volume(&b, 0.0);
+        push(a, 1000);
+        push(b, 9000);
+        assert_eq!(mesh.mix().unwrap(), vec![500; 4]);
+        assert_eq!(mesh.volume(&b), 0.0);
+        mesh.set_volume(&a, 99.0);
+        assert_eq!(mesh.volume(&a), MAX_VOLUME);
+    }
+
+    #[test]
+    fn mix_sums_quiet_voices_untouched() {
         let mesh = Mesh::new();
         assert!(mesh.mix().is_none());
         {
             let mut q = mesh.queues.lock().unwrap();
-            q.entry([1; 32]).or_default().push_back(vec![100, i16::MAX, -5]);
-            q.entry([2; 32]).or_default().push_back(vec![23, 10, i16::MIN]);
+            q.entry([1; 32]).or_default().push_back(vec![100, 2000, -5]);
+            q.entry([2; 32]).or_default().push_back(vec![23, 10, -4000]);
         }
-        assert_eq!(mesh.mix().unwrap(), vec![123, i16::MAX, i16::MIN]);
+        assert_eq!(mesh.mix().unwrap(), vec![123, 2010, -4005]);
         assert!(mesh.mix().is_none());
+    }
+
+    #[test]
+    fn mix_limits_loud_sum_without_clipping_then_recovers() {
+        let mesh = Mesh::new();
+        let wave = |a: f64, n: usize| -> Vec<i16> { (0..320).map(|i| (a * (std::f64::consts::TAU * 440.0 * (n * 320 + i) as f64 / 16000.0).sin()) as i16).collect() };
+        // Quatro vozes a 20000 somam 80000: sem limitador, achataria a onda.
+        {
+            let mut q = mesh.queues.lock().unwrap();
+            for k in 0..4u8 {
+                q.entry([k; 32]).or_default().push_back(wave(20000.0, 0));
+            }
+        }
+        let out = mesh.mix().unwrap();
+        let peak = out.iter().map(|x| x.unsigned_abs()).max().unwrap();
+        assert!((29000..=30001).contains(&peak), "{peak}");
+        // A forma da onda se preserva: razão constante com a soma ideal.
+        let ideal: Vec<i32> = wave(20000.0, 0).iter().map(|x| *x as i32 * 4).collect();
+        let k = ideal.iter().zip(&out).filter(|(i, _)| i.abs() > 40000).map(|(i, o)| *o as f64 / *i as f64);
+        let k: Vec<f64> = k.collect();
+        assert!(k.iter().all(|r| (r - k[0]).abs() < 0.01));
+        // Voz baixa depois: o ganho volta a 1 em poucos quadros.
+        let mut last = 0.0;
+        for n in 1..40 {
+            mesh.queues.lock().unwrap().entry([9; 32]).or_default().push_back(wave(1000.0, n));
+            let o = mesh.mix().unwrap();
+            last = o.iter().map(|x| x.unsigned_abs()).max().unwrap() as f64 / 1000.0;
+        }
+        assert!(last > 0.97, "{last}");
     }
 }

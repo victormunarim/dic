@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use clam::directory::{self, DirectoryServer, HostConfig};
+use clam::directory::{self, DirectoryServer};
 use clam::media::codec::Mulaw;
 use clam::node::{DialError, Node, NodeConfig};
 use clam::{
@@ -158,87 +158,26 @@ async fn third_node_serves_as_first_hop() {
     ca.hangup();
 }
 
-async fn hosted_call(a_hosted: bool, b_hosted: bool) {
-    let d = DirectoryServer::spawn_with(
-        "127.0.0.1:0".parse().unwrap(),
-        Some(HostConfig { relay_listen: "127.0.0.1:0".parse().unwrap(), relay_public: None, verbose: false }),
-    )
-    .await
-    .unwrap();
-    let addr = d.local_addr().to_string();
-    let (sa, sb) = (key(), key());
-    let (pa, pb) = (*PublicKey::from(&sa).as_bytes(), *PublicKey::from(&sb).as_bytes());
-    let a = Node::start(NodeConfig { via_server: a_hosted, ..cfg(sa, &addr, vec![]) }).await.unwrap();
-    let mut b = Node::start(NodeConfig { via_server: b_hosted, ..cfg(sb, &addr, vec![pa]) }).await.unwrap();
-    if b_hosted {
-        assert_eq!(b.published_addr(), d.relay_addr().unwrap().to_string());
-    }
-    let answer = tokio::spawn(async move {
-        let inc = timeout(Duration::from_secs(15), b.next_incoming()).await.unwrap().unwrap();
-        (inc.accept(Mulaw::new()).await.unwrap(), b)
-    });
-    let mut ca = a.dial(pb, Mulaw::new(), Duration::from_secs(15)).await.unwrap();
-    let (mut cb, _b) = answer.await.unwrap();
-    let end = Instant::now() + Duration::from_millis(1500);
-    let (mut n, mut got_a, mut got_b) = (0, 0, 0);
-    while Instant::now() < end {
-        ca.send(tone(n)).await.unwrap();
-        cb.send(tone(n)).await.unwrap();
-        n += 1;
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        while let Ok(Some(f)) = timeout(Duration::from_millis(1), cb.next_pcm()).await {
-            got_b += f.iter().any(|x| x.abs() > 1000) as usize;
-        }
-        while let Ok(Some(f)) = timeout(Duration::from_millis(1), ca.next_pcm()).await {
-            got_a += f.iter().any(|x| x.abs() > 1000) as usize;
-        }
-    }
-    assert!(got_a >= 20 && got_b >= 20, "a {got_a} b {got_b}");
-    ca.hangup();
-}
-
-/// Quem atende está atrás de NAT (sem porta aberta): o relay do servidor emenda a conexão por uma saída do nó.
+/// O diretório confere se o relay publicado aceita conexões de fora; não deixa repetir o teste de imediato.
 #[tokio::test]
-async fn hosted_callee_talks_through_server_relay() {
-    hosted_call(false, true).await;
-}
-
-#[tokio::test]
-async fn both_hosted_talk() {
-    hosted_call(true, true).await;
-}
-
-#[tokio::test]
-async fn host_needs_proof_and_server_support() {
-    // Servidor sem relay recusa.
+async fn reachability_check_sees_open_and_closed_ports() {
     let (_d, addr) = dir().await;
-    let err = directory::host(&addr, &key(), "127.0.0.1:1".parse().unwrap(), Default::default()).await.unwrap_err();
-    assert!(err.to_string().contains("sem relay"), "{err}");
+    let open = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (a, b) = (key(), key());
+    directory::publish(&addr, &a, open.local_addr().unwrap().port(), [1; 32], [2; 32], None).await.unwrap();
+    assert!(directory::reachable(&addr, &a).await.unwrap());
+    let err = directory::reachable(&addr, &a).await.unwrap_err();
+    assert!(err.to_string().contains("instantes"), "{err}");
 
-    // Prova de posse falsa: pede para hospedar a chave de `me` com a prova de outra secreta.
-    let d = DirectoryServer::spawn_with(
-        "127.0.0.1:0".parse().unwrap(),
-        Some(HostConfig { relay_listen: "127.0.0.1:0".parse().unwrap(), relay_public: None, verbose: false }),
-    )
-    .await
-    .unwrap();
-    let me = *PublicKey::from(&key()).as_bytes();
-    let mut t = tokio::net::TcpStream::connect(d.local_addr()).await.unwrap();
-    let hello = read_frame(&mut t).await;
-    let e: [u8; 32] = hello[..32].try_into().unwrap();
-    let mut req = vec![4u8];
-    req.extend_from_slice(&me);
-    let shared = key().diffie_hellman(&PublicKey::from(e));
-    let mut m = <Hmac<Sha256> as Mac>::new_from_slice(shared.as_bytes()).unwrap();
-    m.update(b"clam-dir-v1");
-    m.update(&e);
-    m.update(&req);
-    req.extend_from_slice(&m.finalize().into_bytes());
-    let mut f = (req.len() as u16).to_be_bytes().to_vec();
-    f.extend_from_slice(&req);
-    t.write_all(&f).await.unwrap();
-    assert_eq!(read_frame(&mut t).await[0], 0x81);
-    assert!(directory::lookup(&d.local_addr().to_string(), &me).await.unwrap().is_none());
+    let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = closed.local_addr().unwrap().port();
+    drop(closed);
+    directory::publish(&addr, &b, port, [1; 32], [2; 32], None).await.unwrap();
+    assert!(!directory::reachable(&addr, &b).await.unwrap());
+
+    // Sem publicar, não há o que testar.
+    let err = directory::reachable(&addr, &key()).await.unwrap_err();
+    assert!(err.to_string().contains("não publicado"), "{err}");
 }
 
 /// Falar com o diretório ajusta o desvio de hora (aqui ~0, pois é a mesma máquina).
@@ -303,7 +242,7 @@ async fn three_nodes_form_a_mesh_room() {
             let end = Instant::now() + Duration::from_secs(25);
             while Instant::now() < end && mesh.count() < 2 {
                 let view = room::sync(&node, &rkey).await.unwrap();
-                room::connect_missing(&node, &view, &mesh, Duration::from_secs(10)).await;
+                room::connect_missing(&node.dialer(), &view, &mesh, Duration::from_secs(10));
                 while let Ok(Some(inc)) = timeout(Duration::from_millis(300), node.next_incoming()).await {
                     room::accept_member(inc, &view, &mesh).await;
                 }
@@ -392,4 +331,167 @@ async fn punch_falls_back_to_circuit() {
     let ca = a.dial(pb, Mulaw::new(), Duration::from_secs(15)).await.unwrap();
     let (cb, _b) = answer.await.unwrap();
     talk(ca, cb).await;
+}
+
+/// Discagem não bloqueia por membro ausente, e uma chamada derrubada volta sozinha na tentativa seguinte.
+#[tokio::test]
+async fn room_dials_in_background_and_reconnects() {
+    use clam::room::{self, Mesh};
+    let (_d, addr) = dir().await;
+    let rkey = room::room_key(&room::new_secret());
+    let (mut a, mut b) = (Node::start(cfg(key(), &addr, vec![])).await.unwrap(), Node::start(cfg(key(), &addr, vec![])).await.unwrap());
+    // Quem tem a chave menor disca.
+    if a.public_key() > b.public_key() {
+        std::mem::swap(&mut a, &mut b);
+    }
+    let (ma, mb) = (Mesh::new(), Mesh::new());
+    room::sync(&a, &rkey).await.unwrap();
+    room::sync(&b, &rkey).await.unwrap();
+    let mut view_a = room::sync(&a, &rkey).await.unwrap();
+    assert_eq!(view_a.members.len(), 2);
+    // Um membro fantasma com chave maior: a discagem a ele não pode segurar a chamada.
+    view_a.members.push([0xff; 32]);
+    let t = Instant::now();
+    let started = room::connect_missing(&a.dialer(), &view_a, &ma, Duration::from_secs(10));
+    assert!(t.elapsed() < Duration::from_millis(200), "connect_missing bloqueou: {:?}", t.elapsed());
+    assert_eq!(started, 2, "b e o fantasma, em paralelo");
+    let view_b = room::sync(&b, &rkey).await.unwrap();
+
+    async fn until_connected(b: &mut Node, view_b: &room::RoomView, ma: &Mesh, mb: &Mesh) {
+        let end = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < end && !(ma.count() == 1 && mb.count() == 1) {
+            if let Ok(Some(inc)) = timeout(Duration::from_millis(200), b.next_incoming()).await {
+                room::accept_member(inc, view_b, mb).await;
+            }
+        }
+        assert!(ma.count() == 1 && mb.count() == 1, "a {} b {}", ma.count(), mb.count());
+    }
+    until_connected(&mut b, &view_b, &ma, &mb).await;
+
+    // A chamada cai do lado de quem disca; a próxima rodada religa.
+    ma.hangup();
+    let end = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < end && mb.count() > 0 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(mb.count(), 0, "o outro lado percebe o fim");
+    let mut redialed = 0;
+    let end = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < end && !(ma.count() == 1 && mb.count() == 1) {
+        redialed += room::connect_missing(&a.dialer(), &view_a, &ma, Duration::from_secs(10));
+        if let Ok(Some(inc)) = timeout(Duration::from_millis(200), b.next_incoming()).await {
+            room::accept_member(inc, &view_b, &mb).await;
+        }
+    }
+    assert!(redialed >= 1 && ma.count() == 1 && mb.count() == 1, "religou? a {} b {}", ma.count(), mb.count());
+    ma.send(&wide_tone(0));
+    ma.hangup();
+    mb.hangup();
+}
+
+#[tokio::test]
+async fn directory_rate_limits_per_ip() {
+    use clam::directory::RateLimit;
+    let d = DirectoryServer::spawn_limited("127.0.0.1:0".parse().unwrap(), RateLimit { per_sec: 0.1, burst: 3.0 }).await.unwrap();
+    let addr = d.local_addr().to_string();
+    let mut refused = 0;
+    for _ in 0..10 {
+        if clam::directory::lookup(&addr, &[7u8; 32]).await.is_err() {
+            refused += 1;
+        }
+    }
+    assert!(refused >= 5, "só {refused} recusados");
+}
+
+#[tokio::test]
+async fn room_owner_rotates_secret_and_removed_member_is_left_out() {
+    use clam::{room, x25519_dalek::{PublicKey, StaticSecret}, rand_core::OsRng};
+    let d = DirectoryServer::spawn("127.0.0.1:0".parse().unwrap()).await.unwrap();
+    let addr = d.local_addr().to_string();
+    let (owner, bob, eve) = (StaticSecret::random_from_rng(OsRng), StaticSecret::random_from_rng(OsRng), StaticSecret::random_from_rng(OsRng));
+    let (opub, bpub) = (PublicKey::from(&owner).to_bytes(), PublicKey::from(&bob).to_bytes());
+    let old = room::new_secret();
+    let new = room::rotate(&addr, &owner, &old, &[bpub]).await.unwrap();
+    assert_eq!(room::follow(&addr, &bob, &opub, &old).await.unwrap(), Some(new));
+    assert_eq!(room::follow(&addr, &eve, &opub, &old).await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn host_leaving_hands_the_room_to_the_next_member() {
+    use clam::room;
+    let (_d, addr) = dir().await;
+    let rkey = room::room_key(&room::new_secret());
+    let (a, b, c) = (
+        Node::start(cfg(key(), &addr, vec![])).await.unwrap(),
+        Node::start(cfg(key(), &addr, vec![])).await.unwrap(),
+        Node::start(cfg(key(), &addr, vec![])).await.unwrap(),
+    );
+    for n in [&a, &b, &c] {
+        room::sync(n, &rkey).await.unwrap();
+    }
+    let view = room::sync(&c, &rkey).await.unwrap();
+    assert_eq!(view.host, a.public_key());
+    room::leave(&a, &rkey).await.unwrap();
+    let view = room::sync(&c, &rkey).await.unwrap();
+    assert_eq!((view.host, view.members.len()), (b.public_key(), 2));
+    assert!(room::sync(&b, &rkey).await.unwrap().i_am_host);
+    // O antigo anfitrião volta como o membro mais novo e não toma a sala de volta.
+    let view = room::sync(&a, &rkey).await.unwrap();
+    assert_eq!((view.host, view.members.last().copied()), (b.public_key(), Some(a.public_key())));
+}
+
+#[tokio::test]
+async fn member_that_drops_and_returns_keeps_the_room_alive() {
+    use clam::room::{self, Mesh};
+    let (_d, addr) = dir().await;
+    let rkey = room::room_key(&room::new_secret());
+    let (mut a, mut b) = (Node::start(cfg(key(), &addr, vec![])).await.unwrap(), Node::start(cfg(key(), &addr, vec![])).await.unwrap());
+    if a.public_key() > b.public_key() {
+        std::mem::swap(&mut a, &mut b);
+    }
+    let (ma, mb) = (Mesh::new(), Mesh::new());
+    room::sync(&a, &rkey).await.unwrap();
+    room::sync(&b, &rkey).await.unwrap();
+    // `b` cai (sai da sala e perde a chamada); `a` segue sozinho na sala.
+    room::leave(&b, &rkey).await.unwrap();
+    let view_a = room::sync(&a, &rkey).await.unwrap();
+    assert_eq!(view_a.members, vec![a.public_key()]);
+    assert_eq!(room::connect_missing(&a.dialer(), &view_a, &ma, Duration::from_secs(10)), 0);
+    // `b` volta: `a` o vê de novo e a malha se refaz.
+    room::sync(&b, &rkey).await.unwrap();
+    let view_a = room::sync(&a, &rkey).await.unwrap();
+    let view_b = room::sync(&b, &rkey).await.unwrap();
+    assert_eq!(view_a.members.len(), 2);
+    room::connect_missing(&a.dialer(), &view_a, &ma, Duration::from_secs(10));
+    let end = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < end && !(ma.count() == 1 && mb.count() == 1) {
+        if let Ok(Some(inc)) = timeout(Duration::from_millis(200), b.next_incoming()).await {
+            room::accept_member(inc, &view_b, &mb).await;
+        }
+    }
+    assert!(ma.count() == 1 && mb.count() == 1, "a {} b {}", ma.count(), mb.count());
+    ma.hangup();
+    mb.hangup();
+}
+
+#[tokio::test]
+async fn restarted_directory_keeps_rooms_and_publications() {
+    use clam::{directory, room};
+    let state = std::env::temp_dir().join(format!("clam-dir-{}.state", std::process::id()));
+    let _ = std::fs::remove_file(&state);
+    let d = DirectoryServer::spawn_with("127.0.0.1:0".parse().unwrap(), Default::default(), Some(state.clone())).await.unwrap();
+    let addr = d.local_addr();
+    let rkey = room::room_key(&room::new_secret());
+    let (a, b) = (Node::start(cfg(key(), &addr.to_string(), vec![])).await.unwrap(), Node::start(cfg(key(), &addr.to_string(), vec![])).await.unwrap());
+    room::sync(&a, &rkey).await.unwrap();
+    room::sync(&b, &rkey).await.unwrap();
+    tokio::time::sleep(directory::SAVE_EVERY + Duration::from_secs(1)).await;
+    drop(d);
+    // Sem o diretório, nada responde; ao voltar com o mesmo estado, tudo reaparece sem ninguém republicar.
+    assert!(directory::lookup(&addr.to_string(), &a.public_key()).await.is_err());
+    let _d2 = DirectoryServer::spawn_with(addr, Default::default(), Some(state.clone())).await.unwrap();
+    assert!(directory::lookup(&addr.to_string(), &a.public_key()).await.unwrap().is_some());
+    let members = directory::room_members(&addr.to_string(), &rkey).await.unwrap();
+    assert_eq!(members, vec![a.public_key(), b.public_key()]);
+    let _ = std::fs::remove_file(&state);
 }

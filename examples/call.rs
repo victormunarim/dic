@@ -54,7 +54,7 @@ fn parse_candidate(spec: &str) -> Result<Candidate, String> {
     let (Some(addr), Some(onion), Some(link)) = (p.next(), p.next(), p.next()) else {
         return Err(format!("relay '{spec}': esperado addr,onion,link"));
     };
-    Ok(Candidate { addr: addr.into(), public: unhex(onion)?.into(), link_public: unhex(link)?, score: 1.0 })
+    Ok(Candidate { addr: addr.into(), public: unhex(onion)?, link_public: unhex(link)?, score: 1.0 })
 }
 
 fn tone(hz: f64, n: usize) -> Vec<i16> {

@@ -782,14 +782,12 @@ Só o **primeiro contato** usa servidor. Um diretório (`src/directory.rs`) guar
 - **Relógio:** o diretório manda a hora dele no primeiro contato e todos usam essa hora nos convites (`src/clock.rs`). Computadores com a hora errada deixam de recusar chamadas (o convite vale 60 s).
 - **Atrás de roteador:** com o diretório na internet, o nó pede ao roteador para encaminhar a porta do relay por UPnP (`src/upnp.rs`, renovado a cada 40 s) e publica o IP externo. Sem UPnP, ou com CGNAT, a janela avisa o motivo; então abra a porta 4001 ou informe `public_addr`. Se o diretório está na LAN (IP privado), o UPnP não é usado.
 - **Furo de NAT por UDP** (`src/punch.rs`, `NodeConfig.punch`, padrão ligado): o nó usa um socket UDP que fala com o diretório (mesma porta do TCP; ele responde de onde o pacote veio, como um STUN) e mantém o mapeamento do roteador aberto. Quem aceita chamadas mantém um controle com o diretório (`REQ_PUNCH_LISTEN`); quem chama pede o furo (`REQ_PUNCH_PREP`/`REQ_PUNCH_GO`), o diretório avisa o ouvinte do endereço UDP do chamador e devolve o do ouvinte, e os dois sondam um ao outro até abrir. O convite e a voz (já cifrados ponta a ponta) seguem direto por UDP, sem circuito e sem relay. Se o alvo não aceita furos ou o furo não abre em 6 s, `Node::dial` cai no circuito. **Limite:** NAT simétrico nos dois lados não fura. O diretório vê os dois IPs no momento do furo. Cobertura: `tests/node.rs` (loopback; não prova um NAT real).
-- **Atrás de NAT sem abrir porta** (só pela biblioteca; a GUI não oferece, pois a chamada tem de ser p2p): o servidor pode rodar também um relay (`--relay`). O nó marca "usar o relay do servidor" (`NodeConfig.via_server`): fica com uma conexão de controle de saída aberta e o diretório publica o relay do servidor como o dele. A cada circuito para você, o servidor avisa pelo controle, você abre uma conexão de saída com uma ficha de 16 bytes e o servidor emenda as duas (`REQ_HOST`/`REQ_ATTACH` em `src/directory.rs`). Custo: o servidor vê seu IP e o tráfego cifrado das suas chamadas; ele é o último salto. Cobertura: `tests/node.rs`.
+- **Teste de alcançabilidade** (`directory::reachable`, `REQ_REACH`): depois de publicar, o nó pede ao diretório que tente abrir TCP no relay publicado (só com o diretório na internet). Se não abrir, `Node::network_note` avisa que ninguém consegue ligar pelo circuito (ou que só o furo de NAT funciona). O pedido exige a prova de posse e o servidor espera 20 s entre testes da mesma chave, para não servir de varredor de portas. Cobertura: `tests/node.rs`.
 
 Servidor (uma máquina alcançável pelos dois lados):
 
 ```text
 cargo run --release --features net --example directory -- 0.0.0.0:7777
-# (biblioteca) com relay para nós atrás de NAT; a GUI não usa, pois a chamada tem de ser p2p:
-cargo run --release --features net --example directory -- 0.0.0.0:7777 --relay 0.0.0.0:4000 IP-PUBLICO:4000
 ```
 
 ### Salas persistentes (`clam::room`, feature `net`)
@@ -798,7 +796,8 @@ Como uma sala do Discord: a sala é um **segredo de 32 bytes** (64 hex) que fica
 
 - O diretório identifica a sala por uma chave Ed25519 derivada do segredo (HKDF). Entrar, sair e listar são pedidos assinados por ela (com a `E` da conexão, sem repetição): sem o segredo não se entra nem se vê quem está lá.
 - A lista é de quem está presente (renovada a cada sincronização, vence em `TTL`). O **primeiro membro vivo é o anfitrião**; se ele sai, o próximo assume. Até `MAX_ROOM_MEMBERS` (8) por sala.
-- **Malha completa**: o menor `chave pública` de cada par liga para o outro; a voz segue de ponta a ponta entre cada par. `room::Mesh` envia o microfone a todos e mistura (soma saturada) o que chega.
+- **Malha completa**: o menor `chave pública` de cada par liga para o outro; a voz segue de ponta a ponta entre cada par. `room::Mesh` envia o microfone a todos e mistura o que chega com um limitador (acima de pico 30000 o ganho cai na hora, sem cortar a onda, e volta em ~200 ms). `room::connect_missing` disca em segundo plano e em paralelo (um membro ausente não trava ninguém), com espera crescente de 2 a 16 s após falhas; a GUI repete a cada 2 s, então uma chamada que cai volta sozinha.
+- Áudio: a troca de taxa do dispositivo usa filtro sinc com janela de Blackman (corte em 45% da menor taxa, avaliado na posição fracionária exata), em vez de média de caixa e interpolação linear.
 - Os membros listados são liberados no telefone (`Node::allow`), então ninguém precisa estar na lista de Contatos.
 - Na GUI: "Criar / entrar" (código vazio cria uma sala nova), "Copiar código", "Entrar" nas salas salvas, "Sair da sala". As salas ficam em `~/.clam-gui.conf` (campo `rooms`, contém segredos).
 - Limite: o diretório vê quem entra em cada sala (chaves e IPs), não a voz.
@@ -862,7 +861,7 @@ cargo run --release --features net --example measure -- direct 127.0.0.1:9000
 | `src/circle.rs` | `CircleSecret`, `TopicKind` |
 | `examples/call.rs` | chamada de teste (`keygen`, `phone`, `dial`), usada por `scripts/call.sh` e `scripts/call-windows.ps1` |
 | `src/audio.rs` | microfone/alto-falante via `cpal`, reamostragem para a taxa do codec (feature `audio`) |
-| `examples/gui.rs` | janela mínima (feature `gui`) para ligar/atender sem terminal |
+| `examples/gui/` | janela mínima (feature `gui`) para ligar/atender sem terminal; `conf`, `engine` (sem janela, testável) e `ui` |
 | `src/phone.rs` | `Phone`, `IncomingCall`, `call`, `ActiveCall` (feature `net`) |
 | `src/media/` | `VoiceCall`, `keys` (handshake), `packet` (200 B + AEAD), `jitter`, `signal` (convite/aceite), `codec` (`Mulaw`, trait `Codec`) |
 | `src/path.rs` | `PathMode`, `PathRequest`, `PathError` |
@@ -879,3 +878,20 @@ cargo run --release --features net --example measure -- direct 127.0.0.1:9000
 
 Ainda **não** existem: TLS/QUIC e travessia de NAT no adaptador (só TCP + Noise), validação de registros na DHT (um nó armazenador pode sobrescrever um registro com lixo; `open` rejeita lixo, mas ele esconde o registro bom até a próxima publicação), failover de circuitos, descoberta e reputação de relays, integração com MLS e vídeo.
 `PathMode` só modela e valida o modo; ele não move mídia.
+
+## Segurança: limite de taxa, troca de segredo da sala e chaveiro
+
+- **Limite por IP no diretório.** Cada IP (IPv6 por /64) tem um balde de fichas (`RateLimit`, padrão 50/s, rajada 200). Pedido simples custa 1; operações de sala, avisos e punch custam 5; teste de alcançabilidade custa 20. Conexões novas também gastam ficha. `DirectoryServer::spawn_limited` troca os valores.
+- **Troca de segredo da sala.** O dono (chave de identidade que criou a sala) chama `room::rotate(server, owner, old_secret, keep)`: gera um segredo novo e deixa, no diretório, um aviso por membro mantido, cifrado com o DH entre as identidades do dono e do membro. Quem foi removido não recebe aviso e não abre o dos outros. Cada membro chama `room::follow(server, me, owner, old_secret)` ao entrar e adota o segredo novo. Avisos expiram em 3 dias; o diretório guarda no máximo 8192.
+- **Chaveiro.** A GUI guarda a chave de identidade no chaveiro do sistema (`secret=@keyring` no `~/.clam-gui.conf`); sem chaveiro disponível, continua no arquivo (0600).
+
+## Estado do diretório em disco
+
+`directory [escuta] [estado]` grava as publicações e as salas em `estado` a cada 5 s (arquivo temporário + renomear) e relê ao subir, descartando o que passou de 120 s. Um reinício não esvazia as salas nem muda o anfitrião. Sem o argumento, o estado fica só em memória.
+
+## Interface da sala: quem fala, volume, apelidos e dispositivos
+
+- **Quem fala.** Cada membro da sala tem uma bolinha: verde e maior enquanto fala (energia do áudio recebido, com 400 ms de retenção), cinza quando conectado e quieto, laranja enquanto a ligação não completou. Na API: `Mesh::is_speaking`.
+- **Volume por pessoa.** Um controle de 0 (mudo) a 200 % por membro; vale só para o que você ouve (`Mesh::set_volume`, antes do limitador da mixagem).
+- **Apelidos.** O campo ao lado de cada membro grava um apelido salvo no `~/.clam-gui.conf` (`nicks=`, só neste computador). Contatos continuam com o nome da lista; o apelido nunca torna alguém "contato" (atendimento automático segue só a lista de contatos).
+- **Dispositivos de áudio.** Em Configurações avançadas, escolha microfone e alto-falante (`clam::audio::devices`, `Audio::open_with`); vazio usa o padrão do sistema. Se o dispositivo escolhido sumiu (fone desconectado), a abertura falha com aviso em vez de trocar de dispositivo em silêncio.

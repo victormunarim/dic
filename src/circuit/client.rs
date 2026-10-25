@@ -84,21 +84,21 @@ impl ClientCircuit {
 
     /// Pede à saída que abra o fluxo para `dest`.
     pub fn begin(&mut self, dest: &str) -> Result<Cell, CircuitError> {
-        self.to_last(RelayCmd::Begin, dest.as_bytes().to_vec())
+        self.send_last(RelayCmd::Begin, dest.as_bytes().to_vec())
     }
 
     /// Envia dados à saída. Máximo: [`max_data`]`(1)` bytes com 2 saltos.
     pub fn send_data(&mut self, payload: &[u8]) -> Result<Cell, CircuitError> {
-        self.to_last(RelayCmd::Data, payload.to_vec())
+        self.send_last(RelayCmd::Data, payload.to_vec())
     }
 
     /// Célula de preenchimento para o salto de saída (cover de ponta a ponta).
     pub fn cover(&mut self) -> Result<Cell, CircuitError> {
-        self.to_last(RelayCmd::Drop, Vec::new())
+        self.send_last(RelayCmd::Drop, Vec::new())
     }
 
     pub fn end(&mut self) -> Result<Cell, CircuitError> {
-        self.to_last(RelayCmd::End, Vec::new())
+        self.send_last(RelayCmd::End, Vec::new())
     }
 
     /// Ping ao salto `hop`; a resposta chega como [`Event::Pong`]. Mede a
@@ -110,7 +110,7 @@ impl ClientCircuit {
         self.build(hop, RelayCell::new(RelayCmd::Ping, nonce.to_be_bytes().to_vec()))
     }
 
-    fn to_last(&mut self, cmd: RelayCmd, data: Vec<u8>) -> Result<Cell, CircuitError> {
+    fn send_last(&mut self, cmd: RelayCmd, data: Vec<u8>) -> Result<Cell, CircuitError> {
         let last = self.hops.len().checked_sub(1).ok_or(CircuitError::Protocol("circuito vazio"))?;
         self.build(last, RelayCell::new(cmd, data))
     }
