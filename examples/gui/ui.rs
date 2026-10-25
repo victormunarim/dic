@@ -354,18 +354,20 @@ impl App {
         };
         let title = format!("Tela de {}", member_name(&self.form.names(), &who));
         let size = tex.size_vec2();
-        let mut close = false;
-        ctx.show_viewport_immediate(
-            egui::ViewportId::from_hash_of("tela-ampliada"),
-            egui::ViewportBuilder::default().with_title(title).with_inner_size([size.x.min(1600.0), size.y.min(900.0)]),
-            |ctx, _| {
-                egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx, |ui| {
-                    ui.add(egui::Image::new(tex).fit_to_exact_size(ui.available_size()).maintain_aspect_ratio(true));
-                });
-                close = ctx.input(|i| i.viewport().close_requested());
-            },
-        );
-        if close {
+        // Janela flutuante dentro da janela do app: um segundo viewport (outra janela do sistema com
+        // contexto GL próprio) travava a janela principal no Wayland, que esperava a troca de buffers das duas.
+        let screen = ctx.screen_rect().size();
+        let fit = (screen.x * 0.9 / size.x).min(screen.y * 0.9 / size.y).min(1.0);
+        let mut open = true;
+        egui::Window::new(title)
+            .id(egui::Id::new("tela-ampliada"))
+            .open(&mut open)
+            .resizable(true)
+            .default_size(size * fit)
+            .show(ctx, |ui| {
+                ui.add(egui::Image::new(tex).fit_to_exact_size(ui.available_size()).maintain_aspect_ratio(true));
+            });
+        if !open {
             self.zoom = None;
         }
     }
