@@ -14,6 +14,8 @@
 //! | [`circuit`] | Circuito de 2 saltos: handshake por salto, camadas AEAD, relay e cliente |
 //! | [`media`] | Chamada de voz: E2E, pacote fixo de 200 B, buffer de jitter, codec |
 //! | `audio` | Microfone e alto-falante (8 kHz mono) via `cpal` (feature `audio`) |
+//! | `clock` | Hora do diretório para os convites, sem depender do relógio local (feature `net`) |
+//! | `upnp` | Abre a porta do relay no roteador (feature `net`) |
 //! | `timer` | Temporizadores de 1 ms no Windows (feature `net`) |
 //! | `directory` | Diretório de primeiro contato: publicar e achar o relay de uma chave (feature `net`) |
 //! | `node` | `Node`: relay + telefone + publicação no diretório; liga só com a chave do outro (feature `net`) |
@@ -65,6 +67,8 @@ pub mod pairing;
 pub mod net;
 pub mod path;
 #[cfg(feature = "net")]
+pub mod clock;
+#[cfg(feature = "net")]
 pub mod directory;
 #[cfg(feature = "net")]
 pub mod node;
@@ -72,6 +76,8 @@ pub mod node;
 pub mod phone;
 #[cfg(feature = "net")]
 pub mod timer;
+#[cfg(feature = "net")]
+pub mod upnp;
 #[cfg(feature = "net")]
 pub mod runner;
 pub mod presence;

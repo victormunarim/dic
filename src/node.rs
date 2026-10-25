@@ -23,6 +23,7 @@ use crate::{
         manager::{Candidate, CircuitManager, ManagerConfig},
         relay::{RelayConfig, RelayNode},
     },
+    upnp,
     directory::{self, REPUBLISH, RelayInfo, dest_for},
     media::codec::Codec,
     phone::{ActiveCall, CallError, IncomingCall, Phone, call},
@@ -46,11 +47,13 @@ pub struct NodeConfig {
     /// Atrás de NAT, sem porta aberta: usa o relay do próprio servidor (o servidor precisa ter sido
     /// iniciado com relay). O servidor passa a ver o seu IP e o tráfego cifrado das suas chamadas.
     pub via_server: bool,
+    /// Tenta abrir a porta do relay no roteador por UPnP quando o diretório está na internet. Padrão: sim.
+    pub upnp: bool,
 }
 
 impl NodeConfig {
     pub fn new(secret: StaticSecret, directory: impl Into<String>, contacts: Vec<[u8; 32]>) -> Self {
-        Self { secret, directory: directory.into(), contacts, relay_port: DEFAULT_RELAY_PORT, public_addr: None, via_server: false }
+        Self { secret, directory: directory.into(), contacts, relay_port: DEFAULT_RELAY_PORT, public_addr: None, via_server: false, upnp: true }
     }
 }
 
@@ -72,6 +75,7 @@ pub struct Node {
     mine: RelayInfo,
     last_error: Arc<Mutex<Option<String>>>,
     republish: JoinHandle<()>,
+    note: Option<String>,
 }
 
 impl Node {
@@ -91,11 +95,11 @@ impl Node {
                 let onion = n.public_key();
                 scfg.listen = SocketAddr::from(([0, 0, 0, 0], 0));
                 let r = RelayServer::spawn(n, scfg).await?;
-                return Self::finish(cfg.secret, cfg.directory, cfg.public_addr, cfg.via_server, phone, r, onion).await;
+                return Self::finish(cfg.secret, cfg.directory, cfg.public_addr, cfg.via_server, cfg.upnp, phone, r, onion).await;
             }
             Err(e) => return Err(e),
         };
-        Self::finish(cfg.secret, cfg.directory, cfg.public_addr, cfg.via_server, phone, relay, onion).await
+        Self::finish(cfg.secret, cfg.directory, cfg.public_addr, cfg.via_server, cfg.upnp, phone, relay, onion).await
     }
 
     async fn finish(
@@ -103,6 +107,7 @@ impl Node {
         directory: String,
         public_addr: Option<String>,
         via_server: bool,
+        upnp: bool,
         phone: Phone,
         relay: RelayServer,
         onion: [u8; 32],
@@ -112,7 +117,19 @@ impl Node {
         if via_server {
             let (addr, task) = directory::host(&directory, &secret, phone.local_addr(), last_error.clone()).await?;
             let mine = RelayInfo { addr, onion, link };
-            return Ok(Self { secret, directory, phone, relay, mine, last_error, republish: task });
+            return Ok(Self { secret, directory, phone, relay, mine, last_error, republish: task, note: None });
+        }
+        // Diretório na internet e nenhum endereço público informado: tenta abrir a porta no roteador.
+        let (mut public_addr, mut mapping, mut note) = (public_addr, None, None);
+        if upnp && public_addr.is_none() && !upnp::directory_is_local(&directory).await {
+            match upnp::map(port).await {
+                Ok(m) => {
+                    note = Some(format!("porta {port} aberta no roteador (UPnP)"));
+                    public_addr = Some(m.external.clone());
+                    mapping = Some(m);
+                }
+                Err(e) => note = Some(format!("não deu para abrir a porta automaticamente: {e}. Libere a porta {port} no roteador/firewall ou informe o endereço público")),
+            }
         }
         let addr = directory::publish(&directory, &secret, port, onion, link, public_addr.as_deref()).await?;
         let mine = RelayInfo { addr, onion, link };
@@ -121,12 +138,15 @@ impl Node {
             tokio::spawn(async move {
                 loop {
                     tokio::time::sleep(REPUBLISH).await;
+                    if let Some(m) = &mapping {
+                        let _ = m.renew().await;
+                    }
                     let r = directory::publish(&directory, &secret, port, onion, link, public_addr.as_deref()).await;
                     *last_error.lock().unwrap() = r.err().map(|e| e.to_string());
                 }
             })
         };
-        Ok(Self { secret, directory, phone, relay, mine, last_error, republish })
+        Ok(Self { secret, directory, phone, relay, mine, last_error, republish, note })
     }
 
     pub fn public_key(&self) -> [u8; 32] {
@@ -136,6 +156,11 @@ impl Node {
     /// Endereço publicado no diretório (o que os outros usam para chegar ao seu relay).
     pub fn published_addr(&self) -> &str {
         &self.mine.addr
+    }
+
+    /// Aviso sobre a rede (porta aberta por UPnP, ou por que não foi possível), se houver.
+    pub fn network_note(&self) -> Option<&str> {
+        self.note.as_deref()
     }
 
     /// Erro da última renovação no diretório, se houve. `None`: tudo certo.
