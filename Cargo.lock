@@ -766,6 +766,7 @@ dependencies = [
  "keyring",
  "libp2p",
  "openh264",
+ "openh264-sys2",
  "rand_core 0.6.4",
  "rustix 1.1.5",
  "sha2 0.10.9",

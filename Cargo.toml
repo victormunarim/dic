@@ -24,6 +24,7 @@ zeroize = { version = "1", features = ["derive"] }
 igd-next = { version = "0.18.0", features = ["aio_tokio"], optional = true }
 sonora = { version = "0.2.0", optional = true }
 openh264 = { version = "0.9.9", optional = true }
+openh264-sys2 = { version = "0.9.9", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 x11rb = { version = "0.14.0", optional = true }
@@ -37,7 +38,7 @@ windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphic
 gui = ["net", "capture", "portal", "dep:eframe", "dep:keyring"]
 audio = ["dep:cpal", "dep:sonora"]
 net = ["dep:igd-next", "dep:libp2p", "dep:tokio", "dep:futures", "dep:snow"]
-video = ["net", "dep:openh264"]
+video = ["net", "dep:openh264", "dep:openh264-sys2"]
 capture = ["video", "dep:x11rb", "dep:windows-sys"]
 portal = ["video", "dep:ashpd", "dep:rustix"]
 
