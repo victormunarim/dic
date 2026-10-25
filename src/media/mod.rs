@@ -13,6 +13,7 @@
 //! - [`jitter`]: reordena, detecta perda e adapta o atraso de reprodução.
 //! - [`codec`]: trait do codec; vem o G.711 µ-law (sem dependência de C). Opus entra pela mesma trait.
 //! - [`signal`]: convite, aceite e recusa, em quadros de 200 B (a identidade de quem liga vai cifrada).
+//! - [`screen`]: vídeo da tela em fragmentos de 200 B num circuito próprio, com taxa fixa.
 //! - [`VoiceCall`]: junta tudo.
 //!
 //! Sem DTX: o cover do circuito já manda uma célula a cada 20 ms, então calar não economiza banda
@@ -22,6 +23,7 @@ pub mod codec;
 pub mod jitter;
 pub mod keys;
 pub mod packet;
+pub mod screen;
 pub mod signal;
 
 mod call;

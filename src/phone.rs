@@ -17,6 +17,12 @@
 //! (que a autenticação recusa) nunca troca a rota.
 //!
 //! PCM entra e sai por canais; o relógio de reprodução (`frame_ms`) é interno.
+//!
+//! **Tela.** A transmissão de tela anda num circuito *só dela* (veja [`crate::media::screen`]),
+//! com cover de [`SCREEN_SLOT_MS`] e chaves derivadas das da chamada. Quem transmite abre o
+//! circuito até o telefone de quem assiste ([`share_screen`]); quem assiste recebe
+//! [`ScreenEvent`] em [`ActiveCall::next_screen`]. A chamada que ligou também precisa estar
+//! registrada no telefone da própria máquina ([`PhoneLink`]) para receber esse circuito.
 
 use std::{
     collections::HashMap,
@@ -43,10 +49,15 @@ use crate::{
     media::{
         CallStats, MediaError, VoiceCall,
         codec::Codec,
+        keys::CallKeys,
+        screen::{ScreenFrame, ScreenStats, ScreenStream},
         signal::{Answer, Caller, Incoming},
     },
-    transport::CircuitClient,
+    transport::{CircuitClient, ClientOptions},
 };
+
+/// Intervalo entre pacotes do circuito da tela: 200 pacotes/s, ≈ 277 kbps de vídeo.
+pub const SCREEN_SLOT_MS: u64 = 5;
 
 /// Maior quadro `[u16][dados]` aceito do circuito; os de mídia e sinalização têm 200 B.
 const MAX_FRAME: usize = 1024;
@@ -93,9 +104,30 @@ pub struct ActiveCall {
     speaker: mpsc::Receiver<Vec<i16>>,
     stats: Arc<Mutex<CallStats>>,
     peer_hung_up: Arc<AtomicBool>,
+    screen: mpsc::Receiver<ScreenEvent>,
+    share_keys: CallKeys,
+}
+
+/// O que chega do circuito da tela de quem está transmitindo.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ScreenEvent {
+    /// Quadro de vídeo remontado, pronto para o decodificador.
+    Frame(ScreenFrame),
+    /// Quem transmitia parou.
+    Stopped,
 }
 
 impl ActiveCall {
+    /// Próximo evento da tela de quem transmite para você. `None` = a chamada acabou.
+    pub async fn next_screen(&mut self) -> Option<ScreenEvent> {
+        self.screen.recv().await
+    }
+
+    /// Chaves do circuito de tela quando *você* transmite (use em [`share_screen`]).
+    pub fn share_keys(&self) -> &CallKeys {
+        &self.share_keys
+    }
+
     /// Um quadro do microfone (o tamanho que o codec espera). `Err` = a chamada acabou.
     pub async fn send(&self, pcm: Vec<i16>) -> Result<(), CallError> {
         self.mic.send(pcm).await.map_err(|_| CallError::Closed)
@@ -130,6 +162,12 @@ enum WireOut {
     Bound(u64),
 }
 
+/// Rótulo das chaves da tela: quem transmite define o sentido, então os dois lados nunca
+/// reusam um nonce se transmitirem ao mesmo tempo.
+fn screen_label(sharer_is_caller: bool) -> &'static [u8] {
+    if sharer_is_caller { b"screen/caller" } else { b"screen/callee" }
+}
+
 /// Motor de uma chamada: cifra o microfone, decifra a rede, toca no ritmo do codec.
 #[allow(clippy::too_many_arguments)]
 async fn drive<C: Codec>(
@@ -142,7 +180,16 @@ async fn drive<C: Codec>(
     speaker: mpsc::Sender<Vec<i16>>,
     stats: Arc<Mutex<CallStats>>,
     peer_hung_up: Arc<AtomicBool>,
+    view_keys: CallKeys,
+    screen_tx: mpsc::Sender<ScreenEvent>,
 ) {
+    // Tela de quem transmite para cá: o circuito dela chega por outra conexão e se prende à chamada
+    // pelo primeiro pacote que autenticar.
+    let mut screen = ScreenStream::new(&view_keys);
+    let mut screen_conn: Option<u64> = None;
+    let mut stopped_told = false;
+    let mut ask = interval(Duration::from_millis(100));
+    ask.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let t0 = Instant::now();
     let now = || t0.elapsed().as_millis() as u64;
     let mut tick = interval(Duration::from_millis(frame_ms));
@@ -168,7 +215,24 @@ async fn drive<C: Codec>(
             },
             inb = wire_in.recv() => match inb {
                 Some((conn, data)) => {
-                    if call.receive(now(), &data).is_ok() {
+                    let on_screen = screen_conn == Some(conn);
+                    if on_screen || call.receive(now(), &data).is_err() {
+                        if screen.receive(&data).is_ok() {
+                            if !on_screen {
+                                screen_conn = Some(conn);
+                                let _ = wire_out.send(WireOut::Bound(conn)).await;
+                            }
+                            while let Some(f) = screen.poll_frame() {
+                                let _ = screen_tx.try_send(ScreenEvent::Frame(f));
+                            }
+                            if screen.peer_stopped() != stopped_told {
+                                stopped_told = screen.peer_stopped();
+                                if stopped_told {
+                                    let _ = screen_tx.try_send(ScreenEvent::Stopped);
+                                }
+                            }
+                        }
+                    } else {
                         if conn != current {
                             current = conn;
                             let _ = wire_out.send(WireOut::Bound(conn)).await;
@@ -181,6 +245,12 @@ async fn drive<C: Codec>(
                 }
                 None => break,
             },
+            // Imagem parada por perda: pede um quadro-chave, no máximo 10 vezes por segundo.
+            _ = ask.tick(), if screen_conn.is_some() && screen.needs_key() => {
+                if let (Some(conn), Ok(p)) = (screen_conn, screen.next_packet()) {
+                    let _ = wire_out.send(WireOut::Frame { conn, data: p.to_vec() }).await;
+                }
+            }
             _ = tick.tick() => {
                 for f in call.playout(now()) {
                     let _ = speaker.try_send(f);
@@ -195,6 +265,8 @@ async fn drive<C: Codec>(
 /// Sobe o motor de uma chamada e devolve a ponta que o app usa.
 fn start_call<C: Codec + Send + 'static>(
     voice: VoiceCall<C>,
+    keys: &CallKeys,
+    caller: bool,
     frame_ms: u64,
     conn: u64,
 ) -> (ActiveCall, mpsc::Sender<WireIn>, mpsc::Receiver<WireOut>) {
@@ -204,8 +276,10 @@ fn start_call<C: Codec + Send + 'static>(
     let (spk_tx, spk_rx) = mpsc::channel(32);
     let stats = Arc::new(Mutex::new(CallStats::default()));
     let peer_hung_up = Arc::new(AtomicBool::new(false));
-    tokio::spawn(drive(voice, frame_ms, conn, in_rx, out_tx, mic_rx, spk_tx, stats.clone(), peer_hung_up.clone()));
-    (ActiveCall { mic: mic_tx, speaker: spk_rx, stats, peer_hung_up }, in_tx, out_rx)
+    let (scr_tx, scr_rx) = mpsc::channel(64);
+    let (share_keys, view_keys) = (keys.sub(screen_label(caller)), keys.sub(screen_label(!caller)));
+    tokio::spawn(drive(voice, frame_ms, conn, in_rx, out_tx, mic_rx, spk_tx, stats.clone(), peer_hung_up.clone(), view_keys, scr_tx));
+    (ActiveCall { mic: mic_tx, speaker: spk_rx, stats, peer_hung_up, screen: scr_rx, share_keys }, in_tx, out_rx)
 }
 
 /// Liga para `peer` (a chave do pareamento) pelo circuito de `client`.
@@ -213,11 +287,24 @@ fn start_call<C: Codec + Send + 'static>(
 /// `wait` limita cada espera: o circuito ficar pronto (se `client` já estiver pronto, não espera)
 /// e o aceite chegar.
 pub async fn call<C: Codec + Send + 'static>(
+    client: CircuitClient,
+    my_static: &StaticSecret,
+    peer: &PublicKey,
+    codec: C,
+    wait: Duration,
+) -> Result<ActiveCall, CallError> {
+    call_linked(client, my_static, peer, codec, wait, None).await
+}
+
+/// Como [`call`], mas registrada no telefone desta máquina (`link`), que passa a entregar à
+/// chamada o circuito de tela de quem está do outro lado.
+pub async fn call_linked<C: Codec + Send + 'static>(
     mut client: CircuitClient,
     my_static: &StaticSecret,
     peer: &PublicKey,
     codec: C,
     wait: Duration,
+    link: Option<&PhoneLink>,
 ) -> Result<ActiveCall, CallError> {
     let ready = client.status().await.is_some_and(|s| s.active.is_some_and(|a| a.ready));
     timeout(wait, async {
@@ -254,14 +341,18 @@ pub async fn call<C: Codec + Send + 'static>(
     .map_err(|_| CallError::NoAnswer)??;
 
     let frame_ms = codec.frame_ms();
-    let (active, in_tx, mut out_rx) = start_call(VoiceCall::new(&keys, codec), frame_ms, 0);
+    let (active, in_tx, mut out_rx) = start_call(VoiceCall::new(&keys, codec), &keys, true, frame_ms, 0);
+    let linked = link.cloned().map(|l| (l.ids.fetch_add(1, Ordering::Relaxed), l));
+    if let Some((id, l)) = &linked {
+        let _ = l.actor.send(Msg::Listen { call: *id, tx: in_tx.clone() }).await;
+    }
     tokio::spawn(async move {
         loop {
             tokio::select! {
                 out = out_rx.recv() => match out {
                     // Sem circuito durante um failover a voz se perde; é o esperado.
-                    Some(WireOut::Frame { data, .. }) => { let _ = client.send(&data).await; }
-                    Some(WireOut::Bound(_)) => {}
+                    Some(WireOut::Frame { conn: 0, data }) => { let _ = client.send(&data).await; }
+                    Some(o) => forward_extra(&linked, o).await,
                     None => break,
                 },
                 ev = client.next_event() => match ev {
@@ -283,6 +374,8 @@ enum Msg {
     Frame(u64, Vec<u8>),
     Closed(u64),
     Register { call: u64, conn: u64, tx: mpsc::Sender<WireIn> },
+    /// Chamada feita por esta máquina: só recebe o que chegar por conexões novas (a tela).
+    Listen { call: u64, tx: mpsc::Sender<WireIn> },
     Out(u64, WireOut),
     Reject(u64, Vec<u8>),
 }
@@ -291,6 +384,132 @@ enum Bind {
     /// Convite entregue ao app, sem resposta ainda.
     Pending,
     Call(u64),
+}
+
+/// Ligação de uma chamada feita por esta máquina com o telefone dela: sem isso, só o lado que
+/// atendeu consegue receber o circuito de tela do outro.
+#[derive(Clone)]
+pub struct PhoneLink {
+    actor: mpsc::Sender<Msg>,
+    ids: Arc<AtomicU64>,
+}
+
+/// Saída por uma conexão do telefone (tudo que não é o circuito próprio da chamada, conexão 0).
+async fn forward_extra(linked: &Option<(u64, PhoneLink)>, out: WireOut) {
+    if let Some((id, l)) = linked {
+        let _ = l.actor.send(Msg::Out(*id, out)).await;
+    }
+}
+
+/// Opções do cliente de circuito da tela: cover de circuito e de link no ritmo dos slots.
+pub fn screen_client_options() -> ClientOptions {
+    let every = Duration::from_millis(SCREEN_SLOT_MS);
+    ClientOptions { cover: Some(every), circuit_cover: Some(every), ..Default::default() }
+}
+
+/// Quem transmite a tela: dono do circuito de tela até o telefone de quem assiste.
+///
+/// Largar o valor interrompe sem avisar; [`stop`](Self::stop) avisa quem assiste.
+pub struct ScreenShare {
+    stream: Arc<Mutex<ScreenStream>>,
+    stopping: Arc<AtomicBool>,
+    task: JoinHandle<()>,
+}
+
+impl ScreenShare {
+    /// Entrega um quadro codificado. `Ok(false)`: descartado porque a fila encheu e falta um quadro-chave.
+    pub fn push(&self, data: &[u8], keyframe: bool) -> Result<bool, MediaError> {
+        self.stream.lock().expect("tela").push_frame(data, keyframe)
+    }
+
+    /// Quem assiste perdeu imagem (ou a fila encheu): force um quadro-chave no codec. Consome o pedido.
+    pub fn keyframe_wanted(&self) -> bool {
+        self.stream.lock().expect("tela").take_keyframe_request()
+    }
+
+    pub fn stats(&self) -> ScreenStats {
+        self.stream.lock().expect("tela").stats()
+    }
+
+    /// Avisa quem assiste e encerra o circuito.
+    pub async fn stop(self) {
+        self.stopping.store(true, Ordering::Relaxed);
+        let _ = timeout(Duration::from_secs(2), async { while !self.task.is_finished() { tokio::time::sleep(Duration::from_millis(10)).await } }).await;
+    }
+}
+
+impl Drop for ScreenShare {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+/// Transmite a tela por `client`, um cliente de circuito até o telefone de quem assiste
+/// (crie-o com [`screen_client_options`]). `keys` vêm de [`ActiveCall::share_keys`].
+///
+/// Espera o circuito ficar pronto (até `wait`) e manda um pacote de abertura, que prende o circuito
+/// à chamada do outro lado. Depois sai um pacote por slot enquanto houver vídeo na fila; nos
+/// demais instantes o cover do circuito mantém o fluxo no mesmo ritmo.
+pub async fn share_screen(mut client: CircuitClient, keys: &CallKeys, wait: Duration) -> Result<ScreenShare, CallError> {
+    let ready = client.status().await.is_some_and(|s| s.active.is_some_and(|a| a.ready));
+    timeout(wait, async {
+        if ready {
+            return Ok(());
+        }
+        loop {
+            match client.next_event().await {
+                Some(Event::Ready { .. }) => return Ok(()),
+                Some(_) => {}
+                None => return Err(CallError::Closed),
+            }
+        }
+    })
+    .await
+    .map_err(|_| CallError::NoCircuit)??;
+
+    let stream = Arc::new(Mutex::new(ScreenStream::new(keys)));
+    let stopping = Arc::new(AtomicBool::new(false));
+    let hello = stream.lock().expect("tela").next_packet()?;
+    client.send(&hello).await.map_err(|_| CallError::NoCircuit)?;
+    let task = {
+        let (stream, stopping) = (stream.clone(), stopping.clone());
+        tokio::spawn(async move {
+            let mut tick = interval(Duration::from_millis(SCREEN_SLOT_MS));
+            tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+            loop {
+                tokio::select! {
+                    _ = tick.tick() => {
+                        if stopping.load(Ordering::Relaxed) {
+                            for _ in 0..3 {
+                                let p = stream.lock().expect("tela").stop_packet();
+                                if let Ok(p) = p {
+                                    let _ = client.send(&p).await;
+                                }
+                                tokio::time::sleep(Duration::from_millis(SCREEN_SLOT_MS)).await;
+                            }
+                            break;
+                        }
+                        let p = {
+                            let mut s = stream.lock().expect("tela");
+                            s.has_data().then(|| s.next_packet())
+                        };
+                        if let Some(Ok(p)) = p {
+                            let _ = client.send(&p).await;
+                        }
+                    }
+                    ev = client.next_event() => match ev {
+                        Some(Event::Data(d)) => { let _ = stream.lock().expect("tela").receive(&d); }
+                        Some(_) => {}
+                        None => break,
+                    },
+                }
+            }
+            // `send` só enfileira: dá tempo de o último pacote sair antes de parar.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            client.stop();
+        })
+    };
+    Ok(ScreenShare { stream, stopping, task })
 }
 
 /// Convite de um contato conhecido. Responda com [`accept`](Self::accept) ou [`reject`](Self::reject).
@@ -311,7 +530,7 @@ impl IncomingCall {
         let (frame, keys) = self.invite.accept(&self.secret)?;
         let id = self.ids.fetch_add(1, Ordering::Relaxed);
         let frame_ms = codec.frame_ms();
-        let (active, in_tx, mut out_rx) = start_call(VoiceCall::new(&keys, codec), frame_ms, self.conn);
+        let (active, in_tx, mut out_rx) = start_call(VoiceCall::new(&keys, codec), &keys, false, frame_ms, self.conn);
         let actor = self.actor.clone();
         tokio::spawn(async move {
             while let Some(o) = out_rx.recv().await {
@@ -372,11 +591,24 @@ impl DatagramConn {
 /// Liga para `peer` por um canal de datagramas já aberto (`tx` envia, `rx` recebe), sem circuito.
 pub async fn call_over<C: Codec + Send + 'static>(
     tx: mpsc::Sender<Vec<u8>>,
+    rx: mpsc::Receiver<Vec<u8>>,
+    my_static: &StaticSecret,
+    peer: &PublicKey,
+    codec: C,
+    wait: Duration,
+) -> Result<ActiveCall, CallError> {
+    call_over_linked(tx, rx, my_static, peer, codec, wait, None).await
+}
+
+/// Como [`call_over`], registrada no telefone desta máquina (veja [`call_linked`]).
+pub async fn call_over_linked<C: Codec + Send + 'static>(
+    tx: mpsc::Sender<Vec<u8>>,
     mut rx: mpsc::Receiver<Vec<u8>>,
     my_static: &StaticSecret,
     peer: &PublicKey,
     codec: C,
     wait: Duration,
+    link: Option<&PhoneLink>,
 ) -> Result<ActiveCall, CallError> {
     let (caller, invite) = Caller::invite(my_static, peer, unix_secs())?;
     // O convite pode se perder no caminho: repete até chegar a resposta.
@@ -400,13 +632,17 @@ pub async fn call_over<C: Codec + Send + 'static>(
     .map_err(|_| CallError::NoAnswer)??;
 
     let frame_ms = codec.frame_ms();
-    let (active, in_tx, mut out_rx) = start_call(VoiceCall::new(&keys, codec), frame_ms, 0);
+    let (active, in_tx, mut out_rx) = start_call(VoiceCall::new(&keys, codec), &keys, true, frame_ms, 0);
+    let linked = link.cloned().map(|l| (l.ids.fetch_add(1, Ordering::Relaxed), l));
+    if let Some((id, l)) = &linked {
+        let _ = l.actor.send(Msg::Listen { call: *id, tx: in_tx.clone() }).await;
+    }
     tokio::spawn(async move {
         loop {
             tokio::select! {
                 out = out_rx.recv() => match out {
-                    Some(WireOut::Frame { data, .. }) => { if tx.send(data).await.is_err() { break; } }
-                    Some(WireOut::Bound(_)) => {}
+                    Some(WireOut::Frame { conn: 0, data }) => { if tx.send(data).await.is_err() { break; } }
+                    Some(o) => forward_extra(&linked, o).await,
                     None => break,
                 },
                 d = rx.recv() => match d {
@@ -426,6 +662,8 @@ pub struct Phone {
     notice: Arc<Mutex<Option<String>>>,
     contacts: Contacts,
     port: DatagramPort,
+    ids: Arc<AtomicU64>,
+    link_tx: mpsc::Sender<Msg>,
     tasks: Vec<JoinHandle<()>>,
 }
 
@@ -466,13 +704,18 @@ impl Phone {
             }
         });
         let port = DatagramPort { actor: actor_tx.clone(), next: Arc::new(AtomicU64::new(DATAGRAM_CONN_BASE)) };
-        let actor = tokio::spawn(run_actor(actor_rx, actor_tx, inc_tx, my_static, contacts.clone(), ids, notice.clone()));
-        Ok(Self { addr, incoming: inc_rx, notice, contacts, port, tasks: vec![accept, actor] })
+        let actor = tokio::spawn(run_actor(actor_rx, actor_tx.clone(), inc_tx, my_static, contacts.clone(), ids.clone(), notice.clone()));
+        Ok(Self { addr, incoming: inc_rx, notice, contacts, port, ids, link_tx: actor_tx, tasks: vec![accept, actor] })
     }
 
     /// Porta para ligações que chegam por datagramas (furo de NAT) em vez de TCP.
     pub fn datagram_port(&self) -> DatagramPort {
         self.port.clone()
+    }
+
+    /// Para registrar neste telefone as chamadas que esta máquina faz ([`call_linked`]).
+    pub fn link(&self) -> PhoneLink {
+        PhoneLink { actor: self.link_tx.clone(), ids: self.ids.clone() }
     }
 
     /// Lista viva de chaves aceitas.
@@ -555,6 +798,9 @@ async fn run_actor(
             Msg::Register { call, conn, tx } => {
                 calls.insert(call, tx);
                 binds.insert(conn, Bind::Call(call));
+            }
+            Msg::Listen { call, tx } => {
+                calls.insert(call, tx);
             }
             Msg::Reject(conn, data) => {
                 binds.remove(&conn);

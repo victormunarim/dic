@@ -12,7 +12,7 @@ use clam::media::{
     codec::{Codec, Mulaw},
     signal::{Answer, Caller},
 };
-use clam::phone::{ActiveCall, CallError, Phone, call};
+use clam::phone::{ActiveCall, CallError, Phone, ScreenEvent, call, call_linked, screen_client_options, share_screen};
 use clam::transport::{CircuitClient, RelayServer, ServerConfig, allow_list};
 use clam::{
     rand_core::OsRng,
@@ -254,4 +254,115 @@ async fn call_survives_killing_the_active_relay() {
     eprintln!("lacuna após a queda: a {gap_a:?}, b {gap_b:?}");
     let limit = Duration::from_millis(800);
     assert!(gap_a < limit && gap_b < limit, "silêncio de {gap_a:?} / {gap_b:?}");
+}
+
+fn screen_client(cands: Vec<Candidate>) -> CircuitClient {
+    CircuitClient::spawn_with(CircuitManager::new(ManagerConfig::default(), "contato:9", cands), Duration::from_secs(2), screen_client_options())
+}
+
+fn video(n: usize, seed: u8) -> Vec<u8> {
+    (0..n).map(|i| (i as u8).wrapping_mul(7).wrapping_add(seed)).collect()
+}
+
+/// Lê eventos de tela até juntar `n` quadros (ou estourar `WAIT`).
+async fn collect_frames(viewer: &mut ActiveCall, n: usize) -> Vec<clam::media::screen::ScreenFrame> {
+    let mut got = vec![];
+    timeout(WAIT * 2, async {
+        while got.len() < n {
+            match viewer.next_screen().await {
+                Some(ScreenEvent::Frame(f)) => got.push(f),
+                Some(ScreenEvent::Stopped) => {}
+                None => break,
+            }
+        }
+    })
+    .await
+    .expect("quadros de tela não chegaram a tempo");
+    got
+}
+
+#[tokio::test]
+async fn caller_shares_its_screen_to_the_callee_over_its_own_circuit() {
+    let (alice, bob) = ids();
+    let mut phone = Phone::bind("127.0.0.1:0".parse().unwrap(), bob.clone(), vec![*PublicKey::from(&alice).as_bytes()]).await.unwrap();
+    let (_srv, cands) = relays(4, &phone.local_addr().to_string()).await;
+    let bob_pub = PublicKey::from(&bob);
+    let voice = cands.clone();
+    let caller = tokio::spawn(async move { call(client(voice), &alice, &bob_pub, Mulaw::new(), WAIT).await });
+    let incoming = timeout(WAIT, phone.next_incoming()).await.unwrap().unwrap();
+    let mut b = incoming.accept(Mulaw::new()).await.unwrap();
+    let a = caller.await.unwrap().unwrap();
+
+    let share = share_screen(screen_client(cands), a.share_keys(), WAIT).await.unwrap();
+    let frames = [video(900, 1), video(120, 2), video(2500, 3), video(60, 4)];
+    for (i, f) in frames.iter().enumerate() {
+        assert!(share.push(f, i == 0).unwrap());
+    }
+    let got = collect_frames(&mut b, frames.len()).await;
+    for (g, want) in got.iter().zip(&frames) {
+        assert_eq!(&g.data, want);
+    }
+    assert!(got[0].keyframe && !got[1].keyframe);
+
+    share.stop().await;
+    let stopped = timeout(WAIT, async {
+        loop {
+            match b.next_screen().await {
+                Some(ScreenEvent::Stopped) => return true,
+                Some(_) => {}
+                None => return false,
+            }
+        }
+    })
+    .await;
+    assert_eq!(stopped, Ok(true));
+    // A voz continua funcionando depois.
+    let back = talk(&a, &mut b, 10).await;
+    assert!(!back.is_empty());
+}
+
+#[tokio::test]
+async fn callee_shares_its_screen_to_the_caller_through_the_callers_phone() {
+    let (alice, bob) = ids();
+    let alice_pub = PublicKey::from(&alice);
+    let mut alice_phone = Phone::bind("127.0.0.1:0".parse().unwrap(), alice.clone(), vec![*PublicKey::from(&bob).as_bytes()]).await.unwrap();
+    let mut bob_phone = Phone::bind("127.0.0.1:0".parse().unwrap(), bob.clone(), vec![*alice_pub.as_bytes()]).await.unwrap();
+    let (_s1, to_bob) = relays(4, &bob_phone.local_addr().to_string()).await;
+    let (_s2, to_alice) = relays(4, &alice_phone.local_addr().to_string()).await;
+    let link = alice_phone.link();
+    let bob_pub = PublicKey::from(&bob);
+    let caller = tokio::spawn(async move { call_linked(client(to_bob), &alice, &bob_pub, Mulaw::new(), WAIT, Some(&link)).await });
+    let incoming = timeout(WAIT, bob_phone.next_incoming()).await.unwrap().unwrap();
+    let b = incoming.accept(Mulaw::new()).await.unwrap();
+    let mut a = caller.await.unwrap().unwrap();
+
+    let share = share_screen(screen_client(to_alice), b.share_keys(), WAIT).await.unwrap();
+    let frames = [video(700, 9), video(300, 8)];
+    for (i, f) in frames.iter().enumerate() {
+        share.push(f, i == 0).unwrap();
+    }
+    let got = collect_frames(&mut a, 2).await;
+    assert_eq!(got.iter().map(|g| g.data.clone()).collect::<Vec<_>>(), frames);
+    // Ninguém ligou para a alice: o circuito de tela não vira convite.
+    assert!(timeout(Duration::from_millis(200), alice_phone.next_incoming()).await.is_err());
+}
+
+#[tokio::test]
+async fn screen_circuit_with_foreign_keys_shows_nothing() {
+    let (alice, bob) = ids();
+    let mut phone = Phone::bind("127.0.0.1:0".parse().unwrap(), bob.clone(), vec![*PublicKey::from(&alice).as_bytes()]).await.unwrap();
+    let (_srv, cands) = relays(4, &phone.local_addr().to_string()).await;
+    let bob_pub = PublicKey::from(&bob);
+    let voice = cands.clone();
+    let caller = tokio::spawn(async move { call(client(voice), &alice, &bob_pub, Mulaw::new(), WAIT).await });
+    let mut b = timeout(WAIT, phone.next_incoming()).await.unwrap().unwrap().accept(Mulaw::new()).await.unwrap();
+    let _a = caller.await.unwrap().unwrap();
+
+    // Outra chamada, outras chaves: o telefone não prende o circuito a esta chamada.
+    let (x, y) = ids();
+    let (xe, ye) = (clam::media::keys::Ephemeral::generate(), clam::media::keys::Ephemeral::generate());
+    let foreign = clam::media::keys::CallKeys::initiator(&x, &xe, &PublicKey::from(&y), &ye.public()).unwrap();
+    let share = share_screen(screen_client(cands), &foreign, WAIT).await.unwrap();
+    share.push(&video(500, 1), true).unwrap();
+    assert!(timeout(Duration::from_millis(800), b.next_screen()).await.is_err());
 }

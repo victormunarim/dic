@@ -89,6 +89,17 @@ let mut chamada = call(cliente, &minha_chave, &chave_do_contato, Mulaw::new(), D
 - `tests/phone.rs` cobre: chamada por relays reais com áudio nos dois sentidos e desligar; recusa; desconhecido sem resposta; troca de conexão (failover) sem convite; e queda do primeiro relay do circuito ativo no meio da chamada (6 relays, voz nos dois sentidos): a voz volta sozinha com lacuna de ~400 ms em 127.0.0.1 (limite do teste 800 ms), sem novo convite.
 - Limites: o `Phone` aceita TCP de qualquer origem (não só dos relays), então protege-se só pela autenticação dos pacotes: quem não é contato é ignorado, mas pode gastar CPU com lixo. Uma chamada por contato e por vez não é imposta. Não há toque/ocupado, e a chamada em grupo não existe.
 
+### Transmissão de tela (`clam::media::screen`, `clam::phone`)
+
+A tela anda num **circuito só dela**, aberto por quem transmite até o telefone de quem assiste, com cover de 5 ms nos links e no circuito (200 pacotes/s, ≈ 277 kbps de vídeo; veja `phone::SCREEN_SLOT_MS`). O ritmo é constante: parar a tela, mexer o mouse ou trocar de janela não muda nada no fio. O codec deve usar bitrate constante dentro de `ScreenStream::capacity_bps`.
+
+- Chaves: `CallKeys::sub` deriva, das chaves da chamada, um par por sentido de quem transmite (`screen/caller` ou `screen/callee`), então os dois lados podem transmitir ao mesmo tempo sem reusar nonce.
+- Pacotes: os mesmos 200 B cifrados da voz, com cabeçalho de 5 bytes (flags, id do quadro, índice, total). Quadro de até 255 fragmentos; a remontagem aceita fora de ordem.
+- Perda: sem FEC (a taxa é fixa). Perdeu fragmento, os quadros seguintes não são entregues até chegar um quadro-chave, que quem assiste pede (`ScreenStream::needs_key`, no máximo 10 pedidos por segundo) e quem transmite lê em `ScreenShare::keyframe_wanted`. Fila de saída acima de 400 fragmentos descarta quadros velhos e exige quadro-chave.
+- Sinalização: `phone::share_screen` manda um pacote de abertura que prende o circuito à chamada do outro lado (só quem tem as chaves da chamada o autentica; outros pacotes nunca viram convite). `ScreenShare::stop` avisa quem assiste (`ScreenEvent::Stopped`).
+- Quem assiste lê `ActiveCall::next_screen`. Para a chamada que *ligou* receber a tela, ela precisa estar registrada no telefone da própria máquina (`Phone::link`, `call_linked`); `Node::dial` já faz isso.
+- Captura de tela e codec de vídeo ainda não existem: o protocolo transporta quadros já codificados.
+
 ### Conexão simples: diretório só para o primeiro contato
 
 Só o **primeiro contato** usa servidor. Um diretório (`src/directory/`) guarda, por 120 s, "chave pública → relay" de quem está online; cada `Node` (`src/node.rs`) republica a sua entrada a cada 40 s. Para ligar, você consulta a chave do contato uma vez, monta o circuito de 2 saltos até o relay dele e o resto (convite, voz) segue P2P pelos relays, sem passar pelo diretório.
