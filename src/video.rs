@@ -18,7 +18,7 @@ use openh264::formats::{RgbaSliceU8, YUVBuffer, YUVSource};
 use thiserror::Error;
 
 /// Quadros por segundo da transmissão.
-pub const FPS: f32 = 8.0;
+pub const FPS: f32 = 15.0;
 
 /// Largura máxima enviada: telas maiores são reduzidas por média de blocos, senão o quadro-chave
 /// passa de [`MAX_FRAME`] e nada chega a quem assiste.
