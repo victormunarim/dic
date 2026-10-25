@@ -186,6 +186,8 @@ pub struct Audio {
     rate: u32,
     apm: Mutex<(AudioProcessing, Processing)>,
     tap: Queue,
+    /// Energia do microfone antes e depois do cancelador de eco, suavizada, só enquanto o outro lado fala.
+    erle: Mutex<(f64, f64)>,
     played: Arc<AtomicUsize>,
     failure: Failure,
 }
@@ -226,7 +228,7 @@ impl Audio {
             }
         });
         match ready_rx.recv() {
-            Ok(Ok(info)) => Ok(Self { capture, playback, stop, thread: Some(thread), info, played, frame: (rate / 50) as usize, rate, apm: Mutex::new((voice_processor(rate, Processing::default()), Processing::default())), tap, failure }),
+            Ok(Ok(info)) => Ok(Self { capture, playback, stop, thread: Some(thread), info, played, frame: (rate / 50) as usize, rate, apm: Mutex::new((voice_processor(rate, Processing::default()), Processing::default())), tap, erle: Mutex::new((0.0, 0.0)), failure }),
             Ok(Err(e)) => {
                 let _ = thread.join();
                 Err(e)
@@ -248,8 +250,15 @@ impl Audio {
         }
         let mut pcm: Vec<i16> = q.drain(..self.frame).collect();
         drop(q);
+        let before = pcm.clone();
         let mut guard = self.apm.lock().unwrap();
-        clean_capture(&mut guard.0, &mut pcm, &mut self.tap.lock().unwrap(), self.frame / 2);
+        let far = clean_capture(&mut guard.0, &mut pcm, &mut self.tap.lock().unwrap(), self.frame / 2);
+        if far && guard.1.echo_cancel {
+            let energy = |v: &[i16]| v.iter().map(|&x| (x as f64).powi(2)).sum::<f64>() / v.len() as f64;
+            let mut m = self.erle.lock().unwrap();
+            m.0 += (energy(&before) - m.0) * 0.02;
+            m.1 += (energy(&pcm) - m.1) * 0.02;
+        }
         Some(pcm)
     }
 
@@ -259,6 +268,7 @@ impl Audio {
         let mut guard = self.apm.lock().unwrap();
         if guard.1 != on {
             *guard = (voice_processor(self.rate, on), on);
+            *self.erle.lock().unwrap() = (0.0, 0.0);
         }
     }
 
@@ -267,7 +277,9 @@ impl Audio {
     pub fn echo_stats(&self) -> EchoStats {
         let guard = self.apm.lock().unwrap();
         let st = guard.0.statistics();
-        EchoStats { erle_db: st.echo_return_loss_enhancement, delay_ms: st.delay_ms }
+        let (e_in, e_out) = *self.erle.lock().unwrap();
+        let erle_db = (e_in > 1.0 && e_out > 0.0).then(|| (10.0 * (e_in / e_out).log10()).max(0.0));
+        EchoStats { erle_db, delay_ms: st.delay_ms }
     }
 
     /// Tratamento do microfone em uso.
@@ -344,29 +356,28 @@ fn voice_processor(rate: u32, on: Processing) -> AudioProcessing {
 }
 
 /// Passa `pcm` (microfone) pelo tratamento, dando ao cancelador de eco o que o alto-falante tocou como
-/// referência. `tap` é a fila do que o alto-falante já consumiu e `chunk` o tamanho do passo do tratamento
-/// (10 ms).
+/// referência. `tap` é a fila do que saiu pelo alto-falante (contínua, com o silêncio também) e `chunk` o
+/// tamanho do passo do tratamento (10 ms). Devolve se a referência tinha voz do outro lado.
 ///
-/// A referência entra só em pedaços inteiros, quando existem, e nunca é preenchida com zeros: o alto-falante
+/// A referência entra assim que chega, em pedaços inteiros, e nunca é preenchida com zeros: o alto-falante
 /// e o microfone entregam em rajadas diferentes, e zeros no meio da referência a deslocariam no tempo em
-/// relação ao eco, que o cancelador teria de reaprender a cada vez.
-fn clean_capture(apm: &mut AudioProcessing, pcm: &mut [i16], tap: &mut VecDeque<i16>, chunk: usize) {
-    // Atrasou demais (alto-falante parado e voltando): fica só com os dois pedaços mais novos.
-    if tap.len() > chunk * 4 {
-        let extra = (tap.len() / chunk - 2) * chunk;
-        tap.drain(..extra);
-    }
+/// relação ao eco, que o cancelador teria de reaprender a cada vez. Entregá-la logo (sem formar fila)
+/// também a mantém antes do eco, que o cancelador precisa ouvir primeiro.
+fn clean_capture(apm: &mut AudioProcessing, pcm: &mut [i16], tap: &mut VecDeque<i16>, chunk: usize) -> bool {
     let (mut render, mut sink) = (vec![0i16; chunk], vec![0i16; chunk]);
+    let mut far = false;
     for c in pcm.chunks_mut(chunk) {
-        if tap.len() >= chunk {
+        while tap.len() >= chunk {
             for (r, t) in render.iter_mut().zip(tap.drain(..chunk)) {
                 *r = t;
             }
             let _ = apm.process_render_i16(&render, &mut sink);
+            far |= render.iter().any(|&r| r.unsigned_abs() > 300);
         }
         let src = c.to_vec();
         let _ = apm.process_capture_i16(&src, c);
     }
+    far
 }
 
 fn push_capped(q: &mut VecDeque<i16>, it: impl Iterator<Item = i16>, max: usize) {
@@ -399,6 +410,11 @@ fn is_pseudo(name: &str) -> bool {
     name.starts_with("Discard all samples")
 }
 
+/// Fonte de áudio do PulseAudio/PipeWire que é o espelho de um alto-falante (grava o que toca), não um microfone.
+fn is_monitor(name: &str) -> bool {
+    name.starts_with("Monitor of ")
+}
+
 /// Nomes dos microfones e dos alto-falantes disponíveis agora: `(entradas, saídas)`.
 pub fn devices() -> (Vec<String>, Vec<String>) {
     let host = cpal::default_host();
@@ -412,10 +428,32 @@ pub fn devices() -> (Vec<String>, Vec<String>) {
         }
         v
     };
-    (list(host.input_devices().map(Iterator::collect)), list(host.output_devices().map(Iterator::collect)))
+    let mut inputs = list(host.input_devices().map(Iterator::collect));
+    inputs.retain(|n| !is_monitor(n));
+    (inputs, list(host.output_devices().map(Iterator::collect)))
 }
 
+/// Abre os fluxos pedindo blocos pequenos (10 ms) à placa e, se ela recusar, com o tamanho que ela escolher.
+/// Blocos grandes entregam o som em rajadas, e o cancelador de eco perde a noção do tempo entre o que tocou
+/// e o que o microfone ouviu.
 fn open_streams(capture: Queue, playback: Queue, played: Arc<AtomicUsize>, rate: u32, tap: Queue, want: &Devices, fail: Failure) -> Result<((Stream, Stream), String), AudioError> {
+    match open_streams_sized(capture.clone(), playback.clone(), played.clone(), rate, tap.clone(), want, fail.clone(), true) {
+        Ok(r) => Ok(r),
+        Err(_) => open_streams_sized(capture, playback, played, rate, tap, want, fail, false),
+    }
+}
+
+/// Configuração do dispositivo com bloco de 10 ms, se ele aceita escolher o tamanho do bloco.
+fn stream_config(c: &cpal::SupportedStreamConfig, small: bool) -> cpal::StreamConfig {
+    let mut cfg: cpal::StreamConfig = (*c).into();
+    if let (true, cpal::SupportedBufferSize::Range { min, max }) = (small, c.buffer_size()) {
+        cfg.buffer_size = cpal::BufferSize::Fixed((c.sample_rate() / 100).clamp(*min, *max));
+    }
+    cfg
+}
+
+#[allow(clippy::too_many_arguments)]
+fn open_streams_sized(capture: Queue, playback: Queue, played: Arc<AtomicUsize>, rate: u32, tap: Queue, want: &Devices, fail: Failure, small: bool) -> Result<((Stream, Stream), String), AudioError> {
     let host = cpal::default_host();
     let input = if want.input.is_empty() {
         host.default_input_device().ok_or_else(|| AudioError("sem microfone padrão".into()))?
@@ -435,17 +473,17 @@ fn open_streams(capture: Queue, playback: Queue, played: Arc<AtomicUsize>, rate:
         output.description().map(|d| d.to_string()).unwrap_or_default(), outp.sample_format(), outp.sample_rate(), outp.channels(),
     );
     let in_stream = match inp.sample_format() {
-        SampleFormat::F32 => build_input::<f32>(&input, inp.into(), capture, rate, fail.clone())?,
-        SampleFormat::I16 => build_input::<i16>(&input, inp.into(), capture, rate, fail.clone())?,
-        SampleFormat::U16 => build_input::<u16>(&input, inp.into(), capture, rate, fail.clone())?,
-        SampleFormat::I32 => build_input::<i32>(&input, inp.into(), capture, rate, fail.clone())?,
+        SampleFormat::F32 => build_input::<f32>(&input, stream_config(&inp, small), capture, rate, fail.clone())?,
+        SampleFormat::I16 => build_input::<i16>(&input, stream_config(&inp, small), capture, rate, fail.clone())?,
+        SampleFormat::U16 => build_input::<u16>(&input, stream_config(&inp, small), capture, rate, fail.clone())?,
+        SampleFormat::I32 => build_input::<i32>(&input, stream_config(&inp, small), capture, rate, fail.clone())?,
         f => return Err(AudioError(format!("formato de entrada não suportado: {f}"))),
     };
     let out_stream = match outp.sample_format() {
-        SampleFormat::F32 => build_output::<f32>(&output, outp.into(), playback, played, rate, tap.clone(), fail.clone())?,
-        SampleFormat::I16 => build_output::<i16>(&output, outp.into(), playback, played, rate, tap.clone(), fail.clone())?,
-        SampleFormat::U16 => build_output::<u16>(&output, outp.into(), playback, played, rate, tap.clone(), fail.clone())?,
-        SampleFormat::I32 => build_output::<i32>(&output, outp.into(), playback, played, rate, tap.clone(), fail.clone())?,
+        SampleFormat::F32 => build_output::<f32>(&output, stream_config(&outp, small), playback, played, rate, tap.clone(), fail.clone())?,
+        SampleFormat::I16 => build_output::<i16>(&output, stream_config(&outp, small), playback, played, rate, tap.clone(), fail.clone())?,
+        SampleFormat::U16 => build_output::<u16>(&output, stream_config(&outp, small), playback, played, rate, tap.clone(), fail.clone())?,
+        SampleFormat::I32 => build_output::<i32>(&output, stream_config(&outp, small), playback, played, rate, tap.clone(), fail.clone())?,
         f => return Err(AudioError(format!("formato de saída não suportado: {f}"))),
     };
     in_stream.play().map_err(err)?;
@@ -476,6 +514,36 @@ where
     .map_err(err)
 }
 
+/// Reduz o que sai pelo alto-falante (taxa `from`) à taxa `to` do cancelador de eco, tirando a média de cada
+/// grupo de amostras. Roda a cada amostra de saída, tocando voz ou silêncio.
+struct Reference {
+    from: u32,
+    to: u32,
+    phase: u32,
+    sum: f32,
+    n: u32,
+}
+
+impl Reference {
+    fn new(from: u32, to: u32) -> Self {
+        Self { from, to, phase: 0, sum: 0.0, n: 0 }
+    }
+
+    fn push(&mut self, x: f32) -> Option<i16> {
+        self.sum += x;
+        self.n += 1;
+        self.phase += self.to;
+        if self.phase < self.from {
+            return None;
+        }
+        self.phase -= self.from;
+        let v = (self.sum / self.n as f32 * 32768.0).clamp(-32768.0, 32767.0) as i16;
+        self.sum = 0.0;
+        self.n = 0;
+        Some(v)
+    }
+}
+
 fn build_output<T>(dev: &cpal::Device, cfg: cpal::StreamConfig, q: Queue, played: Arc<AtomicUsize>, rate: u32, tap: Queue, fail: Failure) -> Result<Stream, AudioError>
 where
     T: SizedSample + FromSample<f32>,
@@ -483,21 +551,27 @@ where
     let ch = cfg.channels as usize;
     let mut up = Upsampler::new(rate, cfg.sample_rate);
     let mut drift = Drift::new(rate);
+    // Referência do cancelador de eco: o que saiu de fato pelo alto-falante, na taxa `rate`, uma amostra a
+    // cada `rate / sample_rate` de saída, inclusive o silêncio. Contínua como o relógio da placa, para o
+    // cancelador não perder a noção do tempo entre uma fala e outra.
+    let mut reference = Reference::new(cfg.sample_rate, rate);
     dev.build_output_stream(
         cfg,
         move |data: &mut [T], _| {
             let mut q = q.lock().unwrap();
             up.set_scale(drift.scale(q.len()));
+            let mut tap = tap.lock().unwrap();
             for frame in data.chunks_mut(ch) {
-                let (before, front) = (q.len(), q.front().copied());
-                let v = T::from_sample(up.pull(&mut q).unwrap_or(0.0));
+                let before = q.len();
+                let f = up.pull(&mut q).unwrap_or(0.0);
                 if q.len() < before {
                     played.fetch_add(1, Ordering::Relaxed);
-                    if let Some(f) = front {
-                        push_capped(&mut tap.lock().unwrap(), std::iter::once(f), max_queued(rate));
-                    }
                 }
+                let v = T::from_sample(f);
                 frame.fill(v);
+                if let Some(r) = reference.push(f) {
+                    push_capped(&mut tap, std::iter::once(r), max_queued(rate));
+                }
             }
         },
         move |e| *fail.lock().unwrap() = Some(format!("alto-falante: {e}")),
@@ -516,6 +590,8 @@ mod tests {
         assert_eq!(clean_name("sof-hda-dsp, HDMI 1"), "sof-hda-dsp, HDMI 1");
         assert_eq!(clean_name("  PipeWire Sound Server "), "PipeWire Sound Server");
         assert!(is_pseudo("Discard all samples (playback) or generate zero samples (capture)"));
+        assert!(is_monitor("Monitor of Raptor Lake-P/U/H cAVS Speaker"));
+        assert!(!is_monitor("Raptor Lake-P/U/H cAVS Digital Microphone"));
         assert!(!is_pseudo("PipeWire Sound Server"));
     }
 
@@ -766,7 +842,7 @@ mod tests {
                     // Metade das vezes o alto-falante só entregou parte do que tocou neste intervalo.
                     let hold = if (jitter >> 16).is_multiple_of(3) { tap.len().min(CH) } else { 0 };
                     let kept: Vec<i16> = tap.drain(tap.len() - hold..).collect();
-                    clean_capture(&mut apm, &mut pcm, &mut tap, CH);
+                    let _ = clean_capture(&mut apm, &mut pcm, &mut tap, CH);
                     tap.extend(kept);
                 }
                 if step >= 1700 {
@@ -783,6 +859,18 @@ mod tests {
         let (old, new) = (erle_with_bursts(true), erle_with_bursts(false));
         assert!(new > 10.0, "ERLE de {new:.1} dB");
         assert!(new > old + 6.0, "sem zeros {new:.1} dB, com zeros {old:.1} dB");
+    }
+
+    #[test]
+    fn echo_reference_keeps_the_speaker_clock_through_silence() {
+        for (from, to) in [(48000u32, 16000u32), (44100, 16000), (16000, 16000)] {
+            let mut r = Reference::new(from, to);
+            let n = (0..from).filter(|i| r.push(if *i < from / 2 { 0.25 } else { 0.0 }).is_some()).count();
+            assert!(n.abs_diff(to as usize) <= 1, "{from}→{to}: {n} amostras em 1 s");
+        }
+        let mut r = Reference::new(48000, 16000);
+        let out: Vec<i16> = [0.5f32, 0.5, 0.5, 0.0, 0.0, 0.0].iter().filter_map(|x| r.push(*x)).collect();
+        assert_eq!(out, vec![16384, 0]);
     }
 
     #[test]
