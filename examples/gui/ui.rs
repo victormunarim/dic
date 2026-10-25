@@ -27,6 +27,8 @@ pub(crate) struct App {
     /// Microfones e alto-falantes que o sistema listou (atualizável na janela).
     #[cfg_attr(not(feature = "audio"), allow(dead_code))]
     pub(crate) devs: (Vec<String>, Vec<String>),
+    /// Textura da tela de quem transmite para você e o número da imagem que ela mostra.
+    pub(crate) screen_tex: Option<(u64, egui::TextureHandle)>,
 }
 
 impl App {
@@ -344,6 +346,44 @@ impl App {
     }
 }
 
+impl App {
+    /// Compartilhar a própria tela e ver a do outro lado, dentro do cartão "Em chamada".
+    fn screen_ui(&mut self, ui: &mut egui::Ui) {
+        let st = &self.shared.screen;
+        let (wanted, sharing) = (st.want_share.load(Ordering::Relaxed), st.sharing.load(Ordering::Relaxed));
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            let label = if wanted { "⏹ Parar de compartilhar a tela" } else { "🖥 Compartilhar minha tela" };
+            if ui.button(label).clicked() {
+                st.want_share.store(!wanted, Ordering::Relaxed);
+            }
+            if sharing {
+                ui.colored_label(egui::Color32::LIGHT_GREEN, "● sua tela está sendo vista");
+            } else if wanted {
+                ui.weak("ligando o circuito de vídeo...");
+            }
+        });
+        if !wanted && !sharing {
+            let note = st.note.lock().unwrap().clone();
+            if !note.is_empty() {
+                ui.colored_label(egui::Color32::LIGHT_RED, note);
+            }
+        }
+        let seq = st.seq.load(Ordering::Relaxed);
+        if self.screen_tex.as_ref().is_none_or(|(n, _)| *n != seq) {
+            self.screen_tex = st.image.lock().unwrap().as_ref().map(|img| {
+                let color = egui::ColorImage::from_rgba_unmultiplied([img.width, img.height], &img.rgba);
+                (seq, ui.ctx().load_texture("tela", color, egui::TextureOptions::LINEAR))
+            });
+        }
+        if let Some((_, tex)) = &self.screen_tex {
+            ui.separator();
+            ui.label("Tela do outro lado:");
+            ui.add(egui::Image::new(tex).max_width(ui.available_width()).shrink_to_fit());
+        }
+    }
+}
+
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         if self.done.swap(false, Ordering::Relaxed) {
@@ -415,6 +455,7 @@ impl eframe::App for App {
                         if ui.add_sized([160.0, 30.0], egui::Button::new("Desligar")).clicked() {
                             self.shared.hangup.store(true, Ordering::Relaxed);
                         }
+                        self.screen_ui(ui);
                     });
                 }
 

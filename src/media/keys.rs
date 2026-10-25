@@ -45,7 +45,7 @@ impl Ephemeral {
 }
 
 /// Chaves AEAD das duas direções, já do ponto de vista de quem as derivou.
-#[derive(Zeroize, ZeroizeOnDrop)]
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct CallKeys {
     pub(crate) send: [u8; 32],
     pub(crate) recv: [u8; 32],

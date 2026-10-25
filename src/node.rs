@@ -26,7 +26,7 @@ use crate::{
     },
     upnp,
     directory::{self, REPUBLISH, RelayInfo, dest_for},
-    media::codec::Codec,
+    media::{codec::Codec, keys::CallKeys},
     phone::{self, ActiveCall, CallError, IncomingCall, Phone, PhoneLink, ScreenShare, call_linked, call_over_linked, screen_client_options, share_screen},
     punch::Punch,
     transport::{CircuitClient, ClientOptions, RelayServer, ServerConfig, allow_list},
@@ -184,6 +184,12 @@ impl Dialer {
     /// Transmite a tela da chamada `call` para `peer`, por um circuito só da tela (cover de
     /// [`phone::SCREEN_SLOT_MS`] ms). Sempre por circuito, mesmo que a voz vá direto pelo furo de NAT.
     pub async fn share_screen(&self, peer: [u8; 32], call: &ActiveCall, wait: Duration) -> Result<ScreenShare, DialError> {
+        self.share_screen_keys(peer, call.share_keys(), wait).await
+    }
+
+    /// Como [`Self::share_screen`], com as chaves em vez da chamada (quem não tem mais a chamada em mãos
+    /// guarda uma cópia de [`ActiveCall::share_keys`]).
+    pub async fn share_screen_keys(&self, peer: [u8; 32], keys: &CallKeys, wait: Duration) -> Result<ScreenShare, DialError> {
         let me = *PublicKey::from(&self.secret).as_bytes();
         let cached = self.known.lock().unwrap().get(&peer).cloned();
         let client = match cached {
@@ -207,7 +213,7 @@ impl Dialer {
                 self.client_with(&peer, &exit, relays, screen_client_options())
             }
         };
-        Ok(share_screen(client, call.share_keys(), wait).await?)
+        Ok(share_screen(client, keys, wait).await?)
     }
 }
 

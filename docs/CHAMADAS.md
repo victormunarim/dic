@@ -100,7 +100,7 @@ A tela anda num **circuito só dela**, aberto por quem transmite até o telefone
 - Quem assiste lê `ActiveCall::next_screen`. Para a chamada que *ligou* receber a tela, ela precisa estar registrada no telefone da própria máquina (`Phone::link`, `call_linked`); `Node::dial` já faz isso.
 - Codec (feature `video`, módulo `clam::video`): `H264Encoder` (openh264, compilado da fonte, sem `cmake` nem `nasm`) em taxa constante, 80% da capacidade do circuito (`H264Encoder::default_bitrate`), 8 quadros/s, quadro-chave a cada 4 s e sob demanda; `H264Decoder` devolve `RawFrame` RGBA. `pump(fonte, codificador, share)` faz um passo captura → codifica → `ScreenShare::push` e atende `keyframe_wanted`. Dimensões ímpares são cortadas para pares; mudar de resolução reabre o codificador com quadro-chave. Quadro acima de `MAX_FRAME` é descartado e o próximo sai como quadro-chave.
 - Captura (feature `capture`, módulo `clam::capture`): `X11Screen` lê a janela raiz por `GetImage`. Sob Wayland o XWayland recusa a leitura (`BadMatch`) e `X11Screen::open` devolve `Unreadable`: capturar no Wayland exige o portal do compositor (PipeWire), que ainda não está implementado. Outra fonte entra implementando `ScreenSource`.
-- Ainda falta a GUI (botão de compartilhar e janela de visualização).
+- GUI: no cartão "Em chamada", "Compartilhar minha tela" abre o circuito de tela e transmite a 8 quadros/s; a tela de quem transmite para você aparece no mesmo cartão. A feature `gui` inclui `capture`, então sob Wayland o botão mostra o erro de captura e a recepção continua funcionando. Só em chamadas 1:1 (não em salas); ao cair a ligação a transmissão para e é preciso ligar de novo.
 
 ### Conexão simples: diretório só para o primeiro contato
 

@@ -97,7 +97,16 @@ pub(crate) enum End {
     Lost,
 }
 
-pub(crate) async fn talk(mut c: ActiveCall, hz: f64, stop: Arc<AtomicBool>, out: Sink, sound: Option<Sound>, shared: &Shared) -> End {
+/// Com quem se fala e como abrir o circuito de tela.
+pub(crate) struct Peer {
+    pub(crate) key: [u8; 32],
+    pub(crate) dialer: clam::node::Dialer,
+}
+
+pub(crate) async fn talk(mut c: ActiveCall, hz: f64, stop: Arc<AtomicBool>, out: Sink, sound: Option<Sound>, shared: &Arc<Shared>, peer: &Peer) -> End {
+    let mut decoder = None;
+    let mut screen_rx = c.take_screen();
+    let mut screen_open = true;
     let mut silence = Silence::new(tokio::time::Instant::now());
     let mut end = End::Hangup;
     let mut tick = interval(Duration::from_millis(20));
@@ -133,8 +142,19 @@ pub(crate) async fn talk(mut c: ActiveCall, hz: f64, stop: Arc<AtomicBool>, out:
                     break;
                 }
             },
+            ev = screen_rx.recv(), if screen_open => match ev {
+                Some(ev) => {
+                    if !on_screen_event(&shared.screen, &mut decoder, ev) {
+                        out.line("tela: quadro inválido; esperando o próximo quadro-chave");
+                    }
+                }
+                None => screen_open = false,
+            },
             _ = report.tick() => {
                 report_error(sound.as_ref(), &out);
+                if shared.screen.want_share.load(Ordering::Relaxed) && !shared.screen.share_task.swap(true, Ordering::Relaxed) {
+                    tokio::spawn(share_task(peer.dialer.clone(), peer.key, c.share_keys().clone(), shared.clone(), out.clone()));
+                }
                 let s = c.stats();
                 if silence.lost(s.received > prev.received, tokio::time::Instant::now()) {
                     out.line("nada chegou há 8 s: a rede caiu ou mudou");
@@ -154,6 +174,7 @@ pub(crate) async fn talk(mut c: ActiveCall, hz: f64, stop: Arc<AtomicBool>, out:
         }
     }
     shared.link.lock().unwrap().clear();
+    shared.screen.reset();
     shared.audio.set_level(0.0);
     let s = c.stats();
     out.line(format!("chamada encerrada: enviados {}, recebidos {}, escondidos {}, atrasados {}", s.sent, s.received, s.concealed, s.late));
@@ -164,7 +185,7 @@ pub(crate) async fn talk(mut c: ActiveCall, hz: f64, stop: Arc<AtomicBool>, out:
 
 /// Inicia a conversa numa tarefa própria; `hangup` (da janela) encerra.
 /// `redial`: se a conexão cair, pede para religar a esse contato (só quem discou religa).
-pub(crate) fn start_talk(c: ActiveCall, hz: f64, shared: &Arc<Shared>, out: &Sink, form: &Form, redial: Option<Redial>) {
+pub(crate) fn start_talk(c: ActiveCall, hz: f64, shared: &Arc<Shared>, out: &Sink, form: &Form, redial: Option<Redial>, peer: Peer) {
     let sound = open_sound(form.use_audio, form, out);
     let (shared, out) = (shared.clone(), out.clone());
     // `talk` olha este sinalizador local; um vigia o liga quando a janela pede para desligar.
@@ -179,7 +200,7 @@ pub(crate) fn start_talk(c: ActiveCall, hz: f64, shared: &Arc<Shared>, out: &Sin
         }
     });
     tokio::spawn(async move {
-        let end = talk(c, hz, stop.clone(), out.clone(), sound, &shared).await;
+        let end = talk(c, hz, stop.clone(), out.clone(), sound, &shared, &peer).await;
         stop.store(true, Ordering::Relaxed);
         if end == End::Lost
             && !shared.hangup.load(Ordering::Relaxed)
