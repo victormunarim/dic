@@ -412,3 +412,51 @@ async fn synthetic_screen_goes_through_h264_and_the_screen_circuit() {
     assert_eq!((img.width, img.height), (160, 96));
     share.stop().await;
 }
+
+#[cfg(feature = "video")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn full_size_screen_gets_through_at_the_circuit_slot_rate() {
+    use clam::video::{H264Decoder, H264Encoder, RawFrame, ScreenSource, pump};
+
+    struct Bars(usize);
+    impl ScreenSource for Bars {
+        fn grab(&mut self) -> Option<RawFrame> {
+            self.0 += 1;
+            let (w, h) = (1280, 720);
+            let t = self.0;
+            let rgba = (0..w * h).flat_map(|i| { let (x, y) = (i % w, i / w); let n = (((x * 7 + y * 13 + t * 31) * 2654435761usize) >> 24) as u8; [((x + t * 4) % 256) as u8, (y % 256) as u8, n / 8 + 100, 255] }).collect();
+            RawFrame::new(w, h, rgba).ok()
+        }
+    }
+
+    let (alice, bob) = ids();
+    let mut phone = Phone::bind("127.0.0.1:0".parse().unwrap(), bob.clone(), vec![*PublicKey::from(&alice).as_bytes()]).await.unwrap();
+    let (_srv, cands) = relays(4, &phone.local_addr().to_string()).await;
+    let bob_pub = PublicKey::from(&bob);
+    let voice = cands.clone();
+    let caller = tokio::spawn(async move { call(client(voice), &alice, &bob_pub, Mulaw::new(), WAIT).await });
+    let incoming = timeout(WAIT, phone.next_incoming()).await.unwrap().unwrap();
+    let mut b = incoming.accept(Mulaw::new()).await.unwrap();
+    let a = caller.await.unwrap().unwrap();
+
+    let share = share_screen(screen_client(cands), a.share_keys(), WAIT).await.unwrap();
+    let mut src = Bars(0);
+    let mut enc = H264Encoder::new(H264Encoder::default_bitrate()).unwrap();
+    let mut dec = H264Decoder::new().unwrap();
+    let mut shown = None;
+    let t0 = std::time::Instant::now();
+    while shown.is_none() && t0.elapsed() < Duration::from_secs(20) {
+        pump(&mut src, &mut enc, &share).unwrap();
+        let end = tokio::time::Instant::now() + Duration::from_millis(125);
+        while let Ok(Some(ev)) = tokio::time::timeout_at(end, b.next_screen()).await {
+            if let ScreenEvent::Frame(f) = ev
+                && let Some(img) = dec.decode(&f.data).unwrap()
+            {
+                shown = Some(img);
+            }
+        }
+    }
+    let img = shown.expect("a tela chegou");
+    assert_eq!((img.width, img.height), (1280, 720));
+    share.stop().await;
+}

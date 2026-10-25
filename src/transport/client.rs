@@ -2,6 +2,9 @@
 
 use super::*;
 
+/// Passo máximo do relógio do gerente de circuitos.
+const MANAGER_TICK: Duration = Duration::from_millis(10);
+
 // ---------------------------------------------------------------------------
 // Cliente
 // ---------------------------------------------------------------------------
@@ -72,9 +75,11 @@ impl CircuitClient {
             (cover, circuit_cover) = (p.link_interval(), p.circuit_interval());
         }
         manager.set_cover(circuit_cover.map(|d| d.as_millis() as u64));
+        // O gerente emite no máximo uma célula de cover por tick: o tick precisa caber no intervalo.
+        let tick = circuit_cover.map_or(MANAGER_TICK, |d| d.clamp(Duration::from_millis(1), MANAGER_TICK));
         let (cmd_tx, cmd_rx) = mpsc::channel(CHANNEL);
         let (ev_tx, ev_rx) = mpsc::channel(CHANNEL);
-        let task = tokio::spawn(client_actor(manager, connect_timeout, rep, cover, cmd_rx, ev_tx));
+        let task = tokio::spawn(client_actor(manager, connect_timeout, rep, cover, tick, cmd_rx, ev_tx));
         Self { cmd: cmd_tx, events: ev_rx, task }
     }
 
@@ -137,6 +142,7 @@ pub(super) async fn client_actor(
     connect_timeout: Duration,
     mut rep: Option<Reputation>,
     cover_every: Option<Duration>,
+    tick_every: Duration,
     mut cmd: mpsc::Receiver<ClientCmd>,
     events: mpsc::Sender<Event>,
 ) {
@@ -150,7 +156,7 @@ pub(super) async fn client_actor(
     // Lista como veio da descoberta, antes do ajuste pela reputação.
     let mut base: Vec<Candidate> = Vec::new();
     let mut last_refresh = 0u64;
-    let mut tick = interval(Duration::from_millis(10));
+    let mut tick = interval(tick_every);
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     let mut outs = mgr.start(now());
