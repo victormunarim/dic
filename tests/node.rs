@@ -535,3 +535,23 @@ async fn node_without_directory_dials_stored_address() {
     let (_cb, _b) = second.await.unwrap();
     ca.hangup();
 }
+
+/// Endereço guardado que não responde mais: a ligação cai no diretório e corrige o cache.
+#[tokio::test]
+async fn stale_stored_address_falls_back_to_directory() {
+    let (_d, addr) = dir().await;
+    let (sa, sb) = (key(), key());
+    let (pa, pb) = (*PublicKey::from(&sa).as_bytes(), *PublicKey::from(&sb).as_bytes());
+    let mut b = Node::start(cfg(sb, &addr, vec![pa])).await.unwrap();
+    let real = directory::lookup(&addr, &pb).await.unwrap().unwrap();
+    let stale = clam::directory::RelayInfo { addr: "127.0.0.1:1".into(), ..real.clone() };
+    let a = Node::start(NodeConfig { known: vec![(pb, stale)], ..cfg(sa, &addr, vec![]) }).await.unwrap();
+    let answer = tokio::spawn(async move {
+        let inc = timeout(Duration::from_secs(20), b.next_incoming()).await.unwrap().unwrap();
+        (inc.accept(Mulaw::new()).await.unwrap(), b)
+    });
+    let ca = a.dial(pb, Mulaw::new(), Duration::from_secs(15)).await.unwrap();
+    let (_cb, _b) = answer.await.unwrap();
+    assert_eq!(a.known()[0].1.addr, real.addr);
+    ca.hangup();
+}

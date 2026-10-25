@@ -84,12 +84,30 @@ pub struct Dialer {
 
 type Known = Arc<Mutex<HashMap<[u8; 32], RelayInfo>>>;
 
-/// Vale a pena tentar o endereço guardado se o relay ainda aceita conexões.
-async fn relay_up(addr: &str) -> bool {
-    matches!(tokio::time::timeout(Duration::from_secs(2), tokio::net::TcpStream::connect(addr)).await, Ok(Ok(_)))
+/// Espera o circuito do cliente ficar pronto, até `limit`.
+async fn ready_within(client: &CircuitClient, limit: Duration) -> bool {
+    tokio::time::timeout(limit, async {
+        loop {
+            if client.status().await.is_some_and(|s| s.active.is_some_and(|a| a.ready)) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .is_ok()
 }
 
 impl Dialer {
+    /// Cliente de circuito até `exit`. Sem outros relays, o primeiro salto é o próprio relay (por loopback).
+    fn client(&self, peer: &[u8; 32], exit: &RelayInfo, mut relays: Vec<Candidate>) -> CircuitClient {
+        // Último recurso para o primeiro salto: o próprio relay (por loopback). Perde o anonimato
+        // perante o outro lado, mas permite ligar quando só há duas pessoas online.
+        relays.push(Candidate { addr: format!("127.0.0.1:{}", self.relay_port), public: self.mine.onion, link_public: self.mine.link, score: 0.5 });
+        relays.push(exit.candidate());
+        let cfg = ManagerConfig { exit_addr: Some(exit.addr.clone()), ..Default::default() };
+        CircuitClient::spawn_with(CircuitManager::new(cfg, &dest_for(peer), relays), Duration::from_secs(3), ClientOptions::default())
+    }
     pub fn public_key(&self) -> [u8; 32] {
         *PublicKey::from(&self.secret).as_bytes()
     }
@@ -106,23 +124,20 @@ impl Dialer {
             codec
         };
         let me = *PublicKey::from(&self.secret).as_bytes();
-        // Endereço guardado da última vez: se o relay responde, o diretório nem entra na conversa.
+        // Endereço guardado da última vez: se o circuito fica pronto, o diretório nem entra na conversa.
+        // Endereço velho (relay sumiu, ou outra máquina no mesmo IP) nunca completa o handshake.
         let cached = self.known.lock().unwrap().get(&peer).cloned();
-        let (exit, mut relays) = match cached {
-            Some(k) if relay_up(&k.addr).await => (k, Vec::new()),
-            _ => {
-                let exit = directory::lookup(&self.directory, &peer).await?.ok_or(DialError::NotFound)?;
-                self.known.lock().unwrap().insert(peer, exit.clone());
-                let relays = directory::sample(&self.directory, 3, &[me, peer]).await?.iter().map(RelayInfo::candidate).collect();
-                (exit, relays)
+        if let Some(k) = cached {
+            let client = self.client(&peer, &k, Vec::new());
+            if ready_within(&client, Duration::from_secs(5)).await {
+                return Ok(call(client, &self.secret, &PublicKey::from(peer), codec, wait).await?);
             }
-        };
-        // Último recurso para o primeiro salto: o próprio relay (por loopback). Perde o anonimato
-        // perante o outro lado, mas permite ligar quando só há duas pessoas online.
-        relays.push(Candidate { addr: format!("127.0.0.1:{}", self.relay_port), public: self.mine.onion, link_public: self.mine.link, score: 0.5 });
-        relays.push(exit.candidate());
-        let cfg = ManagerConfig { exit_addr: Some(exit.addr.clone()), ..Default::default() };
-        let client = CircuitClient::spawn_with(CircuitManager::new(cfg, &dest_for(&peer), relays), Duration::from_secs(3), ClientOptions::default());
+            client.stop();
+        }
+        let exit = directory::lookup(&self.directory, &peer).await?.ok_or(DialError::NotFound)?;
+        self.known.lock().unwrap().insert(peer, exit.clone());
+        let relays = directory::sample(&self.directory, 3, &[me, peer]).await?.iter().map(RelayInfo::candidate).collect();
+        let client = self.client(&peer, &exit, relays);
         Ok(call(client, &self.secret, &PublicKey::from(peer), codec, wait).await?)
     }
 }
@@ -132,7 +147,8 @@ pub struct Node {
     directory: String,
     phone: Phone,
     _relay: RelayServer,
-    mine: RelayInfo,
+    /// Endereço publicado; vale o local até o diretório responder.
+    addr: Arc<Mutex<String>>,
     last_error: Arc<Mutex<Option<String>>>,
     republish: JoinHandle<()>,
     note: Option<String>,
@@ -200,14 +216,10 @@ impl Node {
             Ok(a) => (a, true),
             Err(e) => {
                 *last_error.lock().unwrap() = Some(e.to_string());
-                let warn = format!("diretório fora do ar ({e}): só chegam a você os que já têm o seu endereço; tentando de novo a cada {}s", REPUBLISH.as_secs());
-                note = Some(match note {
-                    Some(n) => format!("{n}; {warn}"),
-                    None => warn,
-                });
                 (public_addr.clone().unwrap_or_else(|| format!("127.0.0.1:{port}")), false)
             }
         };
+        let addr_now = Arc::new(Mutex::new(addr.clone()));
         let mine = RelayInfo { addr, onion, link };
         // Pede ao diretório para conectar de fora ao relay publicado: avisa cedo se ninguém consegue ligar para você.
         if published
@@ -226,7 +238,7 @@ impl Node {
         }
         let dialer = Dialer { secret: secret.clone(), directory: directory.clone(), mine: mine.clone(), relay_port: port, punch, known: known.clone() };
         let republish = {
-            let (directory, secret, last_error, public_addr) = (directory.clone(), secret.clone(), last_error.clone(), public_addr);
+            let (directory, secret, last_error, public_addr, addr_now) = (directory.clone(), secret.clone(), last_error.clone(), public_addr, addr_now.clone());
             tokio::spawn(async move {
                 loop {
                     tokio::time::sleep(REPUBLISH).await;
@@ -234,11 +246,17 @@ impl Node {
                         let _ = m.renew().await;
                     }
                     let r = directory::publish(&directory, &secret, port, onion, link, public_addr.as_deref()).await;
-                    *last_error.lock().unwrap() = r.err().map(|e| e.to_string());
+                    match r {
+                        Ok(a) => {
+                            *addr_now.lock().unwrap() = a;
+                            *last_error.lock().unwrap() = None;
+                        }
+                        Err(e) => *last_error.lock().unwrap() = Some(e.to_string()),
+                    }
                 }
             })
         };
-        Ok(Self { secret, directory, phone, _relay: relay, mine, last_error, republish, note, dialer, known })
+        Ok(Self { secret, directory, phone, _relay: relay, last_error, republish, note, dialer, known, addr: addr_now })
     }
 
     /// Aceita convites de `keys` além dos contatos (membros de uma sala).
@@ -261,13 +279,20 @@ impl Node {
     }
 
     /// Endereço publicado no diretório (o que os outros usam para chegar ao seu relay).
-    pub fn published_addr(&self) -> &str {
-        &self.mine.addr
+    pub fn published_addr(&self) -> String {
+        self.addr.lock().unwrap().clone()
     }
 
     /// Aviso sobre a rede (porta aberta por UPnP, ou por que não foi possível), se houver.
-    pub fn network_note(&self) -> Option<&str> {
-        self.note.as_deref()
+    /// Inclui o aviso de diretório fora do ar enquanto durar.
+    pub fn network_note(&self) -> Option<String> {
+        let down = self.directory_error().map(|e| {
+            format!("diretório fora do ar ({e}): só chegam a você os que já têm o seu endereço; tentando de novo a cada {}s", REPUBLISH.as_secs())
+        });
+        match (self.note.clone(), down) {
+            (Some(n), Some(d)) => Some(format!("{n}; {d}")),
+            (n, d) => n.or(d),
+        }
     }
 
     /// Erro da última renovação no diretório, se houve. `None`: tudo certo.

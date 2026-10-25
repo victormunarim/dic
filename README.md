@@ -910,4 +910,6 @@ O diretório só é indispensável no primeiro contato. Depois disso:
 - **Endereço guardado.** O `Node` lembra o último relay de cada contato para quem ligou (`Node::known()`, devolvido em `NodeConfig::known`). Ao discar, se esse relay ainda aceita conexão, a chamada vai direto, sem consultar o diretório. Se não responde, cai na busca normal e atualiza o endereço. A GUI guarda a lista em `~/.clam-gui.known`.
 - **Subir com o diretório fora do ar.** `Node::start` não falha mais: registra o problema em `network_note()`/`directory_error()` e tenta publicar de novo a cada 40 s. Enquanto isso, recebe chamadas de quem já tem o seu endereço e liga para quem está em `known`.
 
+Endereço guardado velho não trava a ligação: se o circuito não fica pronto em 5 s, a busca no diretório assume e corrige o cache. Quando o diretório volta, `published_addr()` e `network_note()` se atualizam sozinhos.
+
 Limites: sem diretório não há furo de NAT nem sorteio de primeiro salto (usa o próprio relay por loopback), e o endereço publicado fica sendo o local até o diretório voltar. Quem muda de IP só é achado de novo pelo diretório.
