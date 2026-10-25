@@ -70,9 +70,26 @@ pub(crate) fn on_screen_event(state: &ScreenState, dec: &mut Option<H264Decoder>
     }
 }
 
-/// Abre a captura da tela. Fora daqui só há o trait `ScreenSource`.
-fn open_source() -> Result<Box<dyn ScreenSource + Send>, String> {
-    clam::capture::X11Screen::open().map(|s| Box::new(s) as Box<dyn ScreenSource + Send>).map_err(|e| e.to_string())
+/// Abre a captura da tela: pelo portal (PipeWire) no Wayland e pelo X11 nos outros casos; se a
+/// primeira falhar, tenta a outra. Fora daqui só há o trait `ScreenSource`.
+async fn open_source() -> Result<Box<dyn ScreenSource + Send>, String> {
+    async fn portal() -> Result<Box<dyn ScreenSource + Send>, String> {
+        clam::portal::PortalScreen::open().await.map(|s| Box::new(s) as Box<dyn ScreenSource + Send>).map_err(|e| e.to_string())
+    }
+    fn x11() -> Result<Box<dyn ScreenSource + Send>, String> {
+        clam::capture::X11Screen::open().map(|s| Box::new(s) as Box<dyn ScreenSource + Send>).map_err(|e| e.to_string())
+    }
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        match portal().await {
+            Ok(s) => Ok(s),
+            Err(e) => x11().map_err(|_| e),
+        }
+    } else {
+        match x11() {
+            Ok(s) => Ok(s),
+            Err(e) => portal().await.map_err(|_| e),
+        }
+    }
 }
 
 /// Liga o circuito de tela e envia quadros enquanto a pessoa quiser e a chamada durar.
@@ -85,7 +102,10 @@ pub(crate) async fn share_task(dialer: Dialer, peer: [u8; 32], keys: clam::media
     };
     st.note.lock().unwrap().clear();
     let wanted = || st.want_share.load(Ordering::Relaxed) && !shared.hangup.load(Ordering::Relaxed);
-    let started = open_source().and_then(|src| H264Encoder::new(H264Encoder::default_bitrate()).map(|e| (src, e)).map_err(|e| e.to_string()));
+    let started = match open_source().await {
+        Ok(src) => H264Encoder::new(H264Encoder::default_bitrate()).map(|e| (src, e)).map_err(|e| e.to_string()),
+        Err(e) => Err(e),
+    };
     let (mut src, mut enc) = match started {
         Ok(x) => x,
         Err(e) => {
