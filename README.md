@@ -803,7 +803,7 @@ cargo run --release --features gui --example gui
 2. **Diretório**: `host:porta` do servidor. **Contatos**: chaves públicas que podem ligar para você, separadas por `;` (quem não estiver na lista não recebe resposta; contatos são atendidos automaticamente).
 3. **Ficar online** publica você no diretório. **Ligar** pede o código (ou só a chave) do outro; **Desligar** encerra.
 4. Os campos são gravados em `~/.clam-gui.conf` (`%USERPROFILE%` no Windows), **inclusive a chave secreta**; no Unix o arquivo fica `0600`.
-5. **Áudio real** (feature `audio`): `--features gui,audio` e marque *Microfone e alto-falante*. Usa `cpal`, 16 kHz mono (G.722), filas de 400 ms. **Use fones**: sem cancelamento de eco. Sem a opção, cai para tom (440 Hz quem liga, 660 Hz quem atende). No Linux a compilação exige `pkg-config` e `libasound2-dev`.
+5. **Áudio real** (feature `audio`): `--features gui,audio` e marque *Microfone e alto-falante*. Usa `cpal`, 16 kHz mono (G.722), filas de 400 ms. O microfone passa pelo `sonora` (WebRTC em Rust puro): filtro passa-altas, cancelamento de eco, supressão de ruído e ganho automático. Fones ainda são o mais seguro. Sem a opção, cai para tom (440 Hz quem liga, 660 Hz quem atende). No Linux a compilação exige `pkg-config` e `libasound2-dev`.
 6. `eframe` fica atrás da feature `gui`, fixado em 0.32 (a 0.37 conflita com o libp2p por `js-sys`).
 
 O fluxo antigo, com relays manuais, continua em `examples/call.rs` e `examples/measure.rs`.
