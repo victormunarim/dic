@@ -20,7 +20,7 @@ use std::{
     time::Duration,
 };
 
-use clam::media::codec::Mulaw;
+use clam::media::codec::G722;
 use clam::node::{Node, NodeConfig};
 use clam::phone::ActiveCall;
 use clam::{
@@ -75,7 +75,7 @@ fn open_sound(want: bool, out: &Sink) -> Option<Sound> {
         return None;
     }
     #[cfg(feature = "audio")]
-    match Sound::open() {
+    match Sound::open_rate(G722::RATE) {
         Ok(s) => {
             out.line(format!("microfone e alto-falante abertos (use fones: não há cancelamento de eco): {}", s.info()));
             return Some(s);
@@ -88,7 +88,7 @@ fn open_sound(want: bool, out: &Sink) -> Option<Sound> {
 }
 
 fn tone(hz: f64, n: usize) -> Vec<i16> {
-    (0..160).map(|i| (6000.0 * (std::f64::consts::TAU * hz * (n * 160 + i) as f64 / 8000.0).sin()) as i16).collect()
+    (0..320).map(|i| (6000.0 * (std::f64::consts::TAU * hz * (n * 320 + i) as f64 / 16000.0).sin()) as i16).collect()
 }
 
 #[derive(Default, Clone)]
@@ -329,7 +329,7 @@ async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, shared: Arc<
                 }
                 out.line(format!("chamada de {name}"));
                 shared.hangup.store(false, Ordering::Relaxed);
-                match inc.accept(Mulaw::new()).await {
+                match inc.accept(G722::new()).await {
                     Ok(c) => start_talk(c, 660.0, &shared, &out, form.use_audio),
                     Err(e) => {
                         out.line(format!("não atendeu: {e}"));
@@ -345,7 +345,7 @@ async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, shared: Arc<
                     }
                     shared.hangup.store(false, Ordering::Relaxed);
                     out.line("ligando...");
-                    match node.dial(peer, Mulaw::new(), Duration::from_secs(15)).await {
+                    match node.dial(peer, G722::new(), Duration::from_secs(15)).await {
                         Ok(c) => {
                             out.line("atendida");
                             start_talk(c, 440.0, &shared, &out, form.use_audio);

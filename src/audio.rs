@@ -27,7 +27,9 @@ pub const RATE: u32 = 8000;
 pub const FRAME: usize = 160;
 
 /// Latência máxima guardada em cada fila (400 ms): passou disso, descarta o mais antigo.
-const MAX_QUEUED: usize = RATE as usize * 4 / 10;
+fn max_queued(rate: u32) -> usize {
+    rate as usize * 4 / 10
+}
 
 #[derive(Debug, thiserror::Error)]
 #[error("áudio: {0}")]
@@ -103,19 +105,26 @@ pub struct Audio {
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
     info: String,
+    frame: usize,
+    rate: u32,
     played: Arc<AtomicUsize>,
 }
 
 impl Audio {
     /// Abre os dispositivos padrão de entrada e saída. Erra se faltar algum ou se o formato não for suportado.
     pub fn open() -> Result<Self, AudioError> {
+        Self::open_rate(RATE)
+    }
+
+    /// Como [`Audio::open`], mas entregando e recebendo PCM na taxa `rate` (quadros de 20 ms).
+    pub fn open_rate(rate: u32) -> Result<Self, AudioError> {
         let capture = Queue::default();
         let playback = Queue::default();
         let stop = Arc::new(AtomicBool::new(false));
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<String, AudioError>>();
         let played = Arc::new(AtomicUsize::new(0));
         let (c, p, s, n) = (capture.clone(), playback.clone(), stop.clone(), played.clone());
-        let thread = std::thread::spawn(move || match open_streams(c, p, n) {
+        let thread = std::thread::spawn(move || match open_streams(c, p, n, rate) {
             Ok((streams, info)) => {
                 let _ = ready_tx.send(Ok(info));
                 while !s.load(Ordering::Relaxed) {
@@ -128,7 +137,7 @@ impl Audio {
             }
         });
         match ready_rx.recv() {
-            Ok(Ok(info)) => Ok(Self { capture, playback, stop, thread: Some(thread), info, played }),
+            Ok(Ok(info)) => Ok(Self { capture, playback, stop, thread: Some(thread), info, played, frame: (rate / 50) as usize, rate }),
             Ok(Err(e)) => {
                 let _ = thread.join();
                 Err(e)
@@ -140,10 +149,10 @@ impl Audio {
     /// Próximo quadro de 160 amostras capturado, se já houver. Se o consumidor atrasar, o excesso antigo é descartado.
     pub fn mic_frame(&self) -> Option<Vec<i16>> {
         let mut q = self.capture.lock().unwrap();
-        if q.len() < FRAME {
+        if q.len() < self.frame {
             return None;
         }
-        Some(q.drain(..FRAME).collect())
+        Some(q.drain(..self.frame).collect())
     }
 
     /// Dispositivos e formatos em uso, para diagnóstico.
@@ -158,7 +167,7 @@ impl Audio {
 
     /// Enfileira PCM recebido para o alto-falante.
     pub fn play(&self, pcm: &[i16]) {
-        push_capped(&mut self.playback.lock().unwrap(), pcm.iter().copied());
+        push_capped(&mut self.playback.lock().unwrap(), pcm.iter().copied(), max_queued(self.rate));
     }
 }
 
@@ -171,15 +180,15 @@ impl Drop for Audio {
     }
 }
 
-fn push_capped(q: &mut VecDeque<i16>, it: impl Iterator<Item = i16>) {
+fn push_capped(q: &mut VecDeque<i16>, it: impl Iterator<Item = i16>, max: usize) {
     q.extend(it);
-    if q.len() > MAX_QUEUED {
-        let extra = q.len() - MAX_QUEUED;
+    if q.len() > max {
+        let extra = q.len() - max;
         q.drain(..extra);
     }
 }
 
-fn open_streams(capture: Queue, playback: Queue, played: Arc<AtomicUsize>) -> Result<((Stream, Stream), String), AudioError> {
+fn open_streams(capture: Queue, playback: Queue, played: Arc<AtomicUsize>, rate: u32) -> Result<((Stream, Stream), String), AudioError> {
     let host = cpal::default_host();
     let input = host.default_input_device().ok_or_else(|| AudioError("sem microfone padrão".into()))?;
     let output = host.default_output_device().ok_or_else(|| AudioError("sem alto-falante padrão".into()))?;
@@ -191,17 +200,17 @@ fn open_streams(capture: Queue, playback: Queue, played: Arc<AtomicUsize>) -> Re
         output.description().map(|d| d.to_string()).unwrap_or_default(), outp.sample_format(), outp.sample_rate(), outp.channels(),
     );
     let in_stream = match inp.sample_format() {
-        SampleFormat::F32 => build_input::<f32>(&input, inp.into(), capture)?,
-        SampleFormat::I16 => build_input::<i16>(&input, inp.into(), capture)?,
-        SampleFormat::U16 => build_input::<u16>(&input, inp.into(), capture)?,
-        SampleFormat::I32 => build_input::<i32>(&input, inp.into(), capture)?,
+        SampleFormat::F32 => build_input::<f32>(&input, inp.into(), capture, rate)?,
+        SampleFormat::I16 => build_input::<i16>(&input, inp.into(), capture, rate)?,
+        SampleFormat::U16 => build_input::<u16>(&input, inp.into(), capture, rate)?,
+        SampleFormat::I32 => build_input::<i32>(&input, inp.into(), capture, rate)?,
         f => return Err(AudioError(format!("formato de entrada não suportado: {f}"))),
     };
     let out_stream = match outp.sample_format() {
-        SampleFormat::F32 => build_output::<f32>(&output, outp.into(), playback, played)?,
-        SampleFormat::I16 => build_output::<i16>(&output, outp.into(), playback, played)?,
-        SampleFormat::U16 => build_output::<u16>(&output, outp.into(), playback, played)?,
-        SampleFormat::I32 => build_output::<i32>(&output, outp.into(), playback, played)?,
+        SampleFormat::F32 => build_output::<f32>(&output, outp.into(), playback, played, rate)?,
+        SampleFormat::I16 => build_output::<i16>(&output, outp.into(), playback, played, rate)?,
+        SampleFormat::U16 => build_output::<u16>(&output, outp.into(), playback, played, rate)?,
+        SampleFormat::I32 => build_output::<i32>(&output, outp.into(), playback, played, rate)?,
         f => return Err(AudioError(format!("formato de saída não suportado: {f}"))),
     };
     in_stream.play().map_err(err)?;
@@ -209,13 +218,13 @@ fn open_streams(capture: Queue, playback: Queue, played: Arc<AtomicUsize>) -> Re
     Ok(((in_stream, out_stream), info))
 }
 
-fn build_input<T>(dev: &cpal::Device, cfg: cpal::StreamConfig, q: Queue) -> Result<Stream, AudioError>
+fn build_input<T>(dev: &cpal::Device, cfg: cpal::StreamConfig, q: Queue, rate: u32) -> Result<Stream, AudioError>
 where
     T: SizedSample,
     f32: FromSample<T>,
 {
     let ch = cfg.channels as usize;
-    let mut down = Downsampler::new(cfg.sample_rate, RATE);
+    let mut down = Downsampler::new(cfg.sample_rate, rate);
     dev.build_input_stream(
         cfg,
         move |data: &[T], _| {
@@ -224,7 +233,7 @@ where
                 let mono = frame.iter().map(|s| s.to_sample::<f32>()).sum::<f32>() / ch as f32;
                 out.extend(down.push(mono));
             }
-            push_capped(&mut q.lock().unwrap(), out.into_iter());
+            push_capped(&mut q.lock().unwrap(), out.into_iter(), max_queued(rate));
         },
         |e| eprintln!("microfone: {e}"),
         None,
@@ -232,12 +241,12 @@ where
     .map_err(err)
 }
 
-fn build_output<T>(dev: &cpal::Device, cfg: cpal::StreamConfig, q: Queue, played: Arc<AtomicUsize>) -> Result<Stream, AudioError>
+fn build_output<T>(dev: &cpal::Device, cfg: cpal::StreamConfig, q: Queue, played: Arc<AtomicUsize>, rate: u32) -> Result<Stream, AudioError>
 where
     T: SizedSample + FromSample<f32>,
 {
     let ch = cfg.channels as usize;
-    let mut up = Upsampler::new(RATE, cfg.sample_rate);
+    let mut up = Upsampler::new(rate, cfg.sample_rate);
     dev.build_output_stream(
         cfg,
         move |data: &mut [T], _| {
@@ -301,8 +310,8 @@ mod tests {
     #[test]
     fn queue_is_capped() {
         let mut q = VecDeque::new();
-        push_capped(&mut q, std::iter::repeat_n(1i16, MAX_QUEUED + 1000));
-        assert_eq!(q.len(), MAX_QUEUED);
+        push_capped(&mut q, std::iter::repeat_n(1i16, max_queued(RATE) + 1000), max_queued(RATE));
+        assert_eq!(q.len(), max_queued(RATE));
     }
 
     /// Precisa de placa de som: `cargo test --features audio -- --ignored`.
