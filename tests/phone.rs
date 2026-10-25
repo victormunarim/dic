@@ -456,10 +456,14 @@ async fn full_size_screen_gets_through_at_the_circuit_slot_rate() {
     let mut shown = None;
     let mut count = 0;
     let t0 = std::time::Instant::now();
-    while count < 4 && t0.elapsed() < Duration::from_secs(20) {
+    let mut lost = 0;
+    while t0.elapsed() < Duration::from_secs(8) {
         pump(&mut src, &mut enc, &share).unwrap();
         let end = tokio::time::Instant::now() + Duration::from_millis(125);
         while let Ok(Some(ev)) = tokio::time::timeout_at(end, b.next_screen()).await {
+            if let ScreenEvent::Lost(n) = ev {
+                lost = n;
+            }
             if let ScreenEvent::Frame(f) = ev
                 && let Some(img) = dec.decode(&f.data).unwrap()
             {
@@ -468,7 +472,8 @@ async fn full_size_screen_gets_through_at_the_circuit_slot_rate() {
             }
         }
     }
-    assert!(count >= 4, "só {count} imagens em 20 s");
+    assert_eq!(lost, 0, "quadros perdidos no caminho");
+    assert!(count >= 20, "só {count} imagens em 8 s");
     let img = shown.expect("a tela chegou");
     assert!(img.width <= 1280 && img.width >= 320);
     share.stop().await;
