@@ -10,7 +10,8 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
     let contacts: Vec<_> = parse_contacts(&form.contacts);
     let names = form.names();
     let mut cfg = NodeConfig::new(secret, form.directory_addr(), contacts.iter().map(|(_, k)| *k).collect());
-    (cfg.known, cfg.hints) = load_known();
+    let book = load_known();
+    (cfg.known, cfg.hints, cfg.history) = (book.known, book.hints, book.history);
     // Códigos diretos na lista de contatos trazem o relay deles: dica para ligar sem diretório.
     for (k, r) in contact_relays(&form.contacts) {
         cfg.hints.retain(|(h, _)| *h != k);
@@ -38,7 +39,7 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
         out.line(n);
     }
     let dialer = node.dialer();
-    let mut saver = KnownSaver::new(&node.known(), &node.hints());
+    let mut saver = KnownSaver::new(&book_of(&node));
     let (dialed_tx, mut dialed_rx) = mpsc::unbounded_channel::<([u8; 32], u32, Option<Result<ActiveCall, clam::node::DialError>>)>();
     let (redial_tx, mut redial_rx) = mpsc::unbounded_channel::<([u8; 32], u32)>();
     // Discar demora (furo de NAT, endereço guardado, espera de resposta): numa tarefa, para a janela seguir
@@ -93,7 +94,7 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
                 }
             }
             Some((peer, attempt, r)) = dialed_rx.recv() => {
-                saver.sync(&node.known(), &node.hints(), &out);
+                saver.sync(&book_of(&node), &out);
                 match (dial_step(attempt, r.as_ref().map(|r| r.is_ok())), r) {
                     (DialStep::Talk, Some(Ok(c))) => {
                         out.line(if attempt > 0 { "religada" } else { "atendida" });
@@ -198,11 +199,11 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
                 }
                 Some(Cmd::Contact(key, relay)) => {
                     node.add_contact(key, relay);
-                    saver.sync(&node.known(), &node.hints(), &out);
+                    saver.sync(&book_of(&node), &out);
                 }
                 Some(Cmd::Forget(key)) => {
                     node.forget(&key);
-                    saver.sync(&node.known(), &node.hints(), &out);
+                    saver.sync(&book_of(&node), &out);
                 }
                 Some(Cmd::MicTest) => {
                     if shared.in_call.swap(true, Ordering::Relaxed) {
@@ -295,10 +296,10 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
         // Os endereços mudam sozinhos (renovação com o diretório, convites): grava quando mudam, não só
         // depois de uma ligação, para um fechamento brusco não perder o que foi aprendido.
         if saver.due() {
-            saver.sync(&node.known(), &node.hints(), &out);
+            saver.sync(&book_of(&node), &out);
         }
     }
-    saver.sync(&node.known(), &node.hints(), &out);
+    saver.sync(&book_of(&node), &out);
     if let Some(r) = room.take() {
         leave_room(&node, r, &shared, &out).await;
     }
@@ -306,10 +307,15 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
     Ok(())
 }
 
+/// O que o nó sabe dos endereços dos contatos, no formato do arquivo.
+fn book_of(node: &Node) -> Book {
+    Book { known: node.known(), hints: node.hints(), history: node.history() }
+}
+
 /// Mantém `.clam-gui.known` igual aos endereços de contatos que o nó conhece, avisando de erro de gravação
 /// uma vez por erro diferente (não a cada tentativa).
 struct KnownSaver {
-    saved: (Stored, Stored),
+    saved: Book,
     last_error: Option<String>,
     next_check: tokio::time::Instant,
 }
@@ -317,15 +323,9 @@ struct KnownSaver {
 impl KnownSaver {
     const EVERY: Duration = Duration::from_secs(5);
 
-    /// `known` e `hints` são o que já está no arquivo (lido na partida): só grava quando algo for diferente disso.
-    fn new(known: &Stored, hints: &Stored) -> Self {
-        Self { saved: (Self::sorted(known), Self::sorted(hints)), last_error: None, next_check: tokio::time::Instant::now() + Self::EVERY }
-    }
-
-    fn sorted(list: &Stored) -> Stored {
-        let mut v = list.clone();
-        v.sort_by_key(|(k, _)| *k);
-        v
+    /// `book` é o que já está no arquivo (lido na partida): só grava quando algo for diferente disso.
+    fn new(book: &Book) -> Self {
+        Self { saved: book.sorted(), last_error: None, next_check: tokio::time::Instant::now() + Self::EVERY }
     }
 
     fn due(&mut self) -> bool {
@@ -337,12 +337,12 @@ impl KnownSaver {
         true
     }
 
-    fn sync(&mut self, known: &Stored, hints: &Stored, out: &Sink) {
-        let now = (Self::sorted(known), Self::sorted(hints));
+    fn sync(&mut self, book: &Book, out: &Sink) {
+        let now = book.sorted();
         if now == self.saved && self.last_error.is_none() {
             return;
         }
-        match save_known(&now.0, &now.1) {
+        match save_known(&now) {
             Ok(()) => {
                 self.saved = now;
                 self.last_error = None;

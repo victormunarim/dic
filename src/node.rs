@@ -16,7 +16,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use tokio::task::JoinHandle;
+use tokio::{
+    sync::Semaphore,
+    task::{AbortHandle, JoinHandle, JoinSet},
+};
 use x25519_dalek::{PublicKey, StaticSecret};
 
 use crate::{
@@ -26,8 +29,14 @@ use crate::{
     },
     upnp,
     directory::{self, REPUBLISH, RelayInfo, dest_for},
-    media::{codec::Codec, keys::CallKeys, signal::RelayHint},
-    phone::{self, ActiveCall, CallError, IncomingCall, Phone, PhoneLink, ScreenShare, call_linked, call_over_linked, screen_client_options, share_screen},
+    circuit::manager::Event,
+    media::{
+        codec::Codec,
+        keys::CallKeys,
+        signal::RelayHint,
+        update::{self, AddressRecord, MAX_ADDR},
+    },
+    phone::{self, ActiveCall, AddressUpdate, CallError, IncomingCall, Phone, PhoneLink, ScreenShare, call_linked, call_over_linked, screen_client_options, share_screen},
     punch::Punch,
     transport::{CircuitClient, ClientOptions, RelayServer, ServerConfig, allow_list},
 };
@@ -37,6 +46,24 @@ const NO_PUNCH_FOR: Duration = Duration::from_secs(300);
 
 /// A cada quantas renovações no diretório os endereços dos contatos são atualizados.
 const REFRESH_KNOWN_EVERY: u32 = 5;
+
+/// Quantos endereços antigos de cada contato ficam guardados para tentar depois do atual.
+pub const HISTORY: usize = 4;
+
+/// Espera inicial entre as tentativas de entregar o endereço novo a um contato (dobra a cada falha, até 2 h).
+pub const UPDATE_RETRY: Duration = Duration::from_secs(30);
+
+/// Maior espera entre duas tentativas de entrega do endereço novo.
+const UPDATE_MAX_WAIT: Duration = Duration::from_secs(2 * 3600);
+
+/// Depois disto sem confirmação do contato, a entrega do endereço novo é abandonada.
+const UPDATE_GIVE_UP: Duration = Duration::from_secs(3 * 24 * 3600);
+
+/// Quanto esperar a confirmação de um contato depois de entregar o endereço.
+const UPDATE_ACK_WAIT: Duration = Duration::from_secs(8);
+
+/// Entregas de endereço feitas ao mesmo tempo (cada uma monta um circuito).
+const UPDATE_PARALLEL: usize = 4;
 
 /// Porta de relay preferida; se estiver ocupada, o sistema escolhe outra.
 pub const DEFAULT_RELAY_PORT: u16 = 4001;
@@ -66,6 +93,15 @@ pub struct NodeConfig {
     /// que os contatos guardaram de você (veja `known`) deixa de valer a cada reinício; gere o par uma vez
     /// com [`RelayKeys::random`], guarde-o e passe-o aqui.
     pub relay_keys: Option<RelayKeys>,
+    /// Endereços antigos de relay por contato, do mais novo ao mais velho (veja [`Node::history`]). Ligar
+    /// tenta estes depois do atual, para quem mudou de endereço sem avisar.
+    pub history: Vec<([u8; 32], RelayInfo)>,
+    /// Entrega o endereço deste relay aos contatos, cifrado, no endereço que se tem deles (veja
+    /// [`crate::media::update`]), ao iniciar e sempre que o endereço mudar. Padrão: ligado sem diretório,
+    /// que é quando os contatos não têm outro jeito de saber o endereço novo.
+    pub updates: bool,
+    /// Espera inicial entre tentativas de entrega a um contato que não responde. Padrão: [`UPDATE_RETRY`].
+    pub update_retry: Duration,
 }
 
 /// Segredos do relay do nó: o do circuito (`onion`) e o do link (Noise NK).
@@ -83,7 +119,9 @@ impl RelayKeys {
 
 impl NodeConfig {
     pub fn new(secret: StaticSecret, directory: impl Into<String>, contacts: Vec<[u8; 32]>) -> Self {
-        Self { secret, directory: directory.into(), contacts, relay_port: DEFAULT_RELAY_PORT, public_addr: None, upnp: true, punch: true, known: Vec::new(), hints: Vec::new(), relay_keys: None }
+        let directory = directory.into();
+        let updates = directory.trim().is_empty();
+        Self { secret, directory, contacts, relay_port: DEFAULT_RELAY_PORT, public_addr: None, upnp: true, punch: true, known: Vec::new(), hints: Vec::new(), relay_keys: None, history: Vec::new(), updates, update_retry: UPDATE_RETRY }
     }
 }
 
@@ -114,6 +152,10 @@ pub struct Dialer {
     known: Known,
     /// Relays que contatos mandaram nos convites (veja [`Node::hints`]): última opção antes do diretório.
     hints: Known,
+    /// Endereços antigos dos contatos (veja [`Node::history`]): tentados depois do guardado e da dica.
+    history: History,
+    /// Último `seq` aceito de cada contato: atualização igual ou mais velha é ignorada.
+    seen_seq: Arc<Mutex<HashMap<[u8; 32], u64>>>,
     /// Contatos que não deixaram furar o NAT há pouco: pula o furo até a data indicada.
     no_punch: Arc<Mutex<HashMap<[u8; 32], Instant>>>,
     /// Registra as chamadas que esta máquina faz no telefone dela (para receber a tela do outro lado).
@@ -122,14 +164,31 @@ pub struct Dialer {
 
 type Known = Arc<Mutex<HashMap<[u8; 32], RelayInfo>>>;
 
+/// Endereços antigos por contato, o mais novo primeiro (até [`HISTORY`]).
+type History = Arc<Mutex<HashMap<[u8; 32], Vec<RelayInfo>>>>;
+
+/// `relay` passa a ser o endereço guardado de `peer`; o que estava guardado vai para o histórico.
+fn set_known(known: &Known, history: &History, peer: &[u8; 32], relay: RelayInfo) {
+    let old = known.lock().unwrap().insert(*peer, relay.clone());
+    let mut history = history.lock().unwrap();
+    let list = history.entry(*peer).or_default();
+    list.retain(|r| *r != relay);
+    if let Some(old) = old.filter(|o| *o != relay) {
+        list.retain(|r| *r != old);
+        list.insert(0, old);
+    }
+    list.truncate(HISTORY);
+    if list.is_empty() {
+        history.remove(peer);
+    }
+}
+
 /// Consulta o relay de cada contato (até 32) e guarda o endereço. Para na primeira falha do diretório.
-async fn refresh_known(directory: &str, contacts: &phone::Contacts, known: &Known) {
+async fn refresh_known(directory: &str, contacts: &phone::Contacts, known: &Known, history: &History) {
     let keys: Vec<[u8; 32]> = contacts.lock().unwrap().iter().take(32).copied().collect();
     for k in keys {
         match directory::lookup(directory, &k).await {
-            Ok(Some(r)) => {
-                known.lock().unwrap().insert(k, r);
-            }
+            Ok(Some(r)) => set_known(known, history, &k, r),
             Ok(None) => {}
             Err(_) => return,
         }
@@ -190,14 +249,19 @@ impl Dialer {
         self.stored_for(peer).first().map(|r| r.addr.clone())
     }
 
-    /// Relays de `peer` para tentar antes do diretório, em ordem: o guardado de uma consulta ou ligação e, se
-    /// for outro, o que o convite dele trouxe (que ninguém verificou).
+    /// Relays de `peer` para tentar antes do diretório, em ordem: o guardado de uma consulta ou ligação, o
+    /// que o convite dele trouxe (que ninguém verificou) e os endereços antigos, do mais novo ao mais velho.
     fn stored_for(&self, peer: &[u8; 32]) -> Vec<RelayInfo> {
         let mut v: Vec<RelayInfo> = self.known.lock().unwrap().get(peer).cloned().into_iter().collect();
         if let Some(h) = self.hints.lock().unwrap().get(peer)
             && !v.contains(h)
         {
             v.push(h.clone());
+        }
+        for old in self.history.lock().unwrap().get(peer).into_iter().flatten() {
+            if !v.contains(old) {
+                v.push(old.clone());
+            }
         }
         v
     }
@@ -233,7 +297,51 @@ impl Dialer {
         if hints.get(peer) == Some(&used) {
             hints.remove(peer);
         }
-        self.known.lock().unwrap().insert(*peer, used);
+        drop(hints);
+        set_known(&self.known, &self.history, peer, used);
+    }
+
+    /// Aplica o endereço novo que `update.peer` mandou (já autenticado pelo telefone). `false`: o `seq` não é
+    /// mais novo que o último visto e nada muda. O endereço antigo vai para o histórico e a dica de convite,
+    /// que não era autenticada, perde o lugar.
+    fn apply_update(&self, update: &AddressUpdate) -> bool {
+        {
+            let mut seen = self.seen_seq.lock().unwrap();
+            if seen.get(&update.peer).is_some_and(|s| *s >= update.record.seq) {
+                return false;
+            }
+            seen.insert(update.peer, update.record.seq);
+        }
+        let r = &update.record;
+        self.hints.lock().unwrap().remove(&update.peer);
+        set_known(&self.known, &self.history, &update.peer, RelayInfo { addr: r.addr.clone(), onion: r.onion, link: r.link });
+        true
+    }
+
+    /// Entrega `record` a `peer` no endereço que se tem dele (o guardado, a dica e os antigos) e espera a
+    /// confirmação cifrada. `true`: o contato abriu o registro. Quem confirmou prova o endereço, que passa a ser o guardado.
+    async fn deliver_update(&self, peer: [u8; 32], record: &AddressRecord, wait: Duration) -> bool {
+        let stored = self.stored_for(&peer);
+        let pk = PublicKey::from(peer);
+        let Ok(frame) = update::seal_update(&self.secret, &pk, record) else { return false };
+        let Some((mut client, used)) = self.stored_client(&peer, stored, ClientOptions::default).await else { return false };
+        let acked = client.send(&frame).await.is_ok()
+            && tokio::time::timeout(wait, async {
+                loop {
+                    match client.next_event().await {
+                        Some(Event::Data(d)) if update::open_ack(&self.secret, &pk, record.seq, &d) => return true,
+                        Some(_) => {}
+                        None => return false,
+                    }
+                }
+            })
+            .await
+            .unwrap_or(false);
+        client.stop();
+        if acked {
+            self.remember(&peer, used);
+        }
+        acked
     }
 
     /// Procura o relay de `peer` no diretório e guarda o endereço. `tried_stored`: o endereço guardado já
@@ -247,7 +355,7 @@ impl Dialer {
             Err(e) if tried_stored => return Err(DialError::StoredAddressDead(e)),
             Err(e) => return Err(DialError::NoStoredAddress(e)),
         };
-        self.known.lock().unwrap().insert(*peer, exit.clone());
+        set_known(&self.known, &self.history, peer, exit.clone());
         Ok(exit)
     }
 
@@ -327,6 +435,59 @@ impl Dialer {
     }
 }
 
+/// Fila de saída: entrega o endereço deste relay a cada contato, no endereço que se tem dele, e insiste com
+/// espera crescente até a confirmação (ou [`UPDATE_GIVE_UP`]). Um endereço novo troca o registro de todos.
+async fn outbox(dialer: Dialer, contacts: phone::Contacts, own: Arc<Mutex<Option<RelayInfo>>>, retry: Duration) {
+    let slots = Arc::new(Semaphore::new(UPDATE_PARALLEL));
+    let mut tasks = JoinSet::new();
+    let mut live: HashMap<[u8; 32], AbortHandle> = HashMap::new();
+    let (mut announced, mut seq): (Option<RelayInfo>, u64) = (None, 0);
+    loop {
+        let mine = own.lock().unwrap().clone().filter(|m| (1..=MAX_ADDR).contains(&m.addr.len()));
+        if let Some(mine) = mine {
+            if announced.as_ref() != Some(&mine) {
+                // O `seq` é a hora em ms, nunca menor que o anterior: o contato descarta o que não for mais novo.
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+                seq = now.max(seq + 1);
+                for h in live.values() {
+                    h.abort();
+                }
+                live.clear();
+                announced = Some(mine);
+            }
+            let record = announced.as_ref().map(|m| AddressRecord { seq, addr: m.addr.clone(), onion: m.onion, link: m.link });
+            let keys: Vec<[u8; 32]> = contacts.lock().unwrap().clone();
+            live.retain(|k, _| keys.contains(k));
+            if let Some(record) = record {
+                for k in keys {
+                    live.entry(k).or_insert_with(|| tasks.spawn(push_address(dialer.clone(), contacts.clone(), k, record.clone(), retry, slots.clone())));
+                }
+            }
+        }
+        while tasks.try_join_next().is_some() {}
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+/// Entrega `record` a `peer` até ele confirmar, o contato sair da lista ou a entrega ser abandonada.
+async fn push_address(dialer: Dialer, contacts: phone::Contacts, peer: [u8; 32], record: AddressRecord, retry: Duration, slots: Arc<Semaphore>) {
+    let (mut wait, give_up) = (retry, Instant::now() + UPDATE_GIVE_UP);
+    loop {
+        if !contacts.lock().unwrap().contains(&peer) {
+            return;
+        }
+        let acked = {
+            let Ok(_slot) = slots.acquire().await else { return };
+            dialer.deliver_update(peer, &record, UPDATE_ACK_WAIT).await
+        };
+        if acked || Instant::now() >= give_up {
+            return;
+        }
+        tokio::time::sleep(wait).await;
+        wait = (wait * 2).min(UPDATE_MAX_WAIT);
+    }
+}
+
 pub struct Node {
     secret: StaticSecret,
     directory: String,
@@ -340,8 +501,13 @@ pub struct Node {
     dialer: Dialer,
     known: Known,
     hints: Known,
+    history: History,
     /// Relay desta máquina como os outros o alcançam (o que vai no código de contato direto).
     own: Arc<Mutex<Option<RelayInfo>>>,
+    /// Último aviso de endereço novo recebido de um contato, para o app mostrar (veja [`Node::take_notice`]).
+    update_notice: Arc<Mutex<Option<String>>>,
+    /// Tarefas de fundo: a que aplica os avisos de endereço dos contatos e a fila de saída dos nossos.
+    background: Vec<JoinHandle<()>>,
 }
 
 impl Node {
@@ -371,10 +537,19 @@ impl Node {
         Self::finish(cfg, phone, relay, onion).await
     }
 
-    async fn finish(cfg: NodeConfig, phone: Phone, relay: RelayServer, onion: [u8; 32]) -> io::Result<Self> {
-        let NodeConfig { secret, directory, public_addr, upnp, punch, known, hints, .. } = cfg;
+    async fn finish(cfg: NodeConfig, mut phone: Phone, relay: RelayServer, onion: [u8; 32]) -> io::Result<Self> {
+        let NodeConfig { secret, directory, public_addr, upnp, punch, known, hints, history, updates, update_retry, .. } = cfg;
         let known: Known = Arc::new(Mutex::new(known.into_iter().collect()));
         let hints: Known = Arc::new(Mutex::new(hints.into_iter().collect()));
+        // A lista guarda do mais novo ao mais velho de cada contato; ao reler, a ordem se mantém.
+        let mut by_peer: HashMap<[u8; 32], Vec<RelayInfo>> = HashMap::new();
+        for (peer, r) in history {
+            let list = by_peer.entry(peer).or_default();
+            if list.len() < HISTORY && !list.contains(&r) {
+                list.push(r);
+            }
+        }
+        let history: History = Arc::new(Mutex::new(by_peer));
         let (port, link) = (relay.local_addr().port(), relay.link_public_key());
         let last_error = Arc::new(Mutex::new(None));
         // Diretório na internet e nenhum endereço público informado: tenta abrir a porta no roteador.
@@ -428,7 +603,7 @@ impl Node {
             };
             push_note(&mut note, warn);
         }
-        let dialer = Dialer { secret: secret.clone(), directory: directory.clone(), mine: mine.clone(), relay_port: port, punch, known: known.clone(), hints: hints.clone(), no_punch: Arc::default(), link: phone.link() };
+        let dialer = Dialer { secret: secret.clone(), directory: directory.clone(), mine: mine.clone(), relay_port: port, punch, known: known.clone(), hints: hints.clone(), history: history.clone(), seen_seq: Arc::default(), no_punch: Arc::default(), link: phone.link() };
         // Os convites levam este relay, para o outro lado ligar de volta sem diretório.
         let link_to_phone = phone.link();
         let own = Arc::new(Mutex::new(own_relay(&mine, published)));
@@ -436,13 +611,13 @@ impl Node {
         let republish = {
             let own = own.clone();
             let (directory, secret, last_error, public_addr, addr_now) = (directory.clone(), secret.clone(), last_error.clone(), public_addr, addr_now.clone());
-            let (contacts, known) = (phone.contacts(), known.clone());
+            let (contacts, known, history) = (phone.contacts(), known.clone(), history.clone());
             tokio::spawn(async move {
                 let mut round = 0u32;
                 loop {
                     // Guarda o endereço dos contatos agora (e de tempos em tempos) para ligar a eles com o diretório fora.
                     if !no_dir && round.is_multiple_of(REFRESH_KNOWN_EVERY) {
-                        refresh_known(&directory, &contacts, &known).await;
+                        refresh_known(&directory, &contacts, &known, &history).await;
                     }
                     round = round.wrapping_add(1);
                     tokio::time::sleep(REPUBLISH).await;
@@ -466,7 +641,23 @@ impl Node {
                 }
             })
         };
-        Ok(Self { secret, directory, phone, _relay: relay, last_error, republish, note, dialer, known, hints, own, addr: addr_now })
+        let update_notice: Arc<Mutex<Option<String>>> = Arc::default();
+        let mut background = Vec::new();
+        if let Some(mut rx) = phone.take_updates() {
+            let (dialer, notice) = (dialer.clone(), update_notice.clone());
+            background.push(tokio::spawn(async move {
+                while let Some(u) = rx.recv().await {
+                    if dialer.apply_update(&u) {
+                        let hex: String = u.peer[..4].iter().map(|b| format!("{b:02x}")).collect();
+                        *notice.lock().unwrap() = Some(format!("{hex}... mudou de endereço e avisou: agora {}", u.record.addr));
+                    }
+                }
+            }));
+        }
+        if updates {
+            background.push(tokio::spawn(outbox(dialer.clone(), phone.contacts(), own.clone(), update_retry)));
+        }
+        Ok(Self { secret, directory, phone, _relay: relay, last_error, republish, note, dialer, known, hints, history, own, update_notice, background, addr: addr_now })
     }
 
     /// Aceita convites de `keys` além dos contatos (membros de uma sala).
@@ -493,6 +684,7 @@ impl Node {
         self.phone.contacts().lock().unwrap().retain(|k| k != peer);
         self.known.lock().unwrap().remove(peer);
         self.hints.lock().unwrap().remove(peer);
+        self.history.lock().unwrap().remove(peer);
     }
 
     pub fn directory(&self) -> &str {
@@ -548,9 +740,16 @@ impl Node {
         self.hints.lock().unwrap().iter().map(|(k, v)| (*k, v.clone())).collect()
     }
 
-    /// Motivo de um convite descartado em silêncio, se houve (veja [`Phone::take_notice`]).
+    /// Endereços antigos de relay por contato, do mais novo ao mais velho (até [`HISTORY`] por contato), para
+    /// guardar e devolver em [`NodeConfig::history`]. Quem mudou de endereço sem avisar ainda é achado por eles.
+    pub fn history(&self) -> Vec<([u8; 32], RelayInfo)> {
+        self.history.lock().unwrap().iter().flat_map(|(k, v)| v.iter().map(|r| (*k, r.clone()))).collect()
+    }
+
+    /// Motivo de um convite descartado em silêncio (veja [`Phone::take_notice`]) ou aviso de que um contato
+    /// mandou o endereço novo dele, se houve; uma vez só.
     pub fn take_notice(&self) -> Option<String> {
-        self.phone.take_notice()
+        self.phone.take_notice().or_else(|| self.update_notice.lock().unwrap().take())
     }
 
     pub async fn next_incoming(&mut self) -> Option<IncomingCall> {
@@ -583,5 +782,8 @@ impl Node {
 impl Drop for Node {
     fn drop(&mut self) {
         self.republish.abort();
+        for t in &self.background {
+            t.abort();
+        }
     }
 }

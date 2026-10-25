@@ -252,54 +252,80 @@ pub(crate) fn conf_path() -> PathBuf {
 }
 
 /// Endereços de relay de contatos, num arquivo à parte (`chave addr onion link` por linha). Linhas que
-/// terminam em `dica` vieram do convite que o contato mandou, sem confirmação de uma chamada.
+/// terminam em `dica` vieram do convite que o contato mandou, sem confirmação de uma chamada; as que
+/// terminam em `antigo` são endereços que o contato já teve (do mais novo ao mais velho, por contato).
 pub(crate) fn known_path() -> PathBuf {
     conf_path().with_file_name(".clam-gui.known")
 }
 
 pub(crate) type Stored = Vec<([u8; 32], clam::directory::RelayInfo)>;
 
-/// Lê o arquivo: `(confirmados, dicas)`.
-pub(crate) fn load_known() -> (Stored, Stored) {
+/// O que o arquivo de endereços guarda.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Book {
+    /// Confirmados por uma chamada, pelo diretório ou pelo aviso do próprio contato.
+    pub known: Stored,
+    pub hints: Stored,
+    pub history: Stored,
+}
+
+impl Book {
+    /// Mesma coisa em ordem estável por contato (a ordem dentro do histórico de um contato se mantém).
+    pub fn sorted(&self) -> Self {
+        let sort = |list: &Stored| {
+            let mut v = list.clone();
+            v.sort_by_key(|(k, _)| *k);
+            v
+        };
+        Self { known: sort(&self.known), hints: sort(&self.hints), history: sort(&self.history) }
+    }
+}
+
+/// Lê o arquivo.
+pub(crate) fn load_known() -> Book {
     parse_known(&std::fs::read_to_string(known_path()).unwrap_or_default())
 }
 
-fn parse_known(text: &str) -> (Stored, Stored) {
-    let (mut known, mut hints) = (Vec::new(), Vec::new());
+fn parse_known(text: &str) -> Book {
+    let mut book = Book::default();
     for l in text.lines() {
         let mut p = l.split_whitespace();
         let entry = (|| {
             let (k, addr, o, link) = (p.next()?, p.next()?, p.next()?, p.next()?);
             Some((unhex(k).ok()?, clam::directory::RelayInfo { addr: addr.to_string(), onion: unhex(o).ok()?, link: unhex(link).ok()? }))
         })();
+        let tail = p.next();
         match entry {
-            Some(e) if p.next() == Some("dica") => hints.push(e),
-            Some(e) => known.push(e),
+            Some(e) if tail == Some("dica") => book.hints.push(e),
+            Some(e) if tail == Some("antigo") => book.history.push(e),
+            Some(e) => book.known.push(e),
             None => {}
         }
     }
-    (known, hints)
+    book
 }
 
-fn format_known(known: &Stored, hints: &Stored) -> String {
+fn format_known(book: &Book) -> String {
     let line = |(k, r): &([u8; 32], clam::directory::RelayInfo), tail: &str| format!("{} {} {} {}{tail}\n", hex(k), r.addr, hex(&r.onion), hex(&r.link));
-    known.iter().map(|e| line(e, "")).chain(hints.iter().map(|e| line(e, " dica"))).collect()
+    let all = book.known.iter().map(|e| line(e, "")).chain(book.hints.iter().map(|e| line(e, " dica"))).chain(book.history.iter().map(|e| line(e, " antigo")));
+    all.collect()
 }
 
-/// Contato removido com o nó parado: tira o endereço dele de `.clam-gui.known`.
+/// Contato removido com o nó parado: tira os endereços dele de `.clam-gui.known`.
 pub(crate) fn forget_known(key: &[u8; 32]) -> std::io::Result<()> {
-    let (mut known, mut hints) = load_known();
-    known.retain(|(k, _)| k != key);
-    hints.retain(|(k, _)| k != key);
-    save_known(&known, &hints)
+    let mut book = load_known();
+    for list in [&mut book.known, &mut book.hints, &mut book.history] {
+        list.retain(|(k, _)| k != key);
+    }
+    save_known(&book)
 }
 
 /// Contato adicionado com o nó parado: o relay do código direto dele entra em `.clam-gui.known` como dica.
 pub(crate) fn remember_hint(key: [u8; 32], relay: clam::directory::RelayInfo) -> std::io::Result<()> {
-    let (known, mut hints) = load_known();
-    hints.retain(|(k, _)| *k != key);
-    hints.push((key, relay));
-    save_known(&known, &hints)
+    let mut book = load_known();
+    book.hints.retain(|(k, _)| *k != key);
+    book.hints.push((key, relay));
+    save_known(&book)
 }
 
 /// Chaves do relay deste computador, num arquivo à parte (`onion link`, em hex). Mantê-las entre execuções
@@ -342,8 +368,8 @@ pub(crate) fn write_private(path: &std::path::Path, text: &str) -> std::io::Resu
     result
 }
 
-pub(crate) fn save_known(known: &Stored, hints: &Stored) -> std::io::Result<()> {
-    write_private(&known_path(), &format_known(known, hints))
+pub(crate) fn save_known(book: &Book) -> std::io::Result<()> {
+    write_private(&known_path(), &format_known(book))
 }
 
 impl Form {
@@ -527,14 +553,17 @@ mod tests {
     }
 
     #[test]
-    fn known_addresses_and_hints_round_trip_and_stay_apart() {
+    fn known_addresses_hints_and_history_round_trip_and_stay_apart() {
         let r = |addr: &str, n: u8| clam::directory::RelayInfo { addr: addr.into(), onion: [n; 32], link: [n + 1; 32] };
-        let (known, hints) = (vec![([1; 32], r("10.0.0.1:4001", 5))], vec![([2; 32], r("[::1]:4001", 8))]);
-        let text = format_known(&known, &hints);
-        assert_eq!(parse_known(&text), (known.clone(), hints));
-        // Arquivo de versão anterior (sem a marca) e linha estragada.
-        let old = format_known(&known, &Vec::new()) + "lixo\n";
-        assert_eq!(parse_known(&old), (known, Vec::new()));
+        let book = Book {
+            known: vec![([1; 32], r("10.0.0.1:4001", 5))],
+            hints: vec![([2; 32], r("[::1]:4001", 8))],
+            history: vec![([1; 32], r("10.0.0.9:4001", 11)), ([1; 32], r("10.0.0.8:4001", 12))],
+        };
+        assert_eq!(parse_known(&format_known(&book)), book);
+        // Arquivo de versão anterior (sem as marcas) e linha estragada.
+        let old = format_known(&Book { known: book.known.clone(), ..Book::default() }) + "lixo\n";
+        assert_eq!(parse_known(&old), Book { known: book.known, ..Book::default() });
     }
 
     #[test]

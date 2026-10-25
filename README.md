@@ -32,6 +32,7 @@ O crate reexporta `ed25519_dalek`, `x25519_dalek` e `rand_core` (`clam::ed25519_
 | [docs/CIRCUITO.md](docs/CIRCUITO.md) | Circuito de 2 saltos, transporte, reputação, cover traffic, fuzzing (Fase 3) |
 | [docs/CHAMADAS.md](docs/CHAMADAS.md) | Mídia, telefone, diretório de primeiro contato, salas, GUI mínima |
 | [docs/GUI.md](docs/GUI.md) | GUI: sala, volume, apelidos, remover membro, modo sem diretório |
+| [docs/ENCONTRO.md](docs/ENCONTRO.md) | Reencontrar contatos sem diretório: aviso de endereço novo (fase 1 pronta) e a proposta das demais camadas |
 | [docs/SEGURANCA.md](docs/SEGURANCA.md) | Garantias, limites, limite de taxa, troca de segredo, estado em disco |
 | [docs/LINUX.md](docs/LINUX.md) / [docs/WINDOWS.md](docs/WINDOWS.md) | Instalação por sistema |
 
@@ -61,5 +62,5 @@ Para ligar a alguém: rode o `examples/gui` (veja [docs/GUI.md](docs/GUI.md)) ou
 | `src/audio.rs` | microfone/alto-falante via `cpal`, reamostragem para a taxa do codec (feature `audio`) |
 | `examples/gui/` | janela mínima (feature `gui`) para ligar/atender sem terminal; `conf`, `engine` (sem janela, testável) e `ui` |
 | `src/phone.rs` | `Phone`, `IncomingCall`, `call`, `ActiveCall` (feature `net`) |
-| `src/media/` | `VoiceCall`, `keys` (handshake), `packet` (200 B + AEAD), `jitter`, `signal` (convite/aceite), `codec` (`Mulaw`, trait `Codec`) |
+| `src/media/` | `VoiceCall`, `keys` (handshake), `packet` (200 B + AEAD), `jitter`, `signal` (convite/aceite), `update` (aviso de endereço novo), `codec` (`Mulaw`, trait `Codec`) |
 | `src/path.rs` | `PathMode`, `PathRequest`, `PathError` |

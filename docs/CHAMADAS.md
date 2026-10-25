@@ -142,7 +142,7 @@ Guias passo a passo por sistema: [`docs/LINUX.md`](LINUX.md) e [`docs/WINDOWS.md
 cargo run --release --features gui --example gui
 ```
 
-1. Na primeira abertura a identidade já é criada sozinha (fica em *Configurações avançadas*, oculta). O **código de contato** (`chave@host:porta`, ou, sem diretório, o código direto `chave#ip:porta#circuito#link` que leva o seu relay; veja `docs/GUI.md`) aparece em *Meu código de contato* com *Copiar*; passe-o a quem vai te chamar.
+1. Na primeira abertura a identidade já é criada sozinha (fica em *Configurações avançadas*, oculta). O **código de contato** (`chave@host:porta`, ou, sem diretório, o código direto `chave#ip:porta#circuito#link` que leva o seu relay; veja `docs/GUI.md`, que também conta como os contatos recebem o endereço novo quando o seu muda) aparece em *Meu código de contato* com *Copiar*; passe-o a quem vai te chamar.
 2. Informe o **servidor (diretório)** `host:porta` e clique **Ficar online**. O indicador mostra Offline / Conectando / Online.
 3. **Contatos**: cada um tem *Ligar* e *Remover*; para adicionar, nome e código de contato. Quem não estiver na lista (nem numa sala sua) não recebe resposta; contatos são atendidos automaticamente. *Ligar para um código* aceita um código ou nome sem salvar. **Desligar** encerra.
 4. Os campos são gravados em `~/.clam-gui.conf` (`%USERPROFILE%` no Windows), **inclusive a chave secreta**; no Unix o arquivo fica `0600`.

@@ -52,6 +52,7 @@ use crate::{
         keys::CallKeys,
         screen::{ScreenFrame, ScreenStats, ScreenStream},
         signal::{Answer, Caller, Incoming, RelayHint},
+        update::{self, AddressRecord},
     },
     transport::{CircuitClient, ClientOptions},
 };
@@ -704,7 +705,15 @@ pub struct Phone {
     ids: Arc<AtomicU64>,
     link_tx: mpsc::Sender<Msg>,
     hint: Arc<Mutex<Option<RelayHint>>>,
+    updates: Option<mpsc::Receiver<AddressUpdate>>,
     tasks: Vec<JoinHandle<()>>,
+}
+
+/// Endereço novo que um contato mandou ([`crate::media::update`]), já aberto e autenticado.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AddressUpdate {
+    pub peer: [u8; 32],
+    pub record: AddressRecord,
 }
 
 /// Chaves aceitas pelo telefone; pode mudar com ele ligado (membros de salas entram e saem).
@@ -744,8 +753,9 @@ impl Phone {
             }
         });
         let port = DatagramPort { actor: actor_tx.clone(), next: Arc::new(AtomicU64::new(DATAGRAM_CONN_BASE)) };
-        let actor = tokio::spawn(run_actor(actor_rx, actor_tx.clone(), inc_tx, my_static, contacts.clone(), ids.clone(), notice.clone()));
-        Ok(Self { addr, incoming: inc_rx, notice, contacts, port, ids, link_tx: actor_tx, hint: Arc::default(), tasks: vec![accept, actor] })
+        let (upd_tx, upd_rx) = mpsc::channel(64);
+        let actor = tokio::spawn(run_actor(actor_rx, actor_tx.clone(), ActorOut { incoming: inc_tx, updates: upd_tx, notice: notice.clone() }, my_static, contacts.clone(), ids.clone()));
+        Ok(Self { addr, incoming: inc_rx, notice, contacts, port, ids, link_tx: actor_tx, hint: Arc::default(), updates: Some(upd_rx), tasks: vec![accept, actor] })
     }
 
     /// Porta para ligações que chegam por datagramas (furo de NAT) em vez de TCP.
@@ -771,6 +781,12 @@ impl Phone {
     /// diferentes), uma vez só. Só para diagnóstico local: o remetente não recebe resposta.
     pub fn take_notice(&self) -> Option<String> {
         self.notice.lock().unwrap().take()
+    }
+
+    /// Fila das atualizações de endereço que contatos mandam (cada uma já foi confirmada ao contato). Só se
+    /// retira uma vez; sem quem a leia, as atualizações novas se perdem quando a fila enche.
+    pub fn take_updates(&mut self) -> Option<mpsc::Receiver<AddressUpdate>> {
+        self.updates.take()
     }
 
     /// Próximo convite de um contato. `None` = o telefone parou.
@@ -840,15 +856,22 @@ impl SeenInvites {
     }
 }
 
+/// Para onde o telefone entrega o que recebe: convites, avisos de endereço e o motivo do último descarte.
+struct ActorOut {
+    incoming: mpsc::Sender<IncomingCall>,
+    updates: mpsc::Sender<AddressUpdate>,
+    notice: Arc<Mutex<Option<String>>>,
+}
+
 async fn run_actor(
     mut rx: mpsc::Receiver<Msg>,
     me: mpsc::Sender<Msg>,
-    incoming: mpsc::Sender<IncomingCall>,
+    out: ActorOut,
     secret: StaticSecret,
     contacts: Contacts,
     ids: Arc<AtomicU64>,
-    notice: Arc<Mutex<Option<String>>>,
 ) {
+    let ActorOut { incoming, updates, notice } = out;
     let mut writers: HashMap<u64, mpsc::Sender<Vec<u8>>> = HashMap::new();
     let mut binds: HashMap<u64, Bind> = HashMap::new();
     let mut calls: HashMap<u64, mpsc::Sender<WireIn>> = HashMap::new();
@@ -893,6 +916,17 @@ async fn run_actor(
                 }
                 Some(Bind::Pending) => {}
                 None => {
+                    // Aviso de endereço de um contato: confirma e entrega, sem tocar o telefone.
+                    let known: Vec<[u8; 32]> = contacts.lock().unwrap().clone();
+                    if let Some((peer, record)) = update::open_update(&secret, known, &data) {
+                        if let Ok(ack) = update::seal_ack(&secret, &PublicKey::from(peer), record.seq)
+                            && let Some(w) = writers.get(&conn)
+                        {
+                            let _ = w.try_send(ack.to_vec());
+                        }
+                        let _ = updates.try_send(AddressUpdate { peer, record });
+                        continue;
+                    }
                     let invite = Incoming::parse(&secret, &data).ok().filter(|i| {
                         let known = contacts.lock().unwrap().contains(i.caller().as_bytes());
                         if !known {

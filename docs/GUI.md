@@ -53,7 +53,18 @@ Custos: o IP e a porta (4001) de quem recebe precisam ser alcançáveis de fora 
 
 Endereço guardado velho não trava a ligação: se o circuito não fica pronto em 5 s, a busca no diretório assume e corrige o cache. Quando o diretório volta, `published_addr()` e `network_note()` se atualizam sozinhos.
 
-Limites: sem diretório não há furo de NAT nem sorteio de primeiro salto (usa o próprio relay por loopback), e o endereço publicado fica sendo o local até o diretório voltar. Quem muda de IP só é achado de novo pelo diretório.
+Limites: sem diretório não há furo de NAT nem sorteio de primeiro salto (usa o próprio relay por loopback), e o endereço publicado fica sendo o local até o diretório voltar.
+
+#### Mudou de endereço sem diretório
+
+Sem diretório, cada contato guarda o endereço do seu relay. Quando ele muda (IP novo, outra porta), o programa avisa os contatos sozinho, e o código antigo não precisa ser trocado:
+
+- **Aviso.** Ao subir, e sempre que o endereço mudar, o nó monta um registro (versão, `seq`, endereço, chave do circuito e do link) cifrado para cada contato e o entrega pelo circuito, no endereço que tem dele: o guardado, a dica e os antigos, nessa ordem. O quadro tem 200 B, como os da sinalização (`media::update`). O telefone do contato confere a cifra, não toca, responde com uma confirmação cifrada e o nó dele passa o endereço velho para o histórico e guarda o novo (o log mostra "... mudou de endereço e avisou: agora ..."). Quem não é contato não consegue abrir o quadro e não recebe resposta.
+- **Fila de saída.** Contato desligado ou sem rede não confirma: o nó tenta de novo com espera que dobra (30 s, 1 min, 2 min, ... até 2 h) e desiste depois de 3 dias ou quando o contato sai da lista. Um endereço novo troca o registro pendente de todos. A fila só existe enquanto o programa está aberto; ao reabrir, um registro novo é enviado a todos.
+- **Histórico.** Os últimos 4 endereços de cada contato ficam em `~/.clam-gui.known` (linhas com `antigo` no fim; `Node::history()` / `NodeConfig::history`), do mais novo ao mais velho, e são tentados depois do guardado e da dica ao discar. Quem mudou de endereço sem conseguir avisar (os dois mudaram, por exemplo) ainda é achado se um dos endereços antigos voltar a servir.
+- **Ligado por padrão só sem diretório** (`NodeConfig::updates`; o diretório já cobre a mudança de endereço).
+
+Limites: se os dois lados mudam de endereço enquanto estão separados, o aviso de um não chega ao outro; isso é para a Fase 2 de [ENCONTRO.md](ENCONTRO.md). O `seq` é a hora em ms: relógio que volta mais que o intervalo entre dois inícios faz o contato ignorar o aviso até o `seq` passar do último que ele viu.
 
 Detalhes do modo sem diretório: o nó consulta o endereço de cada contato (até 32) ao subir e a cada 5 renovações, então dá para ligar a quem você nunca discou. Um furo de NAT que falha não é repetido para o mesmo contato por 5 minutos. Na GUI, discar roda em segundo plano (o botão "Desligar" cancela) e erros de áudio (fone desconectado, driver caiu) aparecem no log.
 

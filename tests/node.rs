@@ -896,3 +896,109 @@ async fn direct_code_keeps_a_hostname_public_address() {
     let a = Node::start(cfg).await.unwrap();
     assert_eq!(a.relay_info().unwrap().addr, "casa.exemplo.com:4001");
 }
+
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+}
+
+/// Nó sem diretório num porto conhecido, para o endereço dele poder ser escrito antes de subir.
+fn fixed(secret: StaticSecret, port: u16, contacts: Vec<[u8; 32]>) -> NodeConfig {
+    use clam::node::RelayKeys;
+    NodeConfig {
+        relay_port: port,
+        public_addr: Some(format!("127.0.0.1:{port}")),
+        upnp: false,
+        punch: false,
+        relay_keys: Some(RelayKeys::random()),
+        update_retry: Duration::from_millis(200),
+        ..NodeConfig::new(secret, "", contacts)
+    }
+}
+
+async fn until<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {
+    timeout(Duration::from_secs(30), async {
+        loop {
+            if let Some(v) = f() {
+                return v;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("não aconteceu: {what}"))
+}
+
+/// A muda de endereço com B desligado; quando B volta, a fila de saída de A entrega o endereço novo e a chamada funciona.
+#[tokio::test]
+async fn a_new_address_reaches_the_contact_that_was_offline() {
+    use clam::directory::RelayInfo;
+    let (sa, sb) = (key(), key());
+    let (pa, pb) = (*PublicKey::from(&sa).as_bytes(), *PublicKey::from(&sb).as_bytes());
+    let (port_a, port_b) = (free_port(), free_port());
+    let stale = RelayInfo { addr: format!("127.0.0.1:{}", free_port()), onion: [1; 32], link: [2; 32] };
+
+    // A já está no endereço novo e só tem o código de B; B ainda guarda o endereço antigo de A.
+    let mut a = Node::start(fixed(sa, port_a, vec![pb])).await.unwrap();
+    let fresh = a.relay_info().unwrap();
+    a.add_hint(pb, RelayInfo { addr: format!("127.0.0.1:{port_b}"), onion: [3; 32], link: [4; 32] });
+    // B ainda não existe: as primeiras entregas falham e a fila insiste.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    let mut cfg_b = fixed(sb, port_b, vec![pa]);
+    cfg_b.known = vec![(pa, stale.clone())];
+    let b = Node::start(cfg_b).await.unwrap();
+    // O que A tinha de B (chaves inventadas) nunca valeu; agora que B existe, A recebe o código certo dele.
+    a.add_hint(pb, b.relay_info().unwrap());
+
+    until("B recebe o endereço novo de A", || (b.known().iter().any(|(k, r)| *k == pa && *r == fresh)).then_some(())).await;
+    assert!(b.history().contains(&(pa, stale)), "o endereço antigo fica no histórico");
+    assert!(b.take_notice().is_some_and(|n| n.contains(&fresh.addr)));
+
+    let answer = tokio::spawn(async move {
+        let inc = timeout(Duration::from_secs(15), a.next_incoming()).await.unwrap().unwrap();
+        (inc.accept(Mulaw::new()).await.unwrap(), a)
+    });
+    let cb = b.dial(pa, Mulaw::new(), Duration::from_secs(15)).await.unwrap();
+    let (_ca, _a) = answer.await.unwrap();
+    cb.hangup();
+}
+
+/// Atualização de quem não é contato não é confirmada nem guardada.
+#[tokio::test]
+async fn address_updates_from_strangers_are_ignored() {
+    let (sb, sc) = (key(), key());
+    let pb = *PublicKey::from(&sb).as_bytes();
+    // C conhece o relay de B, mas B não tem C entre os contatos.
+    let b = Node::start(fixed(sb, free_port(), vec![])).await.unwrap();
+    let c = Node::start(fixed(sc, free_port(), vec![pb])).await.unwrap();
+    c.add_hint(pb, b.relay_info().unwrap());
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    assert!(b.known().is_empty() && b.history().is_empty());
+    assert!(c.known().is_empty(), "sem confirmação de B, C não promove a dica: {:?}", c.known());
+    assert!(b.take_notice().is_none());
+}
+
+/// Quem mudou de endereço sem avisar ainda é achado pelo histórico, e o que respondeu vira o guardado.
+#[tokio::test]
+async fn an_old_address_in_the_history_still_reaches_the_contact() {
+    use clam::directory::RelayInfo;
+    let (sa, sb) = (key(), key());
+    let (pa, pb) = (*PublicKey::from(&sa).as_bytes(), *PublicKey::from(&sb).as_bytes());
+    let dead = RelayInfo { addr: format!("127.0.0.1:{}", free_port()), onion: [1; 32], link: [2; 32] };
+    let mut a = Node::start(NodeConfig { updates: false, ..fixed(sa, free_port(), vec![pb]) }).await.unwrap();
+    let alive = a.relay_info().unwrap();
+    let mut cfg_b = NodeConfig { updates: false, ..fixed(sb, free_port(), vec![pa]) };
+    cfg_b.known = vec![(pa, dead.clone())];
+    cfg_b.history = vec![(pa, alive.clone())];
+    let b = Node::start(cfg_b).await.unwrap();
+
+    let answer = tokio::spawn(async move {
+        let inc = timeout(Duration::from_secs(15), a.next_incoming()).await.unwrap().unwrap();
+        (inc.accept(Mulaw::new()).await.unwrap(), a)
+    });
+    let cb = b.dial(pa, Mulaw::new(), Duration::from_secs(15)).await.unwrap();
+    let (_ca, _a) = answer.await.unwrap();
+    cb.hangup();
+    assert_eq!(b.known(), vec![(pa, alive)]);
+    assert_eq!(b.history(), vec![(pa, dead)]);
+}
