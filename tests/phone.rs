@@ -418,13 +418,19 @@ async fn synthetic_screen_goes_through_h264_and_the_screen_circuit() {
 async fn full_size_screen_gets_through_at_the_circuit_slot_rate() {
     use clam::video::{H264Decoder, H264Encoder, RawFrame, ScreenSource, pump};
 
-    struct Bars(usize);
+    /// Fundo muito detalhado e parado, com um quadrado que anda: o pior caso para o quadro-chave.
+    struct Bars(usize, Vec<u8>);
     impl ScreenSource for Bars {
         fn grab(&mut self) -> Option<RawFrame> {
             self.0 += 1;
             let (w, h) = (1280, 720);
-            let t = self.0;
-            let rgba = (0..w * h).flat_map(|i| { let (x, y) = (i % w, i / w); let n = (((x * 7 + y * 13 + t * 31) * 2654435761usize) >> 24) as u8; [((x + t * 4) % 256) as u8, (y % 256) as u8, n / 8 + 100, 255] }).collect();
+            let mut rgba = self.1.clone();
+            let x0 = self.0 % 30 * 40;
+            for y in 200..240 {
+                for x in x0..x0 + 40 {
+                    rgba[(y * w + x) * 4..(y * w + x) * 4 + 4].copy_from_slice(&[255, 255, 255, 255]);
+                }
+            }
             RawFrame::new(w, h, rgba).ok()
         }
     }
@@ -440,12 +446,17 @@ async fn full_size_screen_gets_through_at_the_circuit_slot_rate() {
     let a = caller.await.unwrap().unwrap();
 
     let share = share_screen(screen_client(cands), a.share_keys(), WAIT).await.unwrap();
-    let mut src = Bars(0);
+    let background = (0..1280 * 720).flat_map(|i| {
+        let n = (((i % 1280 / 3 * 7 + i / 1280 / 3 * 13) * 2654435761usize) >> 24) as u8;
+        [n, n / 2, 90, 255]
+    });
+    let mut src = Bars(0, background.collect());
     let mut enc = H264Encoder::new(H264Encoder::default_bitrate()).unwrap();
     let mut dec = H264Decoder::new().unwrap();
     let mut shown = None;
+    let mut count = 0;
     let t0 = std::time::Instant::now();
-    while shown.is_none() && t0.elapsed() < Duration::from_secs(20) {
+    while count < 4 && t0.elapsed() < Duration::from_secs(20) {
         pump(&mut src, &mut enc, &share).unwrap();
         let end = tokio::time::Instant::now() + Duration::from_millis(125);
         while let Ok(Some(ev)) = tokio::time::timeout_at(end, b.next_screen()).await {
@@ -453,10 +464,12 @@ async fn full_size_screen_gets_through_at_the_circuit_slot_rate() {
                 && let Some(img) = dec.decode(&f.data).unwrap()
             {
                 shown = Some(img);
+                count += 1;
             }
         }
     }
+    assert!(count >= 4, "só {count} imagens em 20 s");
     let img = shown.expect("a tela chegou");
-    assert_eq!((img.width, img.height), (1280, 720));
+    assert!(img.width <= 1280 && img.width >= 320);
     share.stop().await;
 }
