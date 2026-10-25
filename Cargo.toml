@@ -9,6 +9,7 @@ cpal = { version = "0.18", optional = true, features = ["pulseaudio"] }
 eframe = { version = "0.32", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"], optional = true }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 snow = { version = "0.10.0", optional = true }
+mainline = { version = "8.0.1", default-features = false, features = ["async"], optional = true }
 futures = { version = "0.3.34", optional = true }
 hkdf = "0.12"
 keyring = { version = "3", default-features = false, features = ["apple-native", "windows-native", "async-secret-service", "tokio", "crypto-rust"], optional = true }
@@ -38,7 +39,7 @@ windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphic
 [features]
 gui = ["net", "capture", "portal", "dep:eframe", "dep:keyring", "dep:nnnoiseless"]
 audio = ["dep:cpal", "dep:sonora"]
-net = ["dep:igd-next", "dep:libp2p", "dep:tokio", "dep:futures", "dep:snow"]
+net = ["dep:igd-next", "dep:libp2p", "dep:tokio", "dep:futures", "dep:snow", "dep:mainline"]
 video = ["net", "dep:openh264", "dep:openh264-sys2"]
 capture = ["video", "dep:x11rb", "dep:windows-sys"]
 portal = ["video", "dep:ashpd", "dep:rustix"]

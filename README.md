@@ -32,7 +32,7 @@ O crate reexporta `ed25519_dalek`, `x25519_dalek` e `rand_core` (`clam::ed25519_
 | [docs/CIRCUITO.md](docs/CIRCUITO.md) | Circuito de 2 saltos, transporte, reputação, cover traffic, fuzzing (Fase 3) |
 | [docs/CHAMADAS.md](docs/CHAMADAS.md) | Mídia, telefone, diretório de primeiro contato, salas, GUI mínima |
 | [docs/GUI.md](docs/GUI.md) | GUI: sala, volume, apelidos, remover membro, modo sem diretório |
-| [docs/ENCONTRO.md](docs/ENCONTRO.md) | Reencontrar contatos sem diretório: aviso de endereço novo (fase 1 pronta) e a proposta das demais camadas |
+| [docs/ENCONTRO.md](docs/ENCONTRO.md) | Reencontrar contatos sem diretório: aviso de endereço novo e ponto de encontro na DHT (fases 1 e 2 prontas) e a proposta das demais camadas |
 | [docs/SEGURANCA.md](docs/SEGURANCA.md) | Garantias, limites, limite de taxa, troca de segredo, estado em disco |
 | [docs/LINUX.md](docs/LINUX.md) / [docs/WINDOWS.md](docs/WINDOWS.md) | Instalação por sistema |
 

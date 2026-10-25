@@ -1002,3 +1002,41 @@ async fn an_old_address_in_the_history_still_reaches_the_contact() {
     assert_eq!(b.known(), vec![(pa, alive)]);
     assert_eq!(b.history(), vec![(pa, dead)]);
 }
+
+/// Os dois mudaram de endereço enquanto estavam separados: nenhum tem o endereço novo do outro e a fila de
+/// saída não ajuda. A DHT local faz os dois se encontrarem.
+#[tokio::test]
+async fn both_contacts_changed_address_and_find_each_other_through_the_dht() {
+    use clam::directory::RelayInfo;
+    use clam::rendezvous::DhtOptions;
+    let testnet = mainline::Testnet::new(5).unwrap();
+    let dht = || Some(DhtOptions { bootstrap: testnet.bootstrap.clone(), bind: Some(std::net::Ipv4Addr::LOCALHOST) });
+    let (sa, sb) = (key(), key());
+    let (pa, pb) = (*PublicKey::from(&sa).as_bytes(), *PublicKey::from(&sb).as_bytes());
+    let stale = || RelayInfo { addr: format!("127.0.0.1:{}", free_port()), onion: [1; 32], link: [2; 32] };
+    let mut cfg_a = NodeConfig { updates: false, dht: dht(), ..fixed(sa, free_port(), vec![pb]) };
+    cfg_a.known = vec![(pb, stale())];
+    let mut cfg_b = NodeConfig { updates: false, dht: dht(), ..fixed(sb, free_port(), vec![pa]) };
+    cfg_b.known = vec![(pa, stale())];
+    let mut a = Node::start(cfg_a).await.unwrap();
+    let b = Node::start(cfg_b).await.unwrap();
+    let fresh_a = a.relay_info().unwrap();
+
+    let answer = tokio::spawn(async move {
+        let inc = timeout(Duration::from_secs(60), a.next_incoming()).await.unwrap().unwrap();
+        (inc.accept(Mulaw::new()).await.unwrap(), a)
+    });
+    // A grava o endereço dele na DHT em segundo plano; B tenta até o item aparecer.
+    let mut call = None;
+    for _ in 0..10 {
+        if let Ok(c) = b.dial(pa, Mulaw::new(), Duration::from_secs(15)).await {
+            call = Some(c);
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    let cb = call.expect("B achou A pela DHT");
+    let (_ca, _a) = answer.await.unwrap();
+    assert!(b.known().iter().any(|(k, r)| *k == pa && *r == fresh_a), "o endereço da DHT vira o guardado");
+    cb.hangup();
+}

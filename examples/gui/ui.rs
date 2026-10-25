@@ -650,6 +650,9 @@ impl eframe::App for App {
                         ui.separator();
                         ui.label("Endereço público ip:porta (só se o servidor enxergar um IP que não serve, como atrás de NAT; a porta precisa estar aberta no roteador):");
                         ui.text_edit_singleline(&mut self.form.public_addr);
+                        ui.separator();
+                        ui.checkbox(&mut self.form.use_dht, "Usar a DHT (BitTorrent) para reencontrar contatos")
+                            .on_hover_text("Quando você e um contato mudam de endereço ao mesmo tempo, os dois se acham por ela, sem servidor. O conteúdo vai cifrado só para o contato, mas quem opera nós da DHT vê o seu IP.");
                     });
                 });
 

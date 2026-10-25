@@ -25,6 +25,10 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
     if !form.public_addr.trim().is_empty() {
         cfg.public_addr = Some(form.public_addr.trim().to_string());
     }
+    if form.use_dht {
+        cfg.dht = Some(clam::rendezvous::DhtOptions::default());
+        out.line("DHT ligada: o endereço é guardado, cifrado para cada contato, na DHT do BitTorrent (quem opera nós da DHT vê o seu IP)");
+    }
     out.line(format!("{} endereço(s) de contatos guardados em {} ({} deles só vieram de convites)", cfg.known.len() + cfg.hints.len(), known_path().display(), cfg.hints.len()));
     if cfg.directory.trim().is_empty() {
         out.line("sem diretório: só ligo e recebo por código de contato direto (veja \"Meu código de contato\")");

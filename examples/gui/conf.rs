@@ -105,6 +105,8 @@ pub(crate) struct Form {
     pub(crate) contacts: String,
     pub(crate) peer: String,
     pub(crate) public_addr: String,
+    /// Guarda o endereço na DHT do BitTorrent e a consulta ao ligar (veja `NodeConfig::dht`).
+    pub(crate) use_dht: bool,
     pub(crate) use_audio: bool,
     pub(crate) audio: AudioPrefs,
     /// Microfone e alto-falante escolhidos (vazio = padrão do sistema).
@@ -394,6 +396,7 @@ impl Form {
             contacts: get("contacts").replace(';', "\n"),
             peer: get("peer"),
             public_addr: get("public_addr"),
+            use_dht: get("dht") == "1",
             use_audio: get("audio") == "1",
             input_dev: get("input_dev"),
             output_dev: get("output_dev"),
@@ -416,13 +419,14 @@ impl Form {
         // Chave de identidade no chaveiro do sistema; só cai para o arquivo se ele não estiver disponível.
         let secret = if vault_set(self.secret.trim()) { KEYRING_MARK } else { self.secret.trim() };
         let text = format!(
-            "audio={}\nsecret={}\ndirectory={}\ncontacts={}\npeer={}\npublic_addr={}\nrooms={}\ninput_dev={}\noutput_dev={}\nnicks={}\n{}",
+            "audio={}\nsecret={}\ndirectory={}\ncontacts={}\npeer={}\npublic_addr={}\ndht={}\nrooms={}\ninput_dev={}\noutput_dev={}\nnicks={}\n{}",
             u8::from(self.use_audio),
             secret,
             self.directory.trim(),
             self.contacts.trim().replace('\n', ";"),
             self.peer.trim(),
             self.public_addr.trim(),
+            u8::from(self.use_dht),
             self.rooms.trim().replace('\n', ";"),
             self.input_dev.trim(),
             self.output_dev.trim(),

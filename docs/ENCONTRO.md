@@ -1,6 +1,6 @@
 # Proposta: reencontrar contatos sem diretório
 
-Estado: **a camada 1 (fila de saída) e o histórico de endereços estão implementados** (fase 1, veja [GUI.md](GUI.md#mudou-de-endereço-sem-diretório)). As camadas 2 a 4 continuam só como proposta. O código de contato direto e os endereços guardados (camada 0) vieram antes ([GUI.md](GUI.md#totalmente-p2p-o-código-de-contato-direto)).
+Estado: **as camadas 1 (fila de saída) e 2 (ponto de encontro na DHT, sem privacidade extra) e o histórico de endereços estão implementados** (fases 1 e 2, veja [GUI.md](GUI.md#mudou-de-endereço-sem-diretório)). A camada 3 continua só como proposta. O código de contato direto e os endereços guardados (camada 0) vieram antes ([GUI.md](GUI.md#totalmente-p2p-o-código-de-contato-direto)).
 
 ## Problema
 
@@ -86,7 +86,13 @@ item   = cifrado(registro de endereço), assinado por sk, no alvo (pk, sal)
 - O leitor consulta os contatos em ordem, com o período atual, o anterior e o seguinte, porque o relógio pode estar errado (veja abaixo).
 - Limite: até 32 contatos por rodada, como na consulta ao diretório de hoje.
 
-Implementação: usar um crate Rust de cliente Mainline com suporte a BEP 44 (a avaliar; não escrever um cliente DHT à mão). Os testes precisam de uma DHT local em loopback, nunca da rede pública.
+**Como ficou.** O cliente é o crate `mainline` (BEP 44), em `src/rendezvous.rs` (`Rendezvous`, `DhtOptions`). A derivação do alvo e a cifra do valor estão em `src/media/update.rs` (`rendezvous`, `seal_record`, `open_record`): o valor é `nonce ‖ AEAD(registro)` com 162 B, o mesmo registro da camada 1 com outro dado associado, e a semente ed25519 e o sal saem do HKDF como na proposta. Em `src/node.rs`:
+
+- `NodeConfig::dht` (`None` por padrão) liga a camada. O registro do endereço atual (`seq` = hora em ms) é um só para a fila de saída e para a DHT, então o contato vê o mesmo `seq` por qualquer caminho.
+- A tarefa de gravação escreve o item de cada contato (até 32) ao subir, quando o endereço muda, quando entra contato novo, quando o dia vira e a cada hora; uma gravação que falha é refeita em 1 min. Cada gravação leva um `seq` de DHT novo (hora em ms), porque a DHT recusa o mesmo `seq` com outro valor e cada cifra sai com nonce novo.
+- A leitura é sob demanda, só ao discar (não em segundo plano para todos): depois dos endereços guardados e antes do diretório, `Dialer` consulta o dia anterior, o atual e o seguinte ao mesmo tempo, fica com o registro de maior `seq`, aplica como um aviso da camada 1 (o endereço antigo vai para o histórico) e tenta o relay. Vale também para compartilhar a tela.
+- Os testes usam `mainline::Testnet` em loopback (`tests/node.rs`: `both_contacts_changed_address_and_find_each_other_through_the_dht`: os dois começam com o endereço velho um do outro, sem fila de saída, e se acham pela DHT).
+- Na GUI é a caixa "Usar a DHT (BitTorrent) para reencontrar contatos", desligada por padrão.
 
 ## Camada 3: réplicas e âncoras (se for preciso)
 
@@ -117,7 +123,7 @@ Nenhuma dependência criptográfica nova: `chacha20poly1305`, `hkdf`, `sha2` e `
 ## Plano em fases
 
 1. **Camada 1** com memória de endereços antigos por contato (guardar os últimos N, não só um). Testes em loopback: A muda de endereço com B offline, B volta, recebe e liga. **Pronta** (`tests/node.rs`: `a_new_address_reaches_the_contact_that_was_offline`, `an_old_address_in_the_history_still_reaches_the_contact`, `address_updates_from_strangers_are_ignored`).
-2. **Camada 2** sem privacidade extra, com a DHT local nos testes. Teste: os dois mudam de endereço e se encontram.
+2. **Camada 2** sem privacidade extra, com a DHT local nos testes. Teste: os dois mudam de endereço e se encontram. **Pronta** (`tests/node.rs`: `both_contacts_changed_address_and_find_each_other_through_the_dht`).
 3. **Privacidade da camada 2:** consultas pelo circuito.
 4. **Camada 3**, só se a prática mostrar que precisa.
 
@@ -126,4 +132,4 @@ Nenhuma dependência criptográfica nova: `chacha20poly1305`, `hkdf`, `sha2` e `
 - A Mainline é aceitável como dependência de rede (ela depende de nós iniciais fixos do ecossistema BitTorrent) ou o projeto prefere uma DHT própria?
 - ~~O quadro de atualização silenciosa é um convite marcado ou um tipo novo no relay?~~ Tipo novo de quadro, só no telefone (veja a camada 1).
 - Quanto tempo a fila de saída deve insistir (hoje 3 dias, até 2 h entre tentativas), e o usuário vê esse estado na GUI? Hoje só o log mostra o aviso recebido; o estado da fila não aparece.
-- O leitor deve consultar todos os contatos de uma vez ou só quando for ligar a um deles (menos tráfego, mais demora na primeira chamada)?
+- ~~O leitor deve consultar todos os contatos de uma vez ou só quando for ligar a um deles?~~ Só ao ligar (veja a camada 2). O custo é a demora da primeira chamada a quem mudou de endereço (até 10 s de consulta).

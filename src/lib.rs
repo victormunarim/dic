@@ -78,6 +78,8 @@ pub mod phone;
 #[cfg(feature = "net")]
 pub mod punch;
 #[cfg(feature = "net")]
+pub mod rendezvous;
+#[cfg(feature = "net")]
 pub mod timer;
 #[cfg(feature = "video")]
 pub mod video;

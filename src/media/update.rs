@@ -15,6 +15,8 @@
 //!   contato não consegue abrir, e o telefone descarta o quadro em silêncio, como faz com um convite alheio.
 //! - O ack prova que o contato abriu o registro (usa a chave do sentido contrário), e é o que tira o
 //!   registro da fila de saída.
+//! - O mesmo registro, sem o quadro em volta, é o que o ponto de encontro guarda na DHT
+//!   ([`seal_record`], [`open_record`]); a chave de assinatura e o sal do item vêm de [`rendezvous`].
 //! - Repetir um registro gravado só devolve ao contato um endereço que ele já teve; quem recebe descarta
 //!   registro com `seq` menor ou igual ao último que viu.
 
@@ -31,6 +33,8 @@ use super::{MediaError, packet::PACKET_LEN, signal::Frame};
 
 pub const TAG_UPDATE: u8 = 4;
 pub const TAG_ACK: u8 = 5;
+/// Só separa o domínio da cifra do registro guardado na DHT (entra como dado associado, não vai a nenhum quadro).
+const TAG_RECORD: u8 = 6;
 /// Tamanho máximo do endereço (`host:porta`) no registro, o mesmo que o diretório aceita.
 pub const MAX_ADDR: usize = 60;
 const VERSION: u8 = 1;
@@ -59,15 +63,21 @@ fn cipher(my: &StaticSecret, peer: &PublicKey, owner: &PublicKey) -> Option<ChaC
     Some(ChaCha20Poly1305::new(Key::from_slice(&k)))
 }
 
-fn seal(cipher: &ChaCha20Poly1305, tag: u8, plain: &[u8]) -> Frame {
+/// `nonce ‖ AEAD(plain)`, com nonce aleatório.
+fn seal_bytes(cipher: &ChaCha20Poly1305, tag: u8, plain: &[u8]) -> Vec<u8> {
     let mut nonce = [0u8; NONCE_LEN];
     OsRng.fill_bytes(&mut nonce);
-    let sealed = cipher.encrypt(Nonce::from_slice(&nonce), Payload { msg: plain, aad: &[tag] }).expect("cifrar em memória não falha");
+    let mut out = nonce.to_vec();
+    out.extend(cipher.encrypt(Nonce::from_slice(&nonce), Payload { msg: plain, aad: &[tag] }).expect("cifrar em memória não falha"));
+    out
+}
+
+fn seal(cipher: &ChaCha20Poly1305, tag: u8, plain: &[u8]) -> Frame {
+    let sealed = seal_bytes(cipher, tag, plain);
     let mut f = [0u8; PACKET_LEN];
     f[0] = tag;
-    f[1..1 + NONCE_LEN].copy_from_slice(&nonce);
-    f[1 + NONCE_LEN..1 + NONCE_LEN + sealed.len()].copy_from_slice(&sealed);
-    OsRng.fill_bytes(&mut f[1 + NONCE_LEN + sealed.len()..]);
+    f[1..1 + sealed.len()].copy_from_slice(&sealed);
+    OsRng.fill_bytes(&mut f[1 + sealed.len()..]);
     f
 }
 
@@ -80,13 +90,10 @@ fn open(cipher: &ChaCha20Poly1305, tag: u8, frame: &[u8], plain_len: usize) -> O
     cipher.decrypt(Nonce::from_slice(&frame[1..1 + NONCE_LEN]), Payload { msg: sealed, aad: &[tag] }).ok()
 }
 
-/// Quadro com o registro de `my_static` para `peer`.
-pub fn seal_update(my_static: &StaticSecret, peer: &PublicKey, record: &AddressRecord) -> Result<Frame, MediaError> {
+fn encode(record: &AddressRecord) -> Result<[u8; PLAIN_LEN], MediaError> {
     if record.addr.is_empty() || record.addr.len() > MAX_ADDR {
         return Err(MediaError::Malformed);
     }
-    let me = PublicKey::from(my_static);
-    let cipher = cipher(my_static, peer, &me).ok_or(MediaError::BadKey)?;
     let mut plain = [0u8; PLAIN_LEN];
     plain[0] = VERSION;
     plain[1..9].copy_from_slice(&record.seq.to_be_bytes());
@@ -94,7 +101,52 @@ pub fn seal_update(my_static: &StaticSecret, peer: &PublicKey, record: &AddressR
     plain[10..10 + record.addr.len()].copy_from_slice(record.addr.as_bytes());
     plain[10 + MAX_ADDR..42 + MAX_ADDR].copy_from_slice(&record.onion);
     plain[42 + MAX_ADDR..].copy_from_slice(&record.link);
+    Ok(plain)
+}
+
+/// Quadro com o registro de `my_static` para `peer`.
+pub fn seal_update(my_static: &StaticSecret, peer: &PublicKey, record: &AddressRecord) -> Result<Frame, MediaError> {
+    let plain = encode(record)?;
+    let me = PublicKey::from(my_static);
+    let cipher = cipher(my_static, peer, &me).ok_or(MediaError::BadKey)?;
     Ok(seal(&cipher, TAG_UPDATE, &plain))
+}
+
+/// O registro de `my_static` para `peer` como valor de um item da DHT (`nonce ‖ AEAD`, 162 B).
+pub fn seal_record(my_static: &StaticSecret, peer: &PublicKey, record: &AddressRecord) -> Result<Vec<u8>, MediaError> {
+    let plain = encode(record)?;
+    let me = PublicKey::from(my_static);
+    let cipher = cipher(my_static, peer, &me).ok_or(MediaError::BadKey)?;
+    Ok(seal_bytes(&cipher, TAG_RECORD, &plain))
+}
+
+/// Abre o valor de um item da DHT que `peer` guardou para `my_static`. `None`: não abre com a chave do par.
+pub fn open_record(my_static: &StaticSecret, peer: &PublicKey, value: &[u8]) -> Option<AddressRecord> {
+    if value.len() != NONCE_LEN + PLAIN_LEN + 16 {
+        return None;
+    }
+    let cipher = cipher(my_static, peer, peer)?;
+    let plain = cipher.decrypt(Nonce::from_slice(&value[..NONCE_LEN]), Payload { msg: &value[NONCE_LEN..], aad: &[TAG_RECORD] }).ok()?;
+    parse(&plain)
+}
+
+/// Onde `owner` guarda o endereço dele para o par `(my_static, peer)` no dia `period` (`unix / 86400`): a semente da
+/// chave de assinatura ed25519 e o sal do item. Os dois lados do par derivam o mesmo par de valores; o dia
+/// entra nas duas derivações, então o alvo na DHT muda sozinho a cada dia e um dia não se liga ao outro.
+pub fn rendezvous(my_static: &StaticSecret, peer: &PublicKey, owner: &PublicKey, period: u64) -> Option<([u8; 32], [u8; 32])> {
+    let dh = my_static.diffie_hellman(peer);
+    if !dh.was_contributory() {
+        return None;
+    }
+    let derive = |label: &[u8]| {
+        let mut info = label.to_vec();
+        info.extend_from_slice(owner.as_bytes());
+        info.extend_from_slice(&period.to_be_bytes());
+        let mut out = [0u8; 32];
+        Hkdf::<Sha256>::new(None, dh.as_bytes()).expand(&info, &mut out).expect("32 bytes é válido");
+        out
+    };
+    Some((derive(b"clam/encontro/assina/v1"), derive(b"clam/encontro/sal/v1")))
 }
 
 /// Abre `frame` como atualização de algum de `contacts`. `None`: não é uma atualização para esta chave, ou
@@ -218,6 +270,34 @@ mod tests {
         assert!(open_ack(&a, &pb, 7, &ack));
         assert!(!open_ack(&a, &pb, 8, &ack));
         assert!(!open_ack(&b, &pa, 7, &ack));
+    }
+
+    #[test]
+    fn the_stored_record_opens_only_with_the_pair_key() {
+        let (a, b) = ids();
+        let c = StaticSecret::random_from_rng(OsRng);
+        let (pa, pb) = (PublicKey::from(&a), PublicKey::from(&b));
+        let value = seal_record(&a, &pb, &record(3)).unwrap();
+        assert_eq!(value.len(), 162);
+        assert_eq!(open_record(&b, &pa, &value), Some(record(3)));
+        assert!(open_record(&c, &pa, &value).is_none());
+        assert!(open_record(&a, &pb, &value).is_none(), "o dono não é o par");
+        // Quadro de atualização e item guardado não se confundem.
+        let frame = seal_update(&a, &pb, &record(3)).unwrap();
+        assert!(open_record(&b, &pa, &frame[1..163]).is_none());
+    }
+
+    #[test]
+    fn both_sides_derive_the_same_place_and_it_moves_every_day() {
+        let (a, b) = ids();
+        let (pa, pb) = (PublicKey::from(&a), PublicKey::from(&b));
+        let by_owner = rendezvous(&a, &pb, &pa, 100).unwrap();
+        assert_eq!(rendezvous(&b, &pa, &pa, 100).unwrap(), by_owner);
+        assert_ne!(rendezvous(&a, &pb, &pa, 101).unwrap(), by_owner);
+        // Um sentido por item: o endereço de B para A fica em outro lugar.
+        assert_ne!(rendezvous(&a, &pb, &pb, 100).unwrap(), by_owner);
+        let stranger = StaticSecret::random_from_rng(OsRng);
+        assert_ne!(rendezvous(&stranger, &pb, &pa, 100).unwrap(), by_owner);
     }
 
     #[test]
