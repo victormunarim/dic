@@ -718,3 +718,20 @@ async fn both_restarted_and_directory_gone_still_dials_stored_address() {
     let (_cb, _b2) = second.await.unwrap();
     ca.hangup();
 }
+
+/// Endereço guardado morto e diretório fora do ar: o erro diz as duas coisas, não só "diretório".
+#[tokio::test]
+async fn dead_stored_address_and_no_directory_says_both() {
+    use clam::directory::RelayInfo;
+    let (d, addr) = dir().await;
+    drop(d);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let pb = *PublicKey::from(&key()).as_bytes();
+    let dead = RelayInfo { addr: "127.0.0.1:1".into(), onion: [7; 32], link: [8; 32] };
+    let a = Node::start(NodeConfig { known: vec![(pb, dead)], ..cfg(key(), &addr, vec![]) }).await.unwrap();
+    let err = a.dial(pb, Mulaw::new(), Duration::from_secs(3)).await.err().unwrap();
+    assert!(matches!(err, DialError::StoredAddressDead(_)), "{err}");
+    let other = *PublicKey::from(&key()).as_bytes();
+    let err = a.dial(other, Mulaw::new(), Duration::from_secs(3)).await.err().unwrap();
+    assert!(matches!(err, DialError::NoStoredAddress(_)), "{err}");
+}

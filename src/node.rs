@@ -88,6 +88,10 @@ impl NodeConfig {
 pub enum DialError {
     #[error("diretório: {0}")]
     Directory(#[from] io::Error),
+    #[error("sem endereço guardado desse contato e o diretório não atende: {0}")]
+    NoStoredAddress(io::Error),
+    #[error("o endereço guardado do contato não respondeu (ele pode ter reaberto com outras chaves ou mudado de rede) e o diretório não atende: {0}")]
+    StoredAddressDead(io::Error),
     #[error("essa chave não está online no diretório")]
     NotFound,
     #[error("{0}")]
@@ -154,6 +158,18 @@ impl Dialer {
         self.known.lock().unwrap().get(peer).map(|r| r.addr.clone())
     }
 
+    /// Procura o relay de `peer` no diretório e guarda o endereço. `tried_stored`: o endereço guardado já
+    /// foi tentado e falhou, o que muda o motivo do erro quando o diretório também não atende.
+    async fn lookup_after_stored(&self, peer: &[u8; 32], tried_stored: bool) -> Result<RelayInfo, DialError> {
+        let exit = match directory::lookup(&self.directory, peer).await {
+            Ok(found) => found.ok_or(DialError::NotFound)?,
+            Err(e) if tried_stored => return Err(DialError::StoredAddressDead(e)),
+            Err(e) => return Err(DialError::NoStoredAddress(e)),
+        };
+        self.known.lock().unwrap().insert(*peer, exit.clone());
+        Ok(exit)
+    }
+
     /// Cliente de circuito até `exit`. Sem outros relays, o primeiro salto é o próprio relay (por loopback).
     fn client(&self, peer: &[u8; 32], exit: &RelayInfo, relays: Vec<Candidate>) -> CircuitClient {
         self.client_with(peer, exit, relays, ClientOptions::default())
@@ -190,6 +206,7 @@ impl Dialer {
         // Endereço guardado da última vez: se o circuito fica pronto, o diretório nem entra na conversa.
         // Endereço velho (relay sumiu, ou outra máquina no mesmo IP) nunca completa o handshake.
         let cached = self.known.lock().unwrap().get(&peer).cloned();
+        let tried_stored = cached.is_some();
         if let Some(k) = cached {
             let client = self.client(&peer, &k, Vec::new());
             if ready_within(&client, Duration::from_secs(5)).await {
@@ -197,8 +214,7 @@ impl Dialer {
             }
             client.stop();
         }
-        let exit = directory::lookup(&self.directory, &peer).await?.ok_or(DialError::NotFound)?;
-        self.known.lock().unwrap().insert(peer, exit.clone());
+        let exit = self.lookup_after_stored(&peer, tried_stored).await?;
         let relays = directory::sample(&self.directory, 3, &[me, peer]).await?.iter().map(RelayInfo::candidate).collect();
         let client = self.client(&peer, &exit, relays);
         Ok(call_linked(client, &self.secret, &PublicKey::from(peer), codec, wait, Some(&self.link)).await?)
@@ -215,6 +231,7 @@ impl Dialer {
     pub async fn share_screen_keys(&self, peer: [u8; 32], keys: &CallKeys, wait: Duration) -> Result<ScreenShare, DialError> {
         let me = *PublicKey::from(&self.secret).as_bytes();
         let cached = self.known.lock().unwrap().get(&peer).cloned();
+        let tried_stored = cached.is_some();
         let client = match cached {
             Some(k) => {
                 let client = self.client_with(&peer, &k, Vec::new(), screen_client_options());
@@ -230,8 +247,7 @@ impl Dialer {
         let client = match client {
             Some(c) => c,
             None => {
-                let exit = directory::lookup(&self.directory, &peer).await?.ok_or(DialError::NotFound)?;
-                self.known.lock().unwrap().insert(peer, exit.clone());
+                let exit = self.lookup_after_stored(&peer, tried_stored).await?;
                 let relays = directory::sample(&self.directory, 3, &[me, peer]).await?.iter().map(RelayInfo::candidate).collect();
                 self.client_with(&peer, &exit, relays, screen_client_options())
             }
