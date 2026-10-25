@@ -888,3 +888,11 @@ async fn adding_and_forgetting_a_contact_moves_its_address_too() {
     assert!(a.hints().is_empty() && a.known().is_empty());
     assert_eq!(a.dialer().stored_address(&pb), None);
 }
+
+/// O endereço público pode ser um nome: o código direto o leva como foi informado.
+#[tokio::test]
+async fn direct_code_keeps_a_hostname_public_address() {
+    let cfg = NodeConfig { relay_port: 0, punch: false, upnp: false, public_addr: Some("casa.exemplo.com:4001".into()), ..NodeConfig::new(key(), "", vec![]) };
+    let a = Node::start(cfg).await.unwrap();
+    assert_eq!(a.relay_info().unwrap().addr, "casa.exemplo.com:4001");
+}

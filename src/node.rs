@@ -145,6 +145,15 @@ fn relay_hint(mine: &RelayInfo, published: bool) -> Option<RelayHint> {
     Some(RelayHint { addr, onion: mine.onion, link: mine.link })
 }
 
+/// Relay para o código de contato direto: o endereço publicado como está (pode ser um nome, como
+/// `casa.exemplo.com:4001`) ou, não publicado, o IP desta máquina na rede local (veja [`relay_hint`]).
+fn own_relay(mine: &RelayInfo, published: bool) -> Option<RelayInfo> {
+    if published {
+        return Some(mine.clone());
+    }
+    relay_hint(mine, false).map(|h| RelayInfo { addr: h.addr.to_string(), onion: mine.onion, link: mine.link })
+}
+
 /// IP desta máquina na rota para fora. O "connect" de UDP só escolhe a rota: nenhum pacote sai.
 fn local_ip() -> Option<std::net::IpAddr> {
     let s = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
@@ -422,7 +431,7 @@ impl Node {
         let dialer = Dialer { secret: secret.clone(), directory: directory.clone(), mine: mine.clone(), relay_port: port, punch, known: known.clone(), hints: hints.clone(), no_punch: Arc::default(), link: phone.link() };
         // Os convites levam este relay, para o outro lado ligar de volta sem diretório.
         let link_to_phone = phone.link();
-        let own = Arc::new(Mutex::new(relay_hint(&mine, published).map(|h| RelayInfo { addr: h.addr.to_string(), onion, link })));
+        let own = Arc::new(Mutex::new(own_relay(&mine, published)));
         link_to_phone.set_relay_hint(relay_hint(&mine, published));
         let republish = {
             let own = own.clone();
@@ -447,7 +456,7 @@ impl Node {
                     match r {
                         Ok(a) => {
                             let info = RelayInfo { addr: a.clone(), onion, link };
-                            *own.lock().unwrap() = relay_hint(&info, true).map(|h| RelayInfo { addr: h.addr.to_string(), onion, link });
+                            *own.lock().unwrap() = own_relay(&info, true);
                             link_to_phone.set_relay_hint(relay_hint(&info, true));
                             *addr_now.lock().unwrap() = a;
                             *last_error.lock().unwrap() = None;
