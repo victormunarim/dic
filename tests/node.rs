@@ -36,7 +36,7 @@ async fn dir() -> (DirectoryServer, String) {
 }
 
 fn cfg(secret: StaticSecret, dir: &str, contacts: Vec<[u8; 32]>) -> NodeConfig {
-    NodeConfig { relay_port: 0, ..NodeConfig::new(secret, dir, contacts) }
+    NodeConfig { relay_port: 0, punch: false, ..NodeConfig::new(secret, dir, contacts) }
 }
 
 #[tokio::test]
@@ -333,4 +333,63 @@ async fn three_nodes_form_a_mesh_room() {
         m.hangup();
     }
     assert!(heard.iter().all(|&h| h >= 5), "ouviram {heard:?}");
+}
+
+fn punching(secret: StaticSecret, dir: &str, contacts: Vec<[u8; 32]>) -> NodeConfig {
+    NodeConfig { punch: true, ..cfg(secret, dir, contacts) }
+}
+
+async fn talk(mut ca: clam::phone::ActiveCall, mut cb: clam::phone::ActiveCall) {
+    let end = Instant::now() + Duration::from_millis(1500);
+    let (mut n, mut got_a, mut got_b) = (0, 0, 0);
+    while Instant::now() < end {
+        ca.send(tone(n)).await.unwrap();
+        cb.send(tone(n)).await.unwrap();
+        n += 1;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        while let Ok(Some(f)) = timeout(Duration::from_millis(1), cb.next_pcm()).await {
+            got_b += f.iter().any(|x| x.abs() > 1000) as usize;
+        }
+        while let Ok(Some(f)) = timeout(Duration::from_millis(1), ca.next_pcm()).await {
+            got_a += f.iter().any(|x| x.abs() > 1000) as usize;
+        }
+    }
+    assert!(got_a >= 20 && got_b >= 20, "a {got_a} b {got_b}");
+    ca.hangup();
+    cb.hangup();
+}
+
+/// Furo de NAT (aqui em loopback, não prova NAT real): a chamada vai direto por UDP, sem circuito.
+#[tokio::test]
+async fn two_nodes_talk_through_punch() {
+    let (_d, addr) = dir().await;
+    let (sa, sb) = (key(), key());
+    let (pa, pb) = (*PublicKey::from(&sa).as_bytes(), *PublicKey::from(&sb).as_bytes());
+    let a = Node::start(punching(sa, &addr, vec![])).await.unwrap();
+    let mut b = Node::start(punching(sb, &addr, vec![pa])).await.unwrap();
+    let answer = tokio::spawn(async move {
+        let inc = timeout(Duration::from_secs(15), b.next_incoming()).await.unwrap().unwrap();
+        assert_eq!(inc.caller().as_bytes(), &pa);
+        (inc.accept(Mulaw::new()).await.unwrap(), b)
+    });
+    let ca = a.dial(pb, Mulaw::new(), Duration::from_secs(15)).await.unwrap();
+    let (cb, _b) = answer.await.unwrap();
+    talk(ca, cb).await;
+}
+
+/// Alvo sem furo de NAT: quem chama cai no circuito.
+#[tokio::test]
+async fn punch_falls_back_to_circuit() {
+    let (_d, addr) = dir().await;
+    let (sa, sb) = (key(), key());
+    let (pa, pb) = (*PublicKey::from(&sa).as_bytes(), *PublicKey::from(&sb).as_bytes());
+    let a = Node::start(punching(sa, &addr, vec![])).await.unwrap();
+    let mut b = Node::start(cfg(sb, &addr, vec![pa])).await.unwrap();
+    let answer = tokio::spawn(async move {
+        let inc = timeout(Duration::from_secs(15), b.next_incoming()).await.unwrap().unwrap();
+        (inc.accept(Mulaw::new()).await.unwrap(), b)
+    });
+    let ca = a.dial(pb, Mulaw::new(), Duration::from_secs(15)).await.unwrap();
+    let (cb, _b) = answer.await.unwrap();
+    talk(ca, cb).await;
 }

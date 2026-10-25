@@ -324,12 +324,99 @@ impl IncomingCall {
     }
 }
 
+/// Conexões por datagrama usam ids acima dos do TCP, que contam de 1.
+const DATAGRAM_CONN_BASE: u64 = 1 << 40;
+
+/// Entrada do telefone para ligações que não vêm por TCP: cada par UDP vira uma conexão virtual,
+/// tratada como qualquer outra (convite, atender, voz).
+#[derive(Clone)]
+pub struct DatagramPort {
+    actor: mpsc::Sender<Msg>,
+    next: Arc<AtomicU64>,
+}
+
+impl DatagramPort {
+    /// Abre uma conexão virtual; o que o telefone responder sai por `writer`.
+    pub async fn open(&self, writer: mpsc::Sender<Vec<u8>>) -> Option<DatagramConn> {
+        let id = self.next.fetch_add(1, Ordering::Relaxed);
+        self.actor.send(Msg::Open(id, writer)).await.ok()?;
+        Some(DatagramConn { id, actor: self.actor.clone() })
+    }
+}
+
+pub struct DatagramConn {
+    id: u64,
+    actor: mpsc::Sender<Msg>,
+}
+
+impl DatagramConn {
+    /// Entrega ao telefone um pacote que chegou. `false`: o telefone parou.
+    pub async fn deliver(&self, data: Vec<u8>) -> bool {
+        self.actor.send(Msg::Frame(self.id, data)).await.is_ok()
+    }
+
+    pub async fn close(self) {
+        let _ = self.actor.send(Msg::Closed(self.id)).await;
+    }
+}
+
+/// Liga para `peer` por um canal de datagramas já aberto (`tx` envia, `rx` recebe), sem circuito.
+pub async fn call_over<C: Codec + Send + 'static>(
+    tx: mpsc::Sender<Vec<u8>>,
+    mut rx: mpsc::Receiver<Vec<u8>>,
+    my_static: &StaticSecret,
+    peer: &PublicKey,
+    codec: C,
+    wait: Duration,
+) -> Result<ActiveCall, CallError> {
+    let (caller, invite) = Caller::invite(my_static, peer, unix_secs())?;
+    // O convite pode se perder no caminho: repete até chegar a resposta.
+    let keys = timeout(wait, async {
+        let mut resend = tokio::time::interval(Duration::from_millis(700));
+        loop {
+            tokio::select! {
+                _ = resend.tick() => { let _ = tx.send(invite.to_vec()).await; }
+                d = rx.recv() => match d {
+                    Some(d) => match caller.answer(my_static, &d) {
+                        Ok(Answer::Accepted(k)) => return Ok(k),
+                        Ok(Answer::Rejected) => return Err(CallError::Rejected),
+                        Err(_) => {}
+                    },
+                    None => return Err(CallError::Closed),
+                },
+            }
+        }
+    })
+    .await
+    .map_err(|_| CallError::NoAnswer)??;
+
+    let frame_ms = codec.frame_ms();
+    let (active, in_tx, mut out_rx) = start_call(VoiceCall::new(&keys, codec), frame_ms, 0);
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                out = out_rx.recv() => match out {
+                    Some(WireOut::Frame { data, .. }) => { if tx.send(data).await.is_err() { break; } }
+                    Some(WireOut::Bound(_)) => {}
+                    None => break,
+                },
+                d = rx.recv() => match d {
+                    Some(d) => { if in_tx.send((0, d)).await.is_err() { break; } }
+                    None => break,
+                },
+            }
+        }
+    });
+    Ok(active)
+}
+
 /// Ponta de destino: recebe os circuitos e atende as chamadas.
 pub struct Phone {
     addr: SocketAddr,
     incoming: mpsc::Receiver<IncomingCall>,
     notice: Arc<Mutex<Option<String>>>,
     contacts: Contacts,
+    port: DatagramPort,
     tasks: Vec<JoinHandle<()>>,
 }
 
@@ -369,8 +456,14 @@ impl Phone {
                 tokio::spawn(read_frames(rd, conn, accept_tx.clone()));
             }
         });
+        let port = DatagramPort { actor: actor_tx.clone(), next: Arc::new(AtomicU64::new(DATAGRAM_CONN_BASE)) };
         let actor = tokio::spawn(run_actor(actor_rx, actor_tx, inc_tx, my_static, contacts.clone(), ids, notice.clone()));
-        Ok(Self { addr, incoming: inc_rx, notice, contacts, tasks: vec![accept, actor] })
+        Ok(Self { addr, incoming: inc_rx, notice, contacts, port, tasks: vec![accept, actor] })
+    }
+
+    /// Porta para ligações que chegam por datagramas (furo de NAT) em vez de TCP.
+    pub fn datagram_port(&self) -> DatagramPort {
+        self.port.clone()
     }
 
     /// Lista viva de chaves aceitas.
