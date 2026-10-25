@@ -140,7 +140,8 @@ impl H264Encoder {
             .rate_control_mode(RateControlMode::Bitrate)
             .bitrate(BitRate::from_bps(bitrate))
             .max_frame_rate(FrameRate::from_hz(FPS))
-            .skip_frames(true)
+            // Sem pular quadros: sob movimento o codificador gasta qualidade em vez de fluidez.
+            .skip_frames(false)
             .intra_frame_period(IntraFramePeriod::from_num_frames((FPS * 4.0) as u32));
         Encoder::with_api_config(openh264::OpenH264API::from_source(), config).map_err(codec_err)
     }
