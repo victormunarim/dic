@@ -1,8 +1,8 @@
 # clam
 
-Núcleo de privacidade da rede de chamadas P2P, em Rust: **modo privado por padrão** e **presença cifrada**.
-Implementa a Fase 1 (pareamento e chaves de presença) e o Fase 2 (publicação, busca e renovação automática de presença) e o núcleo da Fase 3 (circuito de 2 saltos).
-O transporte libp2p é opcional (feature `net`); não há relays; veja [Limitações](docs/SEGURANCA.md#limitações).
+Chamadas de voz e de tela P2P em Rust, **sem servidor nem diretório**: cada pessoa é o relay de si mesma, e toda chamada passa por um circuito de 2 saltos cifrado em camadas, com tráfego de cobertura.
+O aplicativo (`examples/gui`) liga com a chave pública do contato e o endereço do relay dele; como a comunicação funciona está em [docs/COMUNICACAO.md](docs/COMUNICACAO.md).
+Além do aplicativo, o crate tem uma camada de biblioteca (presença cifrada na DHT libp2p, círculos, reputação de relays) que o aplicativo ainda não usa; veja os [Conceitos](#conceitos-da-camada-de-biblioteca) e as [Limitações](docs/SEGURANCA.md#limitações).
 
 ## Instalação e testes
 
@@ -15,7 +15,9 @@ cargo doc --open                 # documentação da API
 Requer Rust com edition 2024 (1.85+).
 O crate reexporta `ed25519_dalek`, `x25519_dalek` e `rand_core` (`clam::ed25519_dalek` etc.), para você usar as mesmas versões das chaves que ele espera.
 
-## Conceitos
+## Conceitos da camada de biblioteca
+
+Valem para os módulos `pairing`, `presence`, `service`, `circle`, `intro` e `reputation`. O aplicativo reencontra contatos por outro caminho, descrito em [docs/ENCONTRO.md](docs/ENCONTRO.md).
 
 - **Pareamento:** os dois dispositivos trocam chaves públicas X25519 uma única vez. Do segredo compartilhado, o HKDF deriva uma chave de cifra e uma semente de busca. Só os dois lados as têm.
 - **Endereço que gira:** o identificador de busca na DHT é derivado da semente e do número do período (época, 1 hora por padrão). Quem observa a DHT não liga o endereço de hoje ao de ontem.
@@ -28,11 +30,12 @@ O crate reexporta `ed25519_dalek`, `x25519_dalek` e `rand_core` (`clam::ed25519_
 
 | Documento | Conteúdo |
 |---|---|
-| [docs/PRIVACIDADE.md](docs/PRIVACIDADE.md) | Pareamento, presença cifrada, busca, círculos (Fases 1 e 2) |
-| [docs/CIRCUITO.md](docs/CIRCUITO.md) | Circuito de 2 saltos, transporte, reputação, cover traffic, fuzzing (Fase 3) |
-| [docs/CHAMADAS.md](docs/CHAMADAS.md) | Mídia, telefone, conexão sem servidor, GUI mínima |
-| [docs/GUI.md](docs/GUI.md) | GUI: áudio, dispositivos, como os contatos se acham |
-| [docs/ENCONTRO.md](docs/ENCONTRO.md) | Reencontrar contatos sem servidor: aviso de endereço novo e ponto de encontro na DHT, âncoras e contato de duas vias (fases 1 a 4 prontas) |
+| [docs/COMUNICACAO.md](docs/COMUNICACAO.md) | **Como a comunicação funciona**, ponta a ponta: link, circuito, chamada, tela, reencontro e o que cada parte vê |
+| [docs/PRIVACIDADE.md](docs/PRIVACIDADE.md) | Camada de biblioteca: pareamento, presença cifrada, busca, círculos |
+| [docs/CIRCUITO.md](docs/CIRCUITO.md) | Circuito de 2 saltos, transporte, cover traffic, reputação, fuzzing |
+| [docs/CHAMADAS.md](docs/CHAMADAS.md) | Voz, telefone, tela, conexão sem servidor |
+| [docs/GUI.md](docs/GUI.md) | A janela: abas, contatos, áudio, tela, opções |
+| [docs/ENCONTRO.md](docs/ENCONTRO.md) | Reencontrar contatos sem servidor: aviso de endereço novo e ponto de encontro na DHT, âncoras e contato de duas vias |
 | [docs/SEGURANCA.md](docs/SEGURANCA.md) | Garantias, limites, chaveiro |
 | [docs/LINUX.md](docs/LINUX.md) / [docs/WINDOWS.md](docs/WINDOWS.md) | Instalação por sistema |
 
@@ -60,7 +63,12 @@ Para ligar a alguém: rode o `examples/gui` (veja [docs/GUI.md](docs/GUI.md)) ou
 | `src/circle.rs` | `CircleSecret`, `TopicKind` |
 | `examples/call.rs` | chamada de teste (`keygen`, `phone`, `dial`), usada por `scripts/call.sh` e `scripts/call-windows.ps1` |
 | `src/audio.rs` | microfone/alto-falante via `cpal`, reamostragem para a taxa do codec (feature `audio`) |
-| `examples/gui/` | janela mínima (feature `gui`) para ligar/atender sem terminal; `conf`, `engine` (sem janela, testável) e `ui` |
+| `examples/gui/` | o aplicativo (feature `gui`): `conf` (arquivos em disco), `engine` (sem janela, testável), `ui` (abas) e `theme` |
+| `src/node.rs` | `Node`: relay + telefone + fila de endereços (feature `net`) |
+| `src/rendezvous.rs` | ponto de encontro na DHT Mainline e âncoras (feature `net`) |
+| `src/upnp.rs`, `src/timer.rs` | porta no roteador; temporizador de 1 ms no Windows (feature `net`) |
+| `src/video.rs`, `src/hwenc.rs` | codificação da tela: controle de taxa e qualidade, NACK; codificador por hardware opcional (feature `video`) |
+| `src/capture.rs`, `src/portal.rs` | captura da tela: X11 e GDI; portal do desktop (features `capture`, `portal`) |
 | `src/phone.rs` | `Phone`, `IncomingCall`, `call`, `ActiveCall` (feature `net`) |
-| `src/media/` | `VoiceCall`, `keys` (handshake), `packet` (200 B + AEAD), `jitter`, `signal` (convite/aceite), `update` (aviso de endereço novo), `codec` (`Mulaw`, trait `Codec`) |
+| `src/media/` | `VoiceCall`, `keys` (handshake), `packet` (200 B + AEAD), `jitter`, `signal` (convite/aceite), `update` (aviso de endereço novo), `screen` (pacotes, NACK e taxa da tela), `codec` (µ-law, G.722, Opus; trait `Codec`) |
 | `src/path.rs` | `PathMode`, `PathRequest`, `PathError` |

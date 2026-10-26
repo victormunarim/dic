@@ -4,6 +4,8 @@ Passo a passo da biblioteca: parear, publicar presença, procurar contatos, cír
 
 [← Voltar ao README](../README.md)
 
+> **Camada de biblioteca.** Este guia descreve a presença cifrada sobre uma DHT e um GossipSub do libp2p (features `net`). O aplicativo (`Node` e a GUI) **não** a usa: ele reencontra os contatos pelo aviso de endereço, pela DHT Mainline (BEP 44) e pelas âncoras, com os relays dos próprios contatos ([ENCONTRO.md](ENCONTRO.md); visão geral em [COMUNICACAO.md](COMUNICACAO.md)). O que há de comum são as ideias (pareamento, endereço que gira por período, registro de tamanho fixo) e o parâmetro `PathMode`. Use este guia se for montar uma rede aberta com a biblioteca.
+
 ## Passo a passo
 
 Todos os exemplos abaixo estão reunidos em [`examples/quickstart.rs`](../examples/quickstart.rs).
@@ -206,4 +208,4 @@ Regras da escolha:
 - Havendo menos relays saudáveis que `count`, devolve os que existem; sem nenhum, o registro sai vazio.
 - Endereços têm no máximo 64 bytes, e `count` vai de 1 a 8 (limite do registro).
 
-A medição de latência e saúde é do app (ou da Fase 3, que terá o handshake com os relays): `IntroSelector` não abre conexões.
+A medição de latência e saúde é do app (o `CircuitManager` mede o RTT e as falhas, e `reputation` as transforma em pontuação): `IntroSelector` não abre conexões.

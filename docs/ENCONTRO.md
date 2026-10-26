@@ -1,5 +1,7 @@
 # Reencontrar contatos sem servidor
 
+Desenho e estado das camadas que acham um contato cujo endereço mudou. A visão geral da comunicação está em [COMUNICACAO.md](COMUNICACAO.md).
+
 Estado: **as camadas 1 (fila de saída), 2 (ponto de encontro na DHT) e 3 (âncoras), o histórico de endereços, a privacidade da camada 2 (consultas pelo circuito) e o contato de duas vias (apresentação) estão implementados** (fases 1 a 4, veja [GUI.md](GUI.md#mudou-de-endereço)). Réplicas em terceiros quaisquer, a outra metade da proposta da camada 3, continuam só como ideia. O código de contato direto e os endereços guardados (camada 0) vieram antes ([GUI.md](GUI.md#o-código-de-contato-direto)).
 
 ## Problema
@@ -26,9 +28,9 @@ Quem liga tenta nesta ordem e para na primeira que completar o circuito:
 | 0 | Endereço guardado e dica (já existe) | nada novo | IP que não mudou |
 | 1 | Fila de saída com registro assinado | contato alcançável no endereço antigo | só um lado mudou |
 | 2 | Ponto de encontro na DHT | acesso à DHT, os dois online em algum momento | os dois mudaram |
-| 3 | Réplicas em terceiros e âncoras | nós dispostos a guardar | DHT inacessível ou bloqueada |
+| 3 | Âncoras (réplicas em terceiros quaisquer ficaram de fora) | nós dispostos a guardar | DHT inacessível ou bloqueada |
 
-As camadas 1 e 2 são o núcleo da proposta. A 3 só entra se as duas primeiras não bastarem na prática.
+As três existem. A camada 0 e a 1 não dependem de ninguém; a 2 depende da Mainline; a 3, de uma âncora que a pessoa escolhe. Na GUI a DHT e o serviço de âncora vêm ligados de início, e cada camada pode falhar sem derrubar as outras.
 
 ## Registro de endereço
 
@@ -87,11 +89,11 @@ item   = cifrado(registro de endereço), assinado por sk, no alvo (pk, sal)
 
 **Como ficou.** O cliente é o crate `mainline` (BEP 44), em `src/rendezvous.rs` (`Rendezvous`, `DhtOptions`). A derivação do alvo e a cifra do valor estão em `src/media/update.rs` (`rendezvous`, `seal_record`, `open_record`): o valor é `nonce ‖ AEAD(registro)` com 162 B, o mesmo registro da camada 1 com outro dado associado, e a semente ed25519 e o sal saem do HKDF como na proposta. Em `src/node.rs`:
 
-- `NodeConfig::dht` (`None` por padrão) liga a camada. O registro do endereço atual (`seq` = hora em ms) é um só para a fila de saída e para a DHT, então o contato vê o mesmo `seq` por qualquer caminho.
+- `NodeConfig::dht` liga a camada (`None` por padrão na biblioteca; a GUI a liga de início). O registro do endereço atual (`seq` = hora em ms) é um só para a fila de saída e para a DHT, então o contato vê o mesmo `seq` por qualquer caminho.
 - A tarefa de gravação escreve o item de cada contato (até 32) ao subir, quando o endereço muda, quando entra contato novo, quando o dia vira e a cada hora; uma gravação que falha é refeita em 1 min. Cada gravação leva um `seq` de DHT novo (hora em ms), porque a DHT recusa o mesmo `seq` com outro valor e cada cifra sai com nonce novo.
 - A leitura é sob demanda, só ao discar (não em segundo plano para todos): depois dos endereços guardados, `Dialer` consulta o dia anterior, o atual e o seguinte ao mesmo tempo, fica com o registro de maior `seq`, aplica como um aviso da camada 1 (o endereço antigo vai para o histórico) e tenta o relay. Vale também para compartilhar a tela.
 - Os testes usam `mainline::Testnet` em loopback (`tests/node.rs`: `both_contacts_changed_address_and_find_each_other_through_the_dht`: os dois começam com o endereço velho um do outro, sem fila de saída, e se acham pela DHT).
-- Na GUI é a caixa "Usar a DHT (BitTorrent) para reencontrar contatos", desligada por padrão.
+- Na GUI é a caixa "Não usar a DHT (BitTorrent) para reencontrar contatos" (aba Configurações), desmarcada de início, ou seja, a DHT vem ligada; marcá-la grava `no_dht=1`.
 
 ### Consultas pelo circuito (fase 3)
 
@@ -136,15 +138,15 @@ Quem adiciona um contato pelo código só tem o código do outro; o outro lado n
 - **Sem sigilo futuro:** vazar a chave secreta de uma identidade revela registros antigos que alguém tenha gravado. O dano é limitado a endereços antigos.
 - **Relógio:** a hora vem do relógio local, que pode errar. A tolerância de um período para cada lado cobre desvio de até algumas horas; além disso a camada 2 falha e a camada 1 (que usa `seq`, não relógio) continua valendo.
 
-## Onde isso muda o código
+## Onde está no código
 
-- `src/node.rs`: a ordem de tentativa em `Dialer::dial` ganha as camadas 1 e 2 depois das dicas; `Node` ganha uma tarefa de fundo (como a de `refresh_known`) que publica e lê os itens e roda a fila de saída. `NodeConfig` ganha chaves para ligar cada camada.
-- Módulo novo, por exemplo `src/encontro/`: formato do registro, derivação de chaves, fila de saída e cliente da DHT.
-- `src/phone.rs` ou o relay: o quadro de atualização silenciosa da camada 1.
-- `examples/gui`: arquivo de estado da fila (junto de `.clam-gui.known`), opção para ligar/desligar a DHT e linha de log por camada que atendeu a ligação.
-- `docs/GUI.md` e `docs/CHAMADAS.md`: passam a descrever as camadas quando existirem.
+- `src/node.rs`: `Dialer::reachable_client` (a ordem de tentativa: guardado, dica e histórico; depois DHT e âncoras), a fila de saída (`deliver_update`), as apresentações (`deliver_intro`) e as tarefas de fundo que gravam o registro na DHT e nas âncoras e vigiam o IP.
+- `src/rendezvous.rs`: cliente da DHT (`Rendezvous`), o gateway (`dht:9`), a âncora (`anchor:9`) e o `Remote` que fala com os dois pelo circuito.
+- `src/media/update.rs`: os quadros de 200 B (aviso de endereço, confirmação, apresentação) e a cifra do registro.
+- `src/phone.rs`: o telefone confere e responde esses quadros sem tocar.
+- `examples/gui`: o estado em arquivos (`.clam-gui.known`, `.clam-gui.intro`), as caixas da aba Configurações e as linhas da aba Atividade.
 
-Nenhuma dependência criptográfica nova: `chacha20poly1305`, `hkdf`, `sha2` e `ed25519-dalek` já estão no projeto. A única dependência nova é o cliente da DHT.
+Nenhuma dependência criptográfica nova: `chacha20poly1305`, `hkdf`, `sha2` e `ed25519-dalek` já estão no projeto. A única dependência nova é o cliente da DHT (`mainline`).
 
 ## Plano em fases
 

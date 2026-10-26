@@ -1,13 +1,28 @@
 # Interface gráfica: áudio e conexão entre contatos
 
-Uso da GUI (`examples/gui`): volume, sensibilidade do microfone, dispositivos e como os contatos se acham sem servidor.
+Uso da GUI (`examples/gui`): as abas, volume, sensibilidade do microfone, dispositivos e como os contatos se acham sem servidor. Como a chamada funciona por baixo está em [COMUNICACAO.md](COMUNICACAO.md).
 
 [← Voltar ao README](../README.md)
 
+## As abas
+
+A janela segue o estilo do Discord: a barra lateral tem uma aba por assunto e, no pé, o seu avatar com o estado (offline, conectando, online, em chamada), o botão de mudo e o de desligar. Com a janela larga (≥ 780 px) cada página se divide em duas colunas.
+
+| Aba | O que tem |
+|---|---|
+| **Início** | *Conexão* (Ficar online / offline e o estado), *Meu código de contato* (com *Copiar o código*) e *Ligar para um código* |
+| **Contatos** | A lista (Ligar / Remover) e *Adicionar contato* (nome e código) |
+| **Chamada** | Abre sozinha quando uma chamada começa: a conversa, *Compartilhar a minha tela* (privacidade, fluidez ou nitidez, placa de vídeo, a linha de diagnóstico) e a *Tela de ...* de quem transmite para você, que se amplia em outra janela |
+| **Áudio** | *Dispositivos* (usar microfone e alto-falante, escolha dos dois), *Volume e microfone* (mudo, volume, ganho, medidor, sensibilidade, teste) e *Tratamento da voz* (ruído, eco, porta, graves, volume automático, Opus) |
+| **Configurações** | *Identidade* (a chave secreta, oculta; *Gerar nova identidade*), *Seu nome*, *Endereço* público, *Encontrar contatos* (DHT, circuito da DHT, aceitar apresentações) e *Âncoras* (servir de âncora, as que você usa e o código da sua) |
+| **Atividade** | O registro do que o programa está fazendo (avisos de endereço, apresentações, erros) |
+
+Tudo o que a janela guarda fica em `~/.clam-gui.conf` e nos arquivos ao lado (`.clam-gui.known`, `.clam-gui.relay`, `.clam-gui.intro`); a chave secreta vai para o chaveiro do sistema, quando há ([SEGURANCA.md](SEGURANCA.md#chaveiro)).
+
 ## Áudio e dispositivos
 
-- **Controles de áudio.** Com o áudio ligado e o nó online, o cartão "Áudio" tem mudo (envia silêncio), volume do alto-falante (0 a 200 %), ganho do microfone (0 a 300 %), um medidor do microfone (vale mesmo com mudo, para confirmar que ele capta) e "Testar o microfone", que devolve a sua voz ao alto-falante (use fones). Durante o teste a linha fica ocupada.
-- **Sensibilidade e tratamento da voz.** O medidor traz uma linha laranja: o limiar de sensibilidade (-60 a -20 dBFS, padrão -45). Quando a voz passa da linha o medidor diz "Microfone: voz". Quanto mais à esquerda a linha, mais sensível. Em volta dela:
+- **Controles de áudio.** Com o áudio ligado e o nó online, a aba Áudio tem mudo (envia silêncio), volume do alto-falante (0 a 200 %), ganho do microfone (0 a 300 %), um medidor do microfone (vale mesmo com mudo, para confirmar que ele capta) e "Testar o microfone", que devolve a sua voz ao alto-falante (use fones). Durante o teste a linha fica ocupada.
+- **Sensibilidade e tratamento da voz.** O medidor traz uma linha laranja: o limiar de sensibilidade (-60 a -20 dBFS, padrão -45). Quando a voz passa da linha o medidor fica verde e diz "voz" (senão, "silêncio"). Quanto mais à esquerda a linha, mais sensível. Em volta dela:
   - **Remover ruído (rede neural)** (ligado por padrão): RNNoise, pelo crate `nnnoiseless` (Rust puro). Tira teclado, ventilador, estática e vozes ao fundo, o que filtro por volume não separa. O áudio sobe de 16 para 48 kHz, passa pela rede em quadros de 10 ms e volta; custa ~10 ms de atraso e pouca CPU. A rede também diz, a cada 10 ms, a probabilidade de ser voz: com ela ligada, a porta e o indicador "voz" só contam trechos acima do limiar **e** com probabilidade ≥ 0,5. Nos primeiros ~100 ms de uma chamada a rede ainda se calibra e pode tomar ruído por voz.
   - **Silenciar o que não é voz** (porta, desligada por padrão): abaixo do limiar (ou fora do que a rede reconhece como voz) o som enviado cai pela "Redução do ruído" (6 a 60 dB, padrão 40). A porta abre em 2 ms, segura 250 ms depois da última palavra e fecha em ~60 ms, para não cortar o fim das frases.
   - **Cancelar eco do alto-falante** (ligado por padrão): o AEC3 do WebRTC (`sonora`) usa o que o alto-falante tocou como referência e tira do microfone o que voltou por ele. A janela mostra "Eco cancelado: N dB" na chamada (energia do microfone antes e depois do cancelador, enquanto o outro lado fala). Leva alguns segundos de conversa para aprender o ambiente. A referência é o que de fato saiu pelo alto-falante, amostra a amostra e inclusive o silêncio, entregue ao cancelador assim que chega e nunca completada com zeros: antes ela só tinha as partes com voz e blocos grandes da placa a entregavam em rajadas, e o cancelador perdia o atraso entre o que tocou e o que o microfone ouviu (no alto-falante do notebook, ~0–3 dB; agora ~14 dB, com o atraso achado em ~25 ms).
@@ -60,7 +75,7 @@ Quando o relay de um contato muda (IP novo, outra porta), o programa avisa os co
 
 #### Contato de duas vias
 
-Ao "Adicionar contato" com o nó online, o programa manda ao outro lado uma apresentação cifrada (seu nome, sua chave e o seu relay) e insiste até ele confirmar, mesmo se ele estiver desligado agora (as pendentes ficam em `~/.clam-gui.intro`; com o nó parado, a apresentação sai no próximo início). Do outro lado, a pessoa passa a aparecer na lista de contatos sozinha, já com o endereço para ligar de volta, e o a aba Atividade avisa quem foi. O nome vem do campo "Seu nome" (aba Configurações; `name=`); vazio, aparece só o começo da chave. Quem não quer isso desliga "Aceitar quem me adiciona como contato" (`intros=0`): a apresentação é descartada sem resposta. Remover um contato não remove do outro lado. Detalhes em [ENCONTRO.md](ENCONTRO.md#contato-de-duas-vias-a-apresentação-fase-4).
+Ao "Adicionar contato" com o nó online, o programa manda ao outro lado uma apresentação cifrada (seu nome, sua chave e o seu relay) e insiste até ele confirmar, mesmo se ele estiver desligado agora (as pendentes ficam em `~/.clam-gui.intro`; com o nó parado, a apresentação sai no próximo início). Do outro lado, a pessoa passa a aparecer na lista de contatos sozinha, já com o endereço para ligar de volta, e a aba Atividade avisa quem foi. O nome vem do campo "Seu nome" (aba Configurações; `name=`); vazio, aparece só o começo da chave. Quem não quer isso desliga "Aceitar quem me adiciona como contato" (`intros=0`): a apresentação é descartada sem resposta. Remover um contato não remove do outro lado. Detalhes em [ENCONTRO.md](ENCONTRO.md#contato-de-duas-vias-a-apresentação-fase-4).
 
 Limites: o `seq` é a hora em ms: relógio que volta mais que o intervalo entre dois inícios faz o contato ignorar o aviso até o `seq` passar do último que ele viu.
 

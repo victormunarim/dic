@@ -7,7 +7,7 @@
 //! | --- | --- |
 //! | [`pairing`] | Pareamento X25519 → chaves de presença (HKDF) |
 //! | [`presence`] | Registro de presença cifrado, assinado e de tamanho fixo |
-//! | [`service`] | Publicar, buscar (com consultas falsas) e tópicos de círculo |
+//! | [`service`] | Publicar, buscar (com consultas falsas) e tópicos de círculo (camada de biblioteca: o `Node` não a usa) |
 //! | [`store`] | Trait [`store::RecordStore`] que o transporte (DHT) implementa |
 //! | [`circle`] | Tópicos derivados do segredo do grupo |
 //! | [`intro`] | Escolha dos pontos de introdução (relays semente, saúde, diversidade) |
@@ -17,6 +17,10 @@
 //! | `upnp` | Abre a porta do relay no roteador (feature `net`) |
 //! | `timer` | Temporizadores de 1 ms no Windows (feature `net`) |
 //! | `node` | `Node`: relay + telefone + fila de endereços; liga só com a chave do outro e o relay dele (feature `net`) |
+//! | `rendezvous` | Ponto de encontro na DHT Mainline (BEP 44) e âncoras, para reencontrar um contato que mudou de endereço (feature `net`) |
+//! | `video` | Codificação H.264 da tela: controle de taxa, qualidade e NACK (feature `video`) |
+//! | `hwenc` | Codificador por hardware opcional, via `gst-launch` (feature `video`, Linux) |
+//! | `capture`, `portal` | Captura da tela: X11 e GDI; portal do desktop no Wayland (features `capture`, `portal`) |
 //! | `phone` | Chamado (`Phone`) e chamador (`call`) sobre o circuito (feature `net`) |
 //! | [`path`] | Modos de caminho: 2 saltos (padrão), 1 salto, direto |
 //!

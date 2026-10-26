@@ -4,9 +4,13 @@ Relays, gerente de circuitos, transporte TCP, descritores, descoberta, reputaç�
 
 [← Voltar ao README](../README.md)
 
+Para ver como as peças se encaixam numa chamada (link, circuito, telefone, pacotes, tela, reencontro de contatos), leia antes [COMUNICACAO.md](COMUNICACAO.md). Este documento detalha cada peça do transporte.
+
+**O que o aplicativo usa.** O `Node` (e a GUI) usa o circuito de 2 saltos, o link Noise, os dois covers, o gerente com reserva e failover e a política de saída. A reputação medida (`reputation`) é opcional e o `Node` não a liga, porque só conhece os relays dos contatos. Os relays são os dos próprios contatos, então o aplicativo **não** usa descritores assinados nem a descoberta por GossipSub (`descriptor`, `discovery`, `net`): eles são a camada de biblioteca para quem quiser uma rede aberta de relays e estão aqui por completude.
+
 ## Fase 3: circuito de 2 saltos (`clam::circuit`)
 
-Núcleo do modo privado: você → relay A → relay B → destino. É *sans-IO*: as máquinas de estado recebem células e devolvem ações, e o transporte (libp2p, UDP) fica por sua conta. Ainda **não** há transporte real nem failover automático (veja o fim desta seção).
+Núcleo do modo privado: você → relay A → relay B → destino. É *sans-IO*: as máquinas de estado recebem células e devolvem ações, e o transporte fica por sua conta. O transporte real (TCP + Noise NK, `clam::transport`) e o failover automático (`clam::circuit::manager`) já existem e estão descritos nas seções seguintes.
 
 Garantias, cobertas por `tests/circuit.rs`:
 
@@ -191,9 +195,11 @@ O diretório aplica:
 - **Teto de tamanho**: `max_entries` (4096).
 - **Pontuação**: cresce com o log da banda declarada, limitada a 10 000 kbps, porque a banda é autodeclarada.
 
-Limites: a identidade é barata de gerar (ataque Sybil), então a assinatura prova *quem assinou*, não que o relay é bom. Reputação medida e relays semeados pela equipe continuam necessários. O descritor ainda carrega uma chave só (link e circuito), e o diretório ainda não recebe descritores sozinho: falta o canal de descoberta (GossipSub).
+Limites: a identidade é barata de gerar (ataque Sybil), então a assinatura prova *quem assinou*, não que o relay é bom. Reputação medida e relays semeados pela equipe continuam necessários. O descritor carrega as duas chaves do relay, a de circuito e a de link (formato v2, acima). Quem entrega descritores ao diretório é a descoberta por GossipSub (próxima seção), que o aplicativo não usa.
 
 ### Descoberta de relays por GossipSub (`clam::discovery`, feature `net`)
+
+> Camada de biblioteca: o `Node` e a GUI não a usam (os relays são os dos contatos). Serve a quem monta uma rede aberta de relays.
 
 Os relays anunciam o descritor no tópico público `clam/relays/v1`; todo nó que assina o tópico valida, guarda no `RelayDirectory` e alimenta o gerente de circuitos.
 
@@ -380,7 +386,7 @@ O atraso de ~18 ms **não é bug**: é a quantização do cover. Com cover, cada
 
 ### Cover traffic de ponta a ponta (circuito)
 
-O padding de link esconde a temporização de quem observa um link, mas **os relays do circuito continuam vendo** quando há voz: o relay A enxerga as células do seu circuito e sabe se estão fluindo. O cover de circuito esconde isso: o cliente manda **exatamente uma célula de circuito a cada 20 ms** (padrão), seja mídia, ping ou um `RelayCmd::Drop`, e o relay de saída **responde uma por uma**, com o próximo quadro vindo do contato ou com outro `Drop`. Silêncio e conversa têm a mesma taxa nos dois sentidos, em todos os saltos (há testes que contam 50 células/s nos dois casos).
+O padding de link esconde a temporização de quem observa um link, mas **os relays do circuito continuam vendo** quando há voz: o relay A enxerga as células do seu circuito e sabe se estão fluindo. O cover de circuito esconde isso: o cliente manda **exatamente uma célula de circuito a cada 20 ms** (padrão), seja mídia, ping ou um `RelayCmd::Drop`, e o relay de saída **responde uma por uma**, com o próximo quadro vindo do contato ou com outro `Drop`. Silêncio e conversa têm a mesma taxa nos dois sentidos, em todos os saltos (há testes que contam 50 células/s nos dois casos). O circuito da **tela** usa o mesmo mecanismo com outro ritmo (uma célula a cada 2 ms, ou nenhum cover quando a pessoa abre mão da privacidade); veja [COMUNICACAO.md](COMUNICACAO.md#transmissão-de-tela).
 
 - **Ligar/desligar:** `ClientOptions::circuit_cover` (padrão `Some(DEFAULT_CIRCUIT_COVER)` = 20 ms; `None` desliga). No gerente sans-IO: `ManagerConfig::cover_ms` ou `CircuitManager::set_cover`. Os relays não precisam de configuração: o cover liga no relay de saída ao receber o primeiro `Drop`.
 - **Relógio do cliente:** o cliente dita a cadência dos dois sentidos, então o relay de saída não precisa de timer. Mídia que chega do contato espera no relay (fila de 64, a mais antiga cai) até a próxima célula do cliente.
