@@ -217,6 +217,13 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
                         mesh.clear();
                     }
                 }
+                Some(Cmd::RoomShare(on)) => {
+                    if let Some((tx, _)) = &room {
+                        shared.screen.want_share.store(on, Ordering::Relaxed);
+                        hub.run(|s, now| s.set_sharing(on, now));
+                        let _ = tx.send(RoomCmd::Share(on));
+                    }
+                }
                 Some(Cmd::MicTest) => {
                     if shared.in_call.swap(true, Ordering::Relaxed) {
                         out.line("encerre a chamada antes de testar o microfone");
@@ -244,6 +251,11 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
                         let _ = tx.send(RoomCmd::Mesh(peers.clone()));
                     }
                     mesh = peers;
+                }
+                Event::Watch { from, on, .. } => {
+                    if let Some((tx, _)) = &room {
+                        let _ = tx.send(RoomCmd::Viewer(from, on));
+                    }
                 }
                 Event::Joined(_) => out.line("entrou no servidor"),
                 Event::Removed(id) => {

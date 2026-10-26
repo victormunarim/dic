@@ -1,5 +1,7 @@
 //! Aba de servidores: trilho com os servidores, salas de voz com quem está nelas e membros online/offline.
 
+use std::sync::atomic::Ordering;
+
 use clam::server::{Output, Role, ServerId, ServerView};
 use eframe::egui::{self, Color32, CornerRadius, Margin, RichText, vec2};
 
@@ -174,6 +176,7 @@ impl App {
                         });
                     });
                     let live = self.shared.room.lock().unwrap();
+                    let (sharing, mut action) = (self.shared.screen.want_share.load(Ordering::Relaxed), None);
                     for id in &room.people {
                         let Some(m) = v.members.iter().find(|m| m.id == *id) else { continue };
                         let speaking = live.speaking(&m.key);
@@ -183,7 +186,27 @@ impl App {
                             avatar(ui, &who, 26.0, speaking.then_some(GREEN));
                             let text = RichText::new(if m.is_me { format!("{who} (você)") } else { who }).color(if speaking { GREEN } else { TEXT });
                             ui.label(if speaking { text.strong() } else { text });
+                            if m.sharing {
+                                ui.label(RichText::new("🖥 transmitindo").size(13.0).color(GREEN));
+                            }
+                            if here && m.is_me {
+                                let (label, fill) = if sharing { ("Parar de compartilhar", RED) } else { ("🖥 Compartilhar tela", BLURPLE) };
+                                if button(ui, true, label, fill).clicked() {
+                                    action = Some((None, !sharing));
+                                }
+                            } else if here && m.sharing {
+                                let on = live.watching.contains(&m.key);
+                                if button(ui, true, if on { "Parar de assistir" } else { "Assistir" }, if on { GREY_BUTTON } else { GREEN }).clicked() {
+                                    action = Some((Some(m.key), !on));
+                                }
+                            }
                         });
+                    }
+                    drop(live);
+                    match action {
+                        Some((None, on)) => self.send(Cmd::RoomShare(on)),
+                        Some((Some(key), on)) => crate::engine::follow(&self.shared, key, on),
+                        None => {}
                     }
                 });
                 ui.add_space(4.0);
@@ -205,6 +228,37 @@ impl App {
                 note(ui, "Para trocar de sala, saia da atual primeiro.");
             }
         });
+
+        if my_room.is_some_and(|(server, _)| server == v.id) {
+            let (sharing, note_text) = (self.shared.screen.sharing.load(Ordering::Relaxed), self.shared.screen.note.lock().unwrap().clone());
+            let wanted = self.shared.screen.want_share.load(Ordering::Relaxed);
+            if wanted || !self.screen_tex.is_empty() || !note_text.is_empty() {
+                let names = self.form.names();
+                let diag = self.shared.screen.diagnostics();
+                card(ui, "Telas da sala", "Cada espectador abre um circuito de vídeo próprio, cifrado, direto com quem transmite (até 3 por transmissão).", |ui| {
+                    if wanted {
+                        ui.colored_label(GREEN, if sharing { "● sua tela está sendo vista" } else { "Sua tela está disponível: quem está na sala vê o botão Assistir ao lado do seu nome." });
+                    }
+                    if !wanted && !note_text.is_empty() {
+                        ui.colored_label(Color32::from_rgb(0xf2, 0x7b, 0x7e), note_text);
+                    }
+                    if !diag.is_empty() {
+                        ui.label(RichText::new(diag).monospace().size(13.0).color(MUTED));
+                    }
+                    let mut order: Vec<_> = self.screen_tex.iter().collect();
+                    order.sort_by_key(|(k, _)| **k);
+                    for (who, (_, tex)) in order {
+                        ui.label(RichText::new(format!("Tela de {}", member_name(&names, who))).strong());
+                        if ui.button("🔍  Ampliar").on_hover_text("Abre a tela numa janela maior").clicked() {
+                            self.zoom = Some(*who);
+                        }
+                        if self.zoom != Some(*who) {
+                            ui.add(egui::Image::new(tex).max_width(ui.available_width()).corner_radius(CornerRadius::same(8)).shrink_to_fit());
+                        }
+                    }
+                });
+            }
+        }
 
         card(ui, "Membros", "", |ui| {
             for m in &v.members {

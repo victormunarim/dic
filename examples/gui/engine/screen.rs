@@ -5,8 +5,8 @@ use std::{collections::HashMap, sync::atomic::AtomicU64};
 use super::*;
 use clam::{
     node::Dialer,
-    phone::{OPEN_SCREEN_SLOT, SCREEN_SLOT, ScreenEvent},
-    video::{H264Decoder, H264Encoder, Priority, RawFrame, ScreenSource, pump},
+    phone::{OPEN_SCREEN_SLOT, SCREEN_SLOT, ScreenEvent, ScreenShare},
+    video::{H264Decoder, H264Encoder, Priority, RawFrame, ScreenSource, pump, pump_all},
 };
 
 /// Estado da tela compartilhada, visto pela janela e pela chamada.
@@ -39,7 +39,7 @@ pub(crate) struct ScreenState {
 }
 
 impl ScreenState {
-    fn set_image(&self, who: [u8; 32], img: Option<RawFrame>) {
+    pub(crate) fn set_image(&self, who: [u8; 32], img: Option<RawFrame>) {
         let mut m = self.images.lock().unwrap();
         match img {
             Some(img) => {
@@ -141,6 +141,28 @@ async fn open_source(fps: f32) -> Result<Box<dyn ScreenSource + Send>, String> {
     }
 }
 
+/// Abre a captura e o codificador conforme as escolhas da janela. Devolve também se a transmissão é privada.
+async fn start_capture(shared: &Arc<Shared>, out: &Sink) -> Result<(Box<dyn ScreenSource + Send>, H264Encoder, bool), String> {
+    let st = &shared.screen;
+    let private = !st.open_path.load(Ordering::Relaxed);
+    let slot = if private { SCREEN_SLOT } else { OPEN_SCREEN_SLOT };
+    let bitrate = H264Encoder::bitrate_for(slot);
+    let priority = if st.sharp.load(Ordering::Relaxed) { Priority::Sharpness } else { Priority::Smoothness };
+    let started = match open_source(priority.fps(bitrate)).await {
+        Ok(src) => H264Encoder::with_priority(bitrate, priority).map(|e| (src, e)).map_err(|e| e.to_string()),
+        Err(e) => Err(e),
+    };
+    let (src, mut enc) = started.map_err(|e| format!("não deu para capturar a tela ({e})"))?;
+    if st.hardware.load(Ordering::Relaxed) {
+        // `detect` roda processos: fora do executor.
+        match tokio::task::spawn_blocking(clam::hwenc::detect).await.ok().flatten() {
+            Some(name) if enc.set_hardware(Some(name)) => out.line(format!("tela: codificando por hardware ({name})")),
+            _ => out.line("tela: sem codificador por hardware neste computador (precisa de gstreamer1.0-tools e gstreamer1.0-plugins-bad com o driver da GPU), usando o openh264"),
+        }
+    }
+    Ok((src, enc, private))
+}
+
 /// Liga o circuito de tela e envia quadros enquanto a pessoa quiser e a chamada durar.
 pub(crate) async fn share_task(dialer: Dialer, peer: [u8; 32], keys: clam::media::keys::CallKeys, shared: Arc<Shared>, out: Sink) {
     let st = &shared.screen;
@@ -151,30 +173,14 @@ pub(crate) async fn share_task(dialer: Dialer, peer: [u8; 32], keys: clam::media
     };
     st.note.lock().unwrap().clear();
     let wanted = || st.want_share.load(Ordering::Relaxed) && !shared.hangup.load(Ordering::Relaxed);
-    let private = !st.open_path.load(Ordering::Relaxed);
-    let slot = if private { SCREEN_SLOT } else { OPEN_SCREEN_SLOT };
-    let bitrate = H264Encoder::bitrate_for(slot);
-    let priority = if st.sharp.load(Ordering::Relaxed) { Priority::Sharpness } else { Priority::Smoothness };
-    let started = match open_source(priority.fps(bitrate)).await {
-        Ok(src) => H264Encoder::with_priority(bitrate, priority).map(|e| (src, e)).map_err(|e| e.to_string()),
-        Err(e) => Err(e),
-    };
-    let hardware = st.hardware.load(Ordering::Relaxed);
-    let (mut src, mut enc) = match started {
+    let (mut src, mut enc, private) = match start_capture(&shared, &out).await {
         Ok(x) => x,
         Err(e) => {
-            fail(format!("não deu para capturar a tela ({e})"));
+            fail(e);
             st.share_task.store(false, Ordering::Relaxed);
             return;
         }
     };
-    if hardware {
-        // `detect` roda processos: fora do executor.
-        match tokio::task::spawn_blocking(clam::hwenc::detect).await.ok().flatten() {
-            Some(name) if enc.set_hardware(Some(name)) => out.line(format!("tela: codificando por hardware ({name})")),
-            _ => out.line("tela: sem codificador por hardware neste computador (precisa de gstreamer1.0-tools e gstreamer1.0-plugins-bad com o driver da GPU), usando o openh264"),
-        }
-    }
     out.line("tela: ligando o circuito de vídeo...");
     let opened = if wanted() { until_hangup(dialer.share_screen_keys_with(peer, &keys, Duration::from_secs(15), private), &shared.hangup).await } else { None };
     let share = match opened {
@@ -233,6 +239,86 @@ pub(crate) async fn share_task(dialer: Dialer, peer: [u8; 32], keys: clam::media
     }
     out.line("tela: transmissão encerrada");
     st.share_task.store(false, Ordering::Relaxed);
+}
+
+/// O que a captura da sala recebe: um circuito novo ou o fim de um.
+pub(crate) enum ShareCtl {
+    Add([u8; 32], ScreenShare),
+    Remove([u8; 32]),
+}
+
+/// A captura da tela na sala: um codificador só, o mesmo quadro vai a todos os espectadores. Largar o valor
+/// encerra a captura e os circuitos.
+pub(crate) struct RoomCapture {
+    pub(crate) ctl: std::sync::mpsc::Sender<ShareCtl>,
+    /// Os circuitos de tela devem abrir sem cover (o ritmo do codificador foi escolhido para isso).
+    pub(crate) private: bool,
+}
+
+/// Abre a captura e deixa uma thread à espera dos espectadores: só captura quando há ao menos um.
+pub(crate) async fn start_room_capture(shared: Arc<Shared>, out: Sink) -> Option<RoomCapture> {
+    let st = &shared.screen;
+    st.note.lock().unwrap().clear();
+    let (mut src, mut enc, private) = match start_capture(&shared, &out).await {
+        Ok(x) => x,
+        Err(e) => {
+            out.line(format!("tela: {e}"));
+            *st.note.lock().unwrap() = e;
+            return None;
+        }
+    };
+    let (ctl, rx) = std::sync::mpsc::channel::<ShareCtl>();
+    let handle = tokio::runtime::Handle::current();
+    tokio::task::spawn_blocking(move || {
+        use std::sync::mpsc::TryRecvError;
+        let mut shares: HashMap<[u8; 32], ScreenShare> = HashMap::new();
+        let every = Duration::from_secs_f32(1.0 / enc.fps());
+        let mut next = std::time::Instant::now();
+        let (mut pushed, mut skipped, mut force_key) = (0u64, 0u64, false);
+        'run: while shared.screen.want_share.load(Ordering::Relaxed) && !shared.hangup.load(Ordering::Relaxed) {
+            loop {
+                match rx.try_recv() {
+                    Ok(ShareCtl::Add(who, share)) => {
+                        if let Some(old) = shares.insert(who, share) {
+                            handle.block_on(old.stop());
+                        }
+                        force_key = true;
+                    }
+                    Ok(ShareCtl::Remove(who)) => {
+                        if let Some(old) = shares.remove(&who) {
+                            handle.block_on(old.stop());
+                        }
+                    }
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => break 'run,
+                }
+            }
+            shared.screen.sharing.store(!shares.is_empty(), Ordering::Relaxed);
+            if shares.is_empty() {
+                std::thread::sleep(Duration::from_millis(50));
+                next = std::time::Instant::now();
+                continue;
+            }
+            let refs: Vec<&ScreenShare> = shares.values().collect();
+            match pump_all(src.as_mut(), &mut enc, &refs, std::mem::take(&mut force_key)) {
+                Ok(0) => skipped += 1,
+                Ok(_) => pushed += 1,
+                Err(e) => *shared.screen.note.lock().unwrap() = format!("codec: {e}"),
+            }
+            *shared.screen.tx_info.lock().unwrap() = format!(
+                "para {} pessoas: enviados {pushed}, pulados {skipped} ({} pelo codificador, {} adiados com o circuito cheio), taxa {} kbps, QP {}, imagem 1/{}, codificar leva {:.0} ms",
+                shares.len(), enc.skipped, enc.held, enc.bitrate() / 1000, enc.qp(), enc.scale(), enc.encode_ms
+            );
+            next += every;
+            std::thread::sleep(next.saturating_duration_since(std::time::Instant::now()));
+        }
+        for (_, share) in shares {
+            handle.block_on(share.stop());
+        }
+        shared.screen.sharing.store(false, Ordering::Relaxed);
+        shared.screen.tx_info.lock().unwrap().clear();
+    });
+    Some(RoomCapture { ctl, private })
 }
 
 #[cfg(test)]

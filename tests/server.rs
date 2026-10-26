@@ -170,6 +170,35 @@ fn the_mesh_event_lists_who_shares_my_room() {
 }
 
 #[test]
+fn a_screen_is_only_served_to_those_in_the_room_who_ask() {
+    let (mut net, server) = Net::group(3);
+    net.advance(2);
+    let (room, out) = net.nodes[0].create_room(&server, "Voz", net.now).unwrap();
+    net.run(0, out);
+    for i in [0, 1] {
+        let out = net.nodes[i].join_room(&server, Some(room), net.now).unwrap();
+        net.run(i, out);
+    }
+    // Quem não transmite ignora o pedido.
+    let out = { let (k, now) = (net.key(0), net.now); net.nodes[1].watch(&server, k, true, now) }.unwrap();
+    net.run(1, out);
+    assert!(!net.events[0].iter().any(|e| matches!(e, Event::Watch { .. })));
+    let out = net.nodes[0].set_sharing(true, net.now);
+    net.run(0, out);
+    assert!(net.view(1, &server).members.iter().find(|m| m.key == net.key(0)).unwrap().sharing);
+    assert!(net.view(0, &server).members.iter().find(|m| m.is_me).unwrap().sharing);
+    let out = { let (k, now) = (net.key(0), net.now); net.nodes[1].watch(&server, k, true, now) }.unwrap();
+    net.run(1, out);
+    assert!(net.events[0].contains(&Event::Watch { server, from: net.key(1), on: true }));
+    // Quem está fora da sala nem consegue pedir.
+    assert_eq!({ let (k, now) = (net.key(0), net.now); net.nodes[2].watch(&server, k, true, now) }.err(), Some(ServerError::UnknownMember));
+    // Parar de transmitir some da lista; sair da sala também.
+    let out = net.nodes[0].set_sharing(false, net.now);
+    net.run(0, out);
+    assert!(!net.view(1, &server).members.iter().find(|m| m.key == net.key(0)).unwrap().sharing);
+}
+
+#[test]
 fn someone_who_goes_silent_leaves_the_room_when_the_lease_runs_out() {
     let (mut net, server) = Net::group(2);
     net.advance(2);

@@ -57,6 +57,8 @@ pub enum Event {
     Address { key: [u8; 32], reach: Reach },
     /// Quem está na mesma sala que eu mudou (vazio se não estou em sala): é a malha da chamada.
     Mesh { server: ServerId, room: Option<RoomId>, peers: Vec<[u8; 32]> },
+    /// Alguém da minha sala pediu (`on`) ou deixou de pedir para assistir à minha tela.
+    Watch { server: ServerId, from: [u8; 32], on: bool },
     Notice(String),
 }
 
@@ -91,6 +93,7 @@ struct Peer {
     /// A presença vale até aqui; 0 se nunca ouvi.
     until: u64,
     room: Option<RoomId>,
+    sharing: bool,
     reach: Option<(u64, Reach)>,
     last_hello: Option<u64>,
     last_vector: Option<u64>,
@@ -101,7 +104,7 @@ struct Peer {
 
 impl Peer {
     fn new(key: [u8; 32]) -> Self {
-        Peer { key, until: 0, room: None, reach: None, last_hello: None, last_vector: None, last_gift: None, pages: BTreeMap::new(), pages_total: 0 }
+        Peer { key, until: 0, room: None, sharing: false, reach: None, last_hello: None, last_vector: None, last_gift: None, pages: BTreeMap::new(), pages_total: 0 }
     }
 
     fn online(&self, now: u64) -> bool {
@@ -124,6 +127,8 @@ struct Server {
     /// Já fui membro (para saber quando sou removido).
     member: bool,
     room: Option<RoomId>,
+    /// Estou transmitindo a tela na sala.
+    sharing: bool,
     mesh: (Option<RoomId>, Vec<[u8; 32]>),
 }
 
@@ -144,7 +149,7 @@ impl Server {
     }
 
     fn hello(&self) -> Hello {
-        Hello { room: self.room, fp: self.reg.fingerprint(), count: self.reg.len().min(u16::MAX as usize) as u16, epoch: self.epoch }
+        Hello { room: self.room, fp: self.reg.fingerprint(), count: self.reg.len().min(u16::MAX as usize) as u16, epoch: self.epoch, sharing: self.sharing && self.room.is_some() }
     }
 
     fn is_member(&self, id: &MemberId) -> bool {
@@ -248,6 +253,7 @@ impl Servers {
             last_join: None,
             member: false,
             room: None,
+            sharing: false,
             mesh: (None, Vec::new()),
         };
         s.reg.make(&self.me.sk, self.me.id, Action::AddMember { key: self.me.key, vk: owner_vk }).ok_or(ServerError::Forbidden)?;
@@ -315,6 +321,7 @@ impl Servers {
             last_join: Some(now),
             member: false,
             room: None,
+            sharing: false,
             mesh: (None, Vec::new()),
         };
         let mut out = Output::default();
@@ -471,6 +478,37 @@ impl Servers {
         Ok(self.finish(now, out))
     }
 
+    /// Passo a transmitir (ou paro de transmitir) a tela na sala: avisa quem está online.
+    pub fn set_sharing(&mut self, sharing: bool, now: u64) -> Output {
+        if self.servers.values().all(|s| s.sharing == sharing) {
+            return Output::default();
+        }
+        for s in self.servers.values_mut() {
+            s.sharing = sharing;
+        }
+        let mut out = Output::default();
+        out.merge(self.hello_all(now, true));
+        for s in self.servers.values() {
+            out.events.push(Event::Changed(s.id));
+        }
+        self.finish(now, out)
+    }
+
+    /// Peço (`on`) ou deixo de pedir para assistir à tela de `target`, que está na minha sala.
+    pub fn watch(&mut self, server: &ServerId, target: [u8; 32], on: bool, now: u64) -> Result<Output, ServerError> {
+        let s = self.servers.get_mut(server).ok_or(ServerError::UnknownServer)?;
+        if !s.is_member(&self.me.id) {
+            return Err(ServerError::NotMember);
+        }
+        let there = s.room.is_some() && s.peers.get(&member_id(&target)).is_some_and(|p| p.online(now) && p.room == s.room);
+        if !there {
+            return Err(ServerError::UnknownMember);
+        }
+        let mut out = Output::default();
+        out.send.extend(seal_to(&self.me, s, &target, &Msg::Watch(on)));
+        Ok(out)
+    }
+
     /// `Hello` a quem está online (`only_online`) ou a todos os membros.
     fn hello_all(&mut self, now: u64, only_online: bool) -> Output {
         let mut out = Output::default();
@@ -609,9 +647,10 @@ impl Servers {
                     return out;
                 }
                 let p = s.peer(key);
-                let changed = !p.online(now) || p.room != h.room;
+                let changed = !p.online(now) || p.room != h.room || p.sharing != h.sharing;
                 p.until = now + LEASE;
                 p.room = h.room;
+                p.sharing = h.sharing;
                 if changed {
                     out.events.push(Event::Changed(sid));
                 }
@@ -699,6 +738,13 @@ impl Servers {
                 // Nada a fazer: o que me torna membro são as operações.
             }
             Msg::Ack(_) => {}
+            Msg::Watch(on) => {
+                // Só quem está na minha sala pode pedir, e só enquanto eu transmito.
+                let together = s.room.is_some() && s.peers.get(&id).is_some_and(|p| p.online(now) && p.room == s.room);
+                if is_member && together && (s.sharing || !on) {
+                    out.events.push(Event::Watch { server: sid, from: key, on });
+                }
+            }
             Msg::Gift { epoch, secret } => {
                 if is_member && epoch == s.reg.state().epoch && epoch > s.epoch {
                     s.epoch = epoch;
@@ -765,6 +811,7 @@ impl Servers {
                     is_me,
                     online: is_me && self.visible || p.is_some_and(|p| p.online(now)),
                     room: if is_me { s.room.filter(|_| self.visible) } else { p.filter(|p| p.online(now)).and_then(|p| p.room) },
+                    sharing: if is_me { s.sharing && s.room.is_some() && self.visible } else { p.is_some_and(|p| p.online(now) && p.room.is_some() && p.sharing) },
                 }
             })
             .collect();
@@ -850,6 +897,7 @@ impl Servers {
                             last_join: None,
                             member: false,
                             room: None,
+                            sharing: false,
                             mesh: (None, Vec::new()),
                         })
                     })();
@@ -900,6 +948,8 @@ pub struct MemberView {
     pub is_me: bool,
     pub online: bool,
     pub room: Option<RoomId>,
+    /// Transmite a tela na sala.
+    pub sharing: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

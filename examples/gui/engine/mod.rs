@@ -14,7 +14,7 @@ use clam::media::codec::CodecId;
 use clam::node::{Node, NodeConfig};
 use clam::phone::ActiveCall;
 use tokio::{
-    sync::mpsc,
+    sync::{mpsc, oneshot},
     time::{MissedTickBehavior, interval},
 };
 
@@ -69,6 +69,8 @@ pub(crate) enum Cmd {
     JoinRoom(clam::server::ServerId, clam::server::RoomId),
     /// Sai da sala de voz.
     LeaveRoom,
+    /// Transmitir (ou parar de transmitir) a tela para quem pedir, na sala.
+    RoomShare(bool),
 }
 
 /// Estado compartilhado entre a janela e a tarefa do nó.

@@ -15,6 +15,12 @@ const SPEAKING_RMS: f64 = 250.0;
 const PEER_QUEUE: usize = 6;
 /// Espera antes de tentar discar de novo para quem não atendeu.
 const REDIAL_AFTER: Duration = Duration::from_secs(4);
+/// Quantas pessoas assistem à minha tela ao mesmo tempo.
+pub(crate) const MAX_VIEWERS: usize = 3;
+/// Espera antes de repetir o pedido de assistir a quem ainda não mandou imagem.
+const ASK_AGAIN: Duration = Duration::from_secs(5);
+/// Um pedido repetido depois disto, com o circuito já aberto, é sinal de que ele não chegou: reabre.
+const REOPEN_AFTER: Duration = Duration::from_secs(8);
 
 /// Onde esta pessoa está e quem fala, para a janela.
 #[derive(Default)]
@@ -24,6 +30,8 @@ pub(crate) struct RoomLive {
     pub(crate) connected: HashSet<[u8; 32]>,
     /// Quando cada pessoa falou pela última vez.
     pub(crate) spoke: HashMap<[u8; 32], Instant>,
+    /// De quem eu pedi para assistir à tela.
+    pub(crate) watching: HashSet<[u8; 32]>,
 }
 
 impl RoomLive {
@@ -37,6 +45,23 @@ impl RoomLive {
     }
 }
 
+/// Peço (ou deixo de pedir) para assistir à tela de `who`, que está na minha sala. O pedido se repete
+/// sozinho enquanto a imagem não chega.
+pub(crate) fn follow(shared: &Shared, who: [u8; 32], on: bool) {
+    let mut live = shared.room.lock().unwrap();
+    let Some((server, _)) = live.at else { return };
+    if on {
+        live.watching.insert(who);
+    } else {
+        live.watching.remove(&who);
+        shared.screen.set_image(who, None);
+    }
+    drop(live);
+    if let Some(hub) = shared.servers.lock().unwrap().as_ref() {
+        let _ = hub.try_act(|s, now| s.watch(&server, who, on, now));
+    }
+}
+
 pub(crate) enum RoomCmd {
     /// Quem está na sala agora (sem esta pessoa).
     Mesh(Vec<[u8; 32]>),
@@ -46,6 +71,14 @@ pub(crate) enum RoomCmd {
     Dialed([u8; 32], Result<ActiveCall, String>),
     /// A chamada da geração `rev` com essa pessoa acabou.
     Ended([u8; 32], u64),
+    /// Passo a transmitir a tela (ou paro).
+    Share(bool),
+    /// A captura ficou pronta (ou não abriu).
+    Capture(Option<RoomCapture>),
+    /// Alguém da sala pediu (ou deixou de pedir) para assistir à minha tela.
+    Viewer([u8; 32], bool),
+    /// O circuito de tela para esse espectador abriu (ou não); o número identifica o pedido.
+    Opened([u8; 32], u64, Result<clam::phone::ScreenShare, String>),
     Leave,
 }
 
@@ -53,6 +86,14 @@ struct Link {
     rev: u64,
     mic: mpsc::Sender<Vec<i16>>,
     pcm: mpsc::Receiver<Vec<i16>>,
+    /// Pede as chaves de um circuito de tela novo a esta chamada.
+    keys: mpsc::UnboundedSender<oneshot::Sender<clam::media::keys::CallKeys>>,
+}
+
+/// Quem assiste à minha tela e desde quando.
+struct Viewer {
+    token: u64,
+    since: Instant,
 }
 
 /// Soma os quadros (cada pessoa já no seu volume), sem estourar o `i16`.
@@ -69,7 +110,18 @@ fn rms(f: &[i16]) -> f64 {
 }
 
 /// A chamada com uma pessoa: leva o microfone até ela e o que ela diz até a mistura.
-async fn link_loop(mut c: ActiveCall, key: [u8; 32], rev: u64, mut mic: mpsc::Receiver<Vec<i16>>, pcm: mpsc::Sender<Vec<i16>>, room: mpsc::UnboundedSender<RoomCmd>) {
+async fn link_loop(
+    mut c: ActiveCall,
+    key: [u8; 32],
+    rev: u64,
+    mut mic: mpsc::Receiver<Vec<i16>>,
+    pcm: mpsc::Sender<Vec<i16>>,
+    mut keys: mpsc::UnboundedReceiver<oneshot::Sender<clam::media::keys::CallKeys>>,
+    room: mpsc::UnboundedSender<RoomCmd>,
+    shared: Arc<Shared>,
+) {
+    let (mut screen, mut screen_open, mut decoder) = (c.take_screen(), true, None);
+    let mut keys_open = true;
     let mut silence = Silence::new(tokio::time::Instant::now());
     let mut prev = c.stats().received;
     let mut check = interval(Duration::from_secs(1));
@@ -90,6 +142,18 @@ async fn link_loop(mut c: ActiveCall, key: [u8; 32], rev: u64, mut mic: mpsc::Re
                 }
                 None => break,
             },
+            ev = screen.recv(), if screen_open => match ev {
+                Some(ev) => {
+                    on_screen_event(&shared.screen, key, &mut decoder, ev);
+                }
+                None => screen_open = false,
+            },
+            r = keys.recv(), if keys_open => match r {
+                Some(r) => {
+                    let _ = r.send(c.next_share_keys());
+                }
+                None => keys_open = false,
+            },
             _ = check.tick() => {
                 let now = c.stats().received;
                 if silence.lost(now > prev, tokio::time::Instant::now()) {
@@ -100,7 +164,16 @@ async fn link_loop(mut c: ActiveCall, key: [u8; 32], rev: u64, mut mic: mpsc::Re
         }
     }
     c.hangup();
+    shared.screen.set_image(key, None);
     let _ = room.send(RoomCmd::Ended(key, rev));
+}
+
+/// Para de transmitir a tela e avisa a sala.
+fn stop_sharing(shared: &Shared) {
+    shared.screen.want_share.store(false, Ordering::Relaxed);
+    if let Some(hub) = shared.servers.lock().unwrap().as_ref() {
+        hub.run(|s, now| s.set_sharing(false, now));
+    }
 }
 
 /// Vive enquanto a pessoa estiver na sala. Devolve o microfone ao sistema ao sair.
@@ -109,6 +182,12 @@ pub(crate) async fn run_room(mut rx: mpsc::UnboundedReceiver<RoomCmd>, me_tx: mp
     let mut dialing: HashMap<[u8; 32], Instant> = HashMap::new();
     let mut mesh: Vec<[u8; 32]> = Vec::new();
     let mut revs = 0u64;
+    // A minha tela: a captura (uma só), quem assiste e quando perguntei de novo a quem eu assisto.
+    let mut capture: Option<RoomCapture> = None;
+    let mut capturing = false;
+    let mut viewers: HashMap<[u8; 32], Viewer> = HashMap::new();
+    let mut asked: HashMap<[u8; 32], Instant> = HashMap::new();
+    let mut tokens = 0u64;
     let mut tick = interval(Duration::from_millis(20));
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut n = 0usize;
@@ -117,9 +196,10 @@ pub(crate) async fn run_room(mut rx: mpsc::UnboundedReceiver<RoomCmd>, me_tx: mp
         *revs += 1;
         let (mic_tx, mic_rx) = mpsc::channel(4);
         let (pcm_tx, pcm_rx) = mpsc::channel(PEER_QUEUE);
-        tokio::spawn(link_loop(c, key, *revs, mic_rx, pcm_tx, me_tx.clone()));
+        let (keys_tx, keys_rx) = mpsc::unbounded_channel();
+        tokio::spawn(link_loop(c, key, *revs, mic_rx, pcm_tx, keys_rx, me_tx.clone(), shared.clone()));
         // A ligação antiga com a mesma pessoa cai junto com o `Link` que sai.
-        links.insert(key, Link { rev: *revs, mic: mic_tx, pcm: pcm_rx });
+        links.insert(key, Link { rev: *revs, mic: mic_tx, pcm: pcm_rx, keys: keys_tx });
     };
     loop {
         tokio::select! {
@@ -157,6 +237,23 @@ pub(crate) async fn run_room(mut rx: mpsc::UnboundedReceiver<RoomCmd>, me_tx: mp
             _ = sync.tick() => {
                 // Quem saiu da malha é desligado; quem falta e tem a chave maior que a minha, eu disco.
                 links.retain(|k, _| mesh.contains(k));
+                for gone in viewers.keys().filter(|k| !links.contains_key(*k)).copied().collect::<Vec<_>>() {
+                    viewers.remove(&gone);
+                    if let Some(c) = &capture {
+                        let _ = c.ctl.send(ShareCtl::Remove(gone));
+                    }
+                }
+                // Quem eu assisto e ainda não mandou imagem recebe o pedido de novo (o quadro pode ter se perdido).
+                let wanted: Vec<[u8; 32]> = shared.room.lock().unwrap().watching.iter().copied().collect();
+                for who in wanted {
+                    if !mesh.contains(&who) {
+                        shared.room.lock().unwrap().watching.remove(&who);
+                        asked.remove(&who);
+                    } else if !shared.screen.images.lock().unwrap().contains_key(&who) && asked.get(&who).is_none_or(|t| t.elapsed() >= ASK_AGAIN) {
+                        asked.insert(who, Instant::now());
+                        follow(&shared, who, true);
+                    }
+                }
                 for key in &mesh {
                     if links.contains_key(key) || me >= *key || dialing.get(key).is_some_and(|t| t.elapsed() < REDIAL_AFTER) {
                         continue;
@@ -189,11 +286,80 @@ pub(crate) async fn run_room(mut rx: mpsc::UnboundedReceiver<RoomCmd>, me_tx: mp
                         dialing.insert(key, Instant::now());
                     }
                 }
+                Some(RoomCmd::Share(true)) => {
+                    if capture.is_none() && !capturing {
+                        capturing = true;
+                        let (sh, o, tx) = (shared.clone(), out.clone(), me_tx.clone());
+                        tokio::spawn(async move {
+                            let _ = tx.send(RoomCmd::Capture(start_room_capture(sh, o).await));
+                        });
+                    }
+                }
+                Some(RoomCmd::Share(false)) => {
+                    capture = None;
+                    viewers.clear();
+                    shared.screen.want_share.store(false, Ordering::Relaxed);
+                }
+                Some(RoomCmd::Capture(c)) => {
+                    capturing = false;
+                    match c {
+                        Some(c) if shared.screen.want_share.load(Ordering::Relaxed) => capture = Some(c),
+                        _ => stop_sharing(&shared),
+                    }
+                }
+                Some(RoomCmd::Viewer(who, false)) => {
+                    viewers.remove(&who);
+                    if let Some(c) = &capture {
+                        let _ = c.ctl.send(ShareCtl::Remove(who));
+                    }
+                }
+                Some(RoomCmd::Viewer(who, true)) => {
+                    let Some(c) = &capture else { continue };
+                    let fresh = viewers.get(&who).is_some_and(|v| v.since.elapsed() < REOPEN_AFTER);
+                    if fresh || !mesh.contains(&who) || (viewers.len() >= MAX_VIEWERS && !viewers.contains_key(&who)) {
+                        continue;
+                    }
+                    let Some(link) = links.get(&who) else { continue };
+                    let (tx, rx) = oneshot::channel();
+                    if link.keys.send(tx).is_err() {
+                        continue;
+                    }
+                    tokens += 1;
+                    viewers.insert(who, Viewer { token: tokens, since: Instant::now() });
+                    let _ = c.ctl.send(ShareCtl::Remove(who));
+                    let (dialer, me_tx, token, private, hangup) = (dialer.clone(), me_tx.clone(), tokens, c.private, shared.clone());
+                    tokio::spawn(async move {
+                        let r = match rx.await {
+                            Ok(keys) => match until_hangup(dialer.share_screen_keys_with(who, &keys, Duration::from_secs(15), private), &hangup.hangup).await {
+                                Some(r) => r.map_err(|e| e.to_string()),
+                                None => Err("chamada encerrada".to_string()),
+                            },
+                            Err(_) => Err("a chamada com a pessoa acabou".to_string()),
+                        };
+                        let _ = me_tx.send(RoomCmd::Opened(who, token, r));
+                    });
+                }
+                Some(RoomCmd::Opened(who, token, r)) => {
+                    let current = viewers.get(&who).is_some_and(|v| v.token == token);
+                    match (r, &capture) {
+                        (Ok(share), Some(c)) if current => {
+                            let _ = c.ctl.send(ShareCtl::Add(who, share));
+                        }
+                        (Err(e), _) if current => {
+                            viewers.remove(&who);
+                            out.line(format!("tela: não abriu o circuito para {}: {e}", &hex(&who)[..8]));
+                        }
+                        _ => {}
+                    }
+                }
                 Some(RoomCmd::Leave) | None => break,
             },
         }
     }
     drop(links);
+    drop(capture);
+    stop_sharing(&shared);
+    shared.screen.reset();
     shared.audio.set_level(0.0);
     shared.room.lock().unwrap().clear();
     out.line("saiu da sala");

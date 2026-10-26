@@ -40,6 +40,8 @@ pub struct Hello {
     pub count: u16,
     /// Época do segredo que este lado tem.
     pub epoch: u16,
+    /// Está transmitindo a tela para quem pedir (só vale dentro de uma sala).
+    pub sharing: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -59,6 +61,8 @@ pub enum Msg {
     Gift { epoch: u16, secret: [u8; 32] },
     /// Recebi o quadro cujo nonce começa por estes bytes (veja [`nonce_tag`]).
     Ack([u8; 8]),
+    /// Quem está na mesma sala que o destinatário pede (`true`) ou deixa de pedir (`false`) para assistir à tela dele.
+    Watch(bool),
 }
 
 fn cipher(me: &StaticSecret, peer: &[u8; 32], server: &ServerId) -> Option<ChaCha20Poly1305> {
@@ -93,7 +97,7 @@ fn encode(msg: &Msg) -> Vec<u8> {
     match msg {
         Msg::Hello(h) | Msg::HelloAck(h) => {
             v.push(if matches!(msg, Msg::Hello(_)) { 1 } else { 2 });
-            v.push(u8::from(h.room.is_some()));
+            v.push(u8::from(h.room.is_some()) | u8::from(h.sharing) << 1);
             if let Some(r) = h.room {
                 v.extend_from_slice(&r);
             }
@@ -132,6 +136,7 @@ fn encode(msg: &Msg) -> Vec<u8> {
             v.push(9);
             v.extend_from_slice(tag);
         }
+        Msg::Watch(on) => v.extend_from_slice(&[10, u8::from(*on)]),
     }
     v
 }
@@ -141,7 +146,11 @@ fn decode(b: &[u8]) -> Option<Msg> {
     Some(match kind {
         1 | 2 => {
             let (&flags, rest) = b.split_first()?;
-            let (room, rest) = if flags == 1 { (Some(<RoomId>::try_from(rest.get(..16)?).ok()?), &rest[16..]) } else if flags == 0 { (None, rest) } else { return None };
+            if flags > 3 {
+                return None;
+            }
+            let sharing = flags & 2 != 0;
+            let (room, rest) = if flags & 1 == 1 { (Some(<RoomId>::try_from(rest.get(..16)?).ok()?), &rest[16..]) } else { (None, rest) };
             if rest.len() != 12 {
                 return None;
             }
@@ -150,6 +159,7 @@ fn decode(b: &[u8]) -> Option<Msg> {
                 fp: rest[..8].try_into().ok()?,
                 count: u16::from_be_bytes(rest[8..10].try_into().ok()?),
                 epoch: u16::from_be_bytes(rest[10..].try_into().ok()?),
+                sharing,
             };
             if kind == 1 { Msg::Hello(h) } else { Msg::HelloAck(h) }
         }
@@ -167,6 +177,7 @@ fn decode(b: &[u8]) -> Option<Msg> {
         7 if b.is_empty() => Msg::Joined,
         8 if b.len() == 34 => Msg::Gift { epoch: u16::from_be_bytes([b[0], b[1]]), secret: b[2..].try_into().ok()? },
         9 if b.len() == 8 => Msg::Ack(b.try_into().ok()?),
+        10 if b.len() == 1 && b[0] <= 1 => Msg::Watch(b[0] == 1),
         _ => return None,
     })
 }
@@ -233,7 +244,7 @@ mod tests {
     }
 
     fn samples() -> Vec<Msg> {
-        let hello = Hello { room: Some([3; 16]), fp: [1; 8], count: 9, epoch: 4 };
+        let hello = Hello { room: Some([3; 16]), fp: [1; 8], count: 9, epoch: 4, sharing: true };
         let op = Op::sign(&[7; 16], &SigningKey::from_bytes(&[1; 32]), [2; 8], 3, 4, Action::AddMember { key: [5; 32], vk: [6; 32] });
         vec![
             Msg::Hello(hello),
@@ -245,6 +256,8 @@ mod tests {
             Msg::Joined,
             Msg::Gift { epoch: 2, secret: [7; 32] },
             Msg::Ack([3; 8]),
+            Msg::Watch(true),
+            Msg::Watch(false),
         ]
     }
 

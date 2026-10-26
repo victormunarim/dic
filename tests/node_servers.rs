@@ -111,7 +111,7 @@ async fn people_join_see_each_other_online_and_meet_in_a_room() {
         assert_eq!(inc.caller().as_bytes(), &c.key);
         inc.accept(codec.build()).await.expect("B atende")
     });
-    let mut from_c = dialed.expect("C liga para B");
+    let from_c = dialed.expect("C liga para B");
     let mut at_b = answered;
     from_c.send(vec![1000; 320]).await.unwrap();
     assert!(timeout(Duration::from_secs(10), at_b.next_pcm()).await.expect("voz chega").is_some());
