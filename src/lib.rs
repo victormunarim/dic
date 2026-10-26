@@ -91,6 +91,7 @@ pub mod upnp;
 pub mod runner;
 pub mod presence;
 pub mod reputation;
+pub mod server;
 pub mod service;
 pub mod store;
 #[cfg(feature = "net")]
