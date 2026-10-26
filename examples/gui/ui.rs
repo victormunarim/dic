@@ -573,12 +573,15 @@ impl App {
                     devices_ui(ui, &mut self.form, &mut self.devs);
                 });
                 card(ui, "Volume e microfone", "", |ui| {
-                    ui.spacing_mut().slider_width = (ui.available_width() - 250.0).clamp(160.0, 520.0);
+                    ui.spacing_mut().slider_width = (ui.available_width() - 110.0).max(120.0);
                     if ui.checkbox(&mut muted, "Mudo (o outro lado não ouve você)").changed() {
                         a.muted.store(muted, Ordering::Relaxed);
                     }
-                    ui.add(egui::Slider::new(&mut p.volume, AudioPrefs::VOLUME).text("Volume do alto-falante"));
-                    ui.add(egui::Slider::new(&mut p.mic_gain, AudioPrefs::MIC_GAIN).text("Ganho do microfone"));
+                    ui.label("Volume do alto-falante");
+                    ui.add(egui::Slider::new(&mut p.volume, AudioPrefs::VOLUME));
+                    ui.label("Ganho do microfone");
+                    ui.add(egui::Slider::new(&mut p.mic_gain, AudioPrefs::MIC_GAIN));
+                    ui.label("Nível do microfone");
                     // Medidor: a linha marca o limiar de sensibilidade; o texto diz se a voz passa dele.
                     let meter = ui.add(
                         egui::ProgressBar::new(level)
@@ -586,11 +589,12 @@ impl App {
                             .desired_height(26.0)
                             .corner_radius(CornerRadius::same(6))
                             .fill(if speaking { GREEN } else { BLURPLE })
-                            .text(if speaking { "Microfone: voz" } else { "Microfone" }),
+                            .text(if speaking { "voz" } else { "silêncio" }),
                     );
                     let x = meter.rect.left() + meter.rect.width() * voice_meter(p.gate_db);
                     ui.painter().vline(x, meter.rect.y_range(), egui::Stroke::new(2.5_f32, Color32::from_rgb(230, 160, 40)));
-                    ui.add(egui::Slider::new(&mut p.gate_db, AudioPrefs::GATE_DB).suffix(" dB").text("Sensibilidade (limiar da voz)"))
+                    ui.label("Sensibilidade (limiar da voz)");
+                    ui.add(egui::Slider::new(&mut p.gate_db, AudioPrefs::GATE_DB).suffix(" dB"))
                         .on_hover_text("A linha laranja no medidor. Quanto mais para a esquerda, mais sensível: sons baixos já contam como voz.");
                     if in_call || testing {
                         note(ui, "Fale e veja o medidor: a linha laranja deve ficar abaixo da sua voz e acima do ruído.");
@@ -610,7 +614,7 @@ impl App {
                 });
             } else {
                 card(ui, "Tratamento da voz", "O que o programa faz com o som antes de mandá-lo.", |ui| {
-                    ui.spacing_mut().slider_width = (ui.available_width() - 250.0).clamp(160.0, 520.0);
+                    ui.spacing_mut().slider_width = (ui.available_width() - 110.0).max(120.0);
                     ui.checkbox(&mut p.denoise, "Remover ruído (rede neural)")
                         .on_hover_text("Tira teclado, ventilador, estática e vozes ao fundo (RNNoise). Com ela ligada, a porta e o indicador \"voz\" só contam o que a rede reconhece como fala. Adiciona ~10 ms de atraso.");
                     ui.checkbox(&mut p.echo_cancel, "Cancelar eco do alto-falante")
@@ -622,7 +626,10 @@ impl App {
                     }
                     ui.checkbox(&mut p.gate, "Silenciar o que não é voz")
                         .on_hover_text("Quando o microfone fica abaixo do limiar, o som enviado é reduzido. Ajuste a sensibilidade até a linha ficar logo acima do ruído.");
-                    ui.add_enabled(p.gate, egui::Slider::new(&mut p.gate_depth_db, AudioPrefs::GATE_DEPTH_DB).suffix(" dB").text("Redução do ruído"));
+                    ui.add_enabled_ui(p.gate, |ui| {
+                        ui.label("Redução do ruído");
+                        ui.add(egui::Slider::new(&mut p.gate_depth_db, AudioPrefs::GATE_DEPTH_DB).suffix(" dB"));
+                    });
                     ui.checkbox(&mut p.high_pass, "Cortar graves (ventilador, mesa, sopro)");
                     ui.checkbox(&mut p.agc, "Volume automático (nivela voz baixa e alta)")
                         .on_hover_text("Reforça quem fala baixo e contém quem fala alto. Não reforça o ruído de fundo.");
