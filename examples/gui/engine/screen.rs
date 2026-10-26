@@ -5,8 +5,8 @@ use std::{collections::HashMap, sync::atomic::AtomicU64};
 use super::*;
 use clam::{
     node::Dialer,
-    phone::{OPEN_SCREEN_SLOT_MS, SCREEN_SLOT_MS, ScreenEvent},
-    video::{FPS, H264Decoder, H264Encoder, RawFrame, ScreenSource, pump},
+    phone::{OPEN_SCREEN_SLOT, SCREEN_SLOT, ScreenEvent},
+    video::{H264Decoder, H264Encoder, RawFrame, ScreenSource, fps_for, pump},
 };
 
 /// Estado da tela compartilhada, visto pela janela e pela chamada.
@@ -111,27 +111,27 @@ pub(crate) fn on_screen_event(state: &ScreenState, who: [u8; 32], dec: &mut Opti
 /// Abre a captura da tela: no Windows pelo GDI; no Unix pelo portal (PipeWire) no Wayland e pelo
 /// X11 nos outros casos, e se a primeira falhar tenta a outra. Fora daqui só há o trait `ScreenSource`.
 #[cfg(windows)]
-async fn open_source() -> Result<Box<dyn ScreenSource + Send>, String> {
+async fn open_source(_fps: f32) -> Result<Box<dyn ScreenSource + Send>, String> {
     clam::capture::GdiScreen::open().map(|s| Box::new(s) as Box<dyn ScreenSource + Send>).map_err(|e| e.to_string())
 }
 
 #[cfg(unix)]
-async fn open_source() -> Result<Box<dyn ScreenSource + Send>, String> {
-    async fn portal() -> Result<Box<dyn ScreenSource + Send>, String> {
-        clam::portal::PortalScreen::open().await.map(|s| Box::new(s) as Box<dyn ScreenSource + Send>).map_err(|e| e.to_string())
+async fn open_source(fps: f32) -> Result<Box<dyn ScreenSource + Send>, String> {
+    async fn portal(fps: f32) -> Result<Box<dyn ScreenSource + Send>, String> {
+        clam::portal::PortalScreen::open_with(fps).await.map(|s| Box::new(s) as Box<dyn ScreenSource + Send>).map_err(|e| e.to_string())
     }
     fn x11() -> Result<Box<dyn ScreenSource + Send>, String> {
         clam::capture::X11Screen::open().map(|s| Box::new(s) as Box<dyn ScreenSource + Send>).map_err(|e| e.to_string())
     }
     if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-        match portal().await {
+        match portal(fps).await {
             Ok(s) => Ok(s),
             Err(e) => x11().map_err(|_| e),
         }
     } else {
         match x11() {
             Ok(s) => Ok(s),
-            Err(e) => portal().await.map_err(|_| e),
+            Err(e) => portal(fps).await.map_err(|_| e),
         }
     }
 }
@@ -147,9 +147,10 @@ pub(crate) async fn share_task(dialer: Dialer, peer: [u8; 32], keys: clam::media
     st.note.lock().unwrap().clear();
     let wanted = || st.want_share.load(Ordering::Relaxed) && !shared.hangup.load(Ordering::Relaxed);
     let private = !st.open_path.load(Ordering::Relaxed);
-    let slot_ms = if private { SCREEN_SLOT_MS } else { OPEN_SCREEN_SLOT_MS };
-    let started = match open_source().await {
-        Ok(src) => H264Encoder::new(H264Encoder::bitrate_for(slot_ms)).map(|e| (src, e)).map_err(|e| e.to_string()),
+    let slot = if private { SCREEN_SLOT } else { OPEN_SCREEN_SLOT };
+    let bitrate = H264Encoder::bitrate_for(slot);
+    let started = match open_source(fps_for(bitrate)).await {
+        Ok(src) => H264Encoder::new(bitrate).map(|e| (src, e)).map_err(|e| e.to_string()),
         Err(e) => Err(e),
     };
     let (mut src, mut enc) = match started {
@@ -179,7 +180,7 @@ pub(crate) async fn share_task(dialer: Dialer, peer: [u8; 32], keys: clam::media
     let flag = shared.clone();
     // Capturar e codificar pesa: fora do executor.
     let share = tokio::task::spawn_blocking(move || {
-        let every = Duration::from_secs_f32(1.0 / FPS);
+        let every = Duration::from_secs_f32(1.0 / enc.fps());
         let mut next = std::time::Instant::now();
         let (mut pushed, mut skipped) = (0u64, 0u64);
         let (mut mark, mut mark_packets, mut rate) = (std::time::Instant::now(), 0u64, 0.0f64);

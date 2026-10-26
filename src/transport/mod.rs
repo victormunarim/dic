@@ -120,8 +120,10 @@ const CHANNEL: usize = 1024;
 const WRITE_QUEUE: usize = 256;
 /// Células esperando acima das quais o escritor com cover manda mais algumas por intervalo.
 const BACKLOG: usize = 4;
-/// Células a mais por intervalo quando há fila acumulada.
-const MAX_EXTRA: usize = 5;
+/// Células a mais por intervalo quando há fila acumulada. Com o cover de 10 ms dos relays, 1 + 32 por
+/// intervalo escoam até 3300 células/s, mais que os 2000 pacotes/s da tela sem privacidade (com 5, o teto
+/// era de 600 células/s e a fila do link enchia e descartava).
+const MAX_EXTRA: usize = 32;
 
 // ---------------------------------------------------------------------------
 // Leitura/escrita de links

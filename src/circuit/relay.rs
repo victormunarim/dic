@@ -46,10 +46,10 @@ pub enum Action {
 pub struct RelayConfig {
     /// Circuitos simultâneos aceitos. Padrão: 256.
     pub max_circuits: usize,
-    /// Banda total do relay em bytes/s (células, nos dois sentidos). Padrão: 1 MB/s.
+    /// Banda total do relay em bytes/s (células, nos dois sentidos). Padrão: 2 MB/s.
     pub relay_bytes_per_sec: u64,
-    /// Teto por circuito em bytes/s, nos dois sentidos. Padrão: 400 kB/s (voz usa ~25 kB/s; um circuito
-    /// de tela com cover de 2 ms, ~260 kB/s).
+    /// Teto por circuito em bytes/s, nos dois sentidos. Padrão: 800 kB/s (voz usa ~25 kB/s; um circuito
+    /// de tela com cover de 2 ms, ~260 kB/s; sem privacidade, a 0,5 ms, ~520 kB/s).
     pub circuit_bytes_per_sec: u64,
     /// Rajada tolerada, em ms de banda. Padrão: 500.
     pub burst_ms: u64,
@@ -69,8 +69,8 @@ impl Default for RelayConfig {
     fn default() -> Self {
         Self {
             max_circuits: 256,
-            relay_bytes_per_sec: 1_000_000,
-            circuit_bytes_per_sec: 400_000,
+            relay_bytes_per_sec: 2_000_000,
+            circuit_bytes_per_sec: 800_000,
             burst_ms: 500,
             idle_ms: 60_000,
             max_auth_failures: 16,

@@ -55,8 +55,8 @@ pub fn target_size(w: usize, h: usize) -> Option<(usize, usize)> {
 }
 
 /// Argumentos do `gst-launch-1.0` que leem o nó `node` pelo descritor `fd` e escrevem RGBA no stdout.
-pub fn pipeline_args(fd: i32, node: u32, (w, h): (usize, usize)) -> Vec<String> {
-    let fps = FPS as u32;
+pub fn pipeline_args(fd: i32, node: u32, (w, h): (usize, usize), fps: f32) -> Vec<String> {
+    let fps = fps as u32;
     [
         "-q".to_string(),
         "pipewiresrc".into(),
@@ -110,6 +110,11 @@ pub struct PortalScreen {
 impl PortalScreen {
     /// Abre o diálogo do portal (a pessoa escolhe o monitor ou a janela) e começa a capturar.
     pub async fn open() -> Result<Self, PortalError> {
+        Self::open_with(FPS).await
+    }
+
+    /// Como [`Self::open`], capturando a `fps` quadros por segundo.
+    pub async fn open_with(fps: f32) -> Result<Self, PortalError> {
         let proxy = Screencast::new().await.map_err(portal_err)?;
         let session = proxy.create_session(Default::default()).await.map_err(portal_err)?;
         proxy
@@ -131,7 +136,7 @@ impl PortalScreen {
         // `dup` não marca o descritor como "fechar ao executar", então o filho o herda.
         let inherited = rustix::io::dup(&remote).map_err(|e| PortalError::Gstreamer(e.to_string()))?;
         let mut child = Command::new("gst-launch-1.0")
-            .args(pipeline_args(inherited.as_raw_fd(), stream.pipe_wire_node_id(), size))
+            .args(pipeline_args(inherited.as_raw_fd(), stream.pipe_wire_node_id(), size, fps))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -185,7 +190,7 @@ mod tests {
 
     #[test]
     fn pipeline_reads_the_node_from_the_inherited_fd_and_writes_rgba() {
-        let a = pipeline_args(7, 42, (640, 360));
+        let a = pipeline_args(7, 42, (640, 360), FPS);
         assert!(a.contains(&"fd=7".to_string()) && a.contains(&"path=42".to_string()));
         assert!(a.contains(&"video/x-raw,format=RGBA,width=640,height=360".to_string()));
         assert_eq!(a.last().unwrap(), "fd=1");

@@ -19,7 +19,7 @@
 //! PCM entra e sai por canais; o relógio de reprodução (`frame_ms`) é interno.
 //!
 //! **Tela.** A transmissão de tela anda num circuito *só dela* (veja [`crate::media::screen`]),
-//! com cover de [`SCREEN_SLOT_MS`] e chaves derivadas das da chamada. Quem transmite abre o
+//! com cover de [`SCREEN_SLOT`] e chaves derivadas das da chamada. Quem transmite abre o
 //! circuito até o telefone de quem assiste ([`share_screen`]); quem assiste recebe
 //! [`ScreenEvent`] em [`ActiveCall::next_screen`]. A chamada que ligou também precisa estar
 //! registrada no telefone da própria máquina ([`PhoneLink`]) para receber esse circuito.
@@ -57,12 +57,14 @@ use crate::{
     transport::{CircuitClient, ClientOptions},
 };
 
-/// Intervalo entre pacotes do circuito da tela: 200 pacotes/s, ≈ 277 kbps de vídeo.
-pub const SCREEN_SLOT_MS: u64 = 2;
+/// Intervalo entre pacotes do circuito da tela: 500 pacotes/s, ≈ 680 kbps de vídeo.
+pub const SCREEN_SLOT: Duration = Duration::from_millis(2);
 
-/// Intervalo entre pacotes quando a pessoa abre mão da privacidade da tela: sem cover e o dobro da taxa.
-pub const OPEN_SCREEN_SLOT_MS: u64 = 1;
-/// Pacotes seguidos que o modo sem privacidade pode mandar de uma vez para recuperar atraso do relógio.
+/// Intervalo entre pacotes quando a pessoa abre mão da privacidade da tela: sem cover e quatro vezes a taxa
+/// (2000 pacotes/s, ≈ 2,7 Mbps de vídeo, 512 kB/s no fio).
+pub const OPEN_SCREEN_SLOT: Duration = Duration::from_micros(500);
+/// Pacotes seguidos que o modo sem privacidade pode mandar de uma vez para recuperar atraso do relógio
+/// (o temporizador do sistema acorda a cada 1 ms, ou pior, e o intervalo é menor que isso).
 const OPEN_SCREEN_BURST: f64 = 8.0;
 
 /// Maior quadro `[u16][dados]` aceito do circuito; os de mídia e sinalização têm 200 B.
@@ -462,7 +464,7 @@ async fn forward_extra(linked: &Option<(u64, PhoneLink)>, out: WireOut) {
 
 /// Opções do cliente de circuito da tela: cover de circuito e de link no ritmo dos slots.
 pub fn screen_client_options() -> ClientOptions {
-    let every = Duration::from_millis(SCREEN_SLOT_MS);
+    let every = SCREEN_SLOT;
     ClientOptions { cover: Some(every), circuit_cover: Some(every), ..Default::default() }
 }
 
@@ -520,13 +522,13 @@ impl Drop for ScreenShare {
 /// à chamada do outro lado. Depois sai um pacote por slot enquanto houver vídeo na fila; nos
 /// demais instantes o cover do circuito mantém o fluxo no mesmo ritmo.
 pub async fn share_screen(client: CircuitClient, keys: &CallKeys, wait: Duration) -> Result<ScreenShare, CallError> {
-    share_screen_slot(client, keys, wait, SCREEN_SLOT_MS).await
+    share_screen_slot(client, keys, wait, SCREEN_SLOT).await
 }
 
-/// Como [`share_screen`], com um pacote a cada `slot_ms` ms ([`SCREEN_SLOT_MS`] com cover;
-/// [`OPEN_SCREEN_SLOT_MS`] para o cliente de [`open_screen_client_options`]). Sem cover, um relógio que atrasa
+/// Como [`share_screen`], com um pacote a cada `slot` ([`SCREEN_SLOT`] com cover;
+/// [`OPEN_SCREEN_SLOT`] para o cliente de [`open_screen_client_options`]). Sem cover, um relógio que atrasa
 /// (o do Windows, por exemplo) não reduz a taxa: o atraso vira crédito e sai em rajadas curtas.
-pub async fn share_screen_slot(mut client: CircuitClient, keys: &CallKeys, wait: Duration, slot_ms: u64) -> Result<ScreenShare, CallError> {
+pub async fn share_screen_slot(mut client: CircuitClient, keys: &CallKeys, wait: Duration, slot: Duration) -> Result<ScreenShare, CallError> {
     let ready = client.status().await.is_some_and(|s| s.active.is_some_and(|a| a.ready));
     timeout(wait, async {
         if ready {
@@ -544,7 +546,7 @@ pub async fn share_screen_slot(mut client: CircuitClient, keys: &CallKeys, wait:
     .map_err(|_| CallError::NoCircuit)??;
 
     // Com cover o circuito só aceita um pacote por intervalo; sem cover, o atraso do relógio se recupera.
-    let max_burst = if slot_ms == SCREEN_SLOT_MS { 1.0 } else { OPEN_SCREEN_BURST };
+    let max_burst = if slot == SCREEN_SLOT { 1.0 } else { OPEN_SCREEN_BURST };
     let stream = Arc::new(Mutex::new(ScreenStream::new(keys)));
     let stopping = Arc::new(AtomicBool::new(false));
     let hello = stream.lock().expect("tela").next_packet()?;
@@ -552,7 +554,7 @@ pub async fn share_screen_slot(mut client: CircuitClient, keys: &CallKeys, wait:
     let task = {
         let (stream, stopping) = (stream.clone(), stopping.clone());
         tokio::spawn(async move {
-            let mut tick = interval(Duration::from_millis(slot_ms));
+            let mut tick = interval(slot);
             tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
             // Crédito em slots: o que o relógio atrasou vira rajada curta em vez de taxa perdida.
             let (mut credit, mut last) = (1.0f64, Instant::now());
@@ -565,12 +567,12 @@ pub async fn share_screen_slot(mut client: CircuitClient, keys: &CallKeys, wait:
                                 if let Ok(p) = p {
                                     let _ = client.send(&p).await;
                                 }
-                                tokio::time::sleep(Duration::from_millis(slot_ms)).await;
+                                tokio::time::sleep(slot).await;
                             }
                             break;
                         }
                         let now = Instant::now();
-                        credit = (credit + now.duration_since(last).as_secs_f64() * 1000.0 / slot_ms as f64).min(max_burst);
+                        credit = (credit + now.duration_since(last).as_secs_f64() / slot.as_secs_f64()).min(max_burst);
                         last = now;
                         while credit >= 1.0 {
                             let p = {

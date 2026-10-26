@@ -12,7 +12,7 @@ use clam::media::{
     codec::{Codec, CodecId, Mulaw},
     signal::{Answer, Caller},
 };
-use clam::phone::{ActiveCall, CallError, Phone, ScreenEvent, call, call_linked, open_screen_client_options, screen_client_options, share_screen, share_screen_slot, OPEN_SCREEN_SLOT_MS};
+use clam::phone::{ActiveCall, CallError, Phone, ScreenEvent, call, call_linked, open_screen_client_options, screen_client_options, share_screen, share_screen_slot, OPEN_SCREEN_SLOT};
 use clam::transport::{CircuitClient, RelayServer, ServerConfig, allow_list};
 use clam::{
     rand_core::OsRng,
@@ -377,7 +377,7 @@ async fn the_screen_without_privacy_arrives_with_no_cover_and_a_faster_slot() {
     let a = caller.await.unwrap().unwrap();
 
     let open = CircuitClient::spawn_with(CircuitManager::new(ManagerConfig::default(), "contato:9", cands), Duration::from_secs(2), open_screen_client_options());
-    let share = share_screen_slot(open, &a.next_share_keys(), WAIT, OPEN_SCREEN_SLOT_MS).await.unwrap();
+    let share = share_screen_slot(open, &a.next_share_keys(), WAIT, OPEN_SCREEN_SLOT).await.unwrap();
     let frames = [video(900, 1), video(120, 2), video(2500, 3)];
     for (i, f) in frames.iter().enumerate() {
         assert!(share.push(f, i == 0).unwrap());
@@ -422,7 +422,7 @@ async fn the_screen_without_privacy_carries_a_burst_of_big_frames_quickly() {
     let mut b = incoming.accept(Mulaw::new()).await.unwrap();
     let a = caller.await.unwrap().unwrap();
     let c = CircuitClient::spawn_with(CircuitManager::new(ManagerConfig::default(), "contato:9", cands), Duration::from_secs(2), open_screen_client_options());
-    let share = share_screen_slot(c, &a.next_share_keys(), WAIT, OPEN_SCREEN_SLOT_MS).await.unwrap();
+    let share = share_screen_slot(c, &a.next_share_keys(), WAIT, OPEN_SCREEN_SLOT).await.unwrap();
     let started = std::time::Instant::now();
     let f = video(30_000, 1);
     for i in 0..3 {
@@ -430,7 +430,7 @@ async fn the_screen_without_privacy_carries_a_burst_of_big_frames_quickly() {
     }
     let got = collect_frames(&mut b, 3).await;
     assert!(got.iter().all(|g| g.data == f));
-    // 90 kB são ~600 pacotes: com 1 ms por pacote cabem em ~0,6 s; o dobro do tempo cobre a carga do teste.
+    // 90 kB são ~530 pacotes: com 0,5 ms por pacote cabem em ~0,3 s; o quíntuplo do tempo cobre a carga do teste.
     assert!(started.elapsed() < Duration::from_millis(1500), "{:?}", started.elapsed());
     assert!(share.stats().packets_sent >= 500, "{}", share.stats().packets_sent);
 }

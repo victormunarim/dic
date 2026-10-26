@@ -15,14 +15,24 @@
 //! A captura fica atrás de [`ScreenSource`]; o X11 está em [`crate::capture`].
 
 use crate::media::screen::{ScreenStream, FRAGMENT_PAYLOAD, MAX_FRAME, MAX_QUEUE};
-use crate::phone::{ScreenShare, SCREEN_SLOT_MS};
+use crate::phone::{ScreenShare, SCREEN_SLOT};
 use openh264::decoder::Decoder;
 use openh264::encoder::{Encoder, EncoderConfig, FrameRate, FrameType, IntraFramePeriod, QpRange, RateControlMode, UsageType};
 use openh264::formats::{RgbaSliceU8, YUVBuffer, YUVSource};
 use thiserror::Error;
 
-/// Quadros por segundo da transmissão.
+/// Quadros por segundo da transmissão quando o circuito é estreito (com cover).
 pub const FPS: f32 = 15.0;
+/// Quadros por segundo quando o circuito aguenta pelo menos [`HIGH_FPS_BITRATE`] (sem privacidade).
+pub const HIGH_FPS: f32 = 30.0;
+/// Taxa de vídeo, em bits/s, a partir da qual a transmissão passa a [`HIGH_FPS`]: abaixo disso, mais
+/// quadros por segundo só dividiriam os mesmos bits em quadros piores.
+pub const HIGH_FPS_BITRATE: u32 = 1_500_000;
+
+/// Quadros por segundo adequados a uma taxa de vídeo.
+pub fn fps_for(bitrate: u32) -> f32 {
+    if bitrate >= HIGH_FPS_BITRATE { HIGH_FPS } else { FPS }
+}
 
 /// Largura máxima enviada: telas maiores são reduzidas por média de blocos, senão o quadro-chave
 /// passa de [`MAX_FRAME`] e nada chega a quem assiste.
@@ -136,8 +146,6 @@ const HEAVY_FRAMES: u32 = 3;
 const HEAVY: f32 = 2.0;
 /// Maior redução extra por movimento.
 const MAX_MOTION_K: usize = 3;
-/// Quadros de imagem parada seguidos (1 s) antes de voltar à resolução cheia.
-const CALM_FRAMES: u32 = FPS as u32;
 /// Menor fração de pixels mudados considerada na antecipação (evita dividir por zero).
 const MIN_CHANGE: f32 = 0.02;
 /// Passo, em pixels, da amostragem usada para medir quanto a imagem mudou.
@@ -167,6 +175,8 @@ pub struct H264Encoder {
     size: Option<(usize, usize)>,
     /// Bytes que um quadro pode ter para que o vídeo caiba na taxa.
     target: f32,
+    /// Quadros por segundo desta transmissão ([`fps_for`] da taxa).
+    fps: f32,
     need_key: bool,
     /// Fator mínimo de redução; sobe quando o quadro-chave não cabe em [`FRAME_LIMIT`] (tela muito detalhada).
     min_k: usize,
@@ -179,7 +189,7 @@ pub struct H264Encoder {
     /// Menor QP permitido enquanto a imagem está parada (ver [`SPIKE`]).
     floor: f32,
     /// Fator de redução extra durante movimento brusco que nem o QP mais grosseiro segura: menos pixels,
-    /// menos bits por quadro, mais quadros por segundo. Volta a 1 depois de [`CALM_FRAMES`] quadros parados.
+    /// menos bits por quadro, mais quadros por segundo. Volta a 1 depois de 1 s (`fps` quadros) de imagem parada.
     motion_k: usize,
     heavy: u32,
     calm: u32,
@@ -200,20 +210,22 @@ impl H264Encoder {
     /// Taxa em bits/s do vídeo: 90% do que o circuito de tela carrega; a folga absorve a ponta do último
     /// fragmento de cada quadro, e o excesso de um pico vai para a fila (que larga a camada alta).
     pub fn default_bitrate() -> u32 {
-        Self::bitrate_for(SCREEN_SLOT_MS)
+        Self::bitrate_for(SCREEN_SLOT)
     }
 
-    /// Como [`Self::default_bitrate`], para um circuito que manda um pacote a cada `slot_ms` ms.
-    pub fn bitrate_for(slot_ms: u64) -> u32 {
-        (ScreenStream::capacity_bps(slot_ms) * 9 / 10) as u32
+    /// Como [`Self::default_bitrate`], para um circuito que manda um pacote a cada `slot`.
+    pub fn bitrate_for(slot: std::time::Duration) -> u32 {
+        (ScreenStream::capacity_bps(slot) * 9 / 10) as u32
     }
 
     pub fn new(bitrate: u32) -> Result<Self, VideoError> {
         let qp = QP_START;
+        let fps = fps_for(bitrate);
         Ok(Self {
-            inner: Self::open(qp)?,
+            inner: Self::open(qp, fps)?,
             size: None,
-            target: bitrate as f32 / 8.0 / FPS,
+            target: bitrate as f32 / 8.0 / fps,
+            fps,
             need_key: true,
             min_k: 1,
             layered: false,
@@ -232,7 +244,7 @@ impl H264Encoder {
         })
     }
 
-    fn open(qp: f32) -> Result<Encoder, VideoError> {
+    fn open(qp: f32, fps: f32) -> Result<Encoder, VideoError> {
         let qp = qp.round() as u8;
         let config = EncoderConfig::new()
             .usage_type(UsageType::ScreenContentRealTime)
@@ -240,12 +252,17 @@ impl H264Encoder {
             // `set_qp` manda em cada quadro, e quem decide o tamanho é este módulo.
             .rate_control_mode(RateControlMode::Off)
             .qp(QpRange::new(qp, qp))
-            .max_frame_rate(FrameRate::from_hz(FPS))
+            .max_frame_rate(FrameRate::from_hz(fps))
             .skip_frames(false)
             // Quadro-chave grande (dezenas de kB) leva segundos no circuito e congela a imagem: só periódico
             // de longe em longe; perda e quem entra pedem o seu por `WANT_KEY`.
-            .intra_frame_period(IntraFramePeriod::from_num_frames((FPS * 30.0) as u32));
+            .intra_frame_period(IntraFramePeriod::from_num_frames((fps * 30.0) as u32));
         Encoder::with_api_config(openh264::OpenH264API::from_source(), config).map_err(codec_err)
+    }
+
+    /// Quadros por segundo em que quem chama deve entregar imagens.
+    pub fn fps(&self) -> f32 {
+        self.fps
     }
 
     /// QP configurado no último quadro (diagnóstico): quanto maior, mais grosseira a imagem.
@@ -297,7 +314,7 @@ impl H264Encoder {
         if changed < STILL {
             self.heavy = 0;
             self.calm += 1;
-            if self.calm >= CALM_FRAMES {
+            if self.calm >= self.fps as u32 {
                 self.motion_k = 1;
             }
             if ratio > SPIKE {
@@ -340,7 +357,7 @@ impl H264Encoder {
         let dims = (frame.width, frame.height);
         // O H.264 do openh264 fixa a resolução na abertura: tela nova, codificador novo.
         if self.size.is_some_and(|s| s != dims) {
-            self.inner = Self::open(self.qp)?;
+            self.inner = Self::open(self.qp, self.fps)?;
             self.applied_qp = self.qp;
             self.layered = false;
             self.need_key = true;
@@ -586,11 +603,11 @@ mod tests {
         px
     }
 
-    /// Simula o circuito de tela: um quadro por tick de 1/FPS, a fila escoando `1000 / SCREEN_SLOT_MS / FPS`
+    /// Simula o circuito de tela: um quadro por tick de 1/FPS, a fila escoando `1 / SCREEN_SLOT / FPS`
     /// fragmentos por tick e o quadro só sendo codificado com a fila abaixo de `GATE_BACKLOG`, como em
     /// [`pump_all`]. Devolve (quadros enviados, maior fila em fragmentos, quadros que o circuito recusaria).
     fn run_ticks(enc: &mut H264Encoder, queue: &mut f32, ticks: usize, view: impl Fn(usize) -> RawFrame) -> (usize, f32, usize) {
-        let drain = (1000 / SCREEN_SLOT_MS) as f32 / FPS;
+        let drain = (1.0 / SCREEN_SLOT.as_secs_f32()) / FPS;
         let (mut sent, mut max, mut refused) = (0, 0f32, 0);
         for t in 0..ticks {
             *queue = (*queue - drain).max(0.0);
@@ -667,7 +684,7 @@ mod tests {
         }
         assert!(enc.scale() >= 2, "a resolução não caiu em {t} quadros");
         let still = view(0);
-        for _ in 0..CALM_FRAMES + 2 {
+        for _ in 0..FPS as u32 + 2 {
             enc.encode(&still, false).unwrap();
         }
         assert_eq!(enc.scale(), 1);
@@ -732,7 +749,20 @@ mod tests {
         }
         let used = bytes as u64 * 8 / 10;
         assert!(max <= MAX_FRAME);
-        assert!(used < ScreenStream::capacity_bps(SCREEN_SLOT_MS), "{used} bps");
+        assert!(used < ScreenStream::capacity_bps(SCREEN_SLOT), "{used} bps");
+    }
+
+    #[test]
+    fn open_circuit_gets_a_higher_bitrate_and_30_fps() {
+        let (private, open) = (H264Encoder::bitrate_for(SCREEN_SLOT), H264Encoder::bitrate_for(crate::phone::OPEN_SCREEN_SLOT));
+        assert!(open >= HIGH_FPS_BITRATE && private < HIGH_FPS_BITRATE, "{private} / {open}");
+        assert_eq!(fps_for(private), FPS);
+        assert_eq!(fps_for(open), HIGH_FPS);
+        let mut enc = H264Encoder::new(open).unwrap();
+        assert_eq!(enc.fps(), HIGH_FPS);
+        // O orçamento por quadro é o da taxa dividida pelos 30 quadros, e o quadro cabe no circuito.
+        let f = enc.encode(&scene(320, 180, 0), false).unwrap().unwrap();
+        assert!(f.keyframe && f.data.len() <= MAX_FRAME);
     }
 
     #[test]

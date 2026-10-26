@@ -122,9 +122,9 @@ impl ScreenStream {
         }
     }
 
-    /// Bits por segundo de vídeo que cabem com um pacote a cada `slot_ms` (já sem cabeçalhos).
-    pub fn capacity_bps(slot_ms: u64) -> u64 {
-        FRAGMENT_PAYLOAD as u64 * 8 * 1000 / slot_ms.max(1)
+    /// Bits por segundo de vídeo que cabem com um pacote a cada `slot` (já sem cabeçalhos).
+    pub fn capacity_bps(slot: std::time::Duration) -> u64 {
+        (FRAGMENT_PAYLOAD as u128 * 8 * 1_000_000 / slot.as_micros().max(1)) as u64
     }
 
     /// Enfileira um quadro codificado. `Ok(false)` = descartado (fila cheia aguardando quadro-chave).
@@ -547,6 +547,6 @@ mod tests {
     #[test]
     fn capacity_matches_the_slot_rate() {
         // 5 ms = 200 pacotes/s.
-        assert_eq!(ScreenStream::capacity_bps(5), FRAGMENT_PAYLOAD as u64 * 8 * 200);
+        assert_eq!(ScreenStream::capacity_bps(Duration::from_millis(5)), FRAGMENT_PAYLOAD as u64 * 8 * 200);
     }
 }
