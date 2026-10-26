@@ -345,7 +345,10 @@ impl App {
                     self.zoom = Some(*who);
                 }
             });
-            ui.add(egui::Image::new(tex).max_width(ui.available_width()).shrink_to_fit());
+            // Ampliada, a miniatura sai: a imagem só aparece na janela ampliada (e não é desenhada duas vezes).
+            if self.zoom != Some(*who) {
+                ui.add(egui::Image::new(tex).max_width(ui.available_width()).shrink_to_fit());
+            }
         }
     }
 }
