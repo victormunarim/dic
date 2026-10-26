@@ -57,6 +57,8 @@ pub enum Msg {
     Joined,
     /// O segredo novo do servidor, depois de um `Rekey`.
     Gift { epoch: u16, secret: [u8; 32] },
+    /// Recebi o quadro cujo nonce começa por estes bytes (veja [`nonce_tag`]).
+    Ack([u8; 8]),
 }
 
 fn cipher(me: &StaticSecret, peer: &[u8; 32], server: &ServerId) -> Option<ChaCha20Poly1305> {
@@ -126,6 +128,10 @@ fn encode(msg: &Msg) -> Vec<u8> {
             v.extend_from_slice(&epoch.to_be_bytes());
             v.extend_from_slice(secret);
         }
+        Msg::Ack(tag) => {
+            v.push(9);
+            v.extend_from_slice(tag);
+        }
     }
     v
 }
@@ -160,8 +166,14 @@ fn decode(b: &[u8]) -> Option<Msg> {
         6 if b.len() > 32 => Msg::Join { vk: b[..32].try_into().ok()?, reach: take_reach(&b[32..])? },
         7 if b.is_empty() => Msg::Joined,
         8 if b.len() == 34 => Msg::Gift { epoch: u16::from_be_bytes([b[0], b[1]]), secret: b[2..].try_into().ok()? },
+        9 if b.len() == 8 => Msg::Ack(b.try_into().ok()?),
         _ => return None,
     })
+}
+
+/// Identifica um quadro para quem o confirma: os primeiros bytes do nonce.
+pub fn nonce_tag(frame: &[u8]) -> Option<[u8; 8]> {
+    frame.get(HEAD..HEAD + 8)?.try_into().ok()
 }
 
 /// Quadro de `msg` de `me` para `peer`, ou `None` se a chave do outro não serve ou a mensagem não cabe.
@@ -232,6 +244,7 @@ mod tests {
             Msg::Join { vk: [4; 32], reach: Reach { addr: "a".repeat(MAX_ADDR), onion: [8; 32], link: [9; 32] } },
             Msg::Joined,
             Msg::Gift { epoch: 2, secret: [7; 32] },
+            Msg::Ack([3; 8]),
         ]
     }
 

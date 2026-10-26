@@ -39,6 +39,7 @@ const OPS_PER_ROUND: usize = 64;
 /// Um quadro a entregar a `to`; `via` é o último relay que ele anunciou, para quem ainda não o conhece.
 #[derive(Clone, Debug)]
 pub struct Outbound {
+    pub server: ServerId,
     pub to: [u8; 32],
     pub via: Option<Reach>,
     pub frame: Frame,
@@ -63,6 +64,8 @@ pub enum Event {
 pub struct Output {
     pub send: Vec<Outbound>,
     pub events: Vec<Event>,
+    /// Confirmação do quadro que acabou de chegar, para voltar pela mesma conexão.
+    pub ack: Option<Frame>,
 }
 
 impl Output {
@@ -170,7 +173,7 @@ pub struct Servers {
 
 fn seal_to(me: &Me, s: &Server, key: &[u8; 32], msg: &Msg) -> Option<Outbound> {
     let frame = wire::seal(&me.secret, key, &s.id, msg)?;
-    Some(Outbound { to: *key, via: s.peers.get(&member_id(key)).and_then(|p| p.reach.as_ref().map(|r| r.1.clone())), frame })
+    Some(Outbound { server: s.id, to: *key, via: s.peers.get(&member_id(key)).and_then(|p| p.reach.as_ref().map(|r| r.1.clone())), frame })
 }
 
 fn vector_msgs(reg: &Registry) -> Vec<Msg> {
@@ -196,6 +199,11 @@ impl Servers {
 
     pub fn is_empty(&self) -> bool {
         self.servers.is_empty()
+    }
+
+    /// `reply` é a confirmação de `sent` que o destinatário mandou.
+    pub fn is_ack(&self, sent: &Outbound, reply: &[u8]) -> bool {
+        matches!(wire::open(&self.me.secret, &sent.to, &sent.server, reply), Some(Msg::Ack(t)) if Some(t) == wire::nonce_tag(&sent.frame))
     }
 
     /// Todos os servidores com a época e o segredo atuais (para o reencontro).
@@ -565,6 +573,9 @@ impl Servers {
         for sid in ids {
             let Some(key) = self.servers[&sid].peers.get(&sender).map(|p| p.key) else { continue };
             let Some(msg) = wire::open(&self.me.secret, &key, &sid, frame) else { continue };
+            if !matches!(msg, Msg::Ack(_)) {
+                out.ack = wire::nonce_tag(frame).and_then(|t| wire::seal(&self.me.secret, &key, &sid, &Msg::Ack(t)));
+            }
             out.merge(self.on_msg(sid, key, msg, now));
             break;
         }
@@ -682,6 +693,7 @@ impl Servers {
             Msg::Joined => {
                 // Nada a fazer: o que me torna membro são as operações.
             }
+            Msg::Ack(_) => {}
             Msg::Gift { epoch, secret } => {
                 if is_member && epoch == s.reg.state().epoch && epoch > s.epoch {
                     s.epoch = epoch;

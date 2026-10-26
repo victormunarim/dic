@@ -7,6 +7,8 @@
 
 pub mod engine;
 pub mod invite;
+#[cfg(feature = "net")]
+pub mod net;
 pub mod op;
 pub mod registry;
 pub mod wire;

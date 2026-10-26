@@ -37,6 +37,7 @@ use crate::{
         update::{self, AddressRecord, Intro, MAX_ADDR},
     },
     phone::{self, ActiveCall, AddressUpdate, CallError, IncomingCall, Introduction, Phone, PhoneLink, ScreenShare, call_linked, open_screen_client_options, screen_client_options, share_screen_slot, OPEN_SCREEN_SLOT, SCREEN_SLOT},
+    server::net::{ServerHub, restore},
     rendezvous::{self, ANCHOR_DEST, Anchor, DhtOptions, GATEWAY_DEST, Remote, Rendezvous, Signed},
     transport::{CircuitClient, ClientOptions, RelayServer, ServerConfig, allow_list},
 };
@@ -142,6 +143,8 @@ pub struct NodeConfig {
     pub anchor: bool,
     /// Âncoras onde este nó grava o endereço e consulta o dos contatos, em ordem de preferência. Padrão: nenhuma.
     pub anchors: Vec<RelayInfo>,
+    /// Estado dos servidores guardado por [`crate::server::Servers::export`]; `None`: nenhum servidor.
+    pub servers: Option<String>,
 }
 
 /// Segredos do relay do nó: o do circuito (`onion`) e o do link (Noise NK).
@@ -159,7 +162,7 @@ impl RelayKeys {
 
 impl NodeConfig {
     pub fn new(secret: StaticSecret, contacts: Vec<[u8; 32]>) -> Self {
-        Self { secret, contacts, relay_port: DEFAULT_RELAY_PORT, public_addr: None, upnp: true, known: Vec::new(), hints: Vec::new(), relay_keys: None, history: Vec::new(), updates: true, update_retry: UPDATE_RETRY, dht: None, name: String::new(), introductions: true, anchor: false, anchors: Vec::new() }
+        Self { secret, contacts, relay_port: DEFAULT_RELAY_PORT, public_addr: None, upnp: true, known: Vec::new(), hints: Vec::new(), relay_keys: None, history: Vec::new(), updates: true, update_retry: UPDATE_RETRY, dht: None, name: String::new(), introductions: true, anchor: false, anchors: Vec::new(), servers: None }
     }
 }
 
@@ -297,7 +300,7 @@ impl Dialer {
 
     /// Relays de `peer` para tentar antes da DHT e das âncoras, em ordem: o guardado de uma ligação ou aviso, o
     /// que o convite dele trouxe (que ninguém verificou) e os endereços antigos, do mais novo ao mais velho.
-    fn stored_for(&self, peer: &[u8; 32]) -> Vec<RelayInfo> {
+    pub(crate) fn stored_for(&self, peer: &[u8; 32]) -> Vec<RelayInfo> {
         let mut v: Vec<RelayInfo> = self.known.lock().unwrap().get(peer).cloned().into_iter().collect();
         if let Some(h) = self.hints.lock().unwrap().get(peer)
             && !v.contains(h)
@@ -410,6 +413,39 @@ impl Dialer {
             self.remember(&peer, used);
         }
         acked
+    }
+
+    /// Entrega `frames` a `peer` por um circuito só, no endereço que se tem dele, e espera a confirmação de cada
+    /// um (`acked(i, resposta)`). Devolve quantos foram confirmados. Quem confirmou prova o endereço, que passa a
+    /// ser o guardado. Não procura na DHT nem nas âncoras: quem usa já tem o endereço do membro.
+    pub(crate) async fn deliver_batch(&self, peer: [u8; 32], frames: &[crate::media::signal::Frame], acked: impl Fn(usize, &[u8]) -> bool, wait: Duration) -> usize {
+        let Some((mut client, used)) = self.stored_client(&peer, self.stored_for(&peer), ClientOptions::default).await else { return 0 };
+        let mut got = vec![false; frames.len()];
+        for f in frames {
+            if client.send(f).await.is_err() {
+                break;
+            }
+        }
+        let _ = tokio::time::timeout(wait, async {
+            while got.iter().any(|g| !g) {
+                match client.next_event().await {
+                    Some(Event::Data(d)) => {
+                        if let Some(i) = (0..frames.len()).find(|i| !got[*i] && acked(*i, &d)) {
+                            got[i] = true;
+                        }
+                    }
+                    Some(_) => {}
+                    None => return,
+                }
+            }
+        })
+        .await;
+        client.stop();
+        let n = got.iter().filter(|g| **g).count();
+        if n > 0 {
+            self.remember(&peer, used);
+        }
+        n
     }
 
     /// Relays de contatos para montar o circuito até um gateway da DHT, sem o
@@ -846,6 +882,8 @@ pub struct Node {
     introduced: Arc<Mutex<Vec<Introduced>>>,
     /// Apresentações em entrega: por contato, a tarefa que insiste até a confirmação ([`Node::introduce`]).
     introducing: Arc<Mutex<HashMap<[u8; 32], JoinHandle<()>>>>,
+    /// Os servidores desta pessoa (veja [`Node::servers`]).
+    servers: ServerHub,
     /// Tarefas de fundo: a que aplica os avisos de endereço dos contatos e a fila de saída dos nossos.
     background: Vec<JoinHandle<()>>,
 }
@@ -906,7 +944,7 @@ impl Node {
     }
 
     async fn finish(cfg: NodeConfig, mut phone: Phone, relay: RelayServer, onion: [u8; 32], dht: Services) -> io::Result<Self> {
-        let NodeConfig { secret, public_addr, upnp, known, hints, history, updates, update_retry, dht: dht_options, name, introductions, anchors, .. } = cfg;
+        let NodeConfig { secret, public_addr, upnp, known, hints, history, updates, update_retry, dht: dht_options, name, introductions, anchors, servers: saved_servers, .. } = cfg;
         let known: Known = Arc::new(Mutex::new(known.into_iter().collect()));
         let hints: Known = Arc::new(Mutex::new(hints.into_iter().collect()));
         // A lista guarda do mais novo ao mais velho de cada contato; ao reler, a ordem se mantém.
@@ -975,6 +1013,7 @@ impl Node {
         }
         background.extend(servers);
         phone.accept_introductions(introductions);
+        let server_hub = ServerHub::start(restore(secret.clone(), saved_servers.as_deref()), dialer.clone(), &phone, own.clone());
         let introduced: Arc<Mutex<Vec<Introduced>>> = Arc::default();
         if let Some(mut rx) = phone.take_introductions() {
             let introduced = introduced.clone();
@@ -987,7 +1026,7 @@ impl Node {
                 }
             }));
         }
-        Ok(Self { secret, name, retry: update_retry, phone, _relay: relay, renew, reach, note, dialer, known, hints, history, own, update_notice, background, addr: addr_now, introduced, introducing: Arc::default() })
+        Ok(Self { secret, name, retry: update_retry, phone, _relay: relay, renew, reach, note, dialer, known, hints, history, own, update_notice, background, addr: addr_now, introduced, introducing: Arc::default(), servers: server_hub })
     }
 
     /// Aceita convites de `keys` além dos contatos.
@@ -1146,6 +1185,11 @@ impl Node {
         self.dialer.share_screen(peer, call, wait).await
     }
 
+    /// Os servidores e salas desta pessoa: criar, convidar, presença, eventos. Cópia barata.
+    pub fn servers(&self) -> ServerHub {
+        self.servers.clone()
+    }
+
     /// Cópia barata que sabe ligar sem emprestar o `Node`: serve para discar em tarefas em segundo plano.
     pub fn dialer(&self) -> Dialer {
         self.dialer.clone()
@@ -1166,5 +1210,6 @@ impl Drop for Node {
         for t in &self.background {
             t.abort();
         }
+        self.servers.stop();
     }
 }

@@ -685,8 +685,18 @@ pub struct Phone {
     updates: Option<mpsc::Receiver<AddressUpdate>>,
     introductions: Option<mpsc::Receiver<Introduction>>,
     accept_intros: Arc<AtomicBool>,
+    servers: ServerSlot,
     tasks: Vec<JoinHandle<()>>,
 }
+
+/// Quem atende os quadros de servidor ([`crate::server`]): recebe o quadro e devolve a confirmação a mandar
+/// pela mesma conexão, ou `None` se não era para este nó.
+pub type ServerHandler = Arc<dyn Fn(&[u8]) -> Option<Vec<u8>> + Send + Sync>;
+
+type ServerSlot = Arc<Mutex<Option<ServerHandler>>>;
+
+/// Quadros de servidor atendidos por minuto, de todos juntos; passando disto, o excesso é descartado sem resposta.
+const SERVER_PER_MINUTE: usize = 3000;
 
 /// Apresentação de alguém que adicionou esta pessoa ([`crate::media::update`]): a chave dele está provada pelo
 /// quadro, mas ele ainda não é contato; quem decide é o dono do telefone.
@@ -745,9 +755,10 @@ impl Phone {
         let (upd_tx, upd_rx) = mpsc::channel(64);
         let (intro_tx, intro_rx) = mpsc::channel(64);
         let accept_intros = Arc::new(AtomicBool::new(true));
-        let out = ActorOut { incoming: inc_tx, updates: upd_tx, introductions: intro_tx, accept_intros: accept_intros.clone(), notice: notice.clone() };
+        let servers = ServerSlot::default();
+        let out = ActorOut { incoming: inc_tx, updates: upd_tx, introductions: intro_tx, accept_intros: accept_intros.clone(), servers: servers.clone(), notice: notice.clone() };
         let actor = tokio::spawn(run_actor(actor_rx, actor_tx.clone(), out, my_static, contacts.clone(), ids.clone()));
-        Ok(Self { addr, incoming: inc_rx, notice, contacts, ids, link_tx: actor_tx, hint: Arc::default(), updates: Some(upd_rx), introductions: Some(intro_rx), accept_intros, tasks: vec![accept, actor] })
+        Ok(Self { addr, incoming: inc_rx, notice, contacts, ids, link_tx: actor_tx, hint: Arc::default(), updates: Some(upd_rx), introductions: Some(intro_rx), accept_intros, servers, tasks: vec![accept, actor] })
     }
 
     /// Para registrar neste telefone as chamadas que esta máquina faz ([`call_linked`]).
@@ -786,6 +797,11 @@ impl Phone {
     /// resposta, como faz com qualquer outro quadro de estranho.
     pub fn accept_introductions(&self, on: bool) {
         self.accept_intros.store(on, Ordering::Relaxed);
+    }
+
+    /// Passa a atender os quadros de servidor com `handler` (veja [`ServerHandler`]).
+    pub fn set_server_handler(&self, handler: ServerHandler) {
+        *self.servers.lock().unwrap() = Some(handler);
     }
 
     /// Próximo convite de um contato. `None` = o telefone parou.
@@ -861,6 +877,7 @@ struct ActorOut {
     updates: mpsc::Sender<AddressUpdate>,
     introductions: mpsc::Sender<Introduction>,
     accept_intros: Arc<AtomicBool>,
+    servers: ServerSlot,
     notice: Arc<Mutex<Option<String>>>,
 }
 
@@ -872,8 +889,9 @@ async fn run_actor(
     contacts: Contacts,
     ids: Arc<AtomicU64>,
 ) {
-    let ActorOut { incoming, updates, introductions, accept_intros, notice } = out;
+    let ActorOut { incoming, updates, introductions, accept_intros, servers, notice } = out;
     let mut intro_window: (Instant, usize) = (Instant::now(), 0);
+    let mut server_window: (Instant, usize) = (Instant::now(), 0);
     let mut writers: HashMap<u64, mpsc::Sender<Vec<u8>>> = HashMap::new();
     let mut binds: HashMap<u64, Bind> = HashMap::new();
     let mut calls: HashMap<u64, mpsc::Sender<WireIn>> = HashMap::new();
@@ -918,6 +936,24 @@ async fn run_actor(
                 }
                 Some(Bind::Pending) => {}
                 None => {
+                    // Quadro de servidor: o nó decide e devolve a confirmação. Se não é dele, segue o caminho dos outros
+                    // quadros (voz que muda de conexão pode, por acaso, começar pelo mesmo byte).
+                    if data.first() == Some(&crate::server::wire::TAG_SERVER) {
+                        if server_window.0.elapsed() >= Duration::from_secs(60) {
+                            server_window = (Instant::now(), 0);
+                        }
+                        server_window.1 += 1;
+                        let handler = servers.lock().unwrap().clone();
+                        if server_window.1 <= SERVER_PER_MINUTE
+                            && let Some(handler) = handler
+                            && let Some(ack) = handler(&data)
+                        {
+                            if let Some(w) = writers.get(&conn) {
+                                let _ = w.try_send(ack);
+                            }
+                            continue;
+                        }
+                    }
                     // Apresentação de quem adicionou esta pessoa: confirma e entrega, sem tocar o telefone.
                     if accept_intros.load(Ordering::Relaxed)
                         && let Some((peer, intro)) = update::open_intro(&secret, &data)
