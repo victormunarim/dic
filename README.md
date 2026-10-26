@@ -36,6 +36,7 @@ Valem para os módulos `pairing`, `presence`, `service`, `circle`, `intro` e `re
 | [docs/CHAMADAS.md](docs/CHAMADAS.md) | Voz, telefone, tela, conexão sem servidor |
 | [docs/GUI.md](docs/GUI.md) | A janela: abas, contatos, áudio, tela, opções |
 | [docs/ENCONTRO.md](docs/ENCONTRO.md) | Reencontrar contatos sem servidor: aviso de endereço novo e ponto de encontro na DHT, âncoras e contato de duas vias |
+| [docs/SERVIDORES.md](docs/SERVIDORES.md) | Plano: servidores e salas de voz, com presença, tudo P2P (não implementado) |
 | [docs/SEGURANCA.md](docs/SEGURANCA.md) | Garantias, limites, chaveiro |
 | [docs/LINUX.md](docs/LINUX.md) / [docs/WINDOWS.md](docs/WINDOWS.md) | Instalação por sistema |
 
