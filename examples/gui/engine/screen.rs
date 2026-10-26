@@ -22,6 +22,8 @@ pub(crate) struct ScreenState {
     /// A pessoa prefere nitidez a fluidez (metade dos quadros por segundo); a janela copia a escolha da
     /// configuração a cada quadro, e ela vale a partir da próxima transmissão.
     pub(crate) sharp: AtomicBool,
+    /// A pessoa pediu codificação por hardware; a janela copia a escolha da configuração a cada quadro.
+    pub(crate) hardware: AtomicBool,
     /// Os quadros estão saindo.
     pub(crate) sharing: AtomicBool,
     /// Última imagem recebida de cada pessoa que transmite, com o número dela; a janela só refaz a
@@ -157,6 +159,7 @@ pub(crate) async fn share_task(dialer: Dialer, peer: [u8; 32], keys: clam::media
         Ok(src) => H264Encoder::with_priority(bitrate, priority).map(|e| (src, e)).map_err(|e| e.to_string()),
         Err(e) => Err(e),
     };
+    let hardware = st.hardware.load(Ordering::Relaxed);
     let (mut src, mut enc) = match started {
         Ok(x) => x,
         Err(e) => {
@@ -165,6 +168,13 @@ pub(crate) async fn share_task(dialer: Dialer, peer: [u8; 32], keys: clam::media
             return;
         }
     };
+    if hardware {
+        // `detect` roda processos: fora do executor.
+        match tokio::task::spawn_blocking(clam::hwenc::detect).await.ok().flatten() {
+            Some(name) if enc.set_hardware(Some(name)) => out.line(format!("tela: codificando por hardware ({name})")),
+            _ => out.line("tela: sem codificador por hardware neste computador (precisa de gstreamer1.0-tools e gstreamer1.0-plugins-bad com o driver da GPU), usando o openh264"),
+        }
+    }
     out.line("tela: ligando o circuito de vídeo...");
     let opened = if wanted() { until_hangup(dialer.share_screen_keys_with(peer, &keys, Duration::from_secs(15), private), &shared.hangup).await } else { None };
     let share = match opened {
@@ -201,8 +211,13 @@ pub(crate) async fn share_task(dialer: Dialer, peer: [u8; 32], keys: clam::media
                 (mark, mark_packets) = (std::time::Instant::now(), t.packets_sent);
             }
             *flag.screen.tx_info.lock().unwrap() = format!(
-                "enviados {pushed}, pulados {skipped} ({} pelo codificador, {} adiados com o circuito cheio, {} largados da camada alta), descartados na fila {}, saindo {rate:.0} pacotes/s, taxa {} kbps, QP {}, imagem 1/{}, codificar leva {:.0} ms",
-                enc.skipped, enc.held, enc.layer_dropped, t.frames_dropped, enc.bitrate() / 1000, enc.qp(), enc.scale(), enc.encode_ms
+                "enviados {pushed}, pulados {skipped} ({} pelo codificador, {} adiados com o circuito cheio, {} largados da camada alta), descartados na fila {}, saindo {rate:.0} pacotes/s, taxa {} kbps, QP {}, imagem 1/{}, codificar leva {:.0} ms, codificador {}",
+                enc.skipped, enc.held, enc.layer_dropped, t.frames_dropped, enc.bitrate() / 1000, enc.qp(), enc.scale(), enc.encode_ms,
+                match (enc.hardware(), &enc.hw_note) {
+                    (Some(name), _) => format!("hardware ({name})"),
+                    (None, Some(why)) => format!("openh264 (o hardware parou: {why})"),
+                    (None, None) => "openh264".to_string(),
+                }
             );
             next += every;
             std::thread::sleep(next.saturating_duration_since(std::time::Instant::now()));

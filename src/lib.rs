@@ -74,6 +74,8 @@ pub mod rendezvous;
 #[cfg(feature = "net")]
 pub mod timer;
 #[cfg(feature = "video")]
+pub mod hwenc;
+#[cfg(feature = "video")]
 pub mod video;
 #[cfg(feature = "capture")]
 pub mod capture;

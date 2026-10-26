@@ -14,6 +14,7 @@
 //! Um quadro que passa de [`FRAME_LIMIT`] é descartado e o próximo sai como quadro-chave.
 //! A captura fica atrás de [`ScreenSource`]; o X11 está em [`crate::capture`].
 
+use crate::hwenc::HwEncoder;
 use crate::media::screen::{ScreenStream, FRAGMENT_PAYLOAD, MAX_FRAME, MAX_QUEUE};
 use crate::phone::{ScreenShare, SCREEN_SLOT};
 use openh264::decoder::Decoder;
@@ -287,6 +288,11 @@ pub struct H264Encoder {
     /// Amostra (RGB de alguns pixels) do último quadro codificado e a fração que mudou em relação ao anterior.
     sample: Vec<u8>,
     prev_change: f32,
+    /// Codificador por hardware, quando a pessoa pediu e o computador tem ([`Self::set_hardware`]): no
+    /// lugar do openh264, que fica de reserva se o hardware parar.
+    hw: Option<HwEncoder>,
+    /// Por que o hardware foi abandonado, se foi (diagnóstico).
+    pub hw_note: Option<String>,
     /// Quadros que o codificador recebeu e não devolveu (pulados ou grandes demais).
     pub skipped: u64,
     /// Quadros largados da camada alta porque a fila do circuito estava cheia.
@@ -335,6 +341,8 @@ impl H264Encoder {
             calm: 0,
             sample: Vec::new(),
             prev_change: 0.0,
+            hw: None,
+            hw_note: None,
             skipped: 0,
             layer_dropped: 0,
             held: 0,
@@ -356,6 +364,24 @@ impl H264Encoder {
             // de longe em longe; perda e quem entra pedem o seu por `WANT_KEY`.
             .intra_frame_period(IntraFramePeriod::from_num_frames((fps * 30.0) as u32));
         Encoder::with_api_config(openh264::OpenH264API::from_source(), config).map_err(codec_err)
+    }
+
+    /// Passa a codificar com o `element` de hardware (veja [`crate::hwenc::detect`]), ou volta ao openh264
+    /// com `None`. Devolve `false` se o elemento é desconhecido. O próximo quadro sai como quadro-chave.
+    pub fn set_hardware(&mut self, element: Option<&str>) -> bool {
+        self.hw_note = None;
+        self.need_key = true;
+        match element.map(HwEncoder::new) {
+            None => self.hw = None,
+            Some(Ok(hw)) => self.hw = Some(hw),
+            Some(Err(_)) => return false,
+        }
+        true
+    }
+
+    /// Elemento do GStreamer que está codificando, se for hardware.
+    pub fn hardware(&self) -> Option<&'static str> {
+        self.hw.as_ref().map(HwEncoder::name)
     }
 
     /// Taxa de vídeo atual, em bits/s: a do circuito, menos o que a perda medida por quem assiste mandou cortar.
@@ -470,6 +496,9 @@ impl H264Encoder {
     }
 
     fn encode_inner(&mut self, frame: &RawFrame, force_key: bool) -> Result<Option<EncodedFrame>, VideoError> {
+        if self.hw.is_some() {
+            return self.encode_hardware(frame, force_key);
+        }
         let small = frame.shrunk(self.min_k.max(self.motion_k));
         let frame = small.as_ref().unwrap_or(frame);
         let frame = frame.even().ok_or(VideoError::Size(frame.width, frame.height))?;
@@ -533,6 +562,39 @@ impl H264Encoder {
             self.learn(qp, data.len(), changed);
         }
         Ok(Some(EncodedFrame { data, keyframe: key, droppable }))
+    }
+}
+
+impl H264Encoder {
+    /// Caminho do hardware: o quadro vai para o processo e volta o que já saiu (com atraso). Não há QP nem
+    /// camada temporal; o que passa de [`FRAME_LIMIT`] encolhe a imagem e recomeça com quadro-chave. Se o
+    /// hardware parar de responder, o openh264 assume no quadro seguinte.
+    fn encode_hardware(&mut self, frame: &RawFrame, force_key: bool) -> Result<Option<EncodedFrame>, VideoError> {
+        let small = frame.shrunk(self.min_k);
+        let frame = small.as_ref().unwrap_or(frame);
+        let frame = frame.even().ok_or(VideoError::Size(frame.width, frame.height))?;
+        let want_key = force_key || self.need_key;
+        let (bitrate, fps) = (self.rate.rate(), self.fps);
+        let Some(hw) = self.hw.as_mut() else { return Ok(None) };
+        let au = match hw.encode(&frame, bitrate, fps, want_key) {
+            Ok(au) => au,
+            Err(e) => {
+                self.hw_note = Some(e.to_string());
+                self.hw = None;
+                self.need_key = true;
+                return Ok(None);
+            }
+        };
+        let Some(au) = au else { return Ok(None) };
+        if au.data.len() > FRAME_LIMIT {
+            self.min_k = (self.min_k + 1).min(MAX_SHRINK);
+            self.need_key = true;
+            return Ok(None);
+        }
+        if au.keyframe {
+            self.need_key = false;
+        }
+        Ok(Some(EncodedFrame { data: au.data, keyframe: au.keyframe, droppable: false }))
     }
 }
 
@@ -869,6 +931,34 @@ mod tests {
         };
         let (smooth, sharp) = (mean_qp(Priority::Smoothness), mean_qp(Priority::Sharpness));
         assert!(sharp + 4.0 < smooth, "QP nítido {sharp}, fluido {smooth}");
+    }
+
+    #[test]
+    fn the_hardware_path_hands_out_decodable_frames_and_can_be_switched_off() {
+        let mut enc = H264Encoder::new(H264Encoder::default_bitrate()).unwrap();
+        assert!(!enc.set_hardware(Some("nao-existe")) && enc.hardware().is_none());
+        if !crate::hwenc::exists("x264enc") {
+            eprintln!("sem x264enc no GStreamer: teste pulado");
+            return;
+        }
+        assert!(enc.set_hardware(Some("x264enc")));
+        assert_eq!(enc.hardware(), Some("x264enc"));
+        let mut dec = H264Decoder::new().unwrap();
+        let started = std::time::Instant::now();
+        let (mut keys, mut shown) = (0, 0);
+        let mut t = 0;
+        while shown < 5 && started.elapsed() < std::time::Duration::from_secs(15) {
+            t += 1;
+            if let Some(f) = enc.encode(&scene(320, 240, t), false).unwrap() {
+                keys += usize::from(f.keyframe);
+                assert!(!f.droppable);
+                shown += usize::from(dec.decode(&f.data).unwrap().is_some());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
+        assert_eq!((keys, shown), (1, 5), "um quadro-chave e depois só quadros dependentes");
+        assert!(enc.set_hardware(None) && enc.hardware().is_none());
+        assert!(enc.encode(&scene(320, 240, 0), false).unwrap().is_some_and(|f| f.keyframe), "o openh264 reassume com quadro-chave");
     }
 
     #[test]

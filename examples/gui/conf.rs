@@ -120,6 +120,8 @@ pub(crate) struct Form {
     /// Nitidez em vez de fluidez na transmissão da tela: metade dos quadros por segundo, cada um mais fino
     /// (veja `video::Priority`). Desligada (fluidez) de início.
     pub(crate) screen_sharp: bool,
+    /// Codifica a tela na GPU quando o computador tem (veja `clam::hwenc`); senão, openh264. Desligado de início.
+    pub(crate) screen_hardware: bool,
     /// Codec de voz das chamadas que esta pessoa inicia: Opus (32 kbps) em vez do G.722 (64 kbps).
     /// Quem atende usa o que o convite pedir. Ligado de início.
     pub(crate) voice_opus: bool,
@@ -418,6 +420,7 @@ impl Form {
             // Ligada de início: a chave guarda o "não", então o arquivo antigo, sem ela, também aceita.
             screen_private: get("no_screen_privacy") != "1",
             screen_sharp: get("screen_sharp") == "1",
+            screen_hardware: get("screen_hardware") == "1",
             // Ligado de início: a chave guarda o "não", então o arquivo antigo, sem ela, também aceita.
             voice_opus: get("no_opus") != "1",
             anchors: get("anchors").replace(';', "\n"),
@@ -441,7 +444,7 @@ impl Form {
         // Chave de identidade no chaveiro do sistema; só cai para o arquivo se ele não estiver disponível.
         let secret = if vault_set(self.secret.trim()) { KEYRING_MARK } else { self.secret.trim() };
         let text = format!(
-            "audio={}\nsecret={}\ncontacts={}\npeer={}\npublic_addr={}\nno_dht={}\ndht_circuit={}\nname={}\nintros={}\nno_anchor={}\nno_screen_privacy={}\nscreen_sharp={}\nanchors={}\ninput_dev={}\noutput_dev={}\nno_opus={}\n{}",
+            "audio={}\nsecret={}\ncontacts={}\npeer={}\npublic_addr={}\nno_dht={}\ndht_circuit={}\nname={}\nintros={}\nno_anchor={}\nno_screen_privacy={}\nscreen_sharp={}\nscreen_hardware={}\nanchors={}\ninput_dev={}\noutput_dev={}\nno_opus={}\n{}",
             u8::from(self.use_audio),
             secret,
             self.contacts.trim().replace('\n', ";"),
@@ -454,6 +457,7 @@ impl Form {
             u8::from(!self.anchor),
             u8::from(!self.screen_private),
             u8::from(self.screen_sharp),
+            u8::from(self.screen_hardware),
             self.anchors.trim().replace('\n', ";"),
             self.input_dev.trim(),
             self.output_dev.trim(),

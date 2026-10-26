@@ -298,6 +298,7 @@ impl App {
         // A escolha vale a partir da próxima transmissão; fica salva para não precisar mudar de novo.
         st.open_path.store(!self.form.screen_private, Ordering::Relaxed);
         st.sharp.store(self.form.screen_sharp, Ordering::Relaxed);
+        st.hardware.store(self.form.screen_hardware, Ordering::Relaxed);
         ui.add_enabled_ui(!wanted && !sharing, |ui| {
             let changed = ui
                 .checkbox(&mut self.form.screen_private, "Privacidade na transmissão da tela")
@@ -320,6 +321,13 @@ impl App {
                     self.form.save();
                 }
             });
+            if ui
+                .checkbox(&mut self.form.screen_hardware, "Codificar a tela pela placa de vídeo (experimental)")
+                .on_hover_text("Usa a GPU (VA-API, NVENC ou Quick Sync, via GStreamer) em vez do processador. Precisa de gstreamer1.0-tools e gstreamer1.0-plugins-bad com o driver da GPU; sem isso, ou se ela parar, o programa volta sozinho ao openh264. Menos CPU, mas sem o controle fino de nitidez por quadro, e a imagem pode demorar um pouco mais a reagir. Não funciona no Windows. Vale na próxima transmissão.")
+                .changed()
+            {
+                self.form.save();
+            }
         });
         let diag = st.diagnostics();
         if !diag.is_empty() {
