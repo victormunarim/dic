@@ -17,6 +17,7 @@ pub(crate) enum Tab {
     Home,
     Contacts,
     Call,
+    Servers,
     Audio,
     Settings,
     Log,
@@ -41,6 +42,8 @@ pub(crate) struct App {
     pub(crate) devs: (Vec<String>, Vec<String>),
     /// Tela de quem está aberta numa janela própria, em tamanho grande.
     pub(crate) zoom: Option<[u8; 32]>,
+    /// Aba de servidores.
+    pub(crate) srv: crate::servers::ServersUi,
     /// Textura da tela de quem transmite para você e o número da imagem que ela mostra.
     pub(crate) screen_tex: std::collections::HashMap<[u8; 32], (u64, egui::TextureHandle)>,
 }
@@ -142,6 +145,7 @@ impl App {
 
 impl App {
     fn sidebar(&mut self, ctx: &egui::Context, offline: bool, in_call: bool, status: &str) {
+        let in_room = self.shared.room.lock().unwrap().at.is_some();
         egui::SidePanel::left("abas")
             .exact_width(260.0)
             .resizable(false)
@@ -159,7 +163,8 @@ impl App {
                 let items = [
                     (Tab::Home, "🏠", "Início", None),
                     (Tab::Contacts, "👥", "Contatos", None),
-                    (Tab::Call, "📞", "Chamada", in_call.then_some(GREEN)),
+                    (Tab::Call, "📞", "Chamada", (in_call && !in_room).then_some(GREEN)),
+                    (Tab::Servers, "🛡", "Servidores", in_room.then_some(GREEN)),
                 ];
                 for (tab, icon, label, badge) in items {
                     if nav_item(ui, self.tab == tab, icon, label, badge).clicked() {
@@ -196,9 +201,16 @@ impl App {
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if in_call {
+                        let in_room = self.shared.room.lock().unwrap().at.is_some();
                         let hang = egui::Button::new(RichText::new("✖").strong().color(Color32::WHITE)).fill(RED).min_size(vec2(36.0, 36.0));
-                        if ui.add(hang).on_hover_text("Desligar a chamada").clicked() {
-                            self.shared.hangup.store(true, Ordering::Relaxed);
+                        if ui.add(hang).on_hover_text(if in_room { "Sair da sala" } else { "Desligar a chamada" }).clicked() {
+                            if in_room {
+                                if let Some(r) = &self.running {
+                                    let _ = r.cmds.send(Cmd::LeaveRoom);
+                                }
+                            } else {
+                                self.shared.hangup.store(true, Ordering::Relaxed);
+                            }
                         }
                     }
                     let muted = self.shared.audio.muted.load(Ordering::Relaxed);
@@ -807,6 +819,7 @@ impl App {
                 n => format!("{n} pessoas"),
             })),
             Tab::Call => ("Chamada", "A conversa e a tela compartilhada.".into()),
+            Tab::Servers => ("Servidores", "Grupos de pessoas com salas de voz.".into()),
             Tab::Audio => ("Áudio", "Dispositivos, volume e tratamento da voz.".into()),
             Tab::Settings => ("Configurações", "Identidade, rede e privacidade.".into()),
             Tab::Log => ("Atividade", "O que o programa está fazendo agora.".into()),
@@ -829,6 +842,7 @@ impl eframe::App for App {
         if self.done.swap(false, Ordering::Relaxed) {
             self.running = None;
             self.shared.in_call.store(false, Ordering::Relaxed);
+            self.shared.room.lock().unwrap().clear();
             self.shared.status.lock().unwrap().clear();
             *self.shared.relay.lock().unwrap() = None;
         }
@@ -840,7 +854,8 @@ impl eframe::App for App {
         let testing = self.shared.mic_test.load(Ordering::Relaxed);
         let calling = in_call && !testing;
         // Quando a chamada começa, a aba dela abre sozinha.
-        if calling && !self.was_in_call {
+        let in_room = self.shared.room.lock().unwrap().at.is_some();
+        if calling && !self.was_in_call && !in_room {
             self.tab = Tab::Call;
         }
         self.was_in_call = calling;
@@ -859,7 +874,8 @@ impl eframe::App for App {
                 match self.tab {
                     Tab::Home => self.home_tab(ctx, ui, offline, calling, &status),
                     Tab::Contacts => self.contacts_tab(ui, !offline, calling),
-                    Tab::Call => self.call_tab(ui, calling),
+                    Tab::Call => self.call_tab(ui, calling && !in_room),
+                    Tab::Servers => self.servers_tab(ui, offline, calling),
                     Tab::Audio => self.audio_tab(ui, offline, calling, testing),
                     Tab::Settings => self.settings_tab(ui, offline),
                     Tab::Log => {}

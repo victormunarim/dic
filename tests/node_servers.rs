@@ -94,4 +94,20 @@ async fn people_join_see_each_other_online_and_meet_in_a_room() {
         b.node.servers().take_events().into_iter().find(|e| matches!(e, Event::Mesh { peers, .. } if peers.contains(&c.key))).map(|_| ())
     })
     .await;
+
+    // A malha liga quem não é contato: B e C se aceitam por estarem na mesma sala, e a voz passa.
+    b.node.set_room_peers(&[c.key]);
+    c.node.set_room_peers(&[b.key]);
+    let codec = clam::media::codec::CodecId::G722;
+    let dialer = c.node.dialer();
+    let mut b = b;
+    let (dialed, answered) = tokio::join!(dialer.dial(b.key, codec.build(), Duration::from_secs(20)), async {
+        let inc = timeout(Duration::from_secs(20), b.node.next_incoming()).await.expect("B recebe").expect("chamada");
+        assert_eq!(inc.caller().as_bytes(), &c.key);
+        inc.accept(codec.build()).await.expect("B atende")
+    });
+    let mut from_c = dialed.expect("C liga para B");
+    let mut at_b = answered;
+    from_c.send(vec![1000; 320]).await.unwrap();
+    assert!(timeout(Duration::from_secs(10), at_b.next_pcm()).await.expect("voz chega").is_some());
 }

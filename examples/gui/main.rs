@@ -14,6 +14,7 @@
 
 mod conf;
 mod engine;
+mod servers;
 mod theme;
 mod ui;
 
@@ -51,6 +52,7 @@ fn main() -> eframe::Result {
                 audio_dirty: false,
                 screen_tex: Default::default(),
                 zoom: None,
+                srv: Default::default(),
                 #[cfg(feature = "audio")]
                 devs: clam::audio::devices(),
                 #[cfg(not(feature = "audio"))]
