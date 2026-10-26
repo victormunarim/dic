@@ -14,6 +14,7 @@
 
 mod conf;
 mod engine;
+mod theme;
 mod ui;
 
 use std::sync::Arc;
@@ -21,18 +22,19 @@ use std::sync::Arc;
 use eframe::egui;
 
 use conf::Form;
-use ui::App;
+use ui::{App, Tab};
 
 fn main() -> eframe::Result {
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("runtime");
     let opts = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([760.0, 720.0]).with_title("Clam"),
+        viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 800.0]).with_min_inner_size([820.0, 560.0]).with_title("Clam"),
         ..Default::default()
     };
     eframe::run_native(
         "Clam",
         opts,
-        Box::new(|_| {
+        Box::new(|cc| {
+            theme::apply(&cc.egui_ctx);
             let form = Form::load();
             let shared = Arc::<engine::Shared>::default();
             shared.audio.set_prefs(form.audio);
@@ -44,6 +46,8 @@ fn main() -> eframe::Result {
                 running: None,
                 done: Arc::default(),
                 error: String::new(),
+                tab: Tab::Home,
+                was_in_call: false,
                 audio_dirty: false,
                 screen_tex: Default::default(),
                 zoom: None,

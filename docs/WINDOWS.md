@@ -20,7 +20,7 @@ cargo run --release --features gui,audio --example gui
 3. Contatos: o código de contato de quem pode ligar para você (os dois lados se adicionam; quem é adicionado aparece sozinho na lista do outro).
 4. Para ligar, cole o código do outro em *Ligar* ou use o botão do contato. Use fones.
 
-Atrás de roteador: o programa tenta abrir a porta 4001 sozinho por UPnP e avisa o resultado no log. Se não der, redirecione a porta 4001 e preencha o endereço público (`ip:4001`, ou um nome) em *Configurações avançadas*. A chamada é sempre p2p: sem porta acessível (CGNAT, por exemplo) ninguém consegue ligar para você.
+Atrás de roteador: o programa tenta abrir a porta 4001 sozinho por UPnP e avisa o resultado no log. Se não der, redirecione a porta 4001 e preencha o endereço público (`ip:4001`, ou um nome) em *a aba Configurações*. A chamada é sempre p2p: sem porta acessível (CGNAT, por exemplo) ninguém consegue ligar para você.
 Config em `%USERPROFILE%\.clam-gui.conf` (contém a chave secreta).
 O programa pede timers de 1 ms ao Windows (`timeBeginPeriod`) para manter a cadência da voz.
 

@@ -138,7 +138,8 @@ Guias passo a passo por sistema: [`docs/LINUX.md`](LINUX.md) e [`docs/WINDOWS.md
 cargo run --release --features gui --example gui
 ```
 
-1. Na primeira abertura a identidade já é criada sozinha (fica em *Configurações avançadas*, oculta). O **código de contato** (`chave#ip:porta#circuito#link`, que leva o seu relay; veja `docs/GUI.md`, que também conta como os contatos recebem o endereço novo quando o seu muda) aparece em *Meu código de contato* com *Copiar*; passe-o a quem vai te chamar.
+0. A janela segue o estilo do Discord: barra lateral com uma aba por assunto (**Início**, **Contatos**, **Chamada**, **Áudio**, **Configurações**, **Atividade**) e, no pé dela, o seu avatar com o estado, o botão de mudo e o de desligar. Em janela larga as páginas se dividem em duas colunas. A aba **Chamada** abre sozinha quando uma chamada começa e guarda o compartilhamento de tela e as telas que chegam.
+1. Na primeira abertura a identidade já é criada sozinha (fica na aba *Configurações*, oculta). O **código de contato** (`chave#ip:porta#circuito#link`, que leva o seu relay; veja `docs/GUI.md`, que também conta como os contatos recebem o endereço novo quando o seu muda) aparece em *Meu código de contato*, na aba *Início*, com *Copiar*; passe-o a quem vai te chamar.
 2. Clique **Ficar online**. O indicador mostra Offline / Conectando / Online.
 3. **Contatos**: cada um tem *Ligar* e *Remover*; para adicionar, nome e código de contato. Quem não estiver na lista não recebe resposta; contatos são atendidos automaticamente. *Ligar para um código* aceita um código ou nome sem salvar. **Desligar** encerra.
 4. Os campos são gravados em `~/.clam-gui.conf` (`%USERPROFILE%` no Windows), **inclusive a chave secreta**; no Unix o arquivo fica `0600`.
