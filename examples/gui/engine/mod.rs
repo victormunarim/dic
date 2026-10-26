@@ -22,12 +22,14 @@ use crate::conf::*;
 
 mod call;
 mod node;
+mod room;
 mod screen;
 mod sound;
 mod voice;
 
 pub(crate) use call::*;
 pub(crate) use node::{member_name, run_node};
+pub(crate) use room::*;
 pub(crate) use screen::*;
 pub(crate) use sound::*;
 pub(crate) use voice::*;
@@ -63,6 +65,10 @@ pub(crate) enum Cmd {
     Forget([u8; 32]),
     /// Liga o microfone ao alto-falante para a pessoa conferir som e nível.
     MicTest,
+    /// Entra na sala de voz do servidor.
+    JoinRoom(clam::server::ServerId, clam::server::RoomId),
+    /// Sai da sala de voz.
+    LeaveRoom,
 }
 
 /// Estado compartilhado entre a janela e a tarefa do nó.
@@ -88,6 +94,10 @@ pub(crate) struct Shared {
     pub(crate) relay: Mutex<Option<clam::node::RelayInfo>>,
     /// Quem adicionou esta pessoa e se apresentou; a janela põe cada um na lista de contatos.
     pub(crate) introduced: Mutex<Vec<clam::node::Introduced>>,
+    /// Os servidores desta pessoa; vazio offline.
+    pub(crate) servers: Mutex<Option<clam::server::net::ServerHub>>,
+    /// Sala de voz em que está e quem fala.
+    pub(crate) room: Mutex<RoomLive>,
 }
 
 pub(crate) struct Running {

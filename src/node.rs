@@ -1040,6 +1040,11 @@ impl Node {
         }
     }
 
+    /// Quem está na minha sala de voz e pode ligar sem ser contato (substitui a lista anterior).
+    pub fn set_room_peers(&self, keys: &[[u8; 32]]) {
+        *self.phone.room_peers().lock().unwrap() = keys.to_vec();
+    }
+
     /// Novo contato: passa a ser atendido e, se o código dele trouxe o relay, esse é o primeiro endereço para ligar a ele.
     pub fn add_contact(&self, peer: [u8; 32], relay: Option<RelayInfo>) {
         self.allow(&[peer]);

@@ -211,6 +211,19 @@ pub(crate) fn conf_path() -> PathBuf {
     home.join(".clam-gui.conf")
 }
 
+/// Servidores e salas (veja `clam::server`), num arquivo à parte. Leva o segredo de cada servidor: só o dono lê.
+pub(crate) fn servers_path() -> PathBuf {
+    conf_path().with_file_name(".clam-gui.servers")
+}
+
+pub(crate) fn load_servers() -> Option<String> {
+    std::fs::read_to_string(servers_path()).ok()
+}
+
+pub(crate) fn save_servers(text: &str) -> std::io::Result<()> {
+    write_private(&servers_path(), text)
+}
+
 /// Endereços de relay de contatos, num arquivo à parte (`chave addr onion link` por linha). Linhas que
 /// terminam em `dica` vieram do convite que o contato mandou, sem confirmação de uma chamada; as que
 /// terminam em `antigo` são endereços que o contato já teve (do mais novo ao mais velho, por contato).

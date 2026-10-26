@@ -686,6 +686,7 @@ pub struct Phone {
     introductions: Option<mpsc::Receiver<Introduction>>,
     accept_intros: Arc<AtomicBool>,
     servers: ServerSlot,
+    room_peers: Contacts,
     tasks: Vec<JoinHandle<()>>,
 }
 
@@ -756,9 +757,10 @@ impl Phone {
         let (intro_tx, intro_rx) = mpsc::channel(64);
         let accept_intros = Arc::new(AtomicBool::new(true));
         let servers = ServerSlot::default();
-        let out = ActorOut { incoming: inc_tx, updates: upd_tx, introductions: intro_tx, accept_intros: accept_intros.clone(), servers: servers.clone(), notice: notice.clone() };
+        let room_peers = Contacts::default();
+        let out = ActorOut { incoming: inc_tx, updates: upd_tx, introductions: intro_tx, accept_intros: accept_intros.clone(), servers: servers.clone(), room_peers: room_peers.clone(), notice: notice.clone() };
         let actor = tokio::spawn(run_actor(actor_rx, actor_tx.clone(), out, my_static, contacts.clone(), ids.clone()));
-        Ok(Self { addr, incoming: inc_rx, notice, contacts, ids, link_tx: actor_tx, hint: Arc::default(), updates: Some(upd_rx), introductions: Some(intro_rx), accept_intros, servers, tasks: vec![accept, actor] })
+        Ok(Self { addr, incoming: inc_rx, notice, contacts, ids, link_tx: actor_tx, hint: Arc::default(), updates: Some(upd_rx), introductions: Some(intro_rx), accept_intros, servers, room_peers, tasks: vec![accept, actor] })
     }
 
     /// Para registrar neste telefone as chamadas que esta máquina faz ([`call_linked`]).
@@ -769,6 +771,12 @@ impl Phone {
     /// Lista viva de chaves aceitas.
     pub fn contacts(&self) -> Contacts {
         self.contacts.clone()
+    }
+
+    /// Quem mais pode ligar além dos contatos: os que estão na mesma sala de voz (veja [`crate::server`]). Quem
+    /// atende decide o que fazer com cada chamada; a lista só deixa o convite chegar.
+    pub fn room_peers(&self) -> Contacts {
+        self.room_peers.clone()
     }
 
     pub fn local_addr(&self) -> SocketAddr {
@@ -878,6 +886,7 @@ struct ActorOut {
     introductions: mpsc::Sender<Introduction>,
     accept_intros: Arc<AtomicBool>,
     servers: ServerSlot,
+    room_peers: Contacts,
     notice: Arc<Mutex<Option<String>>>,
 }
 
@@ -889,7 +898,7 @@ async fn run_actor(
     contacts: Contacts,
     ids: Arc<AtomicU64>,
 ) {
-    let ActorOut { incoming, updates, introductions, accept_intros, servers, notice } = out;
+    let ActorOut { incoming, updates, introductions, accept_intros, servers, room_peers, notice } = out;
     let mut intro_window: (Instant, usize) = (Instant::now(), 0);
     let mut server_window: (Instant, usize) = (Instant::now(), 0);
     let mut writers: HashMap<u64, mpsc::Sender<Vec<u8>>> = HashMap::new();
@@ -983,7 +992,7 @@ async fn run_actor(
                         continue;
                     }
                     let invite = Incoming::parse(&secret, &data).ok().filter(|i| {
-                        let known = contacts.lock().unwrap().contains(i.caller().as_bytes());
+                        let known = contacts.lock().unwrap().contains(i.caller().as_bytes()) || room_peers.lock().unwrap().contains(i.caller().as_bytes());
                         if !known {
                             let hex: String = i.caller().as_bytes()[..4].iter().map(|b| format!("{b:02x}")).collect();
                             *notice.lock().unwrap() = Some(format!("convite de {hex}... ignorado: essa chave não está em Contatos"));

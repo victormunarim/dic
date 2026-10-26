@@ -28,6 +28,7 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
     cfg.introductions = form.intros;
     cfg.anchor = form.anchor;
     cfg.anchors = parse_anchors(&form.anchors);
+    cfg.servers = load_servers();
     if form.use_dht {
         cfg.dht = Some(clam::rendezvous::DhtOptions { circuit: form.dht_circuit, ..Default::default() });
         if form.dht_circuit {
@@ -53,6 +54,16 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
     }
     let mut pending_saved = pending_now(&node);
     let dialer = node.dialer();
+    let hub = node.servers();
+    if !form.my_name.trim().is_empty() {
+        hub.run(|s, now| s.set_name(form.my_name.trim(), now));
+    }
+    *shared.servers.lock().unwrap() = Some(hub.clone());
+    let mut servers_saved = hub.read(|s, _| s.export());
+    let mut servers_check = tokio::time::Instant::now();
+    // A sala de voz em que estou: o canal da tarefa e quem está na malha (esses são atendidos sem tocar).
+    let mut room: Option<(mpsc::UnboundedSender<RoomCmd>, clam::server::ServerId)> = None;
+    let mut mesh: Vec<[u8; 32]> = Vec::new();
     let mut saver = KnownSaver::new(&book_of(&node));
     let (dialed_tx, mut dialed_rx) = mpsc::unbounded_channel::<([u8; 32], u32, Option<Result<ActiveCall, clam::node::DialError>>)>();
     let (redial_tx, mut redial_rx) = mpsc::unbounded_channel::<([u8; 32], u32)>();
@@ -79,6 +90,22 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
             inc = node.next_incoming() => {
                 let Some(inc) = inc else { break };
                 let name = member_name(&names, inc.caller().as_bytes());
+                if let Some((tx, _)) = &room {
+                    // Na sala só a malha é atendida, sem tocar: é a pessoa que entrou na mesma sala.
+                    if mesh.contains(inc.caller().as_bytes()) {
+                        let caller = *inc.caller().as_bytes();
+                        let codec = inc.codec();
+                        match inc.accept(codec.build()).await {
+                            Ok(c) => {
+                                let _ = tx.send(RoomCmd::Call(caller, c));
+                            }
+                            Err(e) => out.line(format!("sala: não atendeu {name}: {e}")),
+                        }
+                    } else {
+                        inc.reject().await;
+                    }
+                    continue;
+                }
                 if shared.in_call.swap(true, Ordering::Relaxed) {
                     out.line(format!("{name} ligou, mas já há uma chamada; recusada"));
                     inc.reject().await;
@@ -159,6 +186,37 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
                     save_pending_if_changed(&node, &mut pending_saved, &out);
                     saver.sync(&book_of(&node), &out);
                 }
+                Some(Cmd::JoinRoom(server, room_id)) => {
+                    if shared.in_call.swap(true, Ordering::Relaxed) {
+                        out.line("encerre a chamada antes de entrar na sala");
+                        continue;
+                    }
+                    shared.hangup.store(false, Ordering::Relaxed);
+                    if let Err(e) = hub.try_act(|s, now| s.join_room(&server, Some(room_id), now)) {
+                        out.line(format!("não entrei na sala: {e}"));
+                        shared.in_call.store(false, Ordering::Relaxed);
+                        continue;
+                    }
+                    let sound = open_sound(false, &form, &out);
+                    let (tx, rrx) = mpsc::unbounded_channel();
+                    shared.room.lock().unwrap().at = Some((server, room_id));
+                    let (sh, o, d, me) = (shared.clone(), out.clone(), dialer.clone(), hub.my_key());
+                    let tx2 = tx.clone();
+                    tokio::spawn(async move {
+                        run_room(rrx, tx2, sound, me, d, sh.clone(), o).await;
+                        sh.in_call.store(false, Ordering::Relaxed);
+                    });
+                    room = Some((tx, server));
+                    out.line("entrou na sala");
+                }
+                Some(Cmd::LeaveRoom) => {
+                    if let Some((tx, server)) = room.take() {
+                        let _ = tx.send(RoomCmd::Leave);
+                        let _ = hub.try_act(|s, now| s.join_room(&server, None, now));
+                        node.set_room_peers(&[]);
+                        mesh.clear();
+                    }
+                }
                 Some(Cmd::MicTest) => {
                     if shared.in_call.swap(true, Ordering::Relaxed) {
                         out.line("encerre a chamada antes de testar o microfone");
@@ -176,6 +234,42 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
                 None => break,
             },
             _ = tokio::time::sleep(Duration::from_millis(200)) => {}
+        }
+        for e in hub.take_events() {
+            use clam::server::Event;
+            match e {
+                Event::Mesh { peers, .. } => {
+                    node.set_room_peers(&peers);
+                    if let Some((tx, _)) = &room {
+                        let _ = tx.send(RoomCmd::Mesh(peers.clone()));
+                    }
+                    mesh = peers;
+                }
+                Event::Joined(_) => out.line("entrou no servidor"),
+                Event::Removed(id) => {
+                    out.line("você foi removido de um servidor");
+                    if room.as_ref().is_some_and(|(_, s)| *s == id) {
+                        if let Some((tx, _)) = room.take() {
+                            let _ = tx.send(RoomCmd::Leave);
+                        }
+                        node.set_room_peers(&[]);
+                        mesh.clear();
+                    }
+                }
+                Event::Notice(n) => out.line(n),
+                Event::Changed(_) | Event::Address { .. } => {}
+            }
+            (out.repaint)();
+        }
+        if servers_check.elapsed() >= Duration::from_secs(5) {
+            servers_check = tokio::time::Instant::now();
+            let now = hub.read(|s, _| s.export());
+            if now != servers_saved {
+                match save_servers(&now) {
+                    Ok(()) => servers_saved = now,
+                    Err(e) => out.line(format!("não consegui gravar os servidores em {}: {e}", servers_path().display())),
+                }
+            }
         }
         if let Some(n) = node.take_notice() {
             out.line(n);
@@ -198,6 +292,11 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
         }
     }
     saver.sync(&book_of(&node), &out);
+    let _ = save_servers(&hub.read(|s, _| s.export()));
+    if let Some((tx, _)) = room.take() {
+        let _ = tx.send(RoomCmd::Leave);
+    }
+    *shared.servers.lock().unwrap() = None;
     shared.hangup.store(true, Ordering::Relaxed);
     Ok(())
 }
