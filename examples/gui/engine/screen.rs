@@ -182,6 +182,7 @@ pub(crate) async fn share_task(dialer: Dialer, peer: [u8; 32], keys: clam::media
         let every = Duration::from_secs_f32(1.0 / FPS);
         let mut next = std::time::Instant::now();
         let (mut pushed, mut skipped) = (0u64, 0u64);
+        let (mut mark, mut mark_packets, mut rate) = (std::time::Instant::now(), 0u64, 0.0f64);
         while flag.screen.want_share.load(Ordering::Relaxed) && !flag.hangup.load(Ordering::Relaxed) {
             match pump(src.as_mut(), &mut enc, &share) {
                 Ok(true) => pushed += 1,
@@ -189,8 +190,13 @@ pub(crate) async fn share_task(dialer: Dialer, peer: [u8; 32], keys: clam::media
                 Err(e) => *flag.screen.note.lock().unwrap() = format!("codec: {e}"),
             }
             let t = share.stats();
+            let span = mark.elapsed().as_secs_f64();
+            if span >= 1.0 {
+                rate = (t.packets_sent - mark_packets) as f64 / span;
+                (mark, mark_packets) = (std::time::Instant::now(), t.packets_sent);
+            }
             *flag.screen.tx_info.lock().unwrap() = format!(
-                "enviados {pushed}, pulados {skipped} ({} pelo codificador, {} adiados com o circuito cheio, {} largados da camada alta), descartados na fila {}, QP {}, imagem 1/{}, codificar leva {:.0} ms",
+                "enviados {pushed}, pulados {skipped} ({} pelo codificador, {} adiados com o circuito cheio, {} largados da camada alta), descartados na fila {}, saindo {rate:.0} pacotes/s, QP {}, imagem 1/{}, codificar leva {:.0} ms",
                 enc.skipped, enc.held, enc.layer_dropped, t.frames_dropped, enc.qp(), enc.scale(), enc.encode_ms
             );
             next += every;

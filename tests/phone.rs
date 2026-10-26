@@ -347,6 +347,31 @@ async fn the_screen_without_privacy_arrives_with_no_cover_and_a_faster_slot() {
 }
 
 #[tokio::test]
+async fn the_screen_without_privacy_carries_a_burst_of_big_frames_quickly() {
+    let (alice, bob) = ids();
+    let mut phone = Phone::bind("127.0.0.1:0".parse().unwrap(), bob.clone(), vec![*PublicKey::from(&alice).as_bytes()]).await.unwrap();
+    let (_srv, cands) = relays(4, &phone.local_addr().to_string()).await;
+    let bob_pub = PublicKey::from(&bob);
+    let voice = cands.clone();
+    let caller = tokio::spawn(async move { call(client(voice), &alice, &bob_pub, Mulaw::new(), WAIT).await });
+    let incoming = timeout(WAIT, phone.next_incoming()).await.unwrap().unwrap();
+    let mut b = incoming.accept(Mulaw::new()).await.unwrap();
+    let a = caller.await.unwrap().unwrap();
+    let c = CircuitClient::spawn_with(CircuitManager::new(ManagerConfig::default(), "contato:9", cands), Duration::from_secs(2), open_screen_client_options());
+    let share = share_screen_slot(c, a.share_keys(), WAIT, OPEN_SCREEN_SLOT_MS).await.unwrap();
+    let started = std::time::Instant::now();
+    let f = video(30_000, 1);
+    for i in 0..3 {
+        assert!(share.push(&f, i == 0).unwrap());
+    }
+    let got = collect_frames(&mut b, 3).await;
+    assert!(got.iter().all(|g| g.data == f));
+    // 90 kB são ~600 pacotes: com 1 ms por pacote cabem em ~0,6 s; o dobro do tempo cobre a carga do teste.
+    assert!(started.elapsed() < Duration::from_millis(1500), "{:?}", started.elapsed());
+    assert!(share.stats().packets_sent >= 500, "{}", share.stats().packets_sent);
+}
+
+#[tokio::test]
 async fn callee_shares_its_screen_to_the_caller_through_the_callers_phone() {
     let (alice, bob) = ids();
     let alice_pub = PublicKey::from(&alice);

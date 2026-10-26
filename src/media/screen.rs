@@ -64,6 +64,8 @@ pub struct ScreenStats {
     /// Quadros incompletos abandonados ou descartados por falta de quadro-chave.
     pub frames_lost: u64,
     pub rejected: u64,
+    /// Pacotes com vídeo que saíram (sem contar preenchimento).
+    pub packets_sent: u64,
 }
 
 struct Pending {
@@ -200,6 +202,7 @@ impl ScreenStream {
         let mut buf = [0u8; MAX_PAYLOAD];
         let len = match self.queue.pop_front() {
             Some((flags, id, idx, total, data)) => {
+                self.stats.packets_sent += 1;
                 buf[0] = flags | want;
                 buf[1..3].copy_from_slice(&id.to_be_bytes());
                 buf[3..5].copy_from_slice(&idx.to_be_bytes());
