@@ -264,14 +264,7 @@ async fn drive<C: Codec>(
                                 screen_conn = Some(conn);
                                 let _ = wire_out.send(WireOut::Bound(conn)).await;
                             }
-                            while let Some(f) = screen.poll_frame() {
-                                let _ = screen_tx.try_send(ScreenEvent::Frame(f));
-                            }
-                            let lost = screen.stats().frames_lost;
-                            if lost != lost_told {
-                                lost_told = lost;
-                                let _ = screen_tx.try_send(ScreenEvent::Lost(lost));
-                            }
+                            forward_screen(&mut screen, &screen_tx, &mut lost_told);
                             if screen.peer_stopped() != stopped_told {
                                 stopped_told = screen.peer_stopped();
                                 if stopped_told {
@@ -292,8 +285,8 @@ async fn drive<C: Codec>(
                 }
                 None => break,
             },
-            // Devolve a quem transmite o relatório de perda (a cada meio segundo) e, com a imagem parada
-            // por perda, o pedido de quadro-chave (no máximo 10 vezes por segundo).
+            // Devolve a quem transmite o relatório de perda (a cada meio segundo), o pedido dos fragmentos que
+            // faltam e, com a imagem parada por perda, o pedido de quadro-chave (no máximo 10 vezes por segundo).
             _ = ask.tick(), if screen_conn.is_some() => {
                 let p = match screen.report_packet() {
                     Some(p) => Some(p),
@@ -302,6 +295,8 @@ async fn drive<C: Codec>(
                 if let (Some(conn), Some(Ok(p))) = (screen_conn, p) {
                     let _ = wire_out.send(WireOut::Frame { conn, data: p.to_vec() }).await;
                 }
+                // Quadros que esperavam um reparo e desistiram saem aqui, sem pacote novo para acordá-los.
+                forward_screen(&mut screen, &screen_tx, &mut lost_told);
             }
             _ = tick.tick() => {
                 for f in call.playout(now()) {
@@ -312,6 +307,18 @@ async fn drive<C: Codec>(
         }
     }
     *stats.lock().expect("estatísticas") = call.stats();
+}
+
+/// Entrega ao app os quadros de tela prontos e avisa quando a contagem de quadros perdidos mudou.
+fn forward_screen(screen: &mut ScreenStream, tx: &mpsc::Sender<ScreenEvent>, lost_told: &mut u64) {
+    while let Some(f) = screen.poll_frame() {
+        let _ = tx.try_send(ScreenEvent::Frame(f));
+    }
+    let lost = screen.stats().frames_lost;
+    if lost != *lost_told {
+        *lost_told = lost;
+        let _ = tx.try_send(ScreenEvent::Lost(lost));
+    }
 }
 
 /// Sobe o motor de uma chamada e devolve a ponta que o app usa.

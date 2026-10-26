@@ -12,8 +12,13 @@
 //! Texto claro de cada pacote (dentro do AEAD de [`packet`](super::packet)):
 //! `flags (1) ‖ id do quadro (2) ‖ índice (2) ‖ total (2) ‖ dados`.
 //!
-//! - Quadro perdido: a próxima entrega só acontece num quadro-chave; o receptor pede um
-//!   (flag `WANT_KEY`, repetida enquanto precisar) e o emissor consulta
+//! - Fragmento perdido: quem assiste pede de volta só o que faltou (flag `NACK`, num pacote de
+//!   preenchimento: contagem no byte 2 e, depois do cabeçalho, pares `id do quadro (2) ‖ índice (2)`;
+//!   índice `0xFFFF` = o quadro inteiro). O emissor guarda os últimos [`HISTORY`] fragmentos que saíram e
+//!   os reenvia à frente da fila, em pacotes novos (número de sequência novo, cifra nova). Os quadros
+//!   esperam o reparo e saem em ordem.
+//! - Reparo que não veio em [`PATIENCE`]: o quadro é abandonado e a próxima entrega só acontece num
+//!   quadro-chave; o receptor pede um (flag `WANT_KEY`, repetida enquanto precisar) e o emissor consulta
 //!   [`take_keyframe_request`](ScreenStream::take_keyframe_request).
 //! - Perda no caminho: quem assiste conta as lacunas no número de sequência dos pacotes que chegam e,
 //!   a cada meio segundo, devolve a fração perdida (flag `REPORT`, em pacote de preenchimento). O
@@ -22,7 +27,7 @@
 //!   mais velhos são descartados e a fila só volta a aceitar a partir de um quadro-chave.
 
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     time::{Duration, Instant},
 };
 
@@ -39,8 +44,26 @@ pub const FRAGMENT_PAYLOAD: usize = MAX_PAYLOAD - HEADER;
 pub const MAX_FRAME: usize = 1000 * FRAGMENT_PAYLOAD;
 /// Fragmentos na fila de saída antes de descartar quadros velhos (~2 s a 333 pacotes/s).
 pub const MAX_QUEUE: usize = 660;
-/// Quadros em remontagem ao mesmo tempo; passou disso, o mais velho é abandonado.
-const MAX_PENDING: usize = 4;
+/// Quadros em remontagem ao mesmo tempo (a espera por um reparo acumula os que vêm depois); passou
+/// disso, o mais velho é abandonado.
+const MAX_PENDING: usize = 48;
+/// Fragmentos que o emissor guarda para reenviar (~2 s a 333 pacotes/s).
+pub const HISTORY: usize = 660;
+/// Quanto o receptor espera por um reparo antes de abandonar o quadro e pedir quadro-chave. Conta desde o
+/// último fragmento que o quadro recebeu: um quadro-chave ainda chegando não se esgota.
+pub const PATIENCE: Duration = Duration::from_millis(800);
+/// Intervalo mínimo entre dois pedidos do mesmo quadro (um pedido leva uma ida e volta no circuito).
+const NACK_REPEAT: Duration = Duration::from_millis(250);
+/// Intervalo mínimo entre dois reenvios do mesmo fragmento (pedidos repetidos já em trânsito).
+const RETX_HOLD: Duration = Duration::from_millis(120);
+/// Pares num pedido.
+const MAX_NACK: usize = FRAGMENT_PAYLOAD / 4;
+/// Reenvios esperando saída; o resto o receptor pede de novo.
+const MAX_RETX: usize = 128;
+/// Índice que pede o quadro inteiro.
+const WHOLE_FRAME: u16 = u16::MAX;
+/// Quadros no máximo à frente do último entregue que valem um pedido; mais que isso é desistir.
+const NACK_SPAN: usize = 64;
 
 /// Depois de enfileirar um quadro-chave, pedidos do receptor são ignorados por este tempo: o quadro
 /// leva mais de um segundo para sair e os pedidos já em trânsito não valem para o que está a caminho.
@@ -53,6 +76,8 @@ const STOP: u8 = 8;
 /// Pacote de preenchimento com relatório de perda: byte 1 = fração perdida (0 a 255), bytes 3 e 4 = pacotes
 /// esperados na janela.
 const REPORT: u8 = 16;
+/// Pacote de preenchimento com pedido de fragmentos (veja o topo do módulo).
+const NACK: u8 = 32;
 
 /// Janela de medição da perda, entre dois relatórios.
 const REPORT_EVERY: Duration = Duration::from_millis(500);
@@ -84,8 +109,19 @@ pub struct ScreenStats {
     /// Quadros incompletos abandonados ou descartados por falta de quadro-chave.
     pub frames_lost: u64,
     pub rejected: u64,
-    /// Pacotes com vídeo que saíram (sem contar preenchimento).
+    /// Pacotes com vídeo que saíram (sem contar preenchimento; os reenvios entram).
     pub packets_sent: u64,
+    /// Fragmentos reenviados a pedido de quem assiste.
+    pub retransmitted: u64,
+}
+
+/// Fragmento: sinalizadores, id do quadro, índice, total, dados.
+type Frag = (u8, u16, u16, u16, Vec<u8>);
+
+/// Fragmento que já saiu, guardado para um pedido de reenvio.
+struct Sent {
+    frag: Frag,
+    resent: Option<Instant>,
 }
 
 struct Pending {
@@ -94,6 +130,8 @@ struct Pending {
     total: u16,
     got: usize,
     parts: Vec<Option<Vec<u8>>>,
+    /// Quando chegou o último fragmento deste quadro.
+    last_at: Instant,
 }
 
 /// `a` vem antes de `b` na numeração circular de 16 bits.
@@ -105,7 +143,10 @@ fn older(a: u16, b: u16) -> bool {
 pub struct ScreenStream {
     sealer: Sealer,
     opener: Opener,
-    queue: VecDeque<(u8, u16, u16, u16, Vec<u8>)>,
+    queue: VecDeque<Frag>,
+    /// Reenvios pedidos, à frente da fila.
+    retx: VecDeque<Frag>,
+    history: VecDeque<Sent>,
     next_id: u16,
     /// Fila estourou: só aceita quadro-chave até limpar.
     need_key_out: bool,
@@ -116,6 +157,9 @@ pub struct ScreenStream {
     /// Faltou quadro: descarta até chegar um quadro-chave.
     broken: bool,
     peer_wants_key: bool,
+    /// Quadros já pedidos de volta e quando (receptor).
+    asked: HashMap<u16, Instant>,
+    patience: Duration,
     last_key: Option<Instant>,
     key_cooldown: Duration,
     peer_stopped: bool,
@@ -139,6 +183,8 @@ impl ScreenStream {
             sealer: Sealer::new(keys),
             opener: Opener::new(keys),
             queue: VecDeque::new(),
+            retx: VecDeque::new(),
+            history: VecDeque::new(),
             next_id: 0,
             need_key_out: false,
             pending: Vec::new(),
@@ -146,6 +192,8 @@ impl ScreenStream {
             last_id: None,
             broken: false,
             peer_wants_key: false,
+            asked: HashMap::new(),
+            patience: PATIENCE,
             last_key: None,
             key_cooldown: KEY_COOLDOWN,
             peer_stopped: false,
@@ -179,6 +227,9 @@ impl ScreenStream {
         if keyframe {
             // Quadro-chave dispensa tudo que está na fila: quem decodificar começa dele.
             self.queue.clear();
+            // Os quadros anteriores não servem a quem decodifica a partir deste.
+            self.retx.clear();
+            self.history.clear();
             self.need_key_out = false;
             self.last_key = Some(Instant::now());
         } else if self.queue.len() + total > MAX_QUEUE {
@@ -204,7 +255,7 @@ impl ScreenStream {
 
     /// Há fragmento esperando saída (quem não tem nada a mandar deixa o cover do circuito preencher).
     pub fn has_data(&self) -> bool {
-        !self.queue.is_empty()
+        !self.queue.is_empty() || !self.retx.is_empty()
     }
 
     /// Faltou quadro e a imagem está parada à espera de um quadro-chave: vale mandar um pedido.
@@ -235,22 +286,149 @@ impl ScreenStream {
         wanted | self.need_key_out
     }
 
-    /// Quem assiste: o relatório de perda da janela, se já deu o tempo e chegaram pacotes bastantes. Vai
-    /// num pacote de preenchimento (e leva o pedido de quadro-chave, se houver). Fecha a janela.
+    /// Quem assiste: o relatório de perda da janela, se já deu o tempo e chegaram pacotes bastantes, e o
+    /// pedido dos fragmentos que faltam, se houver. Vai num pacote de preenchimento (e leva o pedido de
+    /// quadro-chave, se houver). Fecha a janela. Também entrega, pela fila de [`poll_frame`](Self::poll_frame),
+    /// os quadros que desistiram de esperar: chame de tempos em tempos.
     pub fn report_packet(&mut self) -> Option<Result<[u8; PACKET_LEN], MediaError>> {
+        let nacks = self.collect_nacks();
+        let window = self.close_window();
+        if nacks.is_empty() && window.is_none() {
+            return None;
+        }
+        let mut buf = [0u8; MAX_PAYLOAD];
+        let mut len = HEADER;
+        buf[0] = IDLE | if self.broken { WANT_KEY } else { 0 };
+        if let Some((lost, expected)) = window {
+            buf[0] |= REPORT;
+            buf[1] = lost;
+            buf[3..5].copy_from_slice(&expected.to_be_bytes());
+        }
+        if !nacks.is_empty() {
+            buf[0] |= NACK;
+            buf[2] = nacks.len() as u8;
+            for (id, idx) in nacks {
+                buf[len..len + 2].copy_from_slice(&id.to_be_bytes());
+                buf[len + 2..len + 4].copy_from_slice(&idx.to_be_bytes());
+                len += 4;
+            }
+        }
+        Some(self.sealer.seal(&buf[..len]))
+    }
+
+    /// Fecha a janela de medição se deu o tempo: fração perdida (0 a 255) e pacotes esperados.
+    fn close_window(&mut self) -> Option<(u8, u16)> {
         let top = self.top?;
         let expected = top.checked_sub(self.win_base).map_or(0, |d| d + 1);
         if self.win_start.elapsed() < self.report_every || expected < MIN_REPORT {
             return None;
         }
         let lost = expected.saturating_sub(self.win_got);
-        let mut buf = [0u8; HEADER];
-        buf[0] = IDLE | REPORT | if self.broken { WANT_KEY } else { 0 };
-        buf[1] = (lost as f32 / expected as f32 * 255.0).round() as u8;
-        buf[3..5].copy_from_slice(&(expected.min(u16::MAX as u32) as u16).to_be_bytes());
         self.win_base = top.saturating_add(1);
         (self.win_got, self.win_start) = (0, Instant::now());
-        Some(self.sealer.seal(&buf))
+        Some(((lost as f32 / expected as f32 * 255.0).round() as u8, expected.min(u16::MAX as u32) as u16))
+    }
+
+    /// Os fragmentos que faltam e já valem um pedido: lacunas dentro do quadro que está chegando, o que
+    /// falta nos quadros mais velhos e quadros que nem começaram a chegar. Cada quadro só é pedido de novo
+    /// depois de [`NACK_REPEAT`].
+    fn collect_nacks(&mut self) -> Vec<(u16, u16)> {
+        self.drain();
+        let Some(newest) = self.pending.iter().map(|p| p.id).fold(None, |n: Option<u16>, id| match n {
+            Some(n) if !older(n, id) => Some(n),
+            _ => Some(id),
+        }) else {
+            return Vec::new();
+        };
+        let start = self.last_id.map_or_else(|| self.pending.iter().map(|p| p.id).fold(newest, |o, id| if older(id, o) { id } else { o }), |l| l.wrapping_add(1));
+        let span = newest.wrapping_sub(start) as usize;
+        if span > NACK_SPAN {
+            return Vec::new(); // `drain` vai desistir
+        }
+        let now = Instant::now();
+        let mut out = Vec::new();
+        for step in 0..=span {
+            let id = start.wrapping_add(step as u16);
+            if self.asked.get(&id).is_some_and(|t| now.duration_since(*t) < NACK_REPEAT) {
+                continue;
+            }
+            let before = out.len();
+            match self.pending.iter().find(|p| p.id == id) {
+                None => out.push((id, WHOLE_FRAME)),
+                Some(p) => {
+                    // No quadro mais novo só vale o que ficou para trás de um fragmento que já chegou.
+                    let upto = if id == newest { p.parts.iter().rposition(Option::is_some).unwrap_or(0) } else { p.parts.len() };
+                    out.extend((0..upto).filter(|i| p.parts[*i].is_none()).map(|i| (id, i as u16)));
+                }
+            }
+            if out.len() > before {
+                self.asked.insert(id, now);
+            }
+            if out.len() >= MAX_NACK {
+                out.truncate(MAX_NACK);
+                break;
+            }
+        }
+        out
+    }
+
+    /// Quem transmite: põe na fila de reenvio os fragmentos que o relatório de quem assiste pediu.
+    fn schedule_retx(&mut self, frame: &[u8]) {
+        let count = frame[2] as usize;
+        let now = Instant::now();
+        for pair in frame[HEADER..].as_chunks::<4>().0.iter().take(count) {
+            let (id, idx) = (u16::from_be_bytes([pair[0], pair[1]]), u16::from_be_bytes([pair[2], pair[3]]));
+            for sent in self.history.iter_mut().filter(|s| s.frag.1 == id && (idx == WHOLE_FRAME || s.frag.2 == idx)) {
+                if self.retx.len() >= MAX_RETX {
+                    return;
+                }
+                if sent.resent.is_some_and(|t| now.duration_since(t) < RETX_HOLD) {
+                    continue;
+                }
+                sent.resent = Some(now);
+                self.retx.push_back(sent.frag.clone());
+                self.stats.retransmitted += 1;
+            }
+        }
+    }
+
+    /// Entrega, em ordem, os quadros completos; desiste do que não veio no prazo.
+    fn drain(&mut self) {
+        while let Some(i) = (0..self.pending.len()).fold(None, |o: Option<usize>, i| match o {
+            Some(o) if !older(self.pending[i].id, self.pending[o].id) => Some(o),
+            _ => Some(i),
+        }) {
+            let (id, key, full, last_at) = {
+                let p = &self.pending[i];
+                (p.id, p.keyframe, p.got == p.total as usize, p.last_at)
+            };
+            let next = self.last_id.map(|l| l.wrapping_add(1));
+            let in_order = key || next.is_none_or(|n| n == id);
+            if full && in_order {
+                let p = self.pending.remove(i);
+                self.finish(p);
+                continue;
+            }
+            if self.pending.len() <= MAX_PENDING && last_at.elapsed() < self.patience {
+                break;
+            }
+            // O reparo não veio: o que falta nunca chegará, e o que vem depois não decodifica.
+            self.broken = true;
+            match next {
+                Some(n) if !in_order => {
+                    self.stats.frames_lost += id.wrapping_sub(n) as u64;
+                    self.last_id = Some(id.wrapping_sub(1));
+                }
+                _ => {
+                    self.pending.remove(i);
+                    self.stats.frames_lost += 1;
+                    self.last_id = Some(id);
+                }
+            }
+        }
+        if let Some(l) = self.last_id {
+            self.asked.retain(|id, _| older(l, *id));
+        }
     }
 
     /// Quem transmite: o último relatório que chegou, uma vez só.
@@ -278,7 +456,11 @@ impl ScreenStream {
     pub fn next_packet(&mut self) -> Result<[u8; PACKET_LEN], MediaError> {
         let want = if self.broken { WANT_KEY } else { 0 };
         let mut buf = [0u8; MAX_PAYLOAD];
-        let len = match self.queue.pop_front() {
+        let (next, fresh) = match self.retx.pop_front() {
+            Some(f) => (Some(f), false),
+            None => (self.queue.pop_front(), true),
+        };
+        let len = match next {
             Some((flags, id, idx, total, data)) => {
                 self.stats.packets_sent += 1;
                 buf[0] = flags | want;
@@ -286,6 +468,12 @@ impl ScreenStream {
                 buf[3..5].copy_from_slice(&idx.to_be_bytes());
                 buf[5..7].copy_from_slice(&total.to_be_bytes());
                 buf[HEADER..HEADER + data.len()].copy_from_slice(&data);
+                if fresh {
+                    if self.history.len() >= HISTORY {
+                        self.history.pop_front();
+                    }
+                    self.history.push_back(Sent { frag: (flags, id, idx, total, data.clone()), resent: None });
+                }
                 HEADER + data.len()
             }
             None => {
@@ -323,6 +511,9 @@ impl ScreenStream {
             self.report_at = Some(Instant::now());
             self.sent_at_report = self.stats.packets_sent;
         }
+        if flags & NACK != 0 && frame.len() > HEADER {
+            self.schedule_retx(&frame);
+        }
         if flags & STOP != 0 {
             self.peer_stopped = true;
             return Ok(());
@@ -343,14 +534,13 @@ impl ScreenStream {
         let slot = match self.pending.iter().position(|p| p.id == id) {
             Some(i) => i,
             None => {
-                self.pending.push(Pending { id, keyframe: flags & KEYFRAME != 0, total: total as u16, got: 0, parts: vec![None; total] });
-                if self.pending.len() > MAX_PENDING {
-                    let oldest = (0..self.pending.len()).fold(0, |o, i| if older(self.pending[i].id, self.pending[o].id) { i } else { o });
-                    self.pending.remove(oldest);
-                    self.stats.frames_lost += 1;
-                    self.broken = true;
+                let keyframe = flags & KEYFRAME != 0;
+                if keyframe {
+                    // O emissor largou tudo que era anterior ao quadro-chave: não há o que esperar.
+                    self.pending.retain(|q| !older(q.id, id));
                 }
-                self.pending.iter().position(|p| p.id == id).expect("acabou de entrar")
+                self.pending.push(Pending { id, keyframe, total: total as u16, got: 0, parts: vec![None; total], last_at: Instant::now() });
+                self.pending.len() - 1
             }
         };
         let p = &mut self.pending[slot];
@@ -361,24 +551,14 @@ impl ScreenStream {
         if p.parts[idx].is_none() {
             p.parts[idx] = Some(frame[HEADER..].to_vec());
             p.got += 1;
+            p.last_at = Instant::now();
         }
-        if p.got == p.total as usize {
-            let p = self.pending.remove(slot);
-            self.finish(p);
-        }
+        self.drain();
         Ok(())
     }
 
+    /// Quadro completo e na vez dele (veja [`drain`](Self::drain)).
     fn finish(&mut self, p: Pending) {
-        // Tudo que ficou para trás desse quadro nunca chegará inteiro.
-        let before = self.pending.len();
-        self.pending.retain(|q| !older(q.id, p.id));
-        let abandoned = (before - self.pending.len()) as u64;
-        let skipped = self.last_id.is_some_and(|l| p.id != l.wrapping_add(1));
-        if abandoned > 0 || skipped {
-            self.stats.frames_lost += abandoned.max(1);
-            self.broken = true;
-        }
         self.last_id = Some(p.id);
         if p.keyframe {
             self.broken = false;
@@ -508,6 +688,7 @@ mod tests {
     fn lost_fragment_blocks_delta_frames_and_asks_for_a_keyframe() {
         let (mut a, mut b) = pair();
         a.key_cooldown = Duration::ZERO;
+        b.patience = Duration::ZERO; // sem esperar reparo
         a.push_frame(&frame(100, 0), true).unwrap();
         a.push_frame(&frame(400, 1), false).unwrap(); // 3 fragmentos
         a.push_frame(&frame(100, 2), false).unwrap();
@@ -525,6 +706,7 @@ mod tests {
         a.receive(&p).unwrap();
         assert!(a.take_keyframe_request());
         assert!(!a.take_keyframe_request(), "pedido é consumido");
+        b.patience = PATIENCE; // o quadro-chave leva dois fragmentos para chegar
         a.push_frame(&frame(200, 3), true).unwrap();
         while a.queued() > 0 {
             slot(&mut a, &mut b, false);
@@ -539,6 +721,127 @@ mod tests {
         // E o pedido cessa.
         slot(&mut b, &mut a, false);
         assert!(!a.take_keyframe_request());
+    }
+
+    /// Quadro-chave de 1 fragmento, quadro de 3 fragmentos e quadro de 1: sai tudo, perdendo o fragmento `lose` (se houver).
+    fn send_three(a: &mut ScreenStream, b: &mut ScreenStream, lose: Option<usize>) {
+        a.push_frame(&frame(100, 0), true).unwrap();
+        a.push_frame(&frame(400, 1), false).unwrap();
+        a.push_frame(&frame(100, 2), false).unwrap();
+        let mut n = 0;
+        while a.queued() > 0 {
+            slot(a, b, lose == Some(n));
+            n += 1;
+        }
+    }
+
+    /// B devolve o que tem a pedir; A o recebe e reenvia tudo que ficou na fila.
+    fn repair(a: &mut ScreenStream, b: &mut ScreenStream) {
+        let ask = b.report_packet().expect("pedido").unwrap();
+        a.receive(&ask).unwrap();
+        while a.has_data() {
+            slot(a, b, false);
+        }
+    }
+
+    #[test]
+    fn a_lost_fragment_is_asked_for_and_the_frames_come_out_whole_and_in_order() {
+        let (mut a, mut b) = pair();
+        send_three(&mut a, &mut b, Some(2)); // o 2º fragmento do quadro 1
+        assert_eq!(b.poll_frame().unwrap().data, frame(100, 0));
+        assert_eq!(b.poll_frame(), None, "o quadro 2 espera o 1");
+        repair(&mut a, &mut b);
+        assert_eq!(b.poll_frame().unwrap().data, frame(400, 1));
+        assert_eq!(b.poll_frame().unwrap().data, frame(100, 2));
+        assert!(!b.needs_key());
+        assert_eq!(b.stats().frames_lost, 0);
+        assert_eq!(a.stats().retransmitted, 1);
+        assert!(b.report_packet().is_none(), "nada mais a pedir");
+    }
+
+    #[test]
+    fn a_frame_that_never_arrived_is_asked_for_whole() {
+        let (mut a, mut b) = pair();
+        a.push_frame(&frame(100, 0), true).unwrap();
+        a.push_frame(&frame(400, 1), false).unwrap();
+        a.push_frame(&frame(100, 2), false).unwrap();
+        let mut n = 0;
+        while a.queued() > 0 {
+            slot(&mut a, &mut b, (1..=3).contains(&n)); // os 3 fragmentos do quadro 1
+            n += 1;
+        }
+        assert_eq!(b.poll_frame().unwrap().data, frame(100, 0));
+        assert_eq!(b.poll_frame(), None);
+        repair(&mut a, &mut b);
+        assert_eq!(b.poll_frame().unwrap().data, frame(400, 1));
+        assert_eq!(b.poll_frame().unwrap().data, frame(100, 2));
+        assert_eq!(a.stats().retransmitted, 3);
+    }
+
+    #[test]
+    fn the_same_frame_is_not_asked_again_before_the_repeat_interval_and_not_resent_twice_in_a_row() {
+        let (mut a, mut b) = pair();
+        send_three(&mut a, &mut b, Some(2));
+        let first = b.report_packet().expect("pedido").unwrap();
+        assert!(b.report_packet().is_none(), "ainda dentro do intervalo");
+        a.receive(&first).unwrap();
+        a.receive(&first).unwrap_err(); // o mesmo pacote é repetição e não vale
+        let again = {
+            b.asked.clear();
+            b.report_packet().expect("pedido repetido").unwrap()
+        };
+        a.receive(&again).unwrap();
+        assert_eq!(a.stats().retransmitted, 1, "o reenvio recente segura o segundo pedido");
+        // Passado o intervalo, o fragmento sai de novo.
+        for s in a.history.iter_mut() {
+            s.resent = s.resent.map(|t| t - RETX_HOLD);
+        }
+        b.asked.clear();
+        a.receive(&b.report_packet().unwrap().unwrap()).unwrap();
+        assert_eq!(a.stats().retransmitted, 2);
+    }
+
+    #[test]
+    fn a_repair_that_never_comes_falls_back_to_a_keyframe_request() {
+        let (mut a, mut b) = pair();
+        b.patience = Duration::from_millis(30);
+        send_three(&mut a, &mut b, Some(2));
+        assert!(!b.needs_key(), "ainda espera o reparo");
+        std::thread::sleep(Duration::from_millis(60));
+        b.report_packet();
+        assert!(b.needs_key());
+        assert_eq!(b.stats().frames_lost, 1);
+        assert_eq!(b.poll_frame().unwrap().data, frame(100, 0));
+        assert_eq!(b.poll_frame(), None);
+    }
+
+    #[test]
+    fn a_keyframe_drops_the_history_and_pending_repairs() {
+        let (mut a, mut b) = pair();
+        send_three(&mut a, &mut b, Some(2));
+        let ask = b.report_packet().expect("pedido").unwrap();
+        a.push_frame(&frame(50, 9), true).unwrap();
+        a.receive(&ask).unwrap();
+        assert_eq!(a.stats().retransmitted, 0, "o quadro-chave largou o que era anterior");
+        while a.queued() > 0 {
+            slot(&mut a, &mut b, false);
+        }
+        assert_eq!(b.poll_frame().unwrap().data, frame(100, 0));
+        assert_eq!(b.poll_frame().unwrap().data, frame(50, 9));
+        assert!(!b.needs_key());
+    }
+
+    #[test]
+    fn retransmissions_look_like_any_other_packet_and_go_first() {
+        let (mut a, mut b) = pair();
+        send_three(&mut a, &mut b, Some(2));
+        a.push_frame(&frame(2000, 7), false).unwrap();
+        assert_eq!(b.poll_frame().unwrap().data, frame(100, 0));
+        a.receive(&b.report_packet().unwrap().unwrap()).unwrap();
+        let p = a.next_packet().unwrap();
+        assert_eq!(p.len(), PACKET_LEN);
+        b.receive(&p).unwrap();
+        assert_eq!(b.poll_frame().unwrap().data, frame(400, 1), "o reenvio saiu antes do quadro novo");
     }
 
     #[test]
@@ -619,6 +922,7 @@ mod tests {
     #[test]
     fn viewer_asks_only_while_it_needs_a_keyframe() {
         let (mut a, mut b) = pair();
+        b.patience = Duration::ZERO;
         assert!(!b.needs_key() && !a.has_data());
         a.push_frame(&frame(100, 0), true).unwrap();
         a.push_frame(&frame(400, 1), false).unwrap();
