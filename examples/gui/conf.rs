@@ -118,7 +118,7 @@ pub(crate) struct Form {
     /// só manda o que há para enviar e dobra o ritmo (veja `Dialer::share_screen_keys_with`).
     pub(crate) screen_private: bool,
     /// Codec de voz das chamadas que esta pessoa inicia: Opus (32 kbps) em vez do G.722 (64 kbps).
-    /// Quem atende usa o que o convite pedir.
+    /// Quem atende usa o que o convite pedir. Ligado de início.
     pub(crate) voice_opus: bool,
     /// Âncoras que usa, uma por linha: `ip:porta#chave-do-circuito#chave-do-link`.
     pub(crate) anchors: String,
@@ -386,7 +386,7 @@ pub(crate) fn save_known(book: &Book) -> std::io::Result<()> {
 impl Form {
     /// Primeira abertura: já nasce com uma identidade, para a pessoa não precisar gerar nada.
     pub(crate) fn first_run() -> Self {
-        Form { secret: hex(&StaticSecret::random_from_rng(OsRng).to_bytes()), intros: true, use_dht: true, anchor: true, screen_private: true, ..Form::default() }
+        Form { secret: hex(&StaticSecret::random_from_rng(OsRng).to_bytes()), intros: true, use_dht: true, anchor: true, screen_private: true, voice_opus: true, ..Form::default() }
     }
 
     pub(crate) fn load() -> Self {
@@ -414,7 +414,8 @@ impl Form {
             anchor: get("no_anchor") != "1",
             // Ligada de início: a chave guarda o "não", então o arquivo antigo, sem ela, também aceita.
             screen_private: get("no_screen_privacy") != "1",
-            voice_opus: get("opus") == "1",
+            // Ligado de início: a chave guarda o "não", então o arquivo antigo, sem ela, também aceita.
+            voice_opus: get("no_opus") != "1",
             anchors: get("anchors").replace(';', "\n"),
             use_audio: get("audio") == "1",
             input_dev: get("input_dev"),
@@ -436,7 +437,7 @@ impl Form {
         // Chave de identidade no chaveiro do sistema; só cai para o arquivo se ele não estiver disponível.
         let secret = if vault_set(self.secret.trim()) { KEYRING_MARK } else { self.secret.trim() };
         let text = format!(
-            "audio={}\nsecret={}\ncontacts={}\npeer={}\npublic_addr={}\nno_dht={}\ndht_circuit={}\nname={}\nintros={}\nno_anchor={}\nno_screen_privacy={}\nanchors={}\ninput_dev={}\noutput_dev={}\nopus={}\n{}",
+            "audio={}\nsecret={}\ncontacts={}\npeer={}\npublic_addr={}\nno_dht={}\ndht_circuit={}\nname={}\nintros={}\nno_anchor={}\nno_screen_privacy={}\nanchors={}\ninput_dev={}\noutput_dev={}\nno_opus={}\n{}",
             u8::from(self.use_audio),
             secret,
             self.contacts.trim().replace('\n', ";"),
@@ -451,7 +452,7 @@ impl Form {
             self.anchors.trim().replace('\n', ";"),
             self.input_dev.trim(),
             self.output_dev.trim(),
-            u8::from(self.voice_opus),
+            u8::from(!self.voice_opus),
             self.audio.to_conf()
         );
         // Contém a chave secreta: só o dono lê.
