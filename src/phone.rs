@@ -48,7 +48,7 @@ use crate::{
     circuit::manager::Event,
     media::{
         CallStats, MediaError, VoiceCall,
-        codec::Codec,
+        codec::{Codec, CodecId},
         keys::CallKeys,
         screen::{ScreenFrame, ScreenStats, ScreenStream},
         signal::{Answer, Caller, Incoming, RelayHint},
@@ -367,7 +367,7 @@ pub async fn call_linked<C: Codec + Send + 'static>(
     .await
     .map_err(|_| CallError::NoCircuit)??;
 
-    let (caller, invite) = Caller::invite_with_hint(my_static, peer, unix_secs(), PhoneLink::current_hint(link).as_ref())?;
+    let (caller, invite) = Caller::invite_codec(my_static, peer, unix_secs(), PhoneLink::current_hint(link).as_ref(), codec.id())?;
     client.send(&invite).await.map_err(|_| CallError::NoCircuit)?;
     let keys = timeout(wait, async {
         loop {
@@ -615,6 +615,11 @@ impl IncomingCall {
     /// Não é autenticado; use só como último recurso.
     pub fn relay_hint(&self) -> Option<&RelayHint> {
         self.invite.relay_hint()
+    }
+
+    /// Codec que quem ligou escolheu. Aceite com ele (veja [`CodecId::build`]); com outro, as duas pontas não se entendem.
+    pub fn codec(&self) -> CodecId {
+        self.invite.codec()
     }
 
     pub async fn accept<C: Codec + Send + 'static>(self, codec: C) -> Result<ActiveCall, CallError> {

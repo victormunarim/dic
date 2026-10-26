@@ -9,7 +9,7 @@ use clam::circuit::{
 };
 use clam::media::{
     VoiceCall,
-    codec::{Codec, Mulaw},
+    codec::{Codec, CodecId, Mulaw},
     signal::{Answer, Caller},
 };
 use clam::phone::{ActiveCall, CallError, Phone, ScreenEvent, call, call_linked, open_screen_client_options, screen_client_options, share_screen, share_screen_slot, OPEN_SCREEN_SLOT_MS};
@@ -111,6 +111,49 @@ async fn call_over_two_hops_carries_audio_both_ways_and_hangs_up() {
 
     a.hangup();
     assert!(timeout(WAIT, async { while b.next_pcm().await.is_some() {} }).await.is_ok(), "b deveria ver o desligar");
+}
+
+/// Voz em 16 kHz (quadros de 320 amostras), para os codecs de banda larga.
+fn wide_voice(n: usize) -> Vec<i16> {
+    (0..320)
+        .map(|i| {
+            let ph = std::f64::consts::TAU * 140.0 * (n * 320 + i) as f64 / 16000.0;
+            (3000.0 * ph.sin() + 2000.0 * (2.0 * ph).sin() + 1200.0 * (3.0 * ph).sin()) as i16
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn the_caller_chooses_the_codec_and_the_callee_follows_the_invite() {
+    for id in [CodecId::Opus, CodecId::G722] {
+        let (alice, bob) = ids();
+        let mut phone = Phone::bind("127.0.0.1:0".parse().unwrap(), bob.clone(), vec![*PublicKey::from(&alice).as_bytes()]).await.unwrap();
+        let (_srv, cands) = relays(4, &phone.local_addr().to_string()).await;
+
+        let bob_pub = PublicKey::from(&bob);
+        let caller = tokio::spawn(async move { call(client(cands), &alice, &bob_pub, id.build(), WAIT).await });
+        let incoming = timeout(WAIT, phone.next_incoming()).await.unwrap().unwrap();
+        let chosen = incoming.codec();
+        assert_eq!(chosen, id);
+        let mut b = incoming.accept(chosen.build()).await.unwrap();
+        let a = caller.await.unwrap().unwrap();
+
+        let mut got = vec![];
+        let end = Instant::now() + Duration::from_millis(20 * 40 + 300);
+        let (mut sent, mut tick) = (0, tokio::time::interval(Duration::from_millis(20)));
+        while Instant::now() < end {
+            tokio::select! {
+                _ = tick.tick(), if sent < 40 => { a.send(wide_voice(sent)).await.unwrap(); sent += 1; }
+                f = b.next_pcm() => match f { Some(f) => got.push(f), None => break },
+                _ = sleep_until(end) => break,
+            }
+        }
+        let loud = got.iter().filter(|f| (f.iter().map(|&x| (x as f64).powi(2)).sum::<f64>() / f.len() as f64).sqrt() > 1000.0).count();
+        assert!(got.iter().all(|f| f.len() == 320), "{id:?}: quadros de 320 amostras");
+        assert!(loud >= 20, "{id:?}: {loud} quadros com voz de {} tocados", got.len());
+        assert!(b.stats().received >= 35, "{id:?}: recebidos {}", b.stats().received);
+        a.hangup();
+    }
 }
 
 #[tokio::test]

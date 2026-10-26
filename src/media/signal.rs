@@ -25,6 +25,11 @@
 //!   bytes; sem dica o bloco é aleatório e [`Incoming::relay_hint`] devolve `None`. Como `s_i`, a dica
 //!   não é autenticada: quem a recebe só a usa depois do endereço guardado, da DHT e das âncoras falharem, e só a
 //!   promove a endereço guardado depois de uma chamada autenticada por ela.
+//! - O convite diz o **codec** da chamada ([`Incoming::codec`]) nos 12 bytes finais: sorteio de 4 bytes
+//!   ‖ 8 bytes de PRF da chave do convite. G.722, o padrão, não leva etiqueta (os bytes são aleatórios,
+//!   como num telefone antigo); outro codec leva, e só quem tem a chave do convite a verifica.
+//!   Telefone antigo não olha esses bytes e atende em G.722: ligar em outro codec exige os dois
+//!   lados novos.
 
 use std::net::{IpAddr, SocketAddr};
 
@@ -35,10 +40,12 @@ use chacha20poly1305::{
 use hkdf::Hkdf;
 use rand_core::{OsRng, RngCore};
 use sha2::Sha256;
+use subtle::ConstantTimeEq;
 use x25519_dalek::{PublicKey, StaticSecret};
 
 use super::{
     MediaError,
+    codec::CodecId,
     keys::{CallKeys, Ephemeral},
     packet::PACKET_LEN,
 };
@@ -51,6 +58,11 @@ const SEALED_LEN: usize = 32 + 8 + 16;
 const HINT_LEN: usize = 32 + 32 + 1 + 16 + 2;
 const HINT_SEALED_LEN: usize = HINT_LEN + 16;
 const HINT_AT: usize = 33 + SEALED_LEN;
+/// Onde começam os bytes finais do convite: aleatórios, ou a etiqueta do codec (veja [`codec_tag`]).
+const TAIL_AT: usize = HINT_AT + HINT_SEALED_LEN;
+/// Bytes da etiqueta do codec: um sorteio e o código de autenticação dele.
+const TAG_SALT_LEN: usize = 4;
+const TAG_MAC_LEN: usize = 8;
 
 /// Onde chegar ao relay de quem liga: o que o chamado precisa para ligar de volta.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -98,6 +110,21 @@ fn hint_nonce() -> Nonce {
     n.into()
 }
 
+/// Etiqueta que diz o codec nos bytes finais do convite: `sorteio ‖ PRF(chave do convite, sorteio ‖ codec)`.
+///
+/// Só quem tem a chave do convite verifica, e sem ela a etiqueta é indistinguível dos bytes
+/// aleatórios que o convite de G.722 leva no lugar (por isso G.722, o padrão, não leva etiqueta e
+/// continua igual ao de um telefone antigo). Telefone antigo ignora esses bytes e atende em G.722.
+fn codec_tag(dh: &[u8; 32], e_i: &[u8; 32], s_r: &[u8; 32], salt: &[u8], codec: CodecId) -> [u8; TAG_MAC_LEN] {
+    let mut info = e_i.to_vec();
+    info.extend_from_slice(s_r);
+    info.extend_from_slice(salt);
+    info.push(codec.wire());
+    let mut mac = [0u8; TAG_MAC_LEN];
+    Hkdf::<Sha256>::new(Some(b"clam/v1/invite-codec"), dh).expand(&info, &mut mac).expect("8 bytes é válido");
+    mac
+}
+
 /// Um quadro de sinalização, pronto para ir ao circuito.
 pub type Frame = [u8; PACKET_LEN];
 
@@ -129,6 +156,18 @@ impl Caller {
 
     /// Como [`Caller::invite`], levando junto o relay de quem liga (veja [`RelayHint`]).
     pub fn invite_with_hint(my_static: &StaticSecret, peer: &PublicKey, now_secs: u64, hint: Option<&RelayHint>) -> Result<(Self, Frame), MediaError> {
+        Self::invite_codec(my_static, peer, now_secs, hint, CodecId::default())
+    }
+
+    /// Como [`Caller::invite_with_hint`], dizendo qual codec a chamada usa (o do chamado vem em
+    /// [`Incoming::codec`]). Quem não lê a indicação (telefone antigo) atende em G.722.
+    pub fn invite_codec(
+        my_static: &StaticSecret,
+        peer: &PublicKey,
+        now_secs: u64,
+        hint: Option<&RelayHint>,
+        codec: CodecId,
+    ) -> Result<(Self, Frame), MediaError> {
         let eph = Ephemeral::generate();
         let dh = eph.diffie_hellman(peer)?;
         let cipher = invite_key(&dh, &eph.public(), peer.as_bytes());
@@ -148,7 +187,11 @@ impl Caller {
             }
             None => OsRng.fill_bytes(&mut f[HINT_AT..HINT_AT + HINT_SEALED_LEN]),
         }
-        OsRng.fill_bytes(&mut f[HINT_AT + HINT_SEALED_LEN..]);
+        OsRng.fill_bytes(&mut f[TAIL_AT..]);
+        if codec != CodecId::default() {
+            let (salt, mac) = f[TAIL_AT..TAIL_AT + TAG_SALT_LEN + TAG_MAC_LEN].split_at_mut(TAG_SALT_LEN);
+            mac.copy_from_slice(&codec_tag(&dh, &eph.public(), peer.as_bytes(), salt, codec));
+        }
         Ok((Self { eph, peer: *peer }, f))
     }
 
@@ -172,6 +215,7 @@ pub struct Incoming {
     caller: PublicKey,
     eph: [u8; 32],
     hint: Option<RelayHint>,
+    codec: CodecId,
 }
 
 impl Incoming {
@@ -193,7 +237,19 @@ impl Incoming {
         let caller: [u8; 32] = plain[..32].try_into().expect("32 bytes");
         // Convite de versão anterior ou sem dica: o bloco não autentica e fica `None`.
         let hint = cipher.decrypt(&hint_nonce(), &frame[HINT_AT..HINT_AT + HINT_SEALED_LEN]).ok().and_then(|p| RelayHint::decode(&p));
-        Ok(Self { caller: PublicKey::from(caller), eph, hint })
+        // Sem etiqueta que confira (telefone antigo, ou o padrão): G.722.
+        let (salt, mac) = frame[TAIL_AT..TAIL_AT + TAG_SALT_LEN + TAG_MAC_LEN].split_at(TAG_SALT_LEN);
+        let codec = CodecId::ALL
+            .into_iter()
+            .filter(|c| *c != CodecId::default())
+            .find(|c| bool::from(codec_tag(dh.as_bytes(), &eph, me.as_bytes(), salt, *c).ct_eq(mac)))
+            .unwrap_or_default();
+        Ok(Self { caller: PublicKey::from(caller), eph, hint, codec })
+    }
+
+    /// Codec que quem ligou escolheu. Não é uma negociação: quem atende usa este, ou recusa.
+    pub fn codec(&self) -> CodecId {
+        self.codec
     }
 
     /// Relay de quem ligou, se o convite o trouxe. Não é autenticado (veja o módulo): é só uma dica.
@@ -313,6 +369,46 @@ mod tests {
         let (_, inv) = Caller::invite_with_hint(&a, &PublicKey::from(&b), 0, Some(&h)).unwrap();
         assert!(!inv.windows(32).any(|w| w == h.onion || w == h.link));
         assert!(!inv.windows(4).any(|w| w == [192, 168, 15, 10]));
+    }
+
+    #[test]
+    fn the_invite_carries_the_codec() {
+        let (alice, bob) = ids();
+        for id in CodecId::ALL {
+            let (_, inv) = Caller::invite_codec(&alice, &PublicKey::from(&bob), 0, None, id).unwrap();
+            assert_eq!(Incoming::parse(&bob, &inv).unwrap().codec(), id);
+        }
+    }
+
+    #[test]
+    fn an_invite_without_a_codec_is_g722() {
+        let (alice, bob) = ids();
+        let (_, inv) = Caller::invite(&alice, &PublicKey::from(&bob), 0).unwrap();
+        assert_eq!(Incoming::parse(&bob, &inv).unwrap().codec(), CodecId::G722);
+        // Telefone antigo: bytes finais zerados.
+        let mut old = inv;
+        old[TAIL_AT..].fill(0);
+        assert_eq!(Incoming::parse(&bob, &old).unwrap().codec(), CodecId::G722);
+    }
+
+    #[test]
+    fn a_tampered_codec_tag_falls_back_to_g722() {
+        let (alice, bob) = ids();
+        let (_, mut inv) = Caller::invite_codec(&alice, &PublicKey::from(&bob), 0, None, CodecId::Opus).unwrap();
+        inv[TAIL_AT + 6] ^= 1;
+        let incoming = Incoming::parse(&bob, &inv).unwrap();
+        assert_eq!(incoming.codec(), CodecId::G722);
+        assert!(incoming.accept(&bob).is_ok());
+    }
+
+    #[test]
+    fn the_codec_stays_hidden_from_the_exit_relay() {
+        let (alice, bob) = ids();
+        // Sem a chave do convite, convite em Opus e em G.722 têm bytes finais igualmente aleatórios:
+        // nenhum padrão fixo (aqui, só que não se repetem entre convites).
+        let (_, a) = Caller::invite_codec(&alice, &PublicKey::from(&bob), 0, None, CodecId::Opus).unwrap();
+        let (_, b) = Caller::invite_codec(&alice, &PublicKey::from(&bob), 0, None, CodecId::Opus).unwrap();
+        assert_ne!(a[TAIL_AT..], b[TAIL_AT..]);
     }
 
     #[test]

@@ -66,7 +66,8 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
                 Some(a) => format!("ligando: tento o endereço guardado do contato ({a})"),
                 None => "ligando: não há endereço guardado deste contato; tento a DHT e as âncoras, se ligadas".to_string(),
             });
-            let r = until_hangup(dialer.dial(peer, G722::new(), Duration::from_secs(15)), &sh.hangup).await;
+            let codec = if sh.opus.load(Ordering::Relaxed) { CodecId::Opus } else { CodecId::G722 };
+            let r = until_hangup(dialer.dial(peer, codec.build(), Duration::from_secs(15)), &sh.hangup).await;
             let _ = tx.send((peer, attempt, r));
         });
     };
@@ -86,7 +87,10 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
                 out.line(format!("chamada de {name}"));
                 shared.hangup.store(false, Ordering::Relaxed);
                 let caller = *inc.caller().as_bytes();
-                match inc.accept(G722::new()).await {
+                // Quem liga escolhe o codec; telefone antigo não diz e fica em G.722.
+                let codec = inc.codec();
+                out.line(format!("codec da chamada: {codec:?}"));
+                match inc.accept(codec.build()).await {
                     Ok(c) => start_talk(c, 660.0, &shared, &out, &form, None, Peer { key: caller, dialer: dialer.clone() }),
                     Err(e) => {
                         out.line(format!("não atendeu: {e}"));

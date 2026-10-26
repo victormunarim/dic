@@ -10,7 +10,7 @@ use std::{
     time::Duration,
 };
 
-use clam::media::codec::G722;
+use clam::media::codec::CodecId;
 use clam::node::{Node, NodeConfig};
 use clam::phone::ActiveCall;
 use tokio::{
@@ -78,6 +78,8 @@ pub(crate) struct Shared {
     pub(crate) screen: ScreenState,
     /// Mudo, volume, ganho e nível do microfone.
     pub(crate) audio: Controls,
+    /// Codec das próximas ligações que esta pessoa fizer: Opus em vez de G.722 (`Form::voice_opus`).
+    pub(crate) opus: AtomicBool,
     /// Teste do microfone em andamento (a pessoa se ouve); desligar este sinalizador encerra o teste.
     pub(crate) mic_test: AtomicBool,
     /// Texto de estado do nó ("online em ...").

@@ -1,10 +1,109 @@
-//! Codecs de voz. A trait é o ponto de encaixe do Opus; o G.711 µ-law vem pronto porque é
-//! Rust puro, tem quadro fixo de 160 bytes (cabe no pacote) e serve para testar a camada.
+//! Codecs de voz. A trait é o ponto de encaixe; vêm o G.722 e o Opus (os dois em Rust puro, a
+//! 16 kHz) e o G.711 µ-law, que tem quadro fixo de 160 bytes (cabe no pacote) e serve para
+//! testar a camada.
+
+use opus_pure::{Application, OpusDecoder, OpusEncoder};
 
 use super::{MediaError, packet::MAX_PAYLOAD};
 
+/// Qual codec uma chamada usa. Quem liga escolhe e diz no convite (veja
+/// [`Caller::invite_codec`](super::signal::Caller::invite_codec)); convite sem a indicação
+/// (telefone antigo) é G.722.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub enum CodecId {
+    /// G.711 µ-law, 8 kHz.
+    Mulaw,
+    /// G.722, 16 kHz, 64 kbps.
+    #[default]
+    G722,
+    /// Opus, 16 kHz, 32 kbps.
+    Opus,
+}
+
+impl CodecId {
+    /// Todos, para quem precisa tentar um a um.
+    pub const ALL: [CodecId; 3] = [CodecId::Mulaw, CodecId::G722, CodecId::Opus];
+
+    /// Número que entra na etiqueta do convite.
+    pub(crate) fn wire(self) -> u8 {
+        match self {
+            CodecId::Mulaw => 1,
+            CodecId::G722 => 2,
+            CodecId::Opus => 3,
+        }
+    }
+
+    /// Taxa de amostragem do áudio que o codec consome e produz.
+    pub fn sample_rate(self) -> u32 {
+        match self {
+            CodecId::Mulaw => 8000,
+            CodecId::G722 | CodecId::Opus => 16000,
+        }
+    }
+
+    /// Um codec novo deste tipo.
+    pub fn build(self) -> AnyCodec {
+        match self {
+            CodecId::Mulaw => AnyCodec::Mulaw(Mulaw::new()),
+            CodecId::G722 => AnyCodec::G722(Box::default()),
+            CodecId::Opus => AnyCodec::Opus(Box::default()),
+        }
+    }
+}
+
+/// Codec escolhido em tempo de execução (o app só sabe qual é depois de ler a configuração ou o convite).
+pub enum AnyCodec {
+    Mulaw(Mulaw),
+    G722(Box<G722>),
+    Opus(Box<Opus>),
+}
+
+impl Codec for AnyCodec {
+    fn id(&self) -> CodecId {
+        match self {
+            AnyCodec::Mulaw(c) => c.id(),
+            AnyCodec::G722(c) => c.id(),
+            AnyCodec::Opus(c) => c.id(),
+        }
+    }
+
+    fn frame_ms(&self) -> u64 {
+        match self {
+            AnyCodec::Mulaw(c) => c.frame_ms(),
+            AnyCodec::G722(c) => c.frame_ms(),
+            AnyCodec::Opus(c) => c.frame_ms(),
+        }
+    }
+
+    fn frame_samples(&self) -> usize {
+        match self {
+            AnyCodec::Mulaw(c) => c.frame_samples(),
+            AnyCodec::G722(c) => c.frame_samples(),
+            AnyCodec::Opus(c) => c.frame_samples(),
+        }
+    }
+
+    fn encode(&mut self, pcm: &[i16]) -> Result<Vec<u8>, MediaError> {
+        match self {
+            AnyCodec::Mulaw(c) => c.encode(pcm),
+            AnyCodec::G722(c) => c.encode(pcm),
+            AnyCodec::Opus(c) => c.encode(pcm),
+        }
+    }
+
+    fn decode(&mut self, data: Option<&[u8]>) -> Vec<i16> {
+        match self {
+            AnyCodec::Mulaw(c) => c.decode(data),
+            AnyCodec::G722(c) => c.decode(data),
+            AnyCodec::Opus(c) => c.decode(data),
+        }
+    }
+}
+
 /// Codec de voz com quadros de duração fixa.
 pub trait Codec {
+    /// Qual é, para o convite dizer ao outro lado.
+    fn id(&self) -> CodecId;
     /// Duração de um quadro, em ms.
     fn frame_ms(&self) -> u64;
     /// Amostras PCM (mono, `i16`) por quadro.
@@ -147,6 +246,10 @@ fn mulaw_to_lin(byte: u8) -> i16 {
 }
 
 impl Codec for Mulaw {
+    fn id(&self) -> CodecId {
+        CodecId::Mulaw
+    }
+
     fn frame_ms(&self) -> u64 {
         20
     }
@@ -425,6 +528,10 @@ impl Default for G722 {
 }
 
 impl Codec for G722 {
+    fn id(&self) -> CodecId {
+        CodecId::G722
+    }
+
     fn frame_ms(&self) -> u64 {
         20
     }
@@ -452,6 +559,84 @@ impl Codec for G722 {
                     .collect();
                 self.plc.good(pcm)
             }
+            _ => self.plc.lost(Self::SAMPLES),
+        }
+    }
+}
+
+/// Opus, 16 kHz, 20 ms: 320 amostras ↔ até [`MAX_PAYLOAD`] bytes, a 32 kbps (metade do G.722;
+/// o codificador escolhe entre SILK, CELT e o híbrido conforme o sinal). Rust puro (`opus-pure`).
+///
+/// Sem DTX (o fluxo é contínuo, veja o módulo [`media`](super)) e sem FEC: o jitter entrega um
+/// quadro por vez, sem olhar o seguinte, então a perda é escondida pelo PLC do próprio Opus.
+pub struct Opus {
+    enc: OpusEncoder,
+    dec: OpusDecoder,
+    /// Só para quadro que o decodificador recusa: segura o som com o esconderijo comum.
+    plc: Concealer,
+}
+
+impl Opus {
+    pub const SAMPLES: usize = 320;
+    pub const RATE: u32 = 16000;
+    /// Taxa média pedida ao codificador, em bits por segundo.
+    pub const BITRATE: i32 = 32000;
+
+    pub fn new() -> Self {
+        let mut enc = OpusEncoder::new(Self::RATE as i32, 1, Application::Voip).expect("16 kHz mono é válido");
+        enc.bitrate_bps = Self::BITRATE;
+        enc.use_dtx = false;
+        enc.use_inband_fec = false;
+        Self { enc, dec: OpusDecoder::new(Self::RATE as i32, 1).expect("16 kHz mono é válido"), plc: Concealer::default() }
+    }
+}
+
+impl Default for Opus {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Codec for Opus {
+    fn id(&self) -> CodecId {
+        CodecId::Opus
+    }
+
+    fn frame_ms(&self) -> u64 {
+        20
+    }
+
+    fn frame_samples(&self) -> usize {
+        Self::SAMPLES
+    }
+
+    fn encode(&mut self, pcm: &[i16]) -> Result<Vec<u8>, MediaError> {
+        if pcm.len() != Self::SAMPLES {
+            return Err(MediaError::FrameLen { got: pcm.len(), want: Self::SAMPLES });
+        }
+        let mut out = vec![0u8; MAX_PAYLOAD];
+        let n = self.enc.encode_s16(pcm, Self::SAMPLES, &mut out).map_err(|_| MediaError::Malformed)?;
+        out.truncate(n);
+        Ok(out)
+    }
+
+    fn decode(&mut self, data: Option<&[u8]>) -> Vec<i16> {
+        let mut pcm = vec![0i16; Self::SAMPLES];
+        // Quadro vazio faz o Opus esconder a perda. Quadro que ele recusa conta como perda também.
+        let ok = match data {
+            Some(d) if !d.is_empty() => self.dec.decode_s16(d, Self::SAMPLES, &mut pcm).is_ok_and(|n| n == Self::SAMPLES),
+            _ => return self.conceal(),
+        };
+        if ok { self.plc.good(pcm) } else { self.conceal() }
+    }
+}
+
+impl Opus {
+    /// Perda: o Opus esconde sozinho e o esconderijo comum acompanha, para o caso de o decodificador falhar depois.
+    fn conceal(&mut self) -> Vec<i16> {
+        let mut pcm = vec![0i16; Self::SAMPLES];
+        match self.dec.decode_s16(&[], Self::SAMPLES, &mut pcm) {
+            Ok(n) if n == Self::SAMPLES => self.plc.good(pcm),
             _ => self.plc.lost(Self::SAMPLES),
         }
     }
@@ -580,5 +765,86 @@ mod tests {
         let p = Concealer::pitch(&x);
         // 200 Hz a 16 kHz: 80 amostras (ou um múltiplo).
         assert_eq!(p % 80, 0, "{p}");
+    }
+
+    /// Fala sintética (vogal com harmônicos) para o Opus, que trata tom puro de forma diferente.
+    fn voice(n: usize) -> Vec<i16> {
+        (0..n)
+            .map(|i| {
+                let t = i as f64 / 16000.0;
+                let f0 = 140.0;
+                let ph = std::f64::consts::TAU * f0 * t;
+                (3000.0 * ph.sin() + 2000.0 * (2.0 * ph).sin() + 1200.0 * (3.0 * ph).sin() + 600.0 * (5.0 * ph).sin()) as i16
+            })
+            .collect()
+    }
+
+    #[test]
+    fn opus_round_trip_keeps_the_voice_and_fits_the_packet() {
+        let (mut e, mut d) = (Opus::new(), Opus::new());
+        let sig = voice(16000 * 2);
+        let (mut out, mut biggest, mut total) = (Vec::new(), 0, 0);
+        for f in sig.chunks(320) {
+            let enc = e.encode(f).unwrap();
+            biggest = biggest.max(enc.len());
+            total += enc.len();
+            out.extend(d.decode(Some(&enc)));
+        }
+        assert!(biggest <= MAX_PAYLOAD, "pacote de {biggest} B");
+        // 32 kbps = 80 B por quadro, com folga para a variação.
+        assert!(total / 100 < 120, "média de {} B por quadro", total / 100);
+        // O Opus codifica pelo que se ouve, não pela forma de onda (a fase de uma vogal sintética
+        // não é preservada): compara a energia da banda de fala, que tem de sobreviver.
+        let rms = |x: &[i16]| (x.iter().map(|&v| (v as f64).powi(2)).sum::<f64>() / x.len() as f64).sqrt();
+        let (rin, rout) = (rms(&sig[8000..24000]), rms(&out[8000..24000]));
+        assert!((rout / rin - 1.0).abs() < 0.25, "energia {rin:.0} -> {rout:.0}");
+        // Tom fundamental (120 a 160 Hz) continua lá: a correlação com a entrada, no melhor atraso, é alta.
+        let best = (0..320)
+            .map(|lag| {
+                let (mut ab, mut aa, mut bb) = (0f64, 0f64, 0f64);
+                for i in 8000..24000 {
+                    let (a, b) = (sig[i] as f64, out[i + lag] as f64);
+                    ab += a * b;
+                    aa += a * a;
+                    bb += b * b;
+                }
+                ab / (aa * bb).sqrt()
+            })
+            .fold(f64::MIN, f64::max);
+        assert!(best > 0.9, "correlação {best:.2}");
+    }
+
+    #[test]
+    fn opus_hides_a_lost_frame_and_recovers() {
+        let (mut e, mut d) = (Opus::new(), Opus::new());
+        let sig = voice(320 * 20);
+        let mut rms = Vec::new();
+        for (i, f) in sig.chunks(320).enumerate() {
+            let enc = e.encode(f).unwrap();
+            let pcm = if i == 10 || i == 11 { d.decode(None) } else { d.decode(Some(&enc)) };
+            assert_eq!(pcm.len(), 320);
+            rms.push((pcm.iter().map(|&x| (x as f64).powi(2)).sum::<f64>() / 320.0).sqrt());
+        }
+        assert!(rms[10] > 100.0, "o quadro escondido tem som: {}", rms[10]);
+        assert!(rms[15] > 1000.0, "depois da perda a voz volta: {}", rms[15]);
+    }
+
+    #[test]
+    fn opus_rejects_wrong_frame_length_and_garbage() {
+        let mut c = Opus::new();
+        assert!(matches!(c.encode(&[0; 160]), Err(MediaError::FrameLen { got: 160, want: 320 })));
+        assert_eq!(c.decode(Some(&[0xff; 5])).len(), 320);
+        assert_eq!(c.decode(Some(&[])).len(), 320);
+    }
+
+    #[test]
+    fn any_codec_builds_what_it_names() {
+        for id in CodecId::ALL {
+            let mut c = id.build();
+            assert_eq!(c.id(), id);
+            let pcm = vec![0i16; c.frame_samples()];
+            let enc = c.encode(&pcm).unwrap();
+            assert_eq!(c.decode(Some(&enc)).len(), c.frame_samples());
+        }
     }
 }

@@ -117,6 +117,9 @@ pub(crate) struct Form {
     /// Privacidade na transmissão da tela: circuito de tráfego constante, com cover. Desligada, o circuito
     /// só manda o que há para enviar e dobra o ritmo (veja `Dialer::share_screen_keys_with`).
     pub(crate) screen_private: bool,
+    /// Codec de voz das chamadas que esta pessoa inicia: Opus (32 kbps) em vez do G.722 (64 kbps).
+    /// Quem atende usa o que o convite pedir.
+    pub(crate) voice_opus: bool,
     /// Âncoras que usa, uma por linha: `ip:porta#chave-do-circuito#chave-do-link`.
     pub(crate) anchors: String,
     pub(crate) use_audio: bool,
@@ -411,6 +414,7 @@ impl Form {
             anchor: get("no_anchor") != "1",
             // Ligada de início: a chave guarda o "não", então o arquivo antigo, sem ela, também aceita.
             screen_private: get("no_screen_privacy") != "1",
+            voice_opus: get("opus") == "1",
             anchors: get("anchors").replace(';', "\n"),
             use_audio: get("audio") == "1",
             input_dev: get("input_dev"),
@@ -432,7 +436,7 @@ impl Form {
         // Chave de identidade no chaveiro do sistema; só cai para o arquivo se ele não estiver disponível.
         let secret = if vault_set(self.secret.trim()) { KEYRING_MARK } else { self.secret.trim() };
         let text = format!(
-            "audio={}\nsecret={}\ncontacts={}\npeer={}\npublic_addr={}\nno_dht={}\ndht_circuit={}\nname={}\nintros={}\nno_anchor={}\nno_screen_privacy={}\nanchors={}\ninput_dev={}\noutput_dev={}\n{}",
+            "audio={}\nsecret={}\ncontacts={}\npeer={}\npublic_addr={}\nno_dht={}\ndht_circuit={}\nname={}\nintros={}\nno_anchor={}\nno_screen_privacy={}\nanchors={}\ninput_dev={}\noutput_dev={}\nopus={}\n{}",
             u8::from(self.use_audio),
             secret,
             self.contacts.trim().replace('\n', ";"),
@@ -447,6 +451,7 @@ impl Form {
             self.anchors.trim().replace('\n', ";"),
             self.input_dev.trim(),
             self.output_dev.trim(),
+            u8::from(self.voice_opus),
             self.audio.to_conf()
         );
         // Contém a chave secreta: só o dono lê.

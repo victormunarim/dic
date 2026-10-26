@@ -46,7 +46,7 @@ pub(crate) fn open_sound(want: bool, form: &Form, out: &Sink) -> Option<Sound> {
         return None;
     }
     #[cfg(feature = "audio")]
-    match Sound::open_with(G722::RATE, &form.devices()) {
+    match Sound::open_with(CodecId::G722.sample_rate(), &form.devices()) {
         Ok(s) => {
             out.line(format!("microfone e alto-falante abertos (cancelamento de eco ligado; fones ainda são o mais seguro): {}", s.info()));
             // Bipe de 0,3 s: se não soar, o problema é a saída do sistema, não a chamada.

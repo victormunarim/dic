@@ -138,6 +138,18 @@ impl App {
         ui.checkbox(&mut p.high_pass, "Cortar graves (ventilador, mesa, sopro)");
         ui.checkbox(&mut p.agc, "Volume automático (nivela voz baixa e alta)")
             .on_hover_text("Reforça quem fala baixo e contém quem fala alto. Não reforça o ruído de fundo.");
+        ui.add_enabled_ui(!in_call, |ui| {
+            let mut opus = self.form.voice_opus;
+            if ui
+                .checkbox(&mut opus, "Voz em Opus (metade da banda do G.722)")
+                .on_hover_text("Vale para as chamadas que você inicia; ao atender, vale o que o outro escolheu. O Opus usa 32 kbps contra 64 kbps do G.722 e esconde melhor a perda de pacotes, mas só funciona se o outro lado também for desta versão. Vale na próxima ligação.")
+                .changed()
+            {
+                self.form.voice_opus = opus;
+                self.form.save();
+            }
+        });
+        self.shared.opus.store(self.form.voice_opus, Ordering::Relaxed);
         if ui.small_button("Restaurar padrões do áudio").clicked() {
             p = AudioPrefs::default();
         }
