@@ -50,7 +50,7 @@ use crate::{
         CallStats, MediaError, VoiceCall,
         codec::{Codec, CodecId},
         keys::CallKeys,
-        screen::{ScreenFrame, ScreenStats, ScreenStream},
+        screen::{LossReport, ScreenFrame, ScreenStats, ScreenStream},
         signal::{Answer, Caller, Incoming, RelayHint},
         update::{self, AddressRecord, Intro},
     },
@@ -292,9 +292,14 @@ async fn drive<C: Codec>(
                 }
                 None => break,
             },
-            // Imagem parada por perda: pede um quadro-chave, no máximo 10 vezes por segundo.
-            _ = ask.tick(), if screen_conn.is_some() && screen.needs_key() => {
-                if let (Some(conn), Ok(p)) = (screen_conn, screen.next_packet()) {
+            // Devolve a quem transmite o relatório de perda (a cada meio segundo) e, com a imagem parada
+            // por perda, o pedido de quadro-chave (no máximo 10 vezes por segundo).
+            _ = ask.tick(), if screen_conn.is_some() => {
+                let p = match screen.report_packet() {
+                    Some(p) => Some(p),
+                    None => screen.needs_key().then(|| screen.next_packet()),
+                };
+                if let (Some(conn), Some(Ok(p))) = (screen_conn, p) {
                     let _ = wire_out.send(WireOut::Frame { conn, data: p.to_vec() }).await;
                 }
             }
@@ -495,6 +500,17 @@ impl ScreenShare {
 
     pub fn stats(&self) -> ScreenStats {
         self.stream.lock().expect("tela").stats()
+    }
+
+    /// O último relatório de perda de quem assiste, uma vez só.
+    pub fn take_report(&self) -> Option<LossReport> {
+        self.stream.lock().expect("tela").take_report()
+    }
+
+    /// Há quanto tempo chegou o último relatório de perda e quantos pacotes de vídeo saíram desde então;
+    /// `None` se nunca chegou (quem assiste pode ser uma versão sem relatórios).
+    pub fn report_age(&self) -> Option<(Duration, u64)> {
+        self.stream.lock().expect("tela").report_age()
     }
 
     /// Fragmentos esperando saída no circuito.

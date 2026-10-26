@@ -123,6 +123,73 @@ pub const FRAME_LIMIT: usize = {
     if by_queue < MAX_FRAME { by_queue } else { MAX_FRAME }
 };
 
+/// Perda (fração dos pacotes) acima da qual a taxa cai; abaixo, ela sobe.
+const LOSS_TOLERATED: f32 = 0.02;
+/// Quanto a taxa sobe a cada relatório sem perda (um por meio segundo).
+const RATE_GROWTH: f32 = 1.08;
+/// Relatórios sem subir depois de uma queda.
+const RATE_HOLD: u32 = 4;
+/// Relatórios limpos seguidos (5 s) para o teto aprendido subir 10%: a banda pode ter voltado.
+const CAP_PROBE_EVERY: u32 = 10;
+/// Sem relatório há este tempo, com vídeo saindo, a taxa cai: o caminho pode ter parado de entregar.
+const SILENCE: std::time::Duration = std::time::Duration::from_secs(4);
+/// Pacotes de vídeo desde o último relatório que tornam o silêncio suspeito (uma tela parada não manda nada).
+const SILENCE_PACKETS: u64 = 300;
+
+/// Controle da taxa do vídeo pelo relatório de perda de quem assiste (AIMD): perda derruba a taxa em
+/// proporção a ela e memoriza o teto aprendido; sem perda a taxa volta a subir até esse teto, que por sua
+/// vez sobe devagar para testar se a banda aumentou. Nunca passa da capacidade do circuito.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RateControl {
+    ceiling: f32,
+    floor: f32,
+    rate: f32,
+    cap: f32,
+    hold: u32,
+    clean: u32,
+}
+
+impl RateControl {
+    /// `ceiling`: taxa máxima, em bits/s (a capacidade do circuito).
+    pub fn new(ceiling: u32) -> Self {
+        let ceiling = ceiling as f32;
+        let floor = (ceiling / 8.0).max(150_000.0).min(ceiling);
+        Self { ceiling, floor, rate: ceiling, cap: ceiling, hold: 0, clean: 0 }
+    }
+
+    /// Taxa atual, em bits/s.
+    pub fn rate(&self) -> u32 {
+        self.rate as u32
+    }
+
+    /// Chegou um relatório com a fração `loss` de pacotes perdidos. Devolve a nova taxa.
+    pub fn on_report(&mut self, loss: f32) -> u32 {
+        if loss > LOSS_TOLERATED {
+            self.cap = (self.rate * 0.9).max(self.floor);
+            self.rate = (self.rate * (1.0 - 0.5 * loss.min(1.0))).max(self.floor);
+            (self.hold, self.clean) = (RATE_HOLD, 0);
+        } else if self.hold > 0 {
+            self.hold -= 1;
+        } else {
+            self.rate = (self.rate * RATE_GROWTH).min(self.cap);
+            self.clean += 1;
+            if self.clean >= CAP_PROBE_EVERY {
+                self.clean = 0;
+                self.cap = (self.cap * 1.1).min(self.ceiling);
+            }
+        }
+        self.rate()
+    }
+
+    /// Os relatórios pararam de chegar com vídeo saindo.
+    pub fn on_silence(&mut self) -> u32 {
+        self.rate = (self.rate * 0.7).max(self.floor);
+        self.cap = self.rate;
+        (self.hold, self.clean) = (RATE_HOLD, 0);
+        self.rate()
+    }
+}
+
 /// Faixa de QP do controlador (quanto maior, mais grosseiro e menor o quadro).
 const QP_MIN: f32 = 28.0;
 const QP_MAX: f32 = 51.0;
@@ -177,6 +244,9 @@ pub struct H264Encoder {
     target: f32,
     /// Quadros por segundo desta transmissão ([`fps_for`] da taxa).
     fps: f32,
+    /// Taxa que acompanha a perda medida por quem assiste.
+    rate: RateControl,
+    last_silence: Option<std::time::Instant>,
     need_key: bool,
     /// Fator mínimo de redução; sobe quando o quadro-chave não cabe em [`FRAME_LIMIT`] (tela muito detalhada).
     min_k: usize,
@@ -226,6 +296,8 @@ impl H264Encoder {
             size: None,
             target: bitrate as f32 / 8.0 / fps,
             fps,
+            rate: RateControl::new(bitrate),
+            last_silence: None,
             need_key: true,
             min_k: 1,
             layered: false,
@@ -258,6 +330,27 @@ impl H264Encoder {
             // de longe em longe; perda e quem entra pedem o seu por `WANT_KEY`.
             .intra_frame_period(IntraFramePeriod::from_num_frames((fps * 30.0) as u32));
         Encoder::with_api_config(openh264::OpenH264API::from_source(), config).map_err(codec_err)
+    }
+
+    /// Taxa de vídeo atual, em bits/s: a do circuito, menos o que a perda medida por quem assiste mandou cortar.
+    pub fn bitrate(&self) -> u32 {
+        self.rate.rate()
+    }
+
+    /// Relatório de perda de quem assiste (fração de 0 a 1 dos pacotes): ajusta a taxa do vídeo.
+    pub fn report_loss(&mut self, loss: f32) {
+        let bps = self.rate.on_report(loss);
+        self.target = bps as f32 / 8.0 / self.fps;
+    }
+
+    /// Os relatórios pararam de chegar com vídeo saindo: corta a taxa, no máximo uma vez a cada 2 s.
+    pub fn report_silence(&mut self) {
+        if self.last_silence.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(2)) {
+            return;
+        }
+        self.last_silence = Some(std::time::Instant::now());
+        let bps = self.rate.on_silence();
+        self.target = bps as f32 / 8.0 / self.fps;
     }
 
     /// Quadros por segundo em que quem chama deve entregar imagens.
@@ -475,6 +568,16 @@ pub fn pump(source: &mut dyn ScreenSource, encoder: &mut H264Encoder, share: &Sc
 pub fn pump_all(source: &mut dyn ScreenSource, encoder: &mut H264Encoder, shares: &[&ScreenShare], force_key: bool) -> Result<usize, VideoError> {
     // Todos precisam ser consultados: `any` pararia no primeiro e deixaria pedidos pendentes.
     let wanted = shares.iter().fold(force_key, |w, s| s.keyframe_wanted() | w);
+    // A taxa segue o pior espectador. Sem relatório novo, relatórios que sumiram com vídeo saindo cortam a taxa.
+    match shares.iter().filter_map(|s| s.take_report()).map(|r| r.loss).reduce(f32::max) {
+        Some(loss) => encoder.report_loss(loss),
+        None => {
+            let silent = |s: &&ScreenShare| s.report_age().is_some_and(|(age, sent)| age > SILENCE && sent >= SILENCE_PACKETS);
+            if shares.iter().any(silent) {
+                encoder.report_silence();
+            }
+        }
+    }
     // O circuito ainda escoa o quadro anterior: capturar agora só criaria um quadro velho na fila.
     // O pedido de quadro-chave fica guardado para o próximo quadro que sair.
     if shares.iter().any(|s| s.queued() > GATE_BACKLOG) {
@@ -750,6 +853,72 @@ mod tests {
         let used = bytes as u64 * 8 / 10;
         assert!(max <= MAX_FRAME);
         assert!(used < ScreenStream::capacity_bps(SCREEN_SLOT), "{used} bps");
+    }
+
+    #[test]
+    fn loss_cuts_the_rate_in_proportion_and_never_below_the_floor() {
+        let mut rc = RateControl::new(2_400_000);
+        assert_eq!(rc.rate(), 2_400_000);
+        let after = rc.on_report(0.20);
+        assert_eq!(after, 2_160_000, "perda de 20% tira 10%");
+        for _ in 0..40 {
+            rc.on_report(0.5);
+        }
+        assert_eq!(rc.rate(), 300_000, "piso: um oitavo do teto");
+        assert_eq!(RateControl::new(600_000).rate, 600_000.0);
+        assert_eq!(RateControl::new(600_000).floor, 150_000.0);
+        assert!(RateControl::new(100_000).floor <= 100_000.0, "o piso nunca passa do teto");
+    }
+
+    #[test]
+    fn small_loss_is_tolerated() {
+        let mut rc = RateControl::new(1_000_000);
+        for _ in 0..10 {
+            rc.on_report(0.01);
+        }
+        assert_eq!(rc.rate(), 1_000_000);
+    }
+
+    #[test]
+    fn the_rate_recovers_only_up_to_the_learned_cap_and_then_probes_upwards() {
+        let mut rc = RateControl::new(2_000_000);
+        rc.on_report(0.30); // 2 Mbps → 1,7 Mbps, teto aprendido 1,8 Mbps
+        let low = rc.rate();
+        assert!(low < 2_000_000);
+        for _ in 0..RATE_HOLD {
+            assert_eq!(rc.on_report(0.0), low, "espera depois da queda");
+        }
+        for _ in 0..4 {
+            rc.on_report(0.0);
+        }
+        assert_eq!(rc.rate(), 1_800_000, "volta só até o teto aprendido");
+        // Limpo por mais 5 s: o teto sobe e a taxa vai atrás, sem passar do teto do circuito.
+        for _ in 0..40 {
+            rc.on_report(0.0);
+        }
+        assert_eq!(rc.rate(), 2_000_000);
+    }
+
+    #[test]
+    fn silence_with_video_going_out_cuts_the_rate_and_holds() {
+        let mut rc = RateControl::new(2_000_000);
+        assert_eq!(rc.on_silence(), 1_400_000);
+        assert_eq!(rc.on_report(0.0), 1_400_000);
+    }
+
+    #[test]
+    fn the_encoder_follows_the_loss_reports() {
+        let mut enc = H264Encoder::new(H264Encoder::bitrate_for(crate::phone::OPEN_SCREEN_SLOT)).unwrap();
+        let full = enc.bitrate();
+        let target = enc.target;
+        enc.report_loss(0.4);
+        assert!(enc.bitrate() < full && enc.target < target);
+        let cut = enc.target;
+        enc.report_silence();
+        assert!(enc.target < cut);
+        let after = enc.target;
+        enc.report_silence();
+        assert_eq!(enc.target, after, "no máximo um corte a cada 2 s");
     }
 
     #[test]

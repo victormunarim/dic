@@ -15,6 +15,9 @@
 //! - Quadro perdido: a próxima entrega só acontece num quadro-chave; o receptor pede um
 //!   (flag `WANT_KEY`, repetida enquanto precisar) e o emissor consulta
 //!   [`take_keyframe_request`](ScreenStream::take_keyframe_request).
+//! - Perda no caminho: quem assiste conta as lacunas no número de sequência dos pacotes que chegam e,
+//!   a cada meio segundo, devolve a fração perdida (flag `REPORT`, em pacote de preenchimento). O
+//!   emissor lê o relatório em [`take_report`](ScreenStream::take_report) e ajusta a taxa do codec.
 //! - Fila do emissor limitada: se o codec produz mais do que o circuito leva, os quadros
 //!   mais velhos são descartados e a fila só volta a aceitar a partir de um quadro-chave.
 
@@ -47,12 +50,29 @@ const KEYFRAME: u8 = 1;
 const IDLE: u8 = 2;
 const WANT_KEY: u8 = 4;
 const STOP: u8 = 8;
+/// Pacote de preenchimento com relatório de perda: byte 1 = fração perdida (0 a 255), bytes 3 e 4 = pacotes
+/// esperados na janela.
+const REPORT: u8 = 16;
+
+/// Janela de medição da perda, entre dois relatórios.
+const REPORT_EVERY: Duration = Duration::from_millis(500);
+/// Pacotes esperados mínimos para valer um relatório (poucos pacotes dão uma fração sem sentido).
+const MIN_REPORT: u32 = 16;
 
 /// Quadro de vídeo remontado, pronto para o decodificador.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct ScreenFrame {
     pub data: Vec<u8>,
     pub keyframe: bool,
+}
+
+/// Relatório de quem assiste sobre a janela de pacotes que acabou de medir.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LossReport {
+    /// Fração dos pacotes que não chegou (0 a 1).
+    pub loss: f32,
+    /// Pacotes que deveriam ter chegado na janela.
+    pub packets: u32,
 }
 
 /// Contadores do fluxo.
@@ -100,6 +120,17 @@ pub struct ScreenStream {
     key_cooldown: Duration,
     peer_stopped: bool,
     stats: ScreenStats,
+    // Medição de perda de quem assiste: maior `seq` visto, início da janela e pacotes que chegaram nela.
+    top: Option<u32>,
+    win_base: u32,
+    win_got: u32,
+    win_start: Instant,
+    report_every: Duration,
+    // Relatório de quem assiste, do lado de quem transmite.
+    report_in: Option<LossReport>,
+    report_at: Option<Instant>,
+    /// `packets_sent` quando o último relatório chegou.
+    sent_at_report: u64,
 }
 
 impl ScreenStream {
@@ -119,6 +150,14 @@ impl ScreenStream {
             key_cooldown: KEY_COOLDOWN,
             peer_stopped: false,
             stats: ScreenStats::default(),
+            top: None,
+            win_base: 0,
+            win_got: 0,
+            win_start: Instant::now(),
+            report_every: REPORT_EVERY,
+            report_in: None,
+            report_at: None,
+            sent_at_report: 0,
         }
     }
 
@@ -196,6 +235,45 @@ impl ScreenStream {
         wanted | self.need_key_out
     }
 
+    /// Quem assiste: o relatório de perda da janela, se já deu o tempo e chegaram pacotes bastantes. Vai
+    /// num pacote de preenchimento (e leva o pedido de quadro-chave, se houver). Fecha a janela.
+    pub fn report_packet(&mut self) -> Option<Result<[u8; PACKET_LEN], MediaError>> {
+        let top = self.top?;
+        let expected = top.checked_sub(self.win_base).map_or(0, |d| d + 1);
+        if self.win_start.elapsed() < self.report_every || expected < MIN_REPORT {
+            return None;
+        }
+        let lost = expected.saturating_sub(self.win_got);
+        let mut buf = [0u8; HEADER];
+        buf[0] = IDLE | REPORT | if self.broken { WANT_KEY } else { 0 };
+        buf[1] = (lost as f32 / expected as f32 * 255.0).round() as u8;
+        buf[3..5].copy_from_slice(&(expected.min(u16::MAX as u32) as u16).to_be_bytes());
+        self.win_base = top.saturating_add(1);
+        (self.win_got, self.win_start) = (0, Instant::now());
+        Some(self.sealer.seal(&buf))
+    }
+
+    /// Quem transmite: o último relatório que chegou, uma vez só.
+    pub fn take_report(&mut self) -> Option<LossReport> {
+        self.report_in.take()
+    }
+
+    /// Quem transmite: há quanto tempo chegou o último relatório (`None` se nunca chegou: quem assiste
+    /// pode ser uma versão sem relatórios) e quantos pacotes de vídeo saíram desde então.
+    pub fn report_age(&self) -> Option<(Duration, u64)> {
+        self.report_at.map(|t| (t.elapsed(), self.stats.packets_sent - self.sent_at_report))
+    }
+
+    fn note_seq(&mut self, seq: u32) {
+        match self.top {
+            None => (self.top, self.win_base, self.win_got, self.win_start) = (Some(seq), seq, 1, Instant::now()),
+            Some(top) => {
+                self.win_got += 1;
+                self.top = Some(top.max(seq));
+            }
+        }
+    }
+
     /// O pacote do próximo slot: fragmento da fila ou preenchimento. Sempre 200 B.
     pub fn next_packet(&mut self) -> Result<[u8; PACKET_LEN], MediaError> {
         let want = if self.broken { WANT_KEY } else { 0 };
@@ -221,7 +299,10 @@ impl ScreenStream {
     /// Pacote que chegou do circuito.
     pub fn receive(&mut self, packet: &[u8]) -> Result<(), MediaError> {
         let frame = match self.opener.open(packet) {
-            Ok((_, Opened::Voice(f))) => f,
+            Ok((seq, Opened::Voice(f))) => {
+                self.note_seq(seq);
+                f
+            }
             Ok((_, Opened::Hangup)) => return Ok(()),
             Err(e) => {
                 self.stats.rejected += 1;
@@ -235,6 +316,12 @@ impl ScreenStream {
         let flags = frame[0];
         if flags & WANT_KEY != 0 {
             self.peer_wants_key = true;
+        }
+        if flags & REPORT != 0 {
+            let packets = u16::from_be_bytes([frame[3], frame[4]]) as u32;
+            self.report_in = Some(LossReport { loss: frame[1] as f32 / 255.0, packets });
+            self.report_at = Some(Instant::now());
+            self.sent_at_report = self.stats.packets_sent;
         }
         if flags & STOP != 0 {
             self.peer_stopped = true;
@@ -542,6 +629,72 @@ mod tests {
             n += 1;
         }
         assert!(b.needs_key());
+    }
+
+    /// `n` slots de A para B (um a cada `lose` é perdido, se for > 0); depois B fecha a janela e A lê o relatório.
+    fn report_after(n: usize, lose: usize) -> Option<LossReport> {
+        let (mut a, mut b) = pair();
+        b.report_every = Duration::ZERO;
+        for i in 0..n {
+            slot(&mut a, &mut b, lose > 0 && i % lose == 1);
+        }
+        let p = b.report_packet()?.unwrap();
+        a.receive(&p).unwrap();
+        a.take_report()
+    }
+
+    #[test]
+    fn the_viewer_reports_the_share_of_packets_lost() {
+        let r = report_after(200, 4).expect("relatório");
+        assert!((r.loss - 0.25).abs() < 0.02, "{r:?}");
+        assert!(r.packets >= 190, "{r:?}");
+        let clean = report_after(200, 0).expect("relatório");
+        assert_eq!(clean.loss, 0.0);
+    }
+
+    #[test]
+    fn no_report_before_enough_packets_or_before_the_window_ends() {
+        assert!(report_after(MIN_REPORT as usize - 1, 0).is_none());
+        let (mut a, mut b) = pair();
+        for _ in 0..100 {
+            slot(&mut a, &mut b, false);
+        }
+        assert!(b.report_packet().is_none(), "a janela de 500 ms ainda não acabou");
+    }
+
+    #[test]
+    fn the_window_restarts_after_each_report() {
+        let (mut a, mut b) = pair();
+        b.report_every = Duration::ZERO;
+        // O último pacote da janela chega: perda na borda só se vê quando o seguinte chega, e cai na janela dele.
+        for i in 0..101 {
+            slot(&mut a, &mut b, i % 2 == 1);
+        }
+        assert!(b.report_packet().is_some());
+        for _ in 0..100 {
+            slot(&mut a, &mut b, false);
+        }
+        let p = b.report_packet().expect("segundo relatório").unwrap();
+        a.receive(&p).unwrap();
+        assert_eq!(a.take_report().unwrap().loss, 0.0);
+        assert!(a.take_report().is_none(), "o relatório é entregue uma vez só");
+    }
+
+    #[test]
+    fn report_age_counts_the_packets_sent_since_it() {
+        let (mut a, mut b) = pair();
+        b.report_every = Duration::ZERO;
+        assert!(a.report_age().is_none());
+        for _ in 0..40 {
+            slot(&mut a, &mut b, false);
+        }
+        a.receive(&b.report_packet().unwrap().unwrap()).unwrap();
+        assert_eq!(a.report_age().map(|(_, n)| n), Some(0));
+        a.push_frame(&frame(1000, 1), true).unwrap();
+        for _ in 0..3 {
+            a.next_packet().unwrap();
+        }
+        assert_eq!(a.report_age().map(|(_, n)| n), Some(3));
     }
 
     #[test]

@@ -436,6 +436,37 @@ async fn the_screen_without_privacy_carries_a_burst_of_big_frames_quickly() {
 }
 
 #[tokio::test]
+async fn the_viewer_reports_the_loss_back_to_the_sharer() {
+    let (alice, bob) = ids();
+    let mut phone = Phone::bind("127.0.0.1:0".parse().unwrap(), bob.clone(), vec![*PublicKey::from(&alice).as_bytes()]).await.unwrap();
+    let (_srv, cands) = relays(4, &phone.local_addr().to_string()).await;
+    let bob_pub = PublicKey::from(&bob);
+    let voice = cands.clone();
+    let caller = tokio::spawn(async move { call(client(voice), &alice, &bob_pub, Mulaw::new(), WAIT).await });
+    let incoming = timeout(WAIT, phone.next_incoming()).await.unwrap().unwrap();
+    let mut b = incoming.accept(Mulaw::new()).await.unwrap();
+    let a = caller.await.unwrap().unwrap();
+    let c = CircuitClient::spawn_with(CircuitManager::new(ManagerConfig::default(), "contato:9", cands), Duration::from_secs(2), open_screen_client_options());
+    let share = share_screen_slot(c, &a.next_share_keys(), WAIT, OPEN_SCREEN_SLOT).await.unwrap();
+    // Vídeo por mais de meio segundo, para a janela de medição de quem assiste fechar.
+    let f = video(20_000, 3);
+    let report = timeout(WAIT, async {
+        for i in 0.. {
+            share.push(&f, i == 0).unwrap();
+            let _ = timeout(Duration::from_millis(100), b.next_screen()).await;
+            if let Some(r) = share.take_report() {
+                return r;
+            }
+        }
+        unreachable!()
+    })
+    .await
+    .expect("relatório de perda não chegou");
+    assert!(report.loss < 0.05 && report.packets >= 16, "{report:?}");
+    share.stop().await;
+}
+
+#[tokio::test]
 async fn callee_shares_its_screen_to_the_caller_through_the_callers_phone() {
     let (alice, bob) = ids();
     let alice_pub = PublicKey::from(&alice);
