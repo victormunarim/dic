@@ -36,7 +36,7 @@ use crate::{
         signal::RelayHint,
         update::{self, AddressRecord, Intro, MAX_ADDR},
     },
-    phone::{self, ActiveCall, AddressUpdate, CallError, IncomingCall, Introduction, Phone, PhoneLink, ScreenShare, call_linked, screen_client_options, share_screen},
+    phone::{self, ActiveCall, AddressUpdate, CallError, IncomingCall, Introduction, Phone, PhoneLink, ScreenShare, call_linked, open_screen_client_options, screen_client_options, share_screen_slot, OPEN_SCREEN_SLOT_MS, SCREEN_SLOT_MS},
     rendezvous::{self, ANCHOR_DEST, Anchor, DhtOptions, GATEWAY_DEST, Remote, Rendezvous, Signed},
     transport::{CircuitClient, ClientOptions, RelayServer, ServerConfig, allow_list},
 };
@@ -631,9 +631,18 @@ impl Dialer {
     /// Como [`Self::share_screen`], com as chaves em vez da chamada (quem não tem mais a chamada em mãos
     /// guarda uma cópia de [`ActiveCall::share_keys`]).
     pub async fn share_screen_keys(&self, peer: [u8; 32], keys: &CallKeys, wait: Duration) -> Result<ScreenShare, DialError> {
-        let (found, tried_stored) = self.reachable_client(&peer, screen_client_options).await;
+        self.share_screen_keys_with(peer, keys, wait, true).await
+    }
+
+    /// Como [`Self::share_screen_keys`]. Com `private` falso o circuito abre mão do cover: não manda pacote
+    /// nos instantes sem vídeo (quem observa a rede vê quando a tela se mexe) e o ritmo máximo dobra
+    /// ([`OPEN_SCREEN_SLOT_MS`]). O vídeo e as chaves seguem cifrados. Quem transmite deve usar
+    /// [`H264Encoder::bitrate_for`](crate::video::H264Encoder::bitrate_for) com o mesmo intervalo.
+    pub async fn share_screen_keys_with(&self, peer: [u8; 32], keys: &CallKeys, wait: Duration, private: bool) -> Result<ScreenShare, DialError> {
+        let (options, slot_ms): (fn() -> ClientOptions, u64) = if private { (screen_client_options, SCREEN_SLOT_MS) } else { (open_screen_client_options, OPEN_SCREEN_SLOT_MS) };
+        let (found, tried_stored) = self.reachable_client(&peer, options).await;
         let Some((client, used)) = found else { return Err(DialError::NoAddress { tried_stored }) };
-        let share = share_screen(client, keys, wait).await?;
+        let share = share_screen_slot(client, keys, wait, slot_ms).await?;
         self.remember(&peer, used);
         Ok(share)
     }

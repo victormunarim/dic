@@ -283,6 +283,17 @@ impl App {
                 ui.colored_label(egui::Color32::LIGHT_RED, note);
             }
         }
+        // A escolha vale a partir da próxima transmissão; fica salva para não precisar mudar de novo.
+        st.open_path.store(!self.form.screen_private, Ordering::Relaxed);
+        ui.add_enabled_ui(!wanted && !sharing, |ui| {
+            let changed = ui
+                .checkbox(&mut self.form.screen_private, "Privacidade na transmissão da tela")
+                .on_hover_text("Ligada, a tela sai num ritmo constante, com tráfego de enchimento, e quem observa a rede não vê quando a imagem se mexe. Desligada, só sai o que há para enviar e o ritmo máximo dobra: a imagem fica mais nítida e fluida, mas o vídeo segue cifrado. Vale na próxima transmissão.")
+                .changed();
+            if changed {
+                self.form.save();
+            }
+        });
         let diag = st.diagnostics();
         if !diag.is_empty() {
             ui.weak(diag);

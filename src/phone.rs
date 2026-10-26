@@ -60,6 +60,9 @@ use crate::{
 /// Intervalo entre pacotes do circuito da tela: 200 pacotes/s, ≈ 277 kbps de vídeo.
 pub const SCREEN_SLOT_MS: u64 = 2;
 
+/// Intervalo entre pacotes quando a pessoa abre mão da privacidade da tela: sem cover e o dobro da taxa.
+pub const OPEN_SCREEN_SLOT_MS: u64 = 1;
+
 /// Maior quadro `[u16][dados]` aceito do circuito; os de mídia e sinalização têm 200 B.
 const MAX_FRAME: usize = 1024;
 
@@ -436,6 +439,11 @@ pub fn screen_client_options() -> ClientOptions {
     ClientOptions { cover: Some(every), circuit_cover: Some(every), ..Default::default() }
 }
 
+/// Opções do cliente de circuito da tela sem privacidade: sem cover, só sai o que há para enviar.
+pub fn open_screen_client_options() -> ClientOptions {
+    ClientOptions { cover: None, circuit_cover: None, ..Default::default() }
+}
+
 /// Quem transmite a tela: dono do circuito de tela até o telefone de quem assiste.
 ///
 /// Largar o valor interrompe sem avisar; [`stop`](Self::stop) avisa quem assiste.
@@ -484,7 +492,13 @@ impl Drop for ScreenShare {
 /// Espera o circuito ficar pronto (até `wait`) e manda um pacote de abertura, que prende o circuito
 /// à chamada do outro lado. Depois sai um pacote por slot enquanto houver vídeo na fila; nos
 /// demais instantes o cover do circuito mantém o fluxo no mesmo ritmo.
-pub async fn share_screen(mut client: CircuitClient, keys: &CallKeys, wait: Duration) -> Result<ScreenShare, CallError> {
+pub async fn share_screen(client: CircuitClient, keys: &CallKeys, wait: Duration) -> Result<ScreenShare, CallError> {
+    share_screen_slot(client, keys, wait, SCREEN_SLOT_MS).await
+}
+
+/// Como [`share_screen`], com um pacote a cada `slot_ms` ms ([`SCREEN_SLOT_MS`] com cover;
+/// [`OPEN_SCREEN_SLOT_MS`] para o cliente de [`open_screen_client_options`]).
+pub async fn share_screen_slot(mut client: CircuitClient, keys: &CallKeys, wait: Duration, slot_ms: u64) -> Result<ScreenShare, CallError> {
     let ready = client.status().await.is_some_and(|s| s.active.is_some_and(|a| a.ready));
     timeout(wait, async {
         if ready {
@@ -508,7 +522,7 @@ pub async fn share_screen(mut client: CircuitClient, keys: &CallKeys, wait: Dura
     let task = {
         let (stream, stopping) = (stream.clone(), stopping.clone());
         tokio::spawn(async move {
-            let mut tick = interval(Duration::from_millis(SCREEN_SLOT_MS));
+            let mut tick = interval(Duration::from_millis(slot_ms));
             tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
             loop {
                 tokio::select! {
@@ -519,7 +533,7 @@ pub async fn share_screen(mut client: CircuitClient, keys: &CallKeys, wait: Dura
                                 if let Ok(p) = p {
                                     let _ = client.send(&p).await;
                                 }
-                                tokio::time::sleep(Duration::from_millis(SCREEN_SLOT_MS)).await;
+                                tokio::time::sleep(Duration::from_millis(slot_ms)).await;
                             }
                             break;
                         }

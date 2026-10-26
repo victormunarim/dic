@@ -200,7 +200,12 @@ impl H264Encoder {
     /// Taxa em bits/s do vídeo: 90% do que o circuito de tela carrega; a folga absorve a ponta do último
     /// fragmento de cada quadro, e o excesso de um pico vai para a fila (que larga a camada alta).
     pub fn default_bitrate() -> u32 {
-        (ScreenStream::capacity_bps(SCREEN_SLOT_MS) * 9 / 10) as u32
+        Self::bitrate_for(SCREEN_SLOT_MS)
+    }
+
+    /// Como [`Self::default_bitrate`], para um circuito que manda um pacote a cada `slot_ms` ms.
+    pub fn bitrate_for(slot_ms: u64) -> u32 {
+        (ScreenStream::capacity_bps(slot_ms) * 9 / 10) as u32
     }
 
     pub fn new(bitrate: u32) -> Result<Self, VideoError> {

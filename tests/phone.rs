@@ -12,7 +12,7 @@ use clam::media::{
     codec::{Codec, Mulaw},
     signal::{Answer, Caller},
 };
-use clam::phone::{ActiveCall, CallError, Phone, ScreenEvent, call, call_linked, screen_client_options, share_screen};
+use clam::phone::{ActiveCall, CallError, Phone, ScreenEvent, call, call_linked, open_screen_client_options, screen_client_options, share_screen, share_screen_slot, OPEN_SCREEN_SLOT_MS};
 use clam::transport::{CircuitClient, RelayServer, ServerConfig, allow_list};
 use clam::{
     rand_core::OsRng,
@@ -319,6 +319,31 @@ async fn caller_shares_its_screen_to_the_callee_over_its_own_circuit() {
     // A voz continua funcionando depois.
     let back = talk(&a, &mut b, 10).await;
     assert!(!back.is_empty());
+}
+
+#[tokio::test]
+async fn the_screen_without_privacy_arrives_with_no_cover_and_a_faster_slot() {
+    let (alice, bob) = ids();
+    let mut phone = Phone::bind("127.0.0.1:0".parse().unwrap(), bob.clone(), vec![*PublicKey::from(&alice).as_bytes()]).await.unwrap();
+    let (_srv, cands) = relays(4, &phone.local_addr().to_string()).await;
+    let bob_pub = PublicKey::from(&bob);
+    let voice = cands.clone();
+    let caller = tokio::spawn(async move { call(client(voice), &alice, &bob_pub, Mulaw::new(), WAIT).await });
+    let incoming = timeout(WAIT, phone.next_incoming()).await.unwrap().unwrap();
+    let mut b = incoming.accept(Mulaw::new()).await.unwrap();
+    let a = caller.await.unwrap().unwrap();
+
+    let open = CircuitClient::spawn_with(CircuitManager::new(ManagerConfig::default(), "contato:9", cands), Duration::from_secs(2), open_screen_client_options());
+    let share = share_screen_slot(open, a.share_keys(), WAIT, OPEN_SCREEN_SLOT_MS).await.unwrap();
+    let frames = [video(900, 1), video(120, 2), video(2500, 3)];
+    for (i, f) in frames.iter().enumerate() {
+        assert!(share.push(f, i == 0).unwrap());
+    }
+    let got = collect_frames(&mut b, frames.len()).await;
+    for (g, want) in got.iter().zip(&frames) {
+        assert_eq!(&g.data, want);
+    }
+    share.stop().await;
 }
 
 #[tokio::test]

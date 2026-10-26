@@ -114,6 +114,9 @@ pub(crate) struct Form {
     pub(crate) intros: bool,
     /// Serve de âncora para os registros de endereço dos outros (veja `NodeConfig::anchor`).
     pub(crate) anchor: bool,
+    /// Privacidade na transmissão da tela: circuito de tráfego constante, com cover. Desligada, o circuito
+    /// só manda o que há para enviar e dobra o ritmo (veja `Dialer::share_screen_keys_with`).
+    pub(crate) screen_private: bool,
     /// Âncoras que usa, uma por linha: `ip:porta#chave-do-circuito#chave-do-link`.
     pub(crate) anchors: String,
     pub(crate) use_audio: bool,
@@ -380,7 +383,7 @@ pub(crate) fn save_known(book: &Book) -> std::io::Result<()> {
 impl Form {
     /// Primeira abertura: já nasce com uma identidade, para a pessoa não precisar gerar nada.
     pub(crate) fn first_run() -> Self {
-        Form { secret: hex(&StaticSecret::random_from_rng(OsRng).to_bytes()), intros: true, use_dht: true, anchor: true, ..Form::default() }
+        Form { secret: hex(&StaticSecret::random_from_rng(OsRng).to_bytes()), intros: true, use_dht: true, anchor: true, screen_private: true, ..Form::default() }
     }
 
     pub(crate) fn load() -> Self {
@@ -406,6 +409,8 @@ impl Form {
             // Ligado de início: o arquivo antigo, sem a chave, também aceita.
             intros: get("intros") != "0",
             anchor: get("no_anchor") != "1",
+            // Ligada de início: a chave guarda o "não", então o arquivo antigo, sem ela, também aceita.
+            screen_private: get("no_screen_privacy") != "1",
             anchors: get("anchors").replace(';', "\n"),
             use_audio: get("audio") == "1",
             input_dev: get("input_dev"),
@@ -427,7 +432,7 @@ impl Form {
         // Chave de identidade no chaveiro do sistema; só cai para o arquivo se ele não estiver disponível.
         let secret = if vault_set(self.secret.trim()) { KEYRING_MARK } else { self.secret.trim() };
         let text = format!(
-            "audio={}\nsecret={}\ncontacts={}\npeer={}\npublic_addr={}\nno_dht={}\ndht_circuit={}\nname={}\nintros={}\nno_anchor={}\nanchors={}\ninput_dev={}\noutput_dev={}\n{}",
+            "audio={}\nsecret={}\ncontacts={}\npeer={}\npublic_addr={}\nno_dht={}\ndht_circuit={}\nname={}\nintros={}\nno_anchor={}\nno_screen_privacy={}\nanchors={}\ninput_dev={}\noutput_dev={}\n{}",
             u8::from(self.use_audio),
             secret,
             self.contacts.trim().replace('\n', ";"),
@@ -438,6 +443,7 @@ impl Form {
             self.my_name.trim().replace(['\n', ';'], " "),
             u8::from(self.intros),
             u8::from(!self.anchor),
+            u8::from(!self.screen_private),
             self.anchors.trim().replace('\n', ";"),
             self.input_dev.trim(),
             self.output_dev.trim(),

@@ -5,7 +5,7 @@ use std::{collections::HashMap, sync::atomic::AtomicU64};
 use super::*;
 use clam::{
     node::Dialer,
-    phone::ScreenEvent,
+    phone::{OPEN_SCREEN_SLOT_MS, SCREEN_SLOT_MS, ScreenEvent},
     video::{FPS, H264Decoder, H264Encoder, RawFrame, ScreenSource, pump},
 };
 
@@ -16,6 +16,9 @@ pub(crate) struct ScreenState {
     pub(crate) want_share: AtomicBool,
     /// Há uma tarefa de transmissão viva (ligando ou enviando).
     pub(crate) share_task: AtomicBool,
+    /// A pessoa abriu mão da privacidade da tela (sem cover, o dobro do ritmo); falso é o padrão. A janela
+    /// copia a escolha da configuração a cada quadro.
+    pub(crate) open_path: AtomicBool,
     /// Os quadros estão saindo.
     pub(crate) sharing: AtomicBool,
     /// Última imagem recebida de cada pessoa que transmite, com o número dela; a janela só refaz a
@@ -143,8 +146,10 @@ pub(crate) async fn share_task(dialer: Dialer, peer: [u8; 32], keys: clam::media
     };
     st.note.lock().unwrap().clear();
     let wanted = || st.want_share.load(Ordering::Relaxed) && !shared.hangup.load(Ordering::Relaxed);
+    let private = !st.open_path.load(Ordering::Relaxed);
+    let slot_ms = if private { SCREEN_SLOT_MS } else { OPEN_SCREEN_SLOT_MS };
     let started = match open_source().await {
-        Ok(src) => H264Encoder::new(H264Encoder::default_bitrate()).map(|e| (src, e)).map_err(|e| e.to_string()),
+        Ok(src) => H264Encoder::new(H264Encoder::bitrate_for(slot_ms)).map(|e| (src, e)).map_err(|e| e.to_string()),
         Err(e) => Err(e),
     };
     let (mut src, mut enc) = match started {
@@ -156,7 +161,7 @@ pub(crate) async fn share_task(dialer: Dialer, peer: [u8; 32], keys: clam::media
         }
     };
     out.line("tela: ligando o circuito de vídeo...");
-    let opened = if wanted() { until_hangup(dialer.share_screen_keys(peer, &keys, Duration::from_secs(15)), &shared.hangup).await } else { None };
+    let opened = if wanted() { until_hangup(dialer.share_screen_keys_with(peer, &keys, Duration::from_secs(15), private), &shared.hangup).await } else { None };
     let share = match opened {
         Some(Ok(s)) => s,
         Some(Err(e)) => {
@@ -170,7 +175,7 @@ pub(crate) async fn share_task(dialer: Dialer, peer: [u8; 32], keys: clam::media
         }
     };
     st.sharing.store(true, Ordering::Relaxed);
-    out.line("tela: transmitindo");
+    out.line(if private { "tela: transmitindo" } else { "tela: transmitindo sem privacidade (sem cover)" });
     let flag = shared.clone();
     // Capturar e codificar pesa: fora do executor.
     let share = tokio::task::spawn_blocking(move || {
