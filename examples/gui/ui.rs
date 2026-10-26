@@ -589,7 +589,7 @@ impl App {
                             .desired_height(26.0)
                             .corner_radius(CornerRadius::same(6))
                             .fill(if speaking { GREEN } else { BLURPLE })
-                            .text(if speaking { "voz" } else { "silêncio" }),
+                            .text(if speaking { "voz" } else { "" }),
                     );
                     let x = meter.rect.left() + meter.rect.width() * voice_meter(p.gate_db);
                     ui.painter().vline(x, meter.rect.y_range(), egui::Stroke::new(2.5_f32, Color32::from_rgb(230, 160, 40)));
