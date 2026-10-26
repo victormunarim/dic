@@ -625,11 +625,11 @@ impl Dialer {
     /// Transmite a tela da chamada `call` para `peer`, por um circuito só da tela (cover de
     /// [`phone::SCREEN_SLOT_MS`] ms). Sempre por circuito, com cover.
     pub async fn share_screen(&self, peer: [u8; 32], call: &ActiveCall, wait: Duration) -> Result<ScreenShare, DialError> {
-        self.share_screen_keys(peer, call.share_keys(), wait).await
+        self.share_screen_keys(peer, &call.next_share_keys(), wait).await
     }
 
     /// Como [`Self::share_screen`], com as chaves em vez da chamada (quem não tem mais a chamada em mãos
-    /// guarda uma cópia de [`ActiveCall::share_keys`]).
+    /// guarda uma cópia de [`ActiveCall::next_share_keys`]).
     pub async fn share_screen_keys(&self, peer: [u8; 32], keys: &CallKeys, wait: Duration) -> Result<ScreenShare, DialError> {
         self.share_screen_keys_with(peer, keys, wait, true).await
     }

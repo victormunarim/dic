@@ -30,7 +30,7 @@ use std::{
     net::SocketAddr,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -112,6 +112,7 @@ pub struct ActiveCall {
     peer_hung_up: Arc<AtomicBool>,
     screen: mpsc::Receiver<ScreenEvent>,
     share_keys: CallKeys,
+    shares: AtomicU32,
 }
 
 /// O que chega do circuito da tela de quem está transmitindo.
@@ -137,9 +138,11 @@ impl ActiveCall {
         std::mem::replace(&mut self.screen, mpsc::channel(1).1)
     }
 
-    /// Chaves do circuito de tela quando *você* transmite (use em [`share_screen`]).
-    pub fn share_keys(&self) -> &CallKeys {
-        &self.share_keys
+    /// Chaves do circuito de tela para uma transmissão sua (use em [`share_screen`]). Cada transmissão
+    /// leva chaves novas: o contador de pacotes recomeça e, com as mesmas chaves, repetiria nonces e
+    /// quem assiste rejeitaria tudo como repetição.
+    pub fn next_share_keys(&self) -> CallKeys {
+        self.share_keys.sub(&share_label(self.shares.fetch_add(1, Ordering::Relaxed)))
     }
 
     /// Um quadro do microfone (o tamanho que o codec espera). `Err` = a chamada acabou.
@@ -176,6 +179,15 @@ enum WireOut {
     Bound(u64),
 }
 
+/// Rótulo das chaves da `n`-ésima transmissão de tela de quem transmite.
+fn share_label(n: u32) -> [u8; 4] {
+    n.to_be_bytes()
+}
+
+/// Quantas transmissões à frente da atual quem assiste tenta reconhecer (transmissões que não chegaram a
+/// abrir também gastam um número).
+const SHARE_LOOKAHEAD: u32 = 16;
+
 /// Rótulo das chaves da tela: quem transmite define o sentido, então os dois lados nunca
 /// reusam um nonce se transmitirem ao mesmo tempo.
 fn screen_label(sharer_is_caller: bool) -> &'static [u8] {
@@ -199,7 +211,8 @@ async fn drive<C: Codec>(
 ) {
     // Tela de quem transmite para cá: o circuito dela chega por outra conexão e se prende à chamada
     // pelo primeiro pacote que autenticar.
-    let mut screen = ScreenStream::new(&view_keys);
+    let mut screen_n = 0u32;
+    let mut screen = ScreenStream::new(&view_keys.sub(&share_label(screen_n)));
     let mut screen_conn: Option<u64> = None;
     let mut stopped_told = false;
     let mut lost_told = 0u64;
@@ -232,7 +245,19 @@ async fn drive<C: Codec>(
                 Some((conn, data)) => {
                     let on_screen = screen_conn == Some(conn);
                     if on_screen || call.receive(now(), &data).is_err() {
-                        if screen.receive(&data).is_ok() {
+                        // Outra transmissão do mesmo contato: chaves novas, pela mesma chamada.
+                        let mut ok = screen.receive(&data).is_ok();
+                        if !ok && !on_screen {
+                            for n in screen_n + 1..=screen_n.saturating_add(SHARE_LOOKAHEAD) {
+                                let mut fresh = ScreenStream::new(&view_keys.sub(&share_label(n)));
+                                if fresh.receive(&data).is_ok() {
+                                    (screen, screen_n, ok) = (fresh, n, true);
+                                    (stopped_told, lost_told) = (false, 0);
+                                    break;
+                                }
+                            }
+                        }
+                        if ok {
                             if !on_screen {
                                 screen_conn = Some(conn);
                                 let _ = wire_out.send(WireOut::Bound(conn)).await;
@@ -299,7 +324,7 @@ fn start_call<C: Codec + Send + 'static>(
     let (scr_tx, scr_rx) = mpsc::channel(64);
     let (share_keys, view_keys) = (keys.sub(screen_label(caller)), keys.sub(screen_label(!caller)));
     tokio::spawn(drive(voice, frame_ms, conn, in_rx, out_tx, mic_rx, spk_tx, stats.clone(), peer_hung_up.clone(), view_keys, scr_tx));
-    (ActiveCall { mic: mic_tx, speaker: spk_rx, stats, peer_hung_up, screen: scr_rx, share_keys }, in_tx, out_rx)
+    (ActiveCall { mic: mic_tx, speaker: spk_rx, stats, peer_hung_up, screen: scr_rx, share_keys, shares: AtomicU32::new(0) }, in_tx, out_rx)
 }
 
 /// Liga para `peer` (a chave do pareamento) pelo circuito de `client`.
@@ -489,7 +514,7 @@ impl Drop for ScreenShare {
 }
 
 /// Transmite a tela por `client`, um cliente de circuito até o telefone de quem assiste
-/// (crie-o com [`screen_client_options`]). `keys` vêm de [`ActiveCall::share_keys`].
+/// (crie-o com [`screen_client_options`]). `keys` vêm de [`ActiveCall::next_share_keys`].
 ///
 /// Espera o circuito ficar pronto (até `wait`) e manda um pacote de abertura, que prende o circuito
 /// à chamada do outro lado. Depois sai um pacote por slot enquanto houver vídeo na fila; nos

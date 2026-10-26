@@ -153,7 +153,7 @@ pub(crate) async fn talk(mut c: ActiveCall, hz: f64, stop: Arc<AtomicBool>, out:
             _ = report.tick() => {
                 report_error(sound.as_ref(), &out);
                 if shared.screen.want_share.load(Ordering::Relaxed) && !shared.screen.share_task.swap(true, Ordering::Relaxed) {
-                    tokio::spawn(share_task(peer.dialer.clone(), peer.key, c.share_keys().clone(), shared.clone(), out.clone()));
+                    tokio::spawn(share_task(peer.dialer.clone(), peer.key, c.next_share_keys(), shared.clone(), out.clone()));
                 }
                 let s = c.stats();
                 if silence.lost(s.received > prev.received, tokio::time::Instant::now()) {

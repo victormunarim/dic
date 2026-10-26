@@ -293,7 +293,7 @@ async fn caller_shares_its_screen_to_the_callee_over_its_own_circuit() {
     let mut b = incoming.accept(Mulaw::new()).await.unwrap();
     let a = caller.await.unwrap().unwrap();
 
-    let share = share_screen(screen_client(cands), a.share_keys(), WAIT).await.unwrap();
+    let share = share_screen(screen_client(cands), &a.next_share_keys(), WAIT).await.unwrap();
     let frames = [video(900, 1), video(120, 2), video(2500, 3), video(60, 4)];
     for (i, f) in frames.iter().enumerate() {
         assert!(share.push(f, i == 0).unwrap());
@@ -334,7 +334,7 @@ async fn the_screen_without_privacy_arrives_with_no_cover_and_a_faster_slot() {
     let a = caller.await.unwrap().unwrap();
 
     let open = CircuitClient::spawn_with(CircuitManager::new(ManagerConfig::default(), "contato:9", cands), Duration::from_secs(2), open_screen_client_options());
-    let share = share_screen_slot(open, a.share_keys(), WAIT, OPEN_SCREEN_SLOT_MS).await.unwrap();
+    let share = share_screen_slot(open, &a.next_share_keys(), WAIT, OPEN_SCREEN_SLOT_MS).await.unwrap();
     let frames = [video(900, 1), video(120, 2), video(2500, 3)];
     for (i, f) in frames.iter().enumerate() {
         assert!(share.push(f, i == 0).unwrap());
@@ -344,6 +344,27 @@ async fn the_screen_without_privacy_arrives_with_no_cover_and_a_faster_slot() {
         assert_eq!(&g.data, want);
     }
     share.stop().await;
+}
+
+#[tokio::test]
+async fn a_second_screen_share_in_the_same_call_reaches_the_viewer() {
+    let (alice, bob) = ids();
+    let mut phone = Phone::bind("127.0.0.1:0".parse().unwrap(), bob.clone(), vec![*PublicKey::from(&alice).as_bytes()]).await.unwrap();
+    let (_srv, cands) = relays(4, &phone.local_addr().to_string()).await;
+    let bob_pub = PublicKey::from(&bob);
+    let voice = cands.clone();
+    let caller = tokio::spawn(async move { call(client(voice), &alice, &bob_pub, Mulaw::new(), WAIT).await });
+    let incoming = timeout(WAIT, phone.next_incoming()).await.unwrap().unwrap();
+    let mut b = incoming.accept(Mulaw::new()).await.unwrap();
+    let a = caller.await.unwrap().unwrap();
+    for round in 0..3u8 {
+        let share = share_screen(screen_client(cands.clone()), &a.next_share_keys(), WAIT).await.unwrap();
+        let f = video(600, round);
+        share.push(&f, true).unwrap();
+        let got = collect_frames(&mut b, 1).await;
+        assert_eq!(got[0].data, f, "transmissão {round}");
+        share.stop().await;
+    }
 }
 
 #[tokio::test]
@@ -358,7 +379,7 @@ async fn the_screen_without_privacy_carries_a_burst_of_big_frames_quickly() {
     let mut b = incoming.accept(Mulaw::new()).await.unwrap();
     let a = caller.await.unwrap().unwrap();
     let c = CircuitClient::spawn_with(CircuitManager::new(ManagerConfig::default(), "contato:9", cands), Duration::from_secs(2), open_screen_client_options());
-    let share = share_screen_slot(c, a.share_keys(), WAIT, OPEN_SCREEN_SLOT_MS).await.unwrap();
+    let share = share_screen_slot(c, &a.next_share_keys(), WAIT, OPEN_SCREEN_SLOT_MS).await.unwrap();
     let started = std::time::Instant::now();
     let f = video(30_000, 1);
     for i in 0..3 {
@@ -386,7 +407,7 @@ async fn callee_shares_its_screen_to_the_caller_through_the_callers_phone() {
     let b = incoming.accept(Mulaw::new()).await.unwrap();
     let mut a = caller.await.unwrap().unwrap();
 
-    let share = share_screen(screen_client(to_alice), b.share_keys(), WAIT).await.unwrap();
+    let share = share_screen(screen_client(to_alice), &b.next_share_keys(), WAIT).await.unwrap();
     let frames = [video(700, 9), video(300, 8)];
     for (i, f) in frames.iter().enumerate() {
         share.push(f, i == 0).unwrap();
@@ -442,7 +463,7 @@ async fn synthetic_screen_goes_through_h264_and_the_screen_circuit() {
     let mut b = incoming.accept(Mulaw::new()).await.unwrap();
     let a = caller.await.unwrap().unwrap();
 
-    let share = share_screen(screen_client(cands), a.share_keys(), WAIT).await.unwrap();
+    let share = share_screen(screen_client(cands), &a.next_share_keys(), WAIT).await.unwrap();
     let mut src = Bars(0);
     let mut enc = H264Encoder::new(H264Encoder::default_bitrate()).unwrap();
     let mut dec = H264Decoder::new().unwrap();
@@ -495,7 +516,7 @@ async fn full_size_screen_gets_through_at_the_circuit_slot_rate() {
     let mut b = incoming.accept(Mulaw::new()).await.unwrap();
     let a = caller.await.unwrap().unwrap();
 
-    let share = share_screen(screen_client(cands), a.share_keys(), WAIT).await.unwrap();
+    let share = share_screen(screen_client(cands), &a.next_share_keys(), WAIT).await.unwrap();
     let background = (0..1280 * 720).flat_map(|i| {
         let n = (((i % 1280 / 3 * 7 + i / 1280 / 3 * 13) * 2654435761usize) >> 24) as u8;
         [n, n / 2, 90, 255]
