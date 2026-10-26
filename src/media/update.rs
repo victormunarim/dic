@@ -179,6 +179,47 @@ pub fn rendezvous(my_static: &StaticSecret, peer: &PublicKey, owner: &PublicKey,
     Some((derive(b"clam/encontro/assina/v1"), derive(b"clam/encontro/sal/v1")))
 }
 
+/// Só separa o domínio da cifra do registro de servidor (dado associado).
+const TAG_SERVER_RECORD: u8 = 9;
+
+fn server_derive(secret: &[u8; 32], label: &[u8], server: &[u8; 16], owner: &[u8; 32], period: Option<u64>) -> [u8; 32] {
+    let mut info = label.to_vec();
+    info.extend_from_slice(server);
+    info.extend_from_slice(owner);
+    if let Some(p) = period {
+        info.extend_from_slice(&p.to_be_bytes());
+    }
+    let mut out = [0u8; 32];
+    Hkdf::<Sha256>::new(None, secret).expand(&info, &mut out).expect("32 bytes é válido");
+    out
+}
+
+/// Onde `owner` guarda o endereço dele para os membros de um servidor, no dia `period`: semente de assinatura e
+/// sal do item, derivados do segredo do servidor. Um registro por membro, não um por par: qualquer membro, só
+/// sabendo a chave do outro, acha o item. Quem tem o segredo também deriva a semente de `owner` e pode gravar
+/// no lugar dele; por isso o registro é só uma dica de relay, e a chamada ainda confere a identidade do outro lado.
+pub fn server_rendezvous(secret: &[u8; 32], server: &[u8; 16], owner: &[u8; 32], period: u64) -> ([u8; 32], [u8; 32]) {
+    (server_derive(secret, b"clam/servidor/encontro/assina/v1", server, owner, Some(period)), server_derive(secret, b"clam/servidor/encontro/sal/v1", server, owner, Some(period)))
+}
+
+fn server_cipher(secret: &[u8; 32], server: &[u8; 16], owner: &[u8; 32]) -> ChaCha20Poly1305 {
+    ChaCha20Poly1305::new(Key::from_slice(&server_derive(secret, b"clam/servidor/encontro/cifra/v1", server, owner, None)))
+}
+
+/// O registro de `owner` como valor de um item da DHT, cifrado com o segredo do servidor.
+pub fn seal_server_record(secret: &[u8; 32], server: &[u8; 16], owner: &[u8; 32], record: &AddressRecord) -> Result<Vec<u8>, MediaError> {
+    Ok(seal_bytes(&server_cipher(secret, server, owner), TAG_SERVER_RECORD, &encode(record)?))
+}
+
+/// Abre o valor que `owner` guardou para os membros do servidor. `None`: não abre com este segredo (outra época) ou é lixo.
+pub fn open_server_record(secret: &[u8; 32], server: &[u8; 16], owner: &[u8; 32], value: &[u8]) -> Option<AddressRecord> {
+    if value.len() != NONCE_LEN + PLAIN_LEN + 16 {
+        return None;
+    }
+    let plain = server_cipher(secret, server, owner).decrypt(Nonce::from_slice(&value[..NONCE_LEN]), Payload { msg: &value[NONCE_LEN..], aad: &[TAG_SERVER_RECORD] }).ok()?;
+    parse(&plain)
+}
+
 /// Abre `frame` como atualização de algum de `contacts`. `None`: não é uma atualização para esta chave, ou
 /// de nenhum contato; ignore o quadro.
 pub fn open_update(my_static: &StaticSecret, contacts: impl IntoIterator<Item = [u8; 32]>, frame: &[u8]) -> Option<([u8; 32], AddressRecord)> {
@@ -299,6 +340,29 @@ pub fn open_ack(my_static: &StaticSecret, peer: &PublicKey, seq: u64, frame: &[u
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_server_record_opens_only_with_the_servers_secret_for_that_owner() {
+        let (secret, server, owner) = ([1u8; 32], [2u8; 16], [3u8; 32]);
+        let record = AddressRecord { seq: 7, addr: "1.2.3.4:4001".into(), onion: [4; 32], link: [5; 32] };
+        let value = seal_server_record(&secret, &server, &owner, &record).unwrap();
+        assert_eq!(open_server_record(&secret, &server, &owner, &value), Some(record));
+        assert_eq!(open_server_record(&[9; 32], &server, &owner, &value), None, "outro segredo (outra época)");
+        assert_eq!(open_server_record(&secret, &[9; 16], &owner, &value), None, "outro servidor");
+        assert_eq!(open_server_record(&secret, &server, &[9; 32], &value), None, "outro dono");
+        assert_eq!(open_server_record(&secret, &server, &owner, &value[1..]), None);
+    }
+
+    #[test]
+    fn the_server_slot_is_per_owner_and_per_day() {
+        let (secret, server) = ([1u8; 32], [2u8; 16]);
+        let base = server_rendezvous(&secret, &server, &[3; 32], 100);
+        assert_eq!(base, server_rendezvous(&secret, &server, &[3; 32], 100));
+        assert_ne!(base, server_rendezvous(&secret, &server, &[4; 32], 100));
+        assert_ne!(base, server_rendezvous(&secret, &server, &[3; 32], 101));
+        assert_ne!(base, server_rendezvous(&[9; 32], &server, &[3; 32], 100));
+        assert_ne!(base.0, base.1);
+    }
+
     use super::*;
 
     fn ids() -> (StaticSecret, StaticSecret) {

@@ -8,7 +8,7 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use tokio::{sync::mpsc, task::JoinHandle};
@@ -30,6 +30,8 @@ const ACK_WAIT: Duration = Duration::from_secs(6);
 const PARALLEL: usize = 6;
 /// Quadros que esperam por um destinatário ocupado ou fora do ar; passando disto, os mais velhos caem.
 const BACKLOG: usize = 64;
+/// Intervalo mínimo entre duas buscas do endereço do mesmo membro.
+const SEARCH_EVERY: Duration = Duration::from_secs(120);
 /// Eventos que esperam a janela; passando disto, os mais velhos caem.
 const EVENTS: usize = 512;
 
@@ -47,6 +49,8 @@ struct Inner {
     events: Mutex<VecDeque<Event>>,
     dialer: Dialer,
     tasks: Mutex<Vec<JoinHandle<()>>>,
+    /// Quando se procurou cada membro na DHT e nas âncoras pela última vez.
+    searched: Mutex<HashMap<[u8; 32], Instant>>,
 }
 
 impl Inner {
@@ -82,7 +86,7 @@ impl ServerHub {
     /// `own` é o relay deste nó como os outros o alcançam (veja [`crate::node::Node::relay_info`]).
     pub fn start(servers: Servers, dialer: Dialer, phone: &Phone, own: Arc<Mutex<Option<RelayInfo>>>) -> Self {
         let (send, queue) = mpsc::unbounded_channel();
-        let inner = Arc::new(Inner { servers: Mutex::new(servers), send, events: Mutex::default(), dialer, tasks: Mutex::default() });
+        let inner = Arc::new(Inner { servers: Mutex::new(servers), send, events: Mutex::default(), dialer, tasks: Mutex::default(), searched: Mutex::default() });
         let handler: ServerHandler = {
             let inner = inner.clone();
             Arc::new(move |frame: &[u8]| {
@@ -226,8 +230,18 @@ async fn deliver(inner: &Inner, peer: [u8; 32], batch: Vec<Outbound>) {
         inner.dialer.add_hint(peer, RelayInfo { addr: reach.addr, onion: reach.onion, link: reach.link });
     }
     let frames: Vec<Frame> = batch.iter().map(|o| o.frame).collect();
-    inner
-        .dialer
-        .deliver_batch(peer, &frames, |i, reply| inner.servers.lock().unwrap().is_ack(&batch[i], reply), ACK_WAIT)
-        .await;
+    let acked = |i: usize, reply: &[u8]| inner.servers.lock().unwrap().is_ack(&batch[i], reply);
+    if inner.dialer.deliver_batch(peer, &frames, acked, ACK_WAIT).await > 0 {
+        return;
+    }
+    // Nada confirmado: o membro pode ter mudado de endereço. Procura o registro que ele deixou para os membros.
+    let shared = inner.servers.lock().unwrap().shared_secrets(&peer);
+    let due = {
+        let mut searched = inner.searched.lock().unwrap();
+        searched.retain(|_, at| at.elapsed() < SEARCH_EVERY);
+        !shared.is_empty() && searched.insert(peer, Instant::now()).is_none()
+    };
+    if due && inner.dialer.find_member(&peer, &shared).await {
+        inner.dialer.deliver_batch(peer, &frames, acked, ACK_WAIT).await;
+    }
 }

@@ -598,9 +598,6 @@ impl Dialer {
     /// O endereço mais novo que `peer` deixou para nós na DHT e nas âncoras: consulta o dia anterior, o atual e o
     /// seguinte (o relógio de um dos dois pode estar errado) e fica com o registro de maior `seq`.
     async fn rendezvous_record(&self, peer: &[u8; 32]) -> Option<AddressRecord> {
-        if self.dht.is_none() && self.anchors.is_empty() {
-            return None;
-        }
         let pk = PublicKey::from(*peer);
         let today = unix_secs() / 86400;
         let targets: Vec<([u8; 32], [u8; 32])> = [today, today.saturating_sub(1), today + 1]
@@ -608,10 +605,40 @@ impl Dialer {
             .filter_map(|period| update::rendezvous(&self.secret, &pk, &pk, period))
             .map(|(seed, salt)| (rendezvous::public_key(&seed), salt))
             .collect();
-        let exclude = [*peer];
-        let lookup = futures::future::join(self.dht_get(&targets, &exclude), self.anchor_values(&targets, &exclude));
-        let (dht, anchors) = tokio::time::timeout(DHT_LOOKUP_LIMIT, lookup).await.ok()?;
-        dht.into_iter().flatten().chain(anchors).filter_map(|v| update::open_record(&self.secret, &pk, &v)).max_by_key(|r| r.seq)
+        self.lookup_values(&targets, peer).await.iter().filter_map(|v| update::open_record(&self.secret, &pk, v)).max_by_key(|r| r.seq)
+    }
+
+    /// Valores guardados nos `targets` `(chave, sal)` da DHT e das âncoras, sem passar pelos relays de `excluded`.
+    async fn lookup_values(&self, targets: &[([u8; 32], [u8; 32])], excluded: &[u8; 32]) -> Vec<Vec<u8>> {
+        if self.dht.is_none() && self.anchors.is_empty() {
+            return Vec::new();
+        }
+        let exclude = [*excluded];
+        let lookup = futures::future::join(self.dht_get(targets, &exclude), self.anchor_values(targets, &exclude));
+        let Ok((dht, anchors)) = tokio::time::timeout(DHT_LOOKUP_LIMIT, lookup).await else { return Vec::new() };
+        dht.into_iter().flatten().chain(anchors).collect()
+    }
+
+    /// O endereço mais novo que `member` deixou, na DHT e nas âncoras, para os membros dos servidores que os dois
+    /// têm (`shared`: id e segredo atual de cada um). Vira a dica de relay de `member` e devolve se achou algum.
+    pub async fn find_member(&self, member: &[u8; 32], shared: &[([u8; 16], [u8; 32])]) -> bool {
+        let today = unix_secs() / 86400;
+        let mut targets: Vec<([u8; 32], [u8; 32])> = Vec::new();
+        for (server, secret) in shared {
+            for period in [today, today.saturating_sub(1), today + 1] {
+                let (seed, salt) = update::server_rendezvous(secret, server, member, period);
+                targets.push((rendezvous::public_key(&seed), salt));
+            }
+        }
+        let values = self.lookup_values(&targets, member).await;
+        let best = values.iter().filter_map(|v| shared.iter().find_map(|(server, secret)| update::open_server_record(secret, server, member, v))).max_by_key(|r| r.seq);
+        match best {
+            Some(r) => {
+                self.add_hint(*member, RelayInfo { addr: r.addr, onion: r.onion, link: r.link });
+                true
+            }
+            None => false,
+        }
     }
 
     /// Primeiro relay de `peer` cujo circuito fica pronto: os guardados e, se nenhum responder, o que o
@@ -828,6 +855,39 @@ async fn rendezvous_publisher(dialer: Dialer, contacts: phone::Contacts, current
     }
 }
 
+/// Grava o registro de `current` para os membros de cada servidor (um item por servidor e dia, cifrado com o
+/// segredo dele), com o mesmo ritmo do reencontro por contato. Quem está invisível não grava nada.
+async fn server_publisher(dialer: Dialer, hub: ServerHub, current: Current) {
+    let me = *PublicKey::from(&dialer.secret).as_bytes();
+    // Por servidor e época: o `seq` do registro e o dia gravados, e quando gravar de novo.
+    let mut state: HashMap<([u8; 16], u16), (u64, u64, Instant)> = HashMap::new();
+    let mut put_seq = 0i64;
+    loop {
+        let record = current.lock().unwrap().clone();
+        let (visible, secrets) = hub.read(|s, _| (s.visible(), s.secrets()));
+        if let Some(record) = record.filter(|_| visible) {
+            state.retain(|k, _| secrets.iter().any(|(id, epoch, _)| (*id, *epoch) == *k));
+            let period = unix_secs() / 86400;
+            let due: Vec<_> = secrets.iter().filter(|(id, epoch, _)| state.get(&(*id, *epoch)).is_none_or(|(seq, day, at)| *seq != record.seq || *day != period || Instant::now() >= *at)).collect();
+            let base = (unix_millis() as i64).max(put_seq + 1);
+            put_seq = base + due.len() as i64;
+            let mut signed = Vec::new();
+            let mut sent = Vec::new();
+            for (i, (id, epoch, secret)) in due.into_iter().enumerate() {
+                let (seed, salt) = update::server_rendezvous(secret, id, &me, period);
+                let Ok(value) = update::seal_server_record(secret, id, &me, &record) else { continue };
+                signed.push(rendezvous::sign(&seed, &salt, &value, base + i as i64));
+                sent.push((*id, *epoch));
+            }
+            let done = if signed.is_empty() { Vec::new() } else { dialer.store_put(&signed).await };
+            for (k, ok) in sent.into_iter().zip(done) {
+                state.insert(k, (record.seq, period, Instant::now() + if ok { DHT_REPUBLISH } else { DHT_RETRY }));
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
 /// Entrega `record` a `peer` até ele confirmar, o contato sair da lista ou a entrega ser abandonada.
 async fn push_address(dialer: Dialer, contacts: phone::Contacts, peer: [u8; 32], record: AddressRecord, retry: Duration, slots: Arc<Semaphore>) {
     let (mut wait, give_up) = (retry, Instant::now() + UPDATE_GIVE_UP);
@@ -1009,11 +1069,14 @@ impl Node {
             background.push(tokio::spawn(outbox(dialer.clone(), phone.contacts(), current.clone(), update_retry)));
         }
         if publishes {
-            background.push(tokio::spawn(rendezvous_publisher(dialer.clone(), phone.contacts(), current)));
+            background.push(tokio::spawn(rendezvous_publisher(dialer.clone(), phone.contacts(), current.clone())));
         }
         background.extend(servers);
         phone.accept_introductions(introductions);
         let server_hub = ServerHub::start(restore(secret.clone(), saved_servers.as_deref()), dialer.clone(), &phone, own.clone());
+        if publishes {
+            background.push(tokio::spawn(server_publisher(dialer.clone(), server_hub.clone(), current.clone())));
+        }
         let introduced: Arc<Mutex<Vec<Introduced>>> = Arc::default();
         if let Some(mut rx) = phone.take_introductions() {
             let introduced = introduced.clone();

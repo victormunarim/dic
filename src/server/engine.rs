@@ -211,6 +211,11 @@ impl Servers {
         self.servers.values().filter(|s| s.member).map(|s| (s.id, s.epoch, s.secret)).collect()
     }
 
+    /// Servidores (e segredo atual) de que `key` também é membro: onde procurar o endereço dele.
+    pub fn shared_secrets(&self, key: &[u8; 32]) -> Vec<(ServerId, [u8; 32])> {
+        self.servers.values().filter(|s| s.member && s.reg.state().members.values().any(|m| m.key == *key)).map(|s| (s.id, s.secret)).collect()
+    }
+
     /// Chaves de todos os membros de todos os servidores (menos eu).
     pub fn all_members(&self) -> Vec<[u8; 32]> {
         let mut v: Vec<[u8; 32]> = self.servers.values().flat_map(|s| s.reg.state().members.values().map(|m| m.key)).filter(|k| *k != self.me.key).collect();

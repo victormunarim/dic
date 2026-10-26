@@ -21,7 +21,10 @@ struct Person {
 }
 
 async fn person() -> Person {
-    let secret = StaticSecret::random_from_rng(OsRng);
+    person_with(StaticSecret::random_from_rng(OsRng), None, vec![]).await
+}
+
+async fn person_with(secret: StaticSecret, servers: Option<String>, anchors: Vec<clam::node::RelayInfo>) -> Person {
     let key = *PublicKey::from(&secret).as_bytes();
     let port = free_port();
     let cfg = NodeConfig {
@@ -30,6 +33,8 @@ async fn person() -> Person {
         upnp: false,
         relay_keys: Some(RelayKeys::random()),
         updates: false,
+        servers,
+        anchors,
         ..NodeConfig::new(secret, vec![])
     };
     Person { node: Node::start(cfg).await.unwrap(), key }
@@ -110,4 +115,48 @@ async fn people_join_see_each_other_online_and_meet_in_a_room() {
     let mut at_b = answered;
     from_c.send(vec![1000; 320]).await.unwrap();
     assert!(timeout(Duration::from_secs(10), at_b.next_pcm()).await.expect("voz chega").is_some());
+}
+
+/// Quem perdeu o endereço de um membro acha o registro que ele deixa numa âncora para os membros do servidor.
+#[tokio::test]
+async fn a_member_finds_another_through_the_server_record_in_an_anchor() {
+    let secret_r = StaticSecret::random_from_rng(OsRng);
+    let port = free_port();
+    let anchor = Node::start(NodeConfig {
+        relay_port: port,
+        public_addr: Some(format!("127.0.0.1:{port}")),
+        upnp: false,
+        relay_keys: Some(RelayKeys::random()),
+        updates: false,
+        anchor: true,
+        ..NodeConfig::new(secret_r, vec![])
+    })
+    .await
+    .unwrap();
+    let anchors = vec![anchor.relay_info().unwrap()];
+    let (secret_a, secret_b) = (StaticSecret::random_from_rng(OsRng), StaticSecret::random_from_rng(OsRng));
+    let a = person_with(secret_a.clone(), None, anchors.clone()).await;
+    let b = person_with(secret_b, None, anchors.clone()).await;
+    let server = until("criar", || a.node.servers().try_run(|s, now| s.create("Amigos", now)).ok()).await;
+    join(&a, &b, server).await;
+    until("A vê B online", || (members_online(&a, server).contains(&b.key)).then_some(())).await;
+
+    // A reabre sem o endereço de B (só com o servidor gravado) e procura pelo registro.
+    let saved = a.node.servers().read(|s, _| s.export());
+    drop(a);
+    let a2 = person_with(secret_a, Some(saved), anchors).await;
+    assert_eq!(a2.node.dialer().stored_address(&b.key), None);
+    let shared = a2.node.servers().read(|s, _| s.shared_secrets(&b.key));
+    assert_eq!(shared.len(), 1);
+    let dialer = a2.node.dialer();
+    let mut found = false;
+    for _ in 0..30 {
+        if dialer.find_member(&b.key, &shared).await {
+            found = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    assert!(found, "o registro de B está na âncora");
+    assert_eq!(dialer.stored_address(&b.key), b.node.relay_info().map(|r| r.addr));
 }
