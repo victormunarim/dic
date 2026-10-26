@@ -17,6 +17,7 @@ use x25519_dalek::StaticSecret;
 use super::{
     ServerError,
     engine::{Event, Outbound, Output, Servers},
+    wire::INVITE_SERVER,
 };
 use crate::{
     media::{signal::Frame, update::Reach},
@@ -85,12 +86,15 @@ impl ServerHub {
     /// Põe `servers` para funcionar: passa a atender os quadros que o telefone recebe e a mandar os seus.
     /// `own` é o relay deste nó como os outros o alcançam (veja [`crate::node::Node::relay_info`]).
     pub fn start(servers: Servers, dialer: Dialer, phone: &Phone, own: Arc<Mutex<Option<RelayInfo>>>) -> Self {
+        let contacts = phone.contacts();
         let (send, queue) = mpsc::unbounded_channel();
         let inner = Arc::new(Inner { servers: Mutex::new(servers), send, events: Mutex::default(), dialer, tasks: Mutex::default(), searched: Mutex::default() });
         let handler: ServerHandler = {
             let inner = inner.clone();
             Arc::new(move |frame: &[u8]| {
-                let out = inner.servers.lock().unwrap().handle(frame, now());
+                // Convites só vêm de contatos: a lista é copiada antes para não segurar as duas travas juntas.
+                let known: Vec<[u8; 32]> = contacts.lock().unwrap().clone();
+                let out = inner.servers.lock().unwrap().handle_with(frame, now(), &known);
                 inner.dispatch(out).map(|f| f.to_vec())
             })
         };
@@ -230,8 +234,21 @@ async fn deliver(inner: &Inner, peer: [u8; 32], batch: Vec<Outbound>) {
         inner.dialer.add_hint(peer, RelayInfo { addr: reach.addr, onion: reach.onion, link: reach.link });
     }
     let frames: Vec<Frame> = batch.iter().map(|o| o.frame).collect();
-    let acked = |i: usize, reply: &[u8]| inner.servers.lock().unwrap().is_ack(&batch[i], reply);
-    if inner.dialer.deliver_batch(peer, &frames, acked, ACK_WAIT).await > 0 {
+    // Convite para um contato: ele pode não ter falado com este nó ainda, então vale procurar o endereço dele.
+    let invites: Vec<usize> = (0..batch.len()).filter(|i| batch[*i].server == INVITE_SERVER).collect();
+    let got = Mutex::new(HashSet::new());
+    let acked = |i: usize, reply: &[u8]| {
+        let ok = inner.servers.lock().unwrap().is_ack(&batch[i], reply);
+        if ok {
+            got.lock().unwrap().insert(i);
+        }
+        ok
+    };
+    let confirmed = inner.dialer.deliver_batch(peer, &frames, acked, ACK_WAIT, !invites.is_empty()).await;
+    if !invites.is_empty() && invites.iter().all(|i| got.lock().unwrap().contains(i)) {
+        inner.servers.lock().unwrap().invite_delivered(&peer, now());
+    }
+    if confirmed > 0 {
         return;
     }
     // Nada confirmado: o membro pode ter mudado de endereço. Procura o registro que ele deixou para os membros.
@@ -242,6 +259,6 @@ async fn deliver(inner: &Inner, peer: [u8; 32], batch: Vec<Outbound>) {
         !shared.is_empty() && searched.insert(peer, Instant::now()).is_none()
     };
     if due && inner.dialer.find_member(&peer, &shared).await {
-        inner.dialer.deliver_batch(peer, &frames, acked, ACK_WAIT).await;
+        inner.dialer.deliver_batch(peer, &frames, acked, ACK_WAIT, false).await;
     }
 }

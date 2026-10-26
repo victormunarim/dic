@@ -15,11 +15,11 @@ use x25519_dalek::{PublicKey, StaticSecret};
 
 use super::{
     MAX_ROOM_PEOPLE, MemberId, RoomId, ServerError, ServerId, clean_name, member_id,
-    invite::{Hint, Invite, MAX_HINTS, hex, unhex},
+    invite::{Hint, Invite, MAX_HINTS, PREFIX, hex, unhex},
     op::{Action, Op, Role},
     registry::{Insert, Registry},
     signing_key, valid_name,
-    wire::{self, Hello, Msg, VECTOR_PER_FRAME},
+    wire::{self, Hello, INVITE_CHUNK, INVITE_CHUNKS, INVITE_SERVER, Msg, VECTOR_PER_FRAME},
 };
 use crate::media::{signal::Frame, update::Reach};
 
@@ -33,6 +33,14 @@ pub const PROBE: u64 = 60;
 const VECTOR_GAP: u64 = 5;
 /// Intervalo mínimo entre dois presentes (segredo novo) ao mesmo membro.
 const GIFT_GAP: u64 = 10;
+/// De quanto em quanto tempo se tenta de novo entregar um convite que ainda não foi confirmado.
+const INVITE_RESEND: u64 = 60;
+/// De quanto em quanto tempo se lembra do convite a quem já o recebeu (se ele reiniciou antes de aceitar).
+const INVITE_REFRESH: u64 = 600;
+/// Por quanto tempo, desde o primeiro envio, o convite continua sendo entregue.
+const INVITE_TTL: u64 = 24 * 3600;
+/// Convites recebidos que esperam resposta, e convites incompletos que se guardam.
+const INVITES_KEPT: usize = 8;
 /// Operações mandadas por rodada de sincronização a um membro.
 const OPS_PER_ROUND: usize = 64;
 
@@ -59,6 +67,8 @@ pub enum Event {
     Mesh { server: ServerId, room: Option<RoomId>, peers: Vec<[u8; 32]> },
     /// Alguém da minha sala pediu (`on`) ou deixou de pedir para assistir à minha tela.
     Watch { server: ServerId, from: [u8; 32], on: bool },
+    /// Um contato me convidou para um servidor: veja [`Servers::pending_invites`].
+    Invitation { server: ServerId, from: [u8; 32] },
     Notice(String),
 }
 
@@ -168,12 +178,34 @@ impl Server {
     }
 }
 
+/// Convite que um contato me mandou e eu ainda não aceitei.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingInvite {
+    pub server: ServerId,
+    pub name: String,
+    pub from: [u8; 32],
+    /// O texto do convite, para [`Servers::accept`].
+    pub text: String,
+}
+
+/// Entrega de um convite que eu mandei.
+struct Delivery {
+    first: u64,
+    next: u64,
+}
+
 pub struct Servers {
     me: Me,
     visible: bool,
     name: String,
     reach: Option<(u64, Reach)>,
     servers: BTreeMap<ServerId, Server>,
+    /// Convites que estou entregando, por servidor e convidado.
+    deliveries: BTreeMap<(ServerId, MemberId), Delivery>,
+    /// Pedaços de convite que chegaram, por remetente e identificador.
+    assembling: Vec<(([u8; 32], [u8; 4]), Vec<Option<Vec<u8>>>)>,
+    pending: BTreeMap<ServerId, PendingInvite>,
+    declined: std::collections::BTreeSet<ServerId>,
 }
 
 fn seal_to(me: &Me, s: &Server, key: &[u8; 32], msg: &Msg) -> Option<Outbound> {
@@ -191,7 +223,7 @@ impl Servers {
     pub fn new(secret: StaticSecret) -> Self {
         let key = *PublicKey::from(&secret).as_bytes();
         let sk = signing_key(&secret);
-        Servers { me: Me { id: member_id(&key), key, secret, sk }, visible: true, name: String::new(), reach: None, servers: BTreeMap::new() }
+        Servers { me: Me { id: member_id(&key), key, secret, sk }, visible: true, name: String::new(), reach: None, servers: BTreeMap::new(), deliveries: BTreeMap::new(), assembling: Vec::new(), pending: BTreeMap::new(), declined: Default::default() }
     }
 
     pub fn my_key(&self) -> [u8; 32] {
@@ -238,7 +270,9 @@ impl Servers {
         }
         let mut id = [0u8; 16];
         let mut secret = [0u8; 32];
-        OsRng.fill_bytes(&mut id);
+        while id[..4] == INVITE_SERVER[..4] {
+            OsRng.fill_bytes(&mut id);
+        }
         OsRng.fill_bytes(&mut secret);
         let owner_vk = self.me.sk.verifying_key().to_bytes();
         let mut s = Server {
@@ -265,6 +299,59 @@ impl Servers {
         Ok((id, self.finish(now, out)))
     }
 
+    /// Convida `invitee` (um contato) e entrega o convite pela rede, em quadros, sem outro canal. Se ele estiver
+    /// offline a entrega se repete até ele receber (ou por [`INVITE_TTL`]).
+    pub fn invite_send(&mut self, server: &ServerId, invitee: [u8; 32], now: u64) -> Result<Output, ServerError> {
+        let text = self.invite(server, invitee, now)?;
+        let mut out = Output::default();
+        out.send = self.invite_frames(&text, &invitee);
+        let d = self.deliveries.entry((*server, member_id(&invitee))).or_insert(Delivery { first: now, next: now });
+        d.next = now + INVITE_RESEND;
+        Ok(out)
+    }
+
+    /// O convite `text` partido em quadros para `to`.
+    fn invite_frames(&self, text: &str, to: &[u8; 32]) -> Vec<Outbound> {
+        let Some(raw) = text.strip_prefix(PREFIX).and_then(unhex) else { return Vec::new() };
+        let chunks: Vec<&[u8]> = raw.chunks(INVITE_CHUNK).collect();
+        if chunks.len() > INVITE_CHUNKS {
+            return Vec::new();
+        }
+        let mut id = [0u8; 4];
+        OsRng.fill_bytes(&mut id);
+        chunks
+            .iter()
+            .enumerate()
+            .filter_map(|(i, data)| {
+                let msg = Msg::InviteChunk { id, idx: i as u8, total: chunks.len() as u8, data: data.to_vec() };
+                let frame = wire::seal(&self.me.secret, to, &INVITE_SERVER, &msg)?;
+                Some(Outbound { server: INVITE_SERVER, to: *to, via: None, frame })
+            })
+            .collect()
+    }
+
+    /// Todos os quadros de convite para `peer` foram confirmados: passa a lembrá-lo só de vez em quando.
+    pub fn invite_delivered(&mut self, peer: &[u8; 32], now: u64) {
+        let id = member_id(peer);
+        for ((_, who), d) in self.deliveries.iter_mut() {
+            if *who == id {
+                d.next = now + INVITE_REFRESH;
+            }
+        }
+    }
+
+    /// Convites de contatos que esperam resposta.
+    pub fn pending_invites(&self) -> Vec<PendingInvite> {
+        self.pending.values().cloned().collect()
+    }
+
+    /// Recusa o convite (some da lista e não volta enquanto o programa estiver aberto).
+    pub fn decline_invite(&mut self, server: &ServerId) {
+        if self.pending.remove(server).is_some() {
+            self.declined.insert(*server);
+        }
+    }
+
     /// Texto de convite para `invitee`, que precisa ser levado a ele por fora (ou pelo contato).
     pub fn invite(&mut self, server: &ServerId, invitee: [u8; 32], now: u64) -> Result<String, ServerError> {
         let reach = self.reach.as_ref().map(|r| r.1.clone()).ok_or(ServerError::NoAddress)?;
@@ -276,7 +363,7 @@ impl Servers {
         if s.is_member(&id) {
             return Err(ServerError::AlreadyIn);
         }
-        if s.reg.state().members.len() + s.invited.len() >= super::MAX_MEMBERS {
+        if !s.invited.contains_key(&id) && s.reg.state().members.len() + s.invited.len() >= super::MAX_MEMBERS {
             return Err(ServerError::Full);
         }
         let hints = s
@@ -332,6 +419,7 @@ impl Servers {
         out.send.extend(seal_to(&self.me, &s, &inv.inviter.key, &Msg::Join { vk: self.me.sk.verifying_key().to_bytes(), reach }));
         let id = s.id;
         self.servers.insert(id, s);
+        self.pending.remove(&id);
         out.events.push(Event::Changed(id));
         Ok((id, self.finish(now, out)))
     }
@@ -579,6 +667,21 @@ impl Servers {
         let vk = self.me.sk.verifying_key().to_bytes();
         let reach = self.reach.as_ref().map(|r| r.1.clone());
         let visible = self.visible;
+        self.deliveries.retain(|(sid, who), d| now < d.first + INVITE_TTL && self.servers.get(sid).is_some_and(|s| s.invited.contains_key(who)));
+        let due: Vec<(ServerId, [u8; 32])> = self
+            .deliveries
+            .iter()
+            .filter(|(_, d)| now >= d.next)
+            .filter_map(|((sid, who), _)| Some((*sid, *self.servers.get(sid)?.invited.get(who)?)))
+            .collect();
+        for (sid, invitee) in due {
+            if let Some(d) = self.deliveries.get_mut(&(sid, member_id(&invitee))) {
+                d.next = now + INVITE_RESEND;
+            }
+            if let Ok(text) = self.invite(&sid, invitee, now) {
+                out.send.extend(self.invite_frames(&text, &invitee));
+            }
+        }
         for s in self.servers.values_mut() {
             if let Some(h) = s.joining.clone() {
                 if let Some(reach) = reach.clone().filter(|_| s.last_join.is_none_or(|t| now >= t + PROBE)) {
@@ -610,8 +713,16 @@ impl Servers {
 
     /// Trata um quadro de servidor. Lixo, adulterado ou de quem não é daqui some sem resposta.
     pub fn handle(&mut self, frame: &[u8], now: u64) -> Output {
+        self.handle_with(frame, now, &[])
+    }
+
+    /// Como [`handle`](Self::handle), sabendo quem são os contatos: só deles se aceitam convites.
+    pub fn handle_with(&mut self, frame: &[u8], now: u64, contacts: &[[u8; 32]]) -> Output {
         let mut out = Output::default();
         let Some((short, sender)) = wire::head(frame) else { return out };
+        if short == INVITE_SERVER[..4] {
+            return self.on_invite_frame(frame, &sender, contacts);
+        }
         let ids: Vec<ServerId> = self.servers.keys().filter(|id| id[..4] == short).copied().collect();
         for sid in ids {
             let Some(key) = self.servers[&sid].peers.get(&sender).map(|p| p.key) else { continue };
@@ -623,6 +734,48 @@ impl Servers {
             break;
         }
         self.finish(now, out)
+    }
+
+    /// Pedaço de convite de um contato: confirma e, com o convite inteiro, avisa a janela.
+    fn on_invite_frame(&mut self, frame: &[u8], sender: &MemberId, contacts: &[[u8; 32]]) -> Output {
+        let mut out = Output::default();
+        let Some(from) = contacts.iter().find(|k| k[..8] == sender[..]).copied() else { return out };
+        let Some(Msg::InviteChunk { id, idx, total, data }) = wire::open(&self.me.secret, &from, &INVITE_SERVER, frame) else { return out };
+        out.ack = wire::nonce_tag(frame).and_then(|t| wire::seal(&self.me.secret, &from, &INVITE_SERVER, &Msg::Ack(t)));
+        let at = match self.assembling.iter().position(|(k, _)| *k == (from, id)) {
+            Some(i) => i,
+            None => {
+                if self.assembling.len() >= INVITES_KEPT {
+                    self.assembling.remove(0);
+                }
+                self.assembling.push(((from, id), vec![None; total as usize]));
+                self.assembling.len() - 1
+            }
+        };
+        let parts = &mut self.assembling[at].1;
+        if parts.len() != total as usize {
+            self.assembling.remove(at);
+            return out;
+        }
+        parts[idx as usize] = Some(data);
+        if parts.iter().any(Option::is_none) {
+            return out;
+        }
+        let raw: Vec<u8> = self.assembling.remove(at).1.into_iter().flatten().flatten().collect();
+        let text = format!("{PREFIX}{}", hex(&raw));
+        let Ok(inv) = Invite::open(&text, &self.me.secret) else { return out };
+        if inv.inviter.key != from || self.servers.contains_key(&inv.server) || self.declined.contains(&inv.server) {
+            return out;
+        }
+        let known = self.pending.contains_key(&inv.server);
+        if !known && self.pending.len() >= INVITES_KEPT {
+            return out;
+        }
+        self.pending.insert(inv.server, PendingInvite { server: inv.server, name: inv.name, from, text });
+        if !known {
+            out.events.push(Event::Invitation { server: inv.server, from });
+        }
+        out
     }
 
     fn on_msg(&mut self, sid: ServerId, key: [u8; 32], msg: Msg, now: u64) -> Output {
@@ -737,7 +890,8 @@ impl Servers {
             Msg::Joined => {
                 // Nada a fazer: o que me torna membro são as operações.
             }
-            Msg::Ack(_) => {}
+            // Pedaços de convite não vêm por servidor: o `handle_with` já os tratou.
+            Msg::Ack(_) | Msg::InviteChunk { .. } => {}
             Msg::Watch(on) => {
                 // Só quem está na minha sala pode pedir, e só enquanto eu transmito.
                 let together = s.room.is_some() && s.peers.get(&id).is_some_and(|p| p.online(now) && p.room == s.room);

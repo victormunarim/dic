@@ -18,7 +18,7 @@ use sha2::Sha256;
 use x25519_dalek::StaticSecret;
 
 pub use op::{Action, Op, Role};
-pub use engine::{Event, MemberView, Outbound, Output, RoomView, ServerView, Servers};
+pub use engine::{Event, MemberView, Outbound, Output, PendingInvite, RoomView, ServerView, Servers};
 pub use registry::{Registry, State};
 
 /// Identificador do servidor (aleatório, só circula em convites e dentro dos quadros).

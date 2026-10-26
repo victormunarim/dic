@@ -160,3 +160,24 @@ async fn a_member_finds_another_through_the_server_record_in_an_anchor() {
     assert!(found, "o registro de B está na âncora");
     assert_eq!(dialer.stored_address(&b.key), b.node.relay_info().map(|r| r.addr));
 }
+
+/// O convite chega a um contato pela rede, sem texto levado por fora, e ele entra ao aceitar.
+#[tokio::test]
+async fn an_invite_is_delivered_to_a_contact_over_the_circuit() {
+    let (a, b) = (person().await, person().await);
+    a.node.add_contact(b.key, b.node.relay_info());
+    b.node.add_contact(a.key, a.node.relay_info());
+    let server = until("criar", || a.node.servers().try_run(|s, now| s.create("Amigos", now)).ok()).await;
+    until("convite enviado", || match a.node.servers().try_act(|s, now| s.invite_send(&server, b.key, now)) {
+        Ok(()) => Some(()),
+        Err(ServerError::NoAddress) => None,
+        Err(e) => panic!("{e:?}"),
+    })
+    .await;
+    let hub = b.node.servers();
+    let pending = until("convite chega", || hub.read(|s, _| s.pending_invites()).into_iter().next()).await;
+    assert_eq!((pending.name.as_str(), pending.from), ("Amigos", a.key));
+    hub.try_run(|s, now| s.accept(&pending.text, now)).unwrap();
+    until("entrou", || hub.take_events().into_iter().find(|e| matches!(e, Event::Joined(_))).map(|_| ())).await;
+    assert!(hub.read(|s, _| s.pending_invites()).is_empty());
+}

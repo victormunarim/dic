@@ -269,6 +269,7 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
                     }
                 }
                 Event::Notice(n) => out.line(n),
+                Event::Invitation { .. } => out.line("um contato convidou você para um servidor (aba Servidores)"),
                 Event::Changed(_) | Event::Address { .. } => {}
             }
             (out.repaint)();

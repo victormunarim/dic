@@ -19,10 +19,14 @@ pub(crate) struct ServersUi {
     pub(crate) pick: Option<[u8; 32]>,
     /// A pessoa leu o aviso de que o convidado passa a ver o IP dela.
     pub(crate) ip_ok: bool,
+    /// A pessoa leu o aviso de que, ao entrar, os membros passam a ver o IP dela.
+    pub(crate) join_ok: bool,
     /// Convite gerado, para copiar.
     pub(crate) invite_out: String,
     pub(crate) confirm_leave: bool,
     pub(crate) msg: String,
+    /// Resultado que deu certo (aparece em verde).
+    pub(crate) info: String,
 }
 
 fn role_name(r: Role) -> &'static str {
@@ -46,6 +50,7 @@ impl App {
         if self.srv.sel.is_some_and(|id| !views.iter().any(|v| v.id == id)) {
             self.srv.sel = None;
         }
+        self.invitations_card(ui, &hub);
         ui.horizontal_top(|ui| {
             ui.vertical(|ui| {
                 ui.set_width(60.0);
@@ -59,6 +64,7 @@ impl App {
                     if ui.add(b).on_hover_text(&v.name).clicked() {
                         self.srv.sel = Some(v.id);
                         self.srv.msg.clear();
+                        self.srv.info.clear();
                         self.srv.invite_out.clear();
                         self.srv.confirm_leave = false;
                     }
@@ -75,10 +81,46 @@ impl App {
                     Some(v) => self.server_view(ui, &hub, v, busy),
                     None => self.server_add(ui, &hub),
                 }
+                if !self.srv.info.is_empty() {
+                    ui.colored_label(GREEN, &self.srv.info);
+                }
                 if !self.srv.msg.is_empty() {
                     ui.colored_label(Color32::from_rgb(0xf2, 0x7b, 0x7e), &self.srv.msg);
                 }
             });
+        });
+    }
+
+    /// Convites que contatos mandaram pela rede.
+    fn invitations_card(&mut self, ui: &mut egui::Ui, hub: &clam::server::net::ServerHub) {
+        let pending = hub.read(|s, _| s.pending_invites());
+        if pending.is_empty() {
+            return;
+        }
+        let contacts = parse_contacts(&self.form.contacts);
+        card(ui, "Convites recebidos", "Um contato chamou você para um servidor.", |ui| {
+            ui.checkbox(&mut self.srv.join_ok, "Entendo que, ao entrar, os membros passam a ver o meu IP quando ligarmos na mesma sala");
+            for p in &pending {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(&p.name).strong());
+                    ui.label(format!("de {}", member_name(&contacts, &p.from)));
+                    if button(ui, self.srv.join_ok, "Aceitar", GREEN).clicked() {
+                        match hub.try_run(|s, now| s.accept(&p.text, now)) {
+                            Ok(id) => {
+                                self.srv.sel = Some(id);
+                                self.srv.msg.clear();
+                            }
+                            Err(e) => self.srv.msg = e.to_string(),
+                        }
+                    }
+                    if button(ui, true, "Recusar", PANEL).clicked() {
+                        hub.run(|s, _| {
+                            s.decline_invite(&p.server);
+                            Output::default()
+                        });
+                    }
+                });
+            }
         });
     }
 
@@ -97,9 +139,10 @@ impl App {
                 }
             }
         });
-        card(ui, "Entrar com um convite", "Cole o texto que um membro gerou para você (começa com clam-servidor:).", |ui| {
+        card(ui, "Entrar com um convite", "Convites de contatos chegam sozinhos (aparecem acima). Se alguém mandou o texto por fora, cole aqui (começa com clam-servidor:).", |ui| {
             ui.add(field(&mut self.srv.invite_in, "clam-servidor:..."));
-            if button(ui, !self.srv.invite_in.trim().is_empty(), "Entrar", BLURPLE).clicked() {
+            ui.checkbox(&mut self.srv.join_ok, "Entendo que, ao entrar, os membros passam a ver o meu IP");
+            if button(ui, !self.srv.invite_in.trim().is_empty() && self.srv.join_ok, "Entrar", BLURPLE).clicked() {
                 let text = self.srv.invite_in.trim().to_string();
                 match hub.try_run(|s, now| s.accept(&text, now)) {
                     Ok(id) => {
@@ -293,7 +336,7 @@ impl App {
             }
         });
 
-        card(ui, "Convidar", "Escolha um contato: o convite é um texto que só ele consegue abrir. Qualquer membro pode convidar.", |ui| {
+        card(ui, "Convidar", "Escolha um contato: o convite chega a ele pela rede, cifrado, e só ele consegue abri-lo. Qualquer membro pode convidar.", |ui| {
             let shown = self.srv.pick.map_or("escolha um contato".to_string(), |k| member_name(&contacts, &k));
             egui::ComboBox::from_id_salt("convidar").selected_text(shown).width(260.0).show_ui(ui, |ui| {
                 for (name, key) in &contacts {
@@ -304,7 +347,21 @@ impl App {
             });
             ui.checkbox(&mut self.srv.ip_ok, "Entendo que quem entrar passa a ver o meu IP quando ligarmos na mesma sala");
             note(ui, "As chamadas de sala são diretas entre os pares (por circuito de 2 saltos), mas o relay de cada um fica conhecido pelos membros.");
-            if button(ui, self.srv.pick.is_some() && self.srv.ip_ok, "Gerar convite", BLURPLE).clicked() {
+            let ready = self.srv.pick.is_some() && self.srv.ip_ok;
+            if button(ui, ready, "Enviar convite", BLURPLE).clicked() {
+                let key = self.srv.pick.expect("botão só liga com contato escolhido");
+                match hub.try_act(|s, now| s.invite_send(&v.id, key, now)) {
+                    Ok(()) => {
+                        self.srv.msg.clear();
+                        self.srv.info = format!("Convite enviado a {}. Se ele estiver offline, o programa tenta de novo até ele receber.", member_name(&contacts, &key));
+                    }
+                    Err(e) => {
+                        self.srv.info.clear();
+                        self.srv.msg = e.to_string();
+                    }
+                }
+            }
+            if button(ui, ready, "Gerar só o texto", PANEL).clicked() {
                 let key = self.srv.pick.expect("botão só liga com contato escolhido");
                 match hub.try_run(|s, now| s.invite(&v.id, key, now).map(|t| (t, Output::default()))) {
                     Ok(text) => {
@@ -319,7 +376,7 @@ impl App {
                 if button(ui, true, "Copiar o convite", GREEN).clicked() {
                     ui.ctx().copy_text(self.srv.invite_out.clone());
                 }
-                note(ui, "Mande o texto por onde preferir; ele só abre na conta do convidado. Ele entra quando você estiver online.");
+                note(ui, "Mande o texto por onde preferir; ele só abre na conta do convidado. Ele entra quando você estiver online. (Este caminho não envia nada pela rede.)");
             }
         });
     }

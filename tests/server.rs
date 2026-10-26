@@ -48,7 +48,8 @@ impl Net {
             if self.down.contains(&to) {
                 continue;
             }
-            let out = self.nodes[to].handle(&frame, self.now);
+            let contacts: Vec<[u8; 32]> = (0..self.nodes.len()).map(|j| self.key(j)).collect();
+            let out = self.nodes[to].handle_with(&frame, self.now, &contacts);
             self.collect(to, out, &mut queue);
         }
     }
@@ -346,4 +347,59 @@ fn frames_from_outsiders_and_junk_are_ignored() {
     }
     assert!(net.nodes[0].handle(&[1, 2, 3], net.now).is_empty());
     assert_eq!(net.view(0, &server).members.len(), 2);
+}
+
+#[test]
+fn an_invite_reaches_a_contact_over_the_network_and_is_accepted_there() {
+    let mut net = Net::new(3);
+    let (server, out) = net.nodes[0].create("Amigos", net.now).unwrap();
+    net.run(0, out);
+    let (key, now) = (net.key(2), net.now);
+    let out = net.nodes[0].invite_send(&server, key, now).unwrap();
+    net.run(0, out);
+    let pending = net.nodes[2].pending_invites();
+    assert_eq!(pending.len(), 1);
+    assert_eq!((pending[0].name.as_str(), pending[0].from), ("Amigos", net.key(0)));
+    assert!(net.events[2].iter().any(|e| matches!(e, Event::Invitation { .. })));
+    let (_, out) = net.nodes[2].accept(&pending[0].text, net.now).unwrap();
+    net.run(2, out);
+    net.advance(2);
+    assert!(net.nodes[2].pending_invites().is_empty());
+    assert_eq!(net.view(2, &server).members.len(), 2);
+    assert!(!net.view(2, &server).joining);
+}
+
+#[test]
+fn an_invite_from_a_stranger_is_ignored_and_a_declined_one_does_not_come_back() {
+    let mut net = Net::new(2);
+    let (server, out) = net.nodes[0].create("Amigos", net.now).unwrap();
+    net.run(0, out);
+    let (key, now) = (net.key(1), net.now);
+    let out = net.nodes[0].invite_send(&server, key, now).unwrap();
+    for o in &out.send {
+        let r = net.nodes[1].handle_with(&o.frame, net.now, &[]);
+        assert!(r.ack.is_none() && r.events.is_empty(), "quem não é contato não é atendido");
+    }
+    assert!(net.nodes[1].pending_invites().is_empty());
+    net.run(0, out);
+    net.nodes[1].decline_invite(&server);
+    assert!(net.nodes[1].pending_invites().is_empty());
+    net.advance(61);
+    assert!(net.nodes[1].pending_invites().is_empty(), "recusado não volta pelo reenvio");
+}
+
+#[test]
+fn an_invite_to_someone_offline_is_delivered_again_until_it_arrives() {
+    let mut net = Net::new(2);
+    let (server, out) = net.nodes[0].create("Amigos", net.now).unwrap();
+    net.run(0, out);
+    net.down.insert(1);
+    let (key, now) = (net.key(1), net.now);
+    let out = net.nodes[0].invite_send(&server, key, now).unwrap();
+    net.run(0, out);
+    net.advance(30);
+    net.down.remove(&1);
+    assert!(net.nodes[1].pending_invites().is_empty());
+    net.advance(40);
+    assert_eq!(net.nodes[1].pending_invites().len(), 1, "o reenvio entregou");
 }

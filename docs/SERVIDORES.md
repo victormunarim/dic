@@ -48,11 +48,14 @@ A chave é **par a par**: `HKDF(DH(minha secreta, pública do outro), "clam/serv
 | `Join` / `Joined` | O convidado pede para entrar, com a chave de verificação e o relay; o convidante responde e manda as operações |
 | `Gift` | O segredo novo depois de um `Rekey` |
 | `Ack` | "Recebi o quadro cujo nonce começa por estes 8 bytes" |
+| `InviteChunk` | Um pedaço do convite, só entre contatos (veja *Entrega do convite pela rede*) |
 | `Watch` | "Quero assistir à sua tela" / "parei" (só entre quem está na mesma sala) |
 
 **Entrega.** O `ServerHub` (`src/server/net.rs`) junta os quadros por destinatário e manda em lote por um circuito (abre, manda, espera os `Ack`, fecha). Não se mantém circuito aberto com todos: cada um custaria cerca de 100 kbps de cobertura. Sem `Ack` a entrega é tentada de novo, e se falhar o nó procura o membro pelo registro do servidor (abaixo).
 
 **Convite.** Texto `clam-servidor:` + hex, cifrado com `HKDF(DH(quem convida, convidado))`: leva segredo, época, chave do dono, nome, o relay de quem convida e até 2 dicas de relay. Como depende da chave do convidado, só ele o abre; repassar não funciona. O convidado manda `Join` a quem o convidou, que responde com `AddMember` assinado por ele.
+
+**Entrega do convite pela rede.** *Enviar convite* parte o texto em até 8 pedaços (`InviteChunk`, 151 B cada) e os entrega ao contato pelo mesmo circuito dos outros quadros, sem outro canal. Como o convidado ainda não conhece o servidor, a chave desses quadros usa um servidor fictício (`INVITE_SERVER`, todo zero) no lugar do `server_id`. Só se aceitam pedaços de **contatos** (a lista do telefone); de quem não é contato some sem resposta. Cada pedaço é confirmado (`Ack`); quando chegam todos, o convite é aberto e vira um aviso na aba *Servidores* (*Convites recebidos*: Aceitar ou Recusar). O endereço do contato é procurado como numa chamada (guardado, DHT, âncoras). Se ele estiver offline, o convidante repete a entrega a cada 60 s, até 24 h; depois da confirmação, só lembra a cada 10 min (para quem reiniciou antes de aceitar). Quem recusa não recebe o mesmo convite de novo enquanto o programa estiver aberto. O texto para copiar (*Gerar só o texto*) continua existindo, para quem não é contato.
 
 **Remover membro.** `RemoveMember` seguido de `Rekey`: o segredo novo vai a cada membro restante em `Gift`. O removido guarda o que já viu (nomes, endereços de então), mas não abre mais nada novo.
 
@@ -90,8 +93,9 @@ O endereço de um membro pode mudar enquanto ele está offline. Cada membro publ
 
 ## Janela
 
+- **Convites recebidos**: cartão no alto da aba, com *Aceitar* (exige o aviso de IP) e *Recusar*.
 - **Trilho de servidores** na aba *Servidores*: avatares, *＋* para criar ou aceitar convite.
-- No servidor: cabeçalho (aparecer online, sair), **salas** com quem está nelas (aro verde de quem fala, *Entrar* / *Sair*, apagar, criar sala), **telas da sala**, **membros** (online primeiro, papel, sala em que estão, remover, tornar admin) e **convite** (escolha de um contato, aviso de IP, texto para copiar).
+- No servidor: cabeçalho (aparecer online, sair), **salas** com quem está nelas (aro verde de quem fala, *Entrar* / *Sair*, apagar, criar sala), **telas da sala**, **membros** (online primeiro, papel, sala em que estão, remover, tornar admin) e **convite** (escolha de um contato, aviso de IP, *Enviar convite* e, à parte, o texto para copiar).
 - Estado em disco: `~/.clam-gui.servers` (modo `0600`): segredos, registros e membros de cada servidor, regravado a cada 5 s se mudou. Sem chaveiro por servidor, para funcionar onde não há chaveiro.
 
 ## Onde está no código

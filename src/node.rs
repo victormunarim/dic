@@ -417,9 +417,11 @@ impl Dialer {
 
     /// Entrega `frames` a `peer` por um circuito só, no endereço que se tem dele, e espera a confirmação de cada
     /// um (`acked(i, resposta)`). Devolve quantos foram confirmados. Quem confirmou prova o endereço, que passa a
-    /// ser o guardado. Não procura na DHT nem nas âncoras: quem usa já tem o endereço do membro.
-    pub(crate) async fn deliver_batch(&self, peer: [u8; 32], frames: &[crate::media::signal::Frame], acked: impl Fn(usize, &[u8]) -> bool, wait: Duration) -> usize {
-        let Some((mut client, used)) = self.stored_client(&peer, self.stored_for(&peer), ClientOptions::default).await else { return 0 };
+    /// ser o guardado. Com `search` falso não procura na DHT nem nas âncoras (quem usa já tem o endereço do membro);
+    /// verdadeiro, procura como numa chamada (para um contato que ainda não se falou).
+    pub(crate) async fn deliver_batch(&self, peer: [u8; 32], frames: &[crate::media::signal::Frame], acked: impl Fn(usize, &[u8]) -> bool, wait: Duration, search: bool) -> usize {
+        let found = if search { self.reachable_client(&peer, ClientOptions::default).await.0 } else { self.stored_client(&peer, self.stored_for(&peer), ClientOptions::default).await };
+        let Some((mut client, used)) = found else { return 0 };
         let mut got = vec![false; frames.len()];
         for f in frames {
             if client.send(f).await.is_err() {

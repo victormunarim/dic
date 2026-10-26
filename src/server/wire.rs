@@ -22,10 +22,17 @@ use super::{MemberId, RoomId, ServerId, op::Op};
 use crate::media::{packet::PACKET_LEN, signal::Frame, update::Reach};
 
 pub const TAG_SERVER: u8 = 8;
+/// Servidor fictício dos quadros de convite: quem recebe ainda não conhece o servidor, então a chave do quadro
+/// usa este no lugar (o convite em si vai selado à parte, veja [`super::invite`]).
+pub const INVITE_SERVER: ServerId = [0; 16];
 const NONCE_LEN: usize = 12;
 const HEAD: usize = 1 + 4 + 8 + 1;
 /// Bytes que cabem no conteúdo de um quadro (tipo e corpo).
 pub const BUDGET: usize = PACKET_LEN - HEAD - NONCE_LEN - 16;
+/// Bytes do convite que cabem num quadro de pedaço de convite.
+pub const INVITE_CHUNK: usize = BUDGET - 7;
+/// Pedaços que um convite pode ter.
+pub const INVITE_CHUNKS: usize = 8;
 /// Autores que cabem num quadro de vetor.
 pub const VECTOR_PER_FRAME: usize = (BUDGET - 4) / 10;
 /// Maior endereço (`host:porta`) que o quadro de endereço leva.
@@ -63,6 +70,8 @@ pub enum Msg {
     Ack([u8; 8]),
     /// Quem está na mesma sala que o destinatário pede (`true`) ou deixa de pedir (`false`) para assistir à tela dele.
     Watch(bool),
+    /// Um pedaço (`idx` de `total`) do convite `id`, que o convidante entrega ao contato sem ele precisar de outro canal.
+    InviteChunk { id: [u8; 4], idx: u8, total: u8, data: Vec<u8> },
 }
 
 fn cipher(me: &StaticSecret, peer: &[u8; 32], server: &ServerId) -> Option<ChaCha20Poly1305> {
@@ -137,6 +146,12 @@ fn encode(msg: &Msg) -> Vec<u8> {
             v.extend_from_slice(tag);
         }
         Msg::Watch(on) => v.extend_from_slice(&[10, u8::from(*on)]),
+        Msg::InviteChunk { id, idx, total, data } => {
+            v.push(11);
+            v.extend_from_slice(id);
+            v.extend_from_slice(&[*idx, *total]);
+            v.extend_from_slice(data);
+        }
     }
     v
 }
@@ -178,6 +193,9 @@ fn decode(b: &[u8]) -> Option<Msg> {
         8 if b.len() == 34 => Msg::Gift { epoch: u16::from_be_bytes([b[0], b[1]]), secret: b[2..].try_into().ok()? },
         9 if b.len() == 8 => Msg::Ack(b.try_into().ok()?),
         10 if b.len() == 1 && b[0] <= 1 => Msg::Watch(b[0] == 1),
+        11 if b.len() > 6 && b.len() <= 6 + INVITE_CHUNK && b[5] as usize <= INVITE_CHUNKS && b[4] < b[5] => {
+            Msg::InviteChunk { id: b[..4].try_into().ok()?, idx: b[4], total: b[5], data: b[6..].to_vec() }
+        }
         _ => return None,
     })
 }
@@ -258,6 +276,7 @@ mod tests {
             Msg::Ack([3; 8]),
             Msg::Watch(true),
             Msg::Watch(false),
+            Msg::InviteChunk { id: [1, 2, 3, 4], idx: 2, total: 5, data: vec![9; INVITE_CHUNK] },
         ]
     }
 
