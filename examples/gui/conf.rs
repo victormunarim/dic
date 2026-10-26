@@ -117,6 +117,9 @@ pub(crate) struct Form {
     /// Privacidade na transmissão da tela: circuito de tráfego constante, com cover. Desligada, o circuito
     /// só manda o que há para enviar e dobra o ritmo (veja `Dialer::share_screen_keys_with`).
     pub(crate) screen_private: bool,
+    /// Nitidez em vez de fluidez na transmissão da tela: metade dos quadros por segundo, cada um mais fino
+    /// (veja `video::Priority`). Desligada (fluidez) de início.
+    pub(crate) screen_sharp: bool,
     /// Codec de voz das chamadas que esta pessoa inicia: Opus (32 kbps) em vez do G.722 (64 kbps).
     /// Quem atende usa o que o convite pedir. Ligado de início.
     pub(crate) voice_opus: bool,
@@ -414,6 +417,7 @@ impl Form {
             anchor: get("no_anchor") != "1",
             // Ligada de início: a chave guarda o "não", então o arquivo antigo, sem ela, também aceita.
             screen_private: get("no_screen_privacy") != "1",
+            screen_sharp: get("screen_sharp") == "1",
             // Ligado de início: a chave guarda o "não", então o arquivo antigo, sem ela, também aceita.
             voice_opus: get("no_opus") != "1",
             anchors: get("anchors").replace(';', "\n"),
@@ -437,7 +441,7 @@ impl Form {
         // Chave de identidade no chaveiro do sistema; só cai para o arquivo se ele não estiver disponível.
         let secret = if vault_set(self.secret.trim()) { KEYRING_MARK } else { self.secret.trim() };
         let text = format!(
-            "audio={}\nsecret={}\ncontacts={}\npeer={}\npublic_addr={}\nno_dht={}\ndht_circuit={}\nname={}\nintros={}\nno_anchor={}\nno_screen_privacy={}\nanchors={}\ninput_dev={}\noutput_dev={}\nno_opus={}\n{}",
+            "audio={}\nsecret={}\ncontacts={}\npeer={}\npublic_addr={}\nno_dht={}\ndht_circuit={}\nname={}\nintros={}\nno_anchor={}\nno_screen_privacy={}\nscreen_sharp={}\nanchors={}\ninput_dev={}\noutput_dev={}\nno_opus={}\n{}",
             u8::from(self.use_audio),
             secret,
             self.contacts.trim().replace('\n', ";"),
@@ -449,6 +453,7 @@ impl Form {
             u8::from(self.intros),
             u8::from(!self.anchor),
             u8::from(!self.screen_private),
+            u8::from(self.screen_sharp),
             self.anchors.trim().replace('\n', ";"),
             self.input_dev.trim(),
             self.output_dev.trim(),

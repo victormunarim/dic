@@ -34,6 +34,27 @@ pub fn fps_for(bitrate: u32) -> f32 {
     if bitrate >= HIGH_FPS_BITRATE { HIGH_FPS } else { FPS }
 }
 
+/// O que a transmissão prioriza quando a banda não dá para os dois: mais quadros por segundo ou mais
+/// nitidez em cada quadro. A taxa de bits é a mesma; muda como ela é repartida.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Priority {
+    /// Movimento fluido (jogo, vídeo): o dobro de quadros por segundo, cada um com menos bits.
+    #[default]
+    Smoothness,
+    /// Imagem nítida (texto, código, slides): metade dos quadros por segundo, cada um com o dobro de bits.
+    Sharpness,
+}
+
+impl Priority {
+    /// Quadros por segundo desta prioridade numa taxa de vídeo de `bitrate` bits/s.
+    pub fn fps(self, bitrate: u32) -> f32 {
+        match self {
+            Priority::Smoothness => fps_for(bitrate),
+            Priority::Sharpness => fps_for(bitrate) / 2.0,
+        }
+    }
+}
+
 /// Largura máxima enviada: telas maiores são reduzidas por média de blocos, senão o quadro-chave
 /// passa de [`MAX_FRAME`] e nada chega a quem assiste.
 pub const MAX_WIDTH: usize = 1920;
@@ -289,8 +310,13 @@ impl H264Encoder {
     }
 
     pub fn new(bitrate: u32) -> Result<Self, VideoError> {
+        Self::with_priority(bitrate, Priority::default())
+    }
+
+    /// Como [`Self::new`], com a taxa de quadros que `priority` pede para essa taxa de vídeo.
+    pub fn with_priority(bitrate: u32, priority: Priority) -> Result<Self, VideoError> {
         let qp = QP_START;
-        let fps = fps_for(bitrate);
+        let fps = priority.fps(bitrate);
         Ok(Self {
             inner: Self::open(qp, fps)?,
             size: None,
@@ -812,6 +838,37 @@ mod tests {
             }
         }
         assert!(droppable >= 10 && kept >= 10, "{droppable} largáveis, {kept} mantidos");
+    }
+
+    #[test]
+    fn sharpness_halves_the_frame_rate_and_gives_each_frame_a_finer_qp() {
+        let bitrate = H264Encoder::default_bitrate();
+        assert_eq!(Priority::Smoothness.fps(bitrate), FPS);
+        assert_eq!(Priority::Sharpness.fps(bitrate), FPS / 2.0);
+        let open = H264Encoder::bitrate_for(std::time::Duration::from_micros(500));
+        assert_eq!((Priority::Smoothness.fps(open), Priority::Sharpness.fps(open)), (HIGH_FPS, HIGH_FPS / 2.0));
+        // Um trecho de texto que muda a cada instante sobre uma página parada: cada quadro custa o mesmo,
+        // com 15 ou 8 quadros por segundo, então menos quadros deixam mais bits para cada um.
+        let (w, h, pw, ph) = (960usize, 540usize, 320usize, 160usize);
+        let page = text_page(w, h, 5);
+        let patches: Vec<Vec<u8>> = (0..40).map(|t| text_page(pw, ph, 100 + t)).collect();
+        let mean_qp = |priority| {
+            let mut enc = H264Encoder::with_priority(bitrate, priority).unwrap();
+            let mut qps = Vec::new();
+            for (t, patch) in patches.iter().enumerate() {
+                let mut rgba = page.clone();
+                for y in 0..ph {
+                    rgba[(y * w) * 4..][..pw * 4].copy_from_slice(&patch[y * pw * 4..][..pw * 4]);
+                }
+                enc.encode(&RawFrame::new(w, h, rgba).unwrap(), false).unwrap();
+                if t >= 20 {
+                    qps.push(enc.qp() as f32);
+                }
+            }
+            qps.iter().sum::<f32>() / qps.len() as f32
+        };
+        let (smooth, sharp) = (mean_qp(Priority::Smoothness), mean_qp(Priority::Sharpness));
+        assert!(sharp + 4.0 < smooth, "QP nítido {sharp}, fluido {smooth}");
     }
 
     #[test]

@@ -6,7 +6,7 @@ use super::*;
 use clam::{
     node::Dialer,
     phone::{OPEN_SCREEN_SLOT, SCREEN_SLOT, ScreenEvent},
-    video::{H264Decoder, H264Encoder, RawFrame, ScreenSource, fps_for, pump},
+    video::{H264Decoder, H264Encoder, Priority, RawFrame, ScreenSource, pump},
 };
 
 /// Estado da tela compartilhada, visto pela janela e pela chamada.
@@ -19,6 +19,9 @@ pub(crate) struct ScreenState {
     /// A pessoa abriu mão da privacidade da tela (sem cover, o dobro do ritmo); falso é o padrão. A janela
     /// copia a escolha da configuração a cada quadro.
     pub(crate) open_path: AtomicBool,
+    /// A pessoa prefere nitidez a fluidez (metade dos quadros por segundo); a janela copia a escolha da
+    /// configuração a cada quadro, e ela vale a partir da próxima transmissão.
+    pub(crate) sharp: AtomicBool,
     /// Os quadros estão saindo.
     pub(crate) sharing: AtomicBool,
     /// Última imagem recebida de cada pessoa que transmite, com o número dela; a janela só refaz a
@@ -149,8 +152,9 @@ pub(crate) async fn share_task(dialer: Dialer, peer: [u8; 32], keys: clam::media
     let private = !st.open_path.load(Ordering::Relaxed);
     let slot = if private { SCREEN_SLOT } else { OPEN_SCREEN_SLOT };
     let bitrate = H264Encoder::bitrate_for(slot);
-    let started = match open_source(fps_for(bitrate)).await {
-        Ok(src) => H264Encoder::new(bitrate).map(|e| (src, e)).map_err(|e| e.to_string()),
+    let priority = if st.sharp.load(Ordering::Relaxed) { Priority::Sharpness } else { Priority::Smoothness };
+    let started = match open_source(priority.fps(bitrate)).await {
+        Ok(src) => H264Encoder::with_priority(bitrate, priority).map(|e| (src, e)).map_err(|e| e.to_string()),
         Err(e) => Err(e),
     };
     let (mut src, mut enc) = match started {

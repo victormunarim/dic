@@ -297,6 +297,7 @@ impl App {
         }
         // A escolha vale a partir da próxima transmissão; fica salva para não precisar mudar de novo.
         st.open_path.store(!self.form.screen_private, Ordering::Relaxed);
+        st.sharp.store(self.form.screen_sharp, Ordering::Relaxed);
         ui.add_enabled_ui(!wanted && !sharing, |ui| {
             let changed = ui
                 .checkbox(&mut self.form.screen_private, "Privacidade na transmissão da tela")
@@ -305,6 +306,20 @@ impl App {
             if changed {
                 self.form.save();
             }
+            ui.horizontal(|ui| {
+                ui.label("Priorizar:");
+                let mut changed = ui
+                    .radio_value(&mut self.form.screen_sharp, false, "Fluidez")
+                    .on_hover_text("Mais quadros por segundo (o dobro): bom para jogo e vídeo. A imagem fica um pouco mais grosseira quando se mexe.")
+                    .changed();
+                changed |= ui
+                    .radio_value(&mut self.form.screen_sharp, true, "Nitidez")
+                    .on_hover_text("Metade dos quadros por segundo, cada um com o dobro de bits: bom para texto, código e slides. O movimento fica menos suave.")
+                    .changed();
+                if changed {
+                    self.form.save();
+                }
+            });
         });
         let diag = st.diagnostics();
         if !diag.is_empty() {
