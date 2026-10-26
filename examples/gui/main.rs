@@ -9,6 +9,8 @@
 //! contato do outro (a chave e, na primeira vez, o relay dele). Chamadas de contatos da lista são atendidas
 //! sozinhas. Sem `--features audio` (ou sem a opção marcada),
 //! cada lado envia um tom (440 Hz quem liga, 660 Hz quem atende).
+//! A aba Servidores (`servers`) cria e entra em servidores e salas de voz (`docs/SERVIDORES.md`); eles ficam em
+//! `~/.clam-gui.servers`.
 //! Os campos são gravados em `~/.clam-gui.conf`; a chave secreta vai para o chaveiro do sistema
 //! (ou, se não houver um, para o arquivo, que só o dono lê).
 

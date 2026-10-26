@@ -15,7 +15,7 @@ Garantias e limites, limitações conhecidas e chaveiro.
 
 ## Limitações
 
-Ainda **não** existem: TLS/QUIC e travessia de NAT (não há furo de NAT: quem não tem porta alcançável não recebe chamadas), chamadas em grupo (MLS) e relays que não sejam os dos próprios contatos (o aplicativo não usa a descoberta por GossipSub nem a reputação; elas são camada de biblioteca).
+Ainda **não** existem: TLS/QUIC e travessia de NAT (não há furo de NAT: quem não tem porta alcançável não recebe chamadas), chamadas em grupo com cifra de grupo (MLS; as salas de voz são uma malha de chamadas 1:1, [SERVIDORES.md](SERVIDORES.md)) e relays que não sejam os dos próprios contatos (o aplicativo não usa a descoberta por GossipSub nem a reputação; elas são camada de biblioteca).
 A DHT é pública: um nó armazenador pode sobrescrever um registro com lixo (`open` rejeita lixo, mas ele esconde o registro bom até a próxima publicação; o dono republica a cada hora), e quem opera nós vê o IP de quem lê e de quem grava, a menos que a pessoa use a opção de falar com a DHT pelos relays dos contatos.
 `PathMode` só modela e valida o modo; a chamada do aplicativo é sempre o circuito de 2 saltos (o primeiro salto é o relay de quem liga, então o contato vê o IP dele).
 
@@ -29,6 +29,7 @@ Tudo fica na pasta pessoal (`~` no Unix, `%USERPROFILE%` no Windows), gravado po
 | `.clam-gui.known` | Uma linha por endereço de relay de contato: `chave addr onion link`, com `dica` (veio do convite, sem confirmação) ou `antigo` (histórico) no fim |
 | `.clam-gui.relay` | As duas chaves secretas do relay (`onion` e `link`), para o endereço que os contatos guardaram continuar valendo depois de reabrir |
 | `.clam-gui.intro` | Contatos a quem a apresentação ainda não foi confirmada (uma chave por linha) |
+| `.clam-gui.servers` | Os servidores de que você faz parte: **o segredo de cada um**, o registro de operações e os membros. Quem lê o arquivo entra nos servidores como você; ele fica em modo `0600` e não vai para o chaveiro ([SERVIDORES.md](SERVIDORES.md)) |
 
 Quem lê estes arquivos conhece com quem você fala e o seu relay; trate-os como dados pessoais.
 

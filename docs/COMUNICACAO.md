@@ -50,7 +50,7 @@ você ── loopback ──> seu relay ──(link Noise)──> relay do conta
 
 ### 3. Telefone
 
-O `Phone` escuta num TCP local; é o que a saída do relay alcança com `contato:9`. Cada circuito chega como uma conexão com quadros `[u16 BE tamanho][dados]`. Convites de contatos conhecidos viram `IncomingCall`; qualquer outra coisa é ignorada sem resposta.
+O `Phone` escuta num TCP local; é o que a saída do relay alcança com `contato:9`. Cada circuito chega como uma conexão com quadros `[u16 BE tamanho][dados]`. Convites de contatos conhecidos viram `IncomingCall`; quadros de servidor (tag 8) de membros de um servidor em comum vão ao motor de servidores, e convites de chamada de quem está na mesma sala ([SERVIDORES.md](SERVIDORES.md)) também são atendidos; qualquer outra coisa é ignorada sem resposta.
 
 ### 4. Pacote de mídia (200 bytes)
 
@@ -137,6 +137,7 @@ O endereço de um relay muda (IP novo, outra porta). Para o código antigo não 
 | Link, cover, política de saída | `src/link.rs`, `src/transport/`, `src/cover.rs` | [CIRCUITO.md](CIRCUITO.md#cover-traffic-padding-de-link) |
 | Pacote, jitter, codecs, convite | `src/media/` | [CHAMADAS.md](CHAMADAS.md) |
 | Telefone e discagem | `src/phone.rs`, `src/node.rs` | [CHAMADAS.md](CHAMADAS.md#telefone-chamar-e-atender-pelo-circuito-clamphone-feature-net) |
+| Servidores e salas | `src/server/`, `examples/gui/engine/room.rs` | [SERVIDORES.md](SERVIDORES.md) |
 | Tela | `src/media/screen.rs`, `src/video.rs`, `src/hwenc.rs`, `src/capture/`, `src/portal.rs` | [CHAMADAS.md](CHAMADAS.md#transmissão-de-tela-clammediascreen-clamphone) |
 | DHT, âncoras, gateway | `src/rendezvous.rs`, `src/media/update.rs` | [ENCONTRO.md](ENCONTRO.md) |
 | UPnP e endereço público | `src/upnp.rs`, `src/node.rs` | [GUI.md](GUI.md#como-os-contatos-se-acham) |

@@ -1,121 +1,116 @@
-# Servidores e salas (plano)
+# Servidores e salas
 
-Plano de um conceito de **servidor** como o do Discord, sem servidor de verdade: um grupo de pessoas com salas de voz, onde se vê quem está online e quem está em cada sala. Tudo P2P, sobre o que já existe (relay de si mesmo, circuito de 2 saltos, telefone).
+Um **servidor** como o do Discord, sem servidor de verdade: um grupo de pessoas com salas de voz, onde se vê quem está online e quem está em cada sala. Tudo P2P, sobre o que já existe (relay de si mesmo, circuito de 2 saltos, telefone).
 
-Estado: **plano, nada implementado**. Como a comunicação funciona hoje está em [COMUNICACAO.md](COMUNICACAO.md).
+Estado: **implementado** (biblioteca em `src/server/`, rede em `src/server/net.rs`, janela na aba *Servidores*). Como a comunicação funciona por baixo está em [COMUNICACAO.md](COMUNICACAO.md).
 
 [← Voltar ao README](../README.md)
 
-## O que se quer
+## O que se tem
 
-1. Um **servidor** tem nome, membros e salas. Entra-se por convite.
-2. Ao clicar no servidor, a janela mostra os **membros online**.
-3. O servidor tem **salas de voz**; qualquer membro pode criar mais e entrar.
-4. Quem está numa sala **aparece nela** para todos os membros, mesmo para quem não entrou.
-5. Nada de servidor central, diretório ou coordenador.
+1. Um servidor tem nome, membros e salas. Entra-se por **convite**.
+2. Ao clicar no servidor, a janela mostra os **membros online e offline**.
+3. O servidor tem **salas de voz**; qualquer membro cria salas e entra nelas.
+4. Quem está numa sala **aparece nela** para todos os membros, mesmo para quem não entrou, com o aro verde de quem fala.
+5. Quem está numa sala pode **transmitir a tela**; os outros da sala assistem sob pedido (até 3 por transmissão).
+6. Nada de servidor central, diretório ou coordenador.
 
-## O que o plano reaproveita e o que muda
-
-| Hoje | No plano |
-|---|---|
-| Só há chamada 1:1, entre contatos | Sala = várias chamadas 1:1 em malha, uma por par |
-| O telefone só toca para quem é contato; o resto é ignorado em silêncio | Membro de servidor pode falar com você **só dentro de salas e de presença**, sem ser contato |
-| Ninguém vê se um contato está online | Presença entre membros, sob demanda |
-| Contatos se reencontram por par (aviso de endereço, DHT por par, âncoras) | Reencontro também por servidor (um registro por membro, não um por par) |
-| Identidade X25519 (só troca de chaves) | Chave de assinatura ed25519 derivada da identidade, para assinar operações do servidor |
+Limites: **50 membros** por servidor, **32 salas**, **8 pessoas por sala**, nomes de até 32 bytes.
 
 ## Modelo
 
-**Servidor.** `server_id` (16 B aleatórios), `ServerSecret` (32 B, só membros têm), nome, época do segredo e uma lista de membros (chaves X25519 + chave de verificação ed25519 de cada um).
+**Servidor.** `server_id` (16 B aleatórios), `ServerSecret` (32 B, só membros têm), nome, época do segredo e um registro de operações.
 
-**Papéis.** `dono` (quem criou), `admin` e `membro`. **Qualquer membro cria salas, entra nelas e adiciona pessoas dos próprios contatos.** Só dono e admins removem membros, trocam papéis e apagam ou renomeiam salas dos outros.
+**Papéis.** `dono` (quem criou), `admin` e `membro`. **Qualquer membro cria salas, entra nelas e convida pessoas dos próprios contatos.** Só dono e admins removem membros e apagam ou renomeiam salas dos outros; só o dono troca papéis.
 
-**Registro de operações.** O estado do servidor (membros, salas) não fica em lugar nenhum: é um **registro de operações assinadas** que cada membro guarda inteiro. Operações: `AddMember`, `RemoveMember`, `SetRole`, `CreateRoom`, `RenameRoom`, `DeleteRoom`, `Rekey`. Cada uma leva `server_id`, número de sequência por autor, autor e assinatura ed25519. Quem aplica confere a assinatura e a permissão do autor naquele ponto do registro. Ordem total por `(época, lamport, autor)`; conflito de nome de sala se resolve por essa ordem. Operações são pequenas (cabem num quadro de 200 B; nome de sala até 32 B).
+**Registro de operações.** O estado do servidor (membros, salas, nomes) não fica em lugar nenhum: é um **registro de operações assinadas** (ed25519) que cada membro guarda inteiro. Operações: `AddMember`, `RemoveMember`, `SetRole`, `CreateRoom`, `RenameRoom`, `DeleteRoom`, `Rekey`, `SetName`. Cada uma leva autor (8 B da chave), relógio de Lamport, número de sequência por autor e assinatura que cobre também o `server_id`. A ordem é total por `(lamport, autor, seq)`; quem aplica confere a assinatura e a permissão do autor naquele ponto do registro, e convergem todos para o mesmo estado, em qualquer ordem de chegada. Uma operação cabe num quadro (corpo até 75 B).
 
-**Sala.** `room_id` (16 B), nome, tipo (`voz`; texto fica para depois). A sala só existe como operação `CreateRoom`; quem está nela **não** é estado do registro, é presença.
+**Sala.** Só existe como operação `CreateRoom`; quem está nela **não** é estado do registro, é presença.
 
-**Presença.** Cada membro online mantém um estado: `visível`, sala atual (ou nenhuma), versão do registro que conhece, endereço do relay. Vale por um contrato de vida (lease) de ~20 s e é renovado enquanto o membro está online.
+**Presença.** Cada membro online diz o que é: visível ou não, sala atual, se transmite a tela, resumo do registro e época do segredo. `Hello` a cada 15 s a quem está online (a quem está offline, uma sondagem por minuto); vale por 40 s (`LEASE`). Quem some deixa a sala quando o contrato vence, e a chamada dele cai pelo vigia de silêncio.
 
 ## Protocolo
 
-Tudo vai por quadros novos de 200 B no mesmo telefone e circuito de hoje (tags livres: 8 em diante; 1 a 7 já estão em uso), cifrados com uma chave de servidor derivada de `ServerSecret` e da época (HKDF, rótulos próprios). Quem não é membro não os abre nem os distingue de lixo.
+Um quadro de servidor tem 200 B, tag **8**, e viaja pelo mesmo telefone e circuito de hoje:
 
-| Quadro | Para quê |
+```text
+tag 8 ‖ servidor(4) ‖ remetente(8) ‖ tamanho(1) ‖ nonce(12) ‖ AEAD(tipo ‖ corpo) ‖ bytes aleatórios
+```
+
+A chave é **par a par**: `HKDF(DH(minha secreta, pública do outro), "clam/servidor/quadro/v1" ‖ server_id)`. Só os dois a calculam e o remetente prova a cada quadro que a chave bate. O telefone aceita quadros de servidor de quem é **membro de algum servidor em comum**, mesmo sem ser contato; o resto continua ignorado em silêncio.
+
+| Mensagem | Para quê |
 |---|---|
-| `Hello` | "Estou online": estado de presença + versão do registro + até 3 endereços de relay de outros membros (fofoca de endereços) |
-| `HelloAck` | Resposta com o estado de quem respondeu, mesmo formato |
-| `OpsWant` / `Ops` | Pedido e entrega de operações que faltam (anti-entropia, um quadro por operação) |
-| `RoomInvite` | Convite de chamada de sala (veja abaixo) |
+| `Hello` / `HelloAck` | "Estou online": sala, se transmite a tela, resumo do registro (`fp`, `count`) e época. Resposta no mesmo formato |
+| `Vector` | Até onde cada lado tem as operações de cada autor (anti-entropia, em páginas) |
+| `Op` | Uma operação que faltava |
+| `MyAddr` | Endereço do relay do remetente (fofoca de endereço; o `seq` só cresce) |
+| `Join` / `Joined` | O convidado pede para entrar, com a chave de verificação e o relay; o convidante responde e manda as operações |
+| `Gift` | O segredo novo depois de um `Rekey` |
+| `Ack` | "Recebi o quadro cujo nonce começa por estes 8 bytes" |
+| `Watch` | "Quero assistir à sua tela" / "parei" (só entre quem está na mesma sala) |
 
-**Ver quem está online.** Ao ficar online, e de novo ao abrir o servidor na janela, o nó manda `Hello` a cada membro conhecido por um **circuito curto** (abre, manda, espera a resposta, fecha). Não se mantém circuito aberto com todos, porque cada circuito aberto custa cerca de 100 kbps por direção de cobertura. Depois disso:
+**Entrega.** O `ServerHub` (`src/server/net.rs`) junta os quadros por destinatário e manda em lote por um circuito (abre, manda, espera os `Ack`, fecha). Não se mantém circuito aberto com todos: cada um custaria cerca de 100 kbps de cobertura. Sem `Ack` a entrega é tentada de novo, e se falhar o nó procura o membro pelo registro do servidor (abaixo).
 
-- cada mudança minha (entrei numa sala, saí, fiquei invisível) vai como `Hello` aos membros que responderam como online;
-- enquanto o servidor está aberto na janela, a presença se renova a cada ~10 s; fechado, só quem está em sala renova;
-- cada `Hello` e `HelloAck` carrega endereços de outros membros e a versão do registro, então a rede se atualiza sozinha (fofoca) e quem está atrás pede `OpsWant`.
+**Convite.** Texto `clam-servidor:` + hex, cifrado com `HKDF(DH(quem convida, convidado))`: leva segredo, época, chave do dono, nome, o relay de quem convida e até 2 dicas de relay. Como depende da chave do convidado, só ele o abre; repassar não funciona. O convidado manda `Join` a quem o convidou, que responde com `AddMember` assinado por ele.
 
-Quem está numa sala renova a presença de sala com todos os membros **online**, porque é isso que o faz "aparecer na sala" para quem só está olhando.
+**Remover membro.** `RemoveMember` seguido de `Rekey`: o segredo novo vai a cada membro restante em `Gift`. O removido guarda o que já viu (nomes, endereços de então), mas não abre mais nada novo.
 
-**Entrar numa sala.**
+## Salas de voz
 
-1. Anuncio `Hello` com a sala. Os membros online passam a me mostrar naquela sala.
-2. Dos membros que já estão **na sala** (vejo pelos `Hello`), eu chamo cada um (o recém-chegado sempre chama; em empate de entrada, chama quem tem a chave menor). Cada par tem uma única chamada, sem o problema de dois lados ligarem ao mesmo tempo.
-3. O convite é o convite de chamada de hoje com um sufixo versionado: `server_id` + `room_id`. O destino aceita sozinho, sem tocar, se ele estiver nessa sala e quem chama for membro. Fora disso, rejeita em silêncio.
-4. Chamada de sala usa o codec, o jitter, as chaves e os pacotes de voz como hoje. Nada muda na mídia.
+1. Entro na sala: `Hello` com a sala. Os membros online passam a me mostrar nela.
+2. O motor calcula a **malha** (quem está online na mesma sala) e avisa a janela (`Event::Mesh`). O nó passa a aceitar convite de chamada dessas pessoas mesmo que não sejam contatos (`Node::set_room_peers`).
+3. Entre dois da malha, **quem tem a chave menor disca**; o outro atende sozinho, sem tocar, e só pares da malha (os demais são recusados). Cada par tem uma só chamada.
+4. A chamada é a de sempre (codec, jitter, chaves e pacotes de voz iguais). A janela soma os quadros de todos num só alto-falante (a cada 20 ms, com limite de volume) e leva o microfone a cada par. Quem cai com a malha ainda valendo é religado a cada 4 s pelo lado que discou.
+5. O aro verde vem da energia (RMS) do que cada um enviou.
 
-**Sair.** Hangup nos pares e `Hello` sem sala. Se cair sem avisar, o contrato de vida (~20 s) tira a pessoa da sala, e a chamada de cada par cai pelo vigia de silêncio que já existe.
+Malha: cada pessoa envia e recebe N-1 fluxos, cerca de 100 kbps por par e direção no modo privado. Por isso o limite de 8 pessoas (≈700 kbps).
 
-**Tamanho da sala.** Malha: cada pessoa envia e recebe N-1 fluxos, cerca de 100 kbps por par em cada direção no modo privado (80 kbps de voz mais cobertura). Limite de **8 pessoas por sala** (≈700 kbps) no começo; a janela avisa ao passar do que o upload suporta. Salas maiores exigiriam um membro que recebe e retransmite; fica fora do plano inicial.
+## Tela numa sala
 
-**Tela numa sala.** Quem compartilha serve só quem clicar em "assistir" (um circuito de tela por espectador, como hoje). Limite de 3 espectadores por compartilhamento. Fase própria.
+- Quem transmite clica em *Compartilhar tela* na própria linha da sala. A presença passa a dizer que ele transmite, e os outros veem *Assistir* ao lado do nome.
+- Quem clica em *Assistir* manda `Watch` e repete a cada 5 s até a imagem chegar. Quem transmite abre um **circuito de tela por espectador** (chaves novas da chamada com aquela pessoa) e manda o **mesmo quadro codificado** a todos; um codificador só, a taxa segue o pior espectador. Limite de **3 espectadores**; os outros ficam sem imagem. Um pedido repetido com o circuito aberto há mais de 8 s o reabre.
+- As escolhas da aba *Chamada* (privacidade, fluidez ou nitidez, placa de vídeo) valem aqui também.
+- As imagens aparecem em *Telas da sala*, na aba *Servidores*, e se ampliam como na chamada 1:1.
 
-## Entrada, saída e reencontro
+## Reencontro por servidor
 
-**Convite.** Qualquer membro convida alguém **que está entre os seus contatos**. O convite é um texto (como o código de contato) com `server_id`, `ServerSecret`, nome, época, chave de verificação do dono, a chave de quem é convidado e dicas de relay de 2 a 3 membros, incluindo o relay de quem convidou. Como o convite leva a chave do convidado, só ele consegue usá-lo; repassar o texto a outra pessoa não funciona. O convidado manda `Join` a quem o convidou, que responde com `AddMember` assinado por ele mesmo; todos aprendem pelo registro e conferem que o autor era membro. Antes de aceitar, a janela do convidado mostra o aviso de IP (veja Privacidade); a de quem convida avisa que a pessoa passará a ver os IPs de todos os membros.
+O endereço de um membro pode mudar enquanto ele está offline. Cada membro publica, na DHT e nas âncoras, **um registro por servidor e dia**, cifrado com o `ServerSecret` e achado por `HKDF(ServerSecret, chave do membro, dia)`. Qualquer outro membro o acha sabendo só a chave do membro (`src/media/update.rs`: `server_rendezvous`, `seal_server_record`). Troca de endereço também viaja em `MyAddr`.
 
-**Remover membro.** `RemoveMember` seguido de `Rekey`: novo `ServerSecret` e época, enviado a cada membro restante cifrado com a chave X25519 dele. O removido continua com o segredo antigo, mas não abre mais nada novo, e os telefones dos membros param de aceitá-lo. **Limite honesto:** ele guarda o que já viu (nomes, endereços de então).
+- A busca só roda quando uma entrega falha, e no máximo a cada 120 s por membro.
+- **Limite:** como todos os membros têm o segredo, um membro pode gravar no lugar de outro. O registro é só uma **dica de relay**: a chamada confere a identidade de quem atende, então o pior efeito é a dica errada fazer a tentativa falhar.
 
-**Reencontro por servidor.** Cada membro publica na DHT (BEP 44, como hoje) **um** registro por servidor e período, cifrado com `ServerSecret`, no endereço `H(ServerSecret, chave do membro, dia)`. Qualquer membro o acha sabendo só a chave do outro. Troca de endereço também viaja no `Hello`. Âncoras valem como hoje.
+## Privacidade
 
-## Privacidade (diferente de contato)
-
-- **Membros veem o seu IP.** O relay de quem recebe vê o relay de quem liga, que é a sua máquina. Com contatos que você escolheu isso já é assim; num servidor grande são pessoas que você não conhece. **A janela deve avisar isso antes de entrar num servidor.**
-- **Presença revela horário.** Membros sabem quando você está online e em que sala. Existe o estado **invisível**: não responde `Hello` e não entra em sala.
-- **O registro é lista de membros inteira para todos.** Nada de papéis ocultos ou membros ocultos.
-- **Cobertura:** quadros de servidor viajam em circuito com a cobertura de hoje e dentro do link com preenchimento; um observador não distingue presença de voz ou lixo.
-- **Tamanho de servidor:** máximo de **50 membros** no começo, porque a presença é, no pior caso, N² mensagens de 200 B.
-- **Saída sem `Rekey`:** quem sai por conta própria continua com o segredo. Só uma troca de segredo (`Rekey`) o deixa de fora; a janela oferece isso ao dono.
+- **Membros veem o seu IP.** O relay de quem recebe vê o relay de quem liga, que é a sua máquina. A janela avisa antes de convidar e de aceitar, e exige o aceite do aviso.
+- **Presença revela horário e sala.** Existe o estado **invisível** (*Aparecer online* desmarcado): não responde `Hello` e não entra em presença.
+- **O registro é a lista de membros inteira para todos.** Não há papéis nem membros ocultos.
+- **Cobertura:** os quadros de servidor viajam em circuito com a cobertura de hoje, dentro do link com preenchimento.
+- **Saída sem `Rekey`:** quem sai por conta própria continua com o segredo. Só uma troca de segredo o deixa de fora.
 
 ## Janela
 
-- **Trilho de servidores** à esquerda da barra lateral atual (ícones redondos, o primeiro é o Início), como o Discord. Botão `+` para criar ou entrar por convite.
-- Ao clicar num servidor: **coluna de salas** (cada sala com seus participantes por baixo, com o indicador de quem fala) e **coluna de membros** (online primeiro, offline esmaecidos). Clique numa sala entra nela; clique duplo num membro abre o contato dele.
-- O painel de chamada atual passa a mostrar a lista de pessoas da sala, com mudo, volume e medidor por pessoa.
-- Novo `examples/gui/servers.rs` para a tela; o estado e os quadros ficam em `examples/gui/engine/` e na biblioteca (veja abaixo).
-- Estado em disco: `~/.clam-gui.servers` (0600), uma seção por servidor com segredo, registro de operações e membros. A identidade já fica no chaveiro; o `ServerSecret` fica nesse arquivo de modo `0600`, decidido: sem chaveiro por servidor (assim funciona também onde não há chaveiro).
+- **Trilho de servidores** na aba *Servidores*: avatares, *＋* para criar ou aceitar convite.
+- No servidor: cabeçalho (aparecer online, sair), **salas** com quem está nelas (aro verde de quem fala, *Entrar* / *Sair*, apagar, criar sala), **telas da sala**, **membros** (online primeiro, papel, sala em que estão, remover, tornar admin) e **convite** (escolha de um contato, aviso de IP, texto para copiar).
+- Estado em disco: `~/.clam-gui.servers` (modo `0600`): segredos, registros e membros de cada servidor, regravado a cada 5 s se mudou. Sem chaveiro por servidor, para funcionar onde não há chaveiro.
 
-## Onde vai no código
+## Onde está no código
 
 | Parte | Lugar |
 |---|---|
-| Registro de operações, papéis, assinatura, convite | `src/server/mod.rs`, `ops.rs`, `invite.rs` (biblioteca, testável sem rede) |
-| Quadros `Hello`/`Ops`/`RoomInvite` | `src/media/server.rs` (junto de `update.rs`) |
-| Permissão por servidor no telefone | `src/phone.rs`: `Contacts` vira uma permissão com origem (`Contato` ou `Membro(server_id)`), e `Membro` só abre quadros de servidor e convites de sala |
-| Presença, anti-entropia, salas, malha | `src/node.rs` ou `src/server/presence.rs`, falando com o `Node` por canais, como as apresentações |
-| Reencontro por servidor | `src/rendezvous.rs` (um registro por servidor) |
-| GUI | `examples/gui/servers.rs`, `engine/server.rs` |
-| Testes | `tests/server.rs` (registro, permissões, convergência, fuzz dos quadros); `tests/node.rs` ganha sala de 3 nós |
-
-## Fases
-
-1. **Registro e convite.** Criar servidor, convidar, entrar, remover, `Rekey`; só biblioteca e testes, com fuzz dos quadros. Sem rede.
-2. **Presença.** `Hello`/`HelloAck`, fofoca de endereço, anti-entropia, estado invisível. A janela mostra o servidor e quem está online.
-3. **Salas de voz.** Criar sala, `RoomInvite`, malha de até 8, contrato de vida, indicador de quem fala. É onde "aparece na sala para os outros" fica pronto.
-4. **Reencontro por servidor** (DHT e âncoras) e testes de queda e troca de IP.
-5. **Tela em sala** (assistir sob demanda).
-6. Depois, se pedido: texto nas salas, salas com mais de 8 por retransmissor.
+| Operações, registro, papéis, convite | `src/server/op.rs`, `registry.rs`, `invite.rs` |
+| Quadros | `src/server/wire.rs` |
+| Motor (presença, anti-entropia, salas, malha, visão para a janela) | `src/server/engine.rs` |
+| Rede (lotes, `Ack`, busca) | `src/server/net.rs` |
+| Reencontro por servidor | `src/media/update.rs`, `src/node.rs` (`server_publisher`, `Dialer::find_member`) |
+| Chamadas de não-contatos da sala | `src/phone.rs`, `src/node.rs` (`set_room_peers`) |
+| Sala de voz e tela da sala na janela | `examples/gui/engine/room.rs`, `engine/screen.rs` |
+| Aba | `examples/gui/servers.rs` |
+| Testes | `tests/server.rs` (motor), `tests/node_servers.rs` (rede: 3 nós, voz entre não-contatos, reencontro pela âncora) |
 
 ## Decisões tomadas
 
-- Qualquer membro cria salas e adiciona pessoas dos seus contatos; basta o aviso de IP, sem exigir que o convidado já tenha contato dentro do servidor.
+- Qualquer membro cria salas e convida pessoas dos seus contatos; basta o aviso de IP.
 - O `ServerSecret` fica em `~/.clam-gui.servers`, modo `0600`.
-- Limites iniciais mantidos: 50 membros por servidor e 8 pessoas por sala.
+- Limites: 50 membros por servidor e 8 pessoas por sala.
+- Fica para depois, se pedido: texto nas salas e salas maiores com um membro que retransmite.
