@@ -3,7 +3,7 @@
 //! Cada dono guarda o próprio registro de endereço, cifrado para o contato ([`crate::media::update::seal_record`]),
 //! num item mutável da Mainline DHT do BitTorrent (BEP 44). O alvo do item vem do par de chaves e do dia
 //! ([`crate::media::update::rendezvous`]), então só os dois lados do par sabem onde procurar, e o alvo
-//! muda sozinho a cada dia. Nenhum servidor do projeto participa.
+//! muda sozinho a cada dia. Nenhum servidor participa.
 //!
 //! Quem guarda o item na DHT vê o IP de quem escreve e o de quem lê; o conteúdo só abre com a chave do par.
 //! Itens somem da DHT em cerca de 2 h sem renovação, então o depósito só existe enquanto o dono está online.

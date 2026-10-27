@@ -70,7 +70,7 @@ Não feito: discar na hora ao receber o registro quando há um pedido de chamada
 
 ## Camada 2: ponto de encontro na DHT
 
-Os dois lados do par se encontram por um depósito numa DHT pública sem que nenhum servidor do projeto exista. A DHT proposta é a Mainline do BitTorrent, que tem milhões de nós e itens mutáveis assinados (BEP 44).
+Os dois lados do par se encontram por um depósito numa DHT pública sem nenhum servidor. A DHT proposta é a Mainline do BitTorrent, que tem milhões de nós e itens mutáveis assinados (BEP 44).
 
 Cada nó publica, para cada contato, **um item por sentido**:
 

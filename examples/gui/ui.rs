@@ -781,7 +781,7 @@ impl App {
                     card(ui, "Endereço", "Só se o IP que os outros enxergam não serve, como atrás de NAT: ip:porta (a porta precisa estar aberta no roteador; pode ser um nome).", |ui| {
                         ui.add(field(&mut self.form.public_addr, "ip:porta"));
                     });
-                    card(ui, "Encontrar contatos", "Quando um contato muda de endereço (IP novo, outra rede), o programa avisa direto. Se vocês dois mudarem enquanto estavam separados, o aviso não chega, e o reencontro usa a DHT, as âncoras ou as duas. Nada passa por servidor do projeto, e o que é guardado vai cifrado só para o contato.", |ui| {
+                    card(ui, "Encontrar contatos", "Quando um contato muda de endereço (IP novo, outra rede), o programa avisa direto. Se vocês dois mudarem enquanto estavam separados, o aviso não chega, e o reencontro usa a DHT, as âncoras ou as duas. Não existe servidor: o que é guardado vai cifrado e só o contato lê.", |ui| {
                         // A DHT vem ligada: a caixa é para desligá-la.
                         let mut no_dht = !self.form.use_dht;
                         let off = ui
