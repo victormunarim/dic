@@ -116,14 +116,18 @@ impl Cell {
         out
     }
 
+    /// Lê o que veio do link: o tamanho é fixo e qualquer outro é protocolo violado.
+    #[deny(clippy::indexing_slicing, clippy::unwrap_used)]
     pub fn from_bytes(buf: &[u8]) -> Result<Self, CircuitError> {
+        let size = || CircuitError::Protocol("tamanho de célula inválido");
         if buf.len() != Self::WIRE_LEN {
-            return Err(CircuitError::Protocol("tamanho de célula inválido"));
+            return Err(size());
         }
-        let cmd = Cmd::from_u8(buf[4]).ok_or(CircuitError::Protocol("comando desconhecido"))?;
-        let mut body = [0u8; CELL_LEN];
-        body.copy_from_slice(&buf[5..]);
-        Ok(Self { circ: u32::from_be_bytes(buf[..4].try_into().unwrap()), cmd, body })
+        let (circ, rest) = buf.split_first_chunk::<4>().ok_or_else(size)?;
+        let (&cmd, body) = rest.split_first().ok_or_else(size)?;
+        let cmd = Cmd::from_u8(cmd).ok_or(CircuitError::Protocol("comando desconhecido"))?;
+        let body: [u8; CELL_LEN] = body.try_into().map_err(|_| size())?;
+        Ok(Self { circ: u32::from_be_bytes(*circ), cmd, body })
     }
 }
 
@@ -195,15 +199,15 @@ impl RelayCell {
         Ok(buf)
     }
 
+    #[deny(clippy::indexing_slicing, clippy::unwrap_used)]
     pub fn decode(buf: &[u8]) -> Result<Self, CircuitError> {
-        if buf.len() < RELAY_HEADER {
+        // `RELAY_HEADER` é este cabeçalho: comando (1) e tamanho (2).
+        let [cmd, len0, len1, rest @ ..] = buf else {
             return Err(CircuitError::Protocol("célula de relay curta"));
-        }
-        let cmd = RelayCmd::from_u8(buf[0]).ok_or(CircuitError::Protocol("comando de relay desconhecido"))?;
-        let len = u16::from_be_bytes([buf[1], buf[2]]) as usize;
-        let data = buf
-            .get(RELAY_HEADER..RELAY_HEADER + len)
-            .ok_or(CircuitError::Protocol("tamanho de relay inválido"))?;
+        };
+        let cmd = RelayCmd::from_u8(*cmd).ok_or(CircuitError::Protocol("comando de relay desconhecido"))?;
+        let len = u16::from_be_bytes([*len0, *len1]) as usize;
+        let data = rest.get(..len).ok_or(CircuitError::Protocol("tamanho de relay inválido"))?;
         Ok(Self { cmd, data: data.to_vec() })
     }
 }

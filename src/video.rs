@@ -609,6 +609,7 @@ impl H264Encoder {
 /// Ajusta o codificador já inicializado: o QP do quadro seguinte e, uma vez, as duas camadas temporais
 /// (quadros pares, camada 0, servem de referência; os ímpares, camada 1, não). O crate `openh264` não
 /// expõe nenhum dos dois; entram pela API crua, sem reiniciar o fluxo nem gerar quadro-chave.
+#[allow(unsafe_code)]
 fn configure(enc: &mut Encoder, qp: f32, layers: bool) -> Result<(), VideoError> {
     use openh264_sys2::{ENCODER_OPTION_SVC_ENCODE_PARAM_EXT, SEncParamExt};
     // SAFETY: `SEncParamExt` é só dados; o codificador preenche a estrutura inteira em `get_option`,

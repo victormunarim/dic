@@ -542,9 +542,8 @@ impl Form {
     /// nenhuma chave nova, mantém a marca: o chaveiro não é tocado e a antiga volta quando ele responder.
     fn secret_to_write(&self, set: impl FnOnce(&str) -> bool) -> String {
         let secret = self.secret.trim();
-        if secret.is_empty() && self.keyring_lost {
-            KEYRING_MARK.to_string()
-        } else if set(secret) {
+        // O curto-circuito importa: com a identidade perdida e nada novo, `set` nem é chamado.
+        if (secret.is_empty() && self.keyring_lost) || set(secret) {
             KEYRING_MARK.to_string()
         } else {
             secret.to_string()

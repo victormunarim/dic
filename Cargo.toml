@@ -37,6 +37,14 @@ rustix = { version = "1", default-features = false, features = ["std"], optional
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging"], optional = true }
 
+# `unsafe` só onde o sistema pede (FFI do Windows e a API crua do openh264): cada ponto leva
+# `#[allow(unsafe_code)]` e um `// SAFETY:` dizendo por que vale.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "warn"
+
 [features]
 gui = ["net", "capture", "portal", "dep:eframe", "dep:keyring", "dep:nnnoiseless"]
 audio = ["dep:cpal", "dep:sonora"]

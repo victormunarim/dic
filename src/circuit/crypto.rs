@@ -202,16 +202,18 @@ impl LayerReceiver {
     }
 
     /// Verifica o replay, decifra e só então registra o contador.
+    #[deny(clippy::indexing_slicing, clippy::unwrap_used)]
     pub fn open(&mut self, data: &[u8]) -> Result<Vec<u8>, CircuitError> {
         if data.len() < 8 + 16 {
             return Err(CircuitError::Decrypt);
         }
-        let c = u64::from_be_bytes(data[..8].try_into().unwrap());
+        let (counter, sealed) = data.split_first_chunk::<8>().ok_or(CircuitError::Decrypt)?;
+        let c = u64::from_be_bytes(*counter);
         if !self.window.accepts(c) {
             return Err(CircuitError::Replay);
         }
         let pt = ChaCha20Poly1305::new(Key::from_slice(&self.key))
-            .decrypt(&nonce(c), &data[8..])
+            .decrypt(&nonce(c), sealed)
             .map_err(|_| CircuitError::Decrypt)?;
         self.window.commit(c);
         Ok(pt)

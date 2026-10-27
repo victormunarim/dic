@@ -21,6 +21,9 @@
 //! aqui, HKDF próprio lá), então os usos não se misturam; separar em duas
 //! chaves no descritor é melhoria futura.
 
+// Tudo aqui lê bytes de quem está do outro lado do fio: nada de índice nem `unwrap` que possa derrubar o processo.
+#![deny(clippy::indexing_slicing, clippy::unwrap_used)]
+
 use std::{io, sync::Arc, time::Duration};
 
 use snow::{Builder, StatelessTransportState};
@@ -45,6 +48,11 @@ const CT_LEN: usize = Cell::WIRE_LEN + TAG;
 
 fn err<E: std::fmt::Display>(e: E) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, e.to_string())
+}
+
+/// `buf[..n]` sem pânico: `n` vem do `snow` e cabe no buffer, mas o parser não aposta nisso.
+fn head(buf: &[u8], n: usize) -> io::Result<&[u8]> {
+    buf.get(..n).ok_or_else(|| err("tamanho fora do buffer"))
 }
 
 async fn write_msg(wr: &mut OwnedWriteHalf, msg: &[u8]) -> io::Result<()> {
@@ -88,7 +96,7 @@ impl LinkReader {
         let mut pt = [0u8; CT_LEN];
         let n = self.st.read_message(self.nonce, &ct, &mut pt).map_err(err)?;
         self.nonce += 1;
-        Cell::from_bytes(&pt[..n]).map_err(err)
+        Cell::from_bytes(head(&pt, n)?).map_err(err)
     }
 }
 
@@ -97,7 +105,7 @@ impl LinkWriter {
         let mut ct = [0u8; CT_LEN];
         let n = self.st.write_message(self.nonce, &cell.to_bytes(), &mut ct).map_err(err)?;
         self.nonce += 1;
-        write_msg(&mut self.wr, &ct[..n]).await
+        write_msg(&mut self.wr, head(&ct, n)?).await
     }
 }
 
@@ -120,7 +128,7 @@ pub async fn connect(stream: TcpStream, remote: &[u8; 32]) -> io::Result<(LinkRe
             .map_err(err)?;
         let mut buf = [0u8; 128];
         let n = hs.write_message(&[], &mut buf).map_err(err)?;
-        write_msg(&mut wr, &buf[..n]).await?;
+        write_msg(&mut wr, head(&buf, n)?).await?;
         let reply = read_msg(&mut rd, 128).await?;
         hs.read_message(&reply, &mut buf).map_err(err)?;
         finish(rd, wr, hs)
@@ -145,7 +153,7 @@ pub async fn accept(stream: TcpStream, secret: &[u8; 32]) -> io::Result<(LinkRea
         let first = read_msg(&mut rd, 128).await?;
         hs.read_message(&first, &mut buf).map_err(err)?;
         let n = hs.write_message(&[], &mut buf).map_err(err)?;
-        write_msg(&mut wr, &buf[..n]).await?;
+        write_msg(&mut wr, head(&buf, n)?).await?;
         finish(rd, wr, hs)
     })
     .await
@@ -153,6 +161,7 @@ pub async fn accept(stream: TcpStream, secret: &[u8; 32]) -> io::Result<(LinkRea
 }
 
 #[cfg(test)]
+#[allow(clippy::indexing_slicing, clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::circuit::Cmd;

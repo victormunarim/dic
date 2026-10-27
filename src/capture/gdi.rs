@@ -1,4 +1,5 @@
 //! Captura da tela principal pelo GDI (`BitBlt` do DC da tela para um bitmap em memória).
+#![allow(unsafe_code)] // o módulo inteiro é FFI do Win32; cada bloco `unsafe` diz por que vale.
 
 use super::CaptureError;
 use crate::video::{RawFrame, ScreenSource};
@@ -14,6 +15,7 @@ pub struct GdiScreen;
 impl GdiScreen {
     pub fn open() -> Result<Self, CaptureError> {
         // Sem isto o Windows entrega o tamanho "virtualizado" em telas com escala.
+        // SAFETY: função do user32 sem argumentos nem ponteiros.
         unsafe { SetProcessDPIAware() };
         let mut s = Self;
         s.grab().ok_or(CaptureError::Gdi)?;
@@ -22,6 +24,7 @@ impl GdiScreen {
 
     /// Dimensões da tela principal.
     pub fn size(&self) -> (usize, usize) {
+        // SAFETY: `GetSystemMetrics` só recebe um índice e devolve um inteiro.
         unsafe { (GetSystemMetrics(SM_CXSCREEN).max(0) as usize, GetSystemMetrics(SM_CYSCREEN).max(0) as usize) }
     }
 }

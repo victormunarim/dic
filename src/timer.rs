@@ -6,6 +6,7 @@
 //! o sistema desfaz o pedido quando o processo termina. Nas demais plataformas não faz nada.
 
 /// Pede temporizadores de 1 ms ao sistema. Idempotente e barato; chamado pelos construtores de rede.
+#[allow(unsafe_code)]
 pub fn fine_timers() {
     #[cfg(windows)]
     {

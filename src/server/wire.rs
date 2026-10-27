@@ -9,6 +9,9 @@
 //! prova a cada quadro que a chave bate. Os primeiros bytes do servidor e do remetente só ajudam a achar a
 //! chave certa; vão dentro do circuito, então só quem atende o telefone os vê.
 
+// Tudo aqui lê quadros que qualquer um pode mandar: nada de índice nem `unwrap` que derrube o processo.
+#![deny(clippy::indexing_slicing, clippy::unwrap_used)]
+
 use chacha20poly1305::{
     ChaCha20Poly1305, Key, Nonce,
     aead::{Aead, KeyInit, Payload},
@@ -94,11 +97,14 @@ fn put_reach(v: &mut Vec<u8>, reach: &Reach) {
 }
 
 fn take_reach(b: &[u8]) -> Option<Reach> {
-    let n = *b.first()? as usize;
-    if n == 0 || n > MAX_ADDR || b.len() != 1 + n + 64 {
+    let (&n, rest) = b.split_first()?;
+    let n = n as usize;
+    if n == 0 || n > MAX_ADDR || rest.len() != n + 64 {
         return None;
     }
-    Some(Reach { addr: String::from_utf8(b[1..1 + n].to_vec()).ok().filter(|a| valid_addr(a))?, onion: b[1 + n..33 + n].try_into().ok()?, link: b[33 + n..].try_into().ok()? })
+    let (addr, keys) = rest.split_at_checked(n)?;
+    let (onion, link) = keys.split_at_checked(32)?;
+    Some(Reach { addr: String::from_utf8(addr.to_vec()).ok().filter(|a| valid_addr(a))?, onion: onion.try_into().ok()?, link: link.try_into().ok()? })
 }
 
 fn encode(msg: &Msg) -> Vec<u8> {
@@ -165,15 +171,20 @@ fn decode(b: &[u8]) -> Option<Msg> {
                 return None;
             }
             let sharing = flags & 2 != 0;
-            let (room, rest) = if flags & 1 == 1 { (Some(<RoomId>::try_from(rest.get(..16)?).ok()?), &rest[16..]) } else { (None, rest) };
+            let (room, rest) = if flags & 1 == 1 {
+                let (room, rest) = rest.split_at_checked(16)?;
+                (Some(<RoomId>::try_from(room).ok()?), rest)
+            } else {
+                (None, rest)
+            };
             if rest.len() != 12 {
                 return None;
             }
             let h = Hello {
                 room,
-                fp: rest[..8].try_into().ok()?,
-                count: u16::from_be_bytes(rest[8..10].try_into().ok()?),
-                epoch: u16::from_be_bytes(rest[10..].try_into().ok()?),
+                fp: rest.get(..8)?.try_into().ok()?,
+                count: u16::from_be_bytes(rest.get(8..10)?.try_into().ok()?),
+                epoch: u16::from_be_bytes(rest.get(10..)?.try_into().ok()?),
                 sharing,
             };
             if kind == 1 { Msg::Hello(h) } else { Msg::HelloAck(h) }
@@ -183,18 +194,39 @@ fn decode(b: &[u8]) -> Option<Msg> {
             if rest.len() != *n as usize * 10 || *n as usize > VECTOR_PER_FRAME || *pages == 0 || page >= pages {
                 return None;
             }
-            let entries = rest.as_chunks::<10>().0.iter().map(|c| (c[..8].try_into().expect("8"), u16::from_be_bytes([c[8], c[9]]))).collect();
+            let entries = rest
+                .as_chunks::<10>()
+                .0
+                .iter()
+                .map(|c| {
+                    let (author, n) = c.split_first_chunk::<8>()?;
+                    Some((*author, u16::from_be_bytes(n.try_into().ok()?)))
+                })
+                .collect::<Option<Vec<_>>>()?;
             Msg::Vector { page: *page, pages: *pages, entries }
         }
         4 => Msg::Op(Op::decode(b)?),
-        5 => Msg::MyAddr { seq: u64::from_be_bytes(b.get(..8)?.try_into().ok()?), reach: take_reach(&b[8..])? },
-        6 if b.len() > 32 => Msg::Join { vk: b[..32].try_into().ok()?, reach: take_reach(&b[32..])? },
+        5 => Msg::MyAddr { seq: u64::from_be_bytes(b.get(..8)?.try_into().ok()?), reach: take_reach(b.get(8..)?)? },
+        6 if b.len() > 32 => {
+            let (vk, reach) = b.split_at_checked(32)?;
+            Msg::Join { vk: vk.try_into().ok()?, reach: take_reach(reach)? }
+        }
         7 if b.is_empty() => Msg::Joined,
-        8 if b.len() == 34 => Msg::Gift { epoch: u16::from_be_bytes([b[0], b[1]]), secret: b[2..].try_into().ok()? },
+        8 if b.len() == 34 => {
+            let (epoch, secret) = b.split_at_checked(2)?;
+            Msg::Gift { epoch: u16::from_be_bytes(epoch.try_into().ok()?), secret: secret.try_into().ok()? }
+        }
         9 if b.len() == 8 => Msg::Ack(b.try_into().ok()?),
-        10 if b.len() == 1 && b[0] <= 1 => Msg::Watch(b[0] == 1),
-        11 if b.len() > 6 && b.len() <= 6 + INVITE_CHUNK && b[5] as usize <= INVITE_CHUNKS && b[4] < b[5] => {
-            Msg::InviteChunk { id: b[..4].try_into().ok()?, idx: b[4], total: b[5], data: b[6..].to_vec() }
+        10 => match b {
+            [on @ (0 | 1)] => Msg::Watch(*on == 1),
+            _ => return None,
+        },
+        11 => {
+            let [i0, i1, i2, i3, idx, total, data @ ..] = b else { return None };
+            if data.is_empty() || data.len() > INVITE_CHUNK || *total as usize > INVITE_CHUNKS || idx >= total {
+                return None;
+            }
+            Msg::InviteChunk { id: [*i0, *i1, *i2, *i3], idx: *idx, total: *total, data: data.to_vec() }
         }
         _ => return None,
     })
@@ -221,34 +253,37 @@ pub fn seal(me: &StaticSecret, peer: &[u8; 32], server: &ServerId, msg: &Msg) ->
     OsRng.fill_bytes(&mut nonce);
     f[HEAD..HEAD + NONCE_LEN].copy_from_slice(&nonce);
     let sealed = cipher.encrypt(Nonce::from_slice(&nonce), Payload { msg: &plain, aad: &f[..HEAD] }).ok()?;
-    f[HEAD + NONCE_LEN..HEAD + NONCE_LEN + sealed.len()].copy_from_slice(&sealed);
-    OsRng.fill_bytes(&mut f[HEAD + NONCE_LEN + sealed.len()..]);
+    let (used, padding) = f.get_mut(HEAD + NONCE_LEN..)?.split_at_mut_checked(sealed.len())?;
+    used.copy_from_slice(&sealed);
+    OsRng.fill_bytes(padding);
     Some(f)
 }
 
 /// De que servidor (4 primeiros bytes) e de quem (8 primeiros bytes da chave) é o quadro.
 pub fn head(frame: &[u8]) -> Option<([u8; 4], MemberId)> {
-    if frame.len() != PACKET_LEN || frame[0] != TAG_SERVER {
+    if frame.len() != PACKET_LEN || *frame.first()? != TAG_SERVER {
         return None;
     }
-    Some((frame[1..5].try_into().ok()?, frame[5..13].try_into().ok()?))
+    Some((frame.get(1..5)?.try_into().ok()?, frame.get(5..13)?.try_into().ok()?))
 }
 
 /// Abre o quadro que `peer` mandou a `me`; `None` se não é dele ou foi adulterado.
 pub fn open(me: &StaticSecret, peer: &[u8; 32], server: &ServerId, frame: &[u8]) -> Option<Msg> {
-    head(frame)?;
-    let len = frame[13] as usize;
-    if len > BUDGET || frame[1..5] != server[..4] || frame[5..13] != peer[..8] {
+    let (srv, from) = head(frame)?;
+    let len = *frame.get(13)? as usize;
+    if len > BUDGET || srv[..] != server[..4] || from[..] != peer[..8] {
         return None;
     }
     let cipher = cipher(me, peer, server)?;
-    let nonce = &frame[HEAD..HEAD + NONCE_LEN];
-    let sealed = &frame[HEAD + NONCE_LEN..HEAD + NONCE_LEN + len + 16];
-    let plain = cipher.decrypt(Nonce::from_slice(nonce), Payload { msg: sealed, aad: &frame[..HEAD] }).ok()?;
+    let (aad, rest) = frame.split_at_checked(HEAD)?;
+    let (nonce, rest) = rest.split_at_checked(NONCE_LEN)?;
+    let sealed = rest.get(..len + 16)?;
+    let plain = cipher.decrypt(Nonce::from_slice(nonce), Payload { msg: sealed, aad }).ok()?;
     decode(&plain)
 }
 
 #[cfg(test)]
+#[allow(clippy::indexing_slicing, clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::server::op::{Action, Op};

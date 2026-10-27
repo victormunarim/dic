@@ -7,6 +7,9 @@
 //! A assinatura cobre o `server_id`, que não viaja na operação (o quadro já diz de que servidor ela é).
 //! `seq` conta as operações de cada autor (1, 2, 3...) e `lamport` ordena as de autores diferentes.
 
+// `Op::decode` lê o que outro membro (ou quem se passa por um) mandou: nada de índice nem `unwrap` que derrube o processo.
+#![deny(clippy::indexing_slicing, clippy::unwrap_used)]
+
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 
 use super::{MAX_NAME, MemberId, RoomId, ServerId, valid_name};
@@ -111,17 +114,17 @@ impl Action {
     fn parse(code: u8, b: &[u8]) -> Option<Self> {
         let name = |raw: &[u8]| String::from_utf8(raw.to_vec()).ok().filter(|n| valid_name(n));
         Some(match code {
-            1 if b.len() == 64 => Action::AddMember { key: b[..32].try_into().ok()?, vk: b[32..].try_into().ok()? },
+            1 if b.len() == 64 => Action::AddMember { key: b.get(..32)?.try_into().ok()?, vk: b.get(32..)?.try_into().ok()? },
             2 if b.len() == 8 => Action::RemoveMember { target: b.try_into().ok()? },
-            3 if b.len() == 9 => Action::SetRole { target: b[..8].try_into().ok()?, role: Role::from_code(b[8])? },
+            3 if b.len() == 9 => Action::SetRole { target: b.get(..8)?.try_into().ok()?, role: Role::from_code(*b.get(8)?)? },
             4 | 5 if b.len() > 16 && b.len() <= 16 + MAX_NAME => {
-                let (room, name) = (b[..16].try_into().ok()?, name(&b[16..])?);
+                let (room, name) = (b.get(..16)?.try_into().ok()?, name(b.get(16..)?)?);
                 if code == 4 { Action::CreateRoom { room, name } } else { Action::RenameRoom { room, name } }
             }
             6 if b.len() == 16 => Action::DeleteRoom { room: b.try_into().ok()? },
             7 if b.len() == 2 || b.len() == 34 => Action::Rekey {
-                epoch: u16::from_be_bytes(b[..2].try_into().ok()?),
-                commit: if b.len() == 34 { b[2..].try_into().ok()? } else { [0; 32] },
+                epoch: u16::from_be_bytes(b.get(..2)?.try_into().ok()?),
+                commit: if b.len() == 34 { b.get(2..)?.try_into().ok()? } else { [0; 32] },
             },
             8 if !b.is_empty() && b.len() <= MAX_NAME => Action::SetName { name: name(b)? },
             _ => return None,
@@ -186,22 +189,23 @@ impl Op {
         if b.len() < HEAD + SIG {
             return None;
         }
-        let body_len = b[HEAD - 1] as usize;
+        let body_len = *b.get(HEAD - 1)? as usize;
         if body_len > MAX_BODY || b.len() != HEAD + body_len + SIG {
             return None;
         }
-        let action = Action::parse(b[0], &b[HEAD..HEAD + body_len])?;
+        let action = Action::parse(*b.first()?, b.get(HEAD..HEAD + body_len)?)?;
         Some(Op {
-            author: b[1..9].try_into().ok()?,
-            lamport: u32::from_be_bytes(b[9..13].try_into().ok()?),
-            seq: u32::from_be_bytes(b[13..17].try_into().ok()?),
+            author: b.get(1..9)?.try_into().ok()?,
+            lamport: u32::from_be_bytes(b.get(9..13)?.try_into().ok()?),
+            seq: u32::from_be_bytes(b.get(13..17)?.try_into().ok()?),
             action,
-            sig: b[HEAD + body_len..].try_into().ok()?,
+            sig: b.get(HEAD + body_len..)?.try_into().ok()?,
         })
     }
 }
 
 #[cfg(test)]
+#[allow(clippy::indexing_slicing, clippy::unwrap_used)]
 mod tests {
     use super::*;
 

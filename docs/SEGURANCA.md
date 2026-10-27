@@ -21,6 +21,11 @@ Garantias e limites, limitações conhecidas e chaveiro.
 - Vídeo: o decodificador recusa imagem maior que `MAX_DECODED_PIXELS` (1920x2160), pois as dimensões vêm do quadro-chave de quem transmite e decidiriam quanta memória alocamos. O openh264 ainda aloca os próprios buffers internos pelo tamanho que o quadro-chave declara; esse teto é o dele.
 - A tela sem a opção de privacidade deixa de ter cover: quem observa a rede vê quando a imagem se mexe. O conteúdo segue cifrado de ponta a ponta.
 
+## Código que lê bytes da rede
+
+- `unsafe_code = "deny"` no `Cargo.toml` para o crate inteiro. Só há `unsafe` onde o sistema exige: o `timeBeginPeriod` do Windows (`src/timer.rs`), o GDI (`src/capture/gdi.rs`) e a API crua do openh264 que o crate dele não expõe (`src/video.rs`, `configure`). Cada ponto leva `#[allow(unsafe_code)]` e um `// SAFETY:`; o lint `clippy::undocumented_unsafe_blocks` avisa se faltar o comentário.
+- Os leitores do que vem do fio negam `clippy::indexing_slicing` e `clippy::unwrap_used` (`cargo clippy --all-targets` falha se alguém voltar a indexar ou dar `unwrap`): o quadro do link (`src/link.rs`), a célula e a célula de relay (`Cell::from_bytes`, `RelayCell::decode`), a camada do circuito (`LayerReceiver::open`), a operação do registro (`src/server/op.rs`), o convite (`src/server/invite.rs`) e os quadros de servidor (`src/server/wire.rs`). Entrada curta ou torta vira `None` ou erro, nunca pânico. Os outros leitores (`descriptor`, `presence`, `intro`, `rendezvous`, `media/*`) ainda indexam depois de conferir o tamanho; ficam para depois.
+
 ## Limitações
 
 Ainda **não** existem: TLS/QUIC e travessia de NAT (não há furo de NAT: quem não tem porta alcançável não recebe chamadas), chamadas em grupo com cifra de grupo (MLS; as salas de voz são uma malha de chamadas 1:1, [SERVIDORES.md](SERVIDORES.md)) e relays que não sejam os dos próprios contatos (o aplicativo não usa a descoberta por GossipSub nem a reputação; elas são camada de biblioteca).

@@ -8,6 +8,9 @@
 //! cifrado com `HKDF(DH(quem convida, convidado), "clam/servidor/convite/v1" ‖ servidor)`: quem pega o
 //! texto no caminho não lê o segredo, e quem recebe o convite errado não consegue abri-lo.
 
+// `Invite::open` lê um texto que qualquer um pode ter montado: nada de índice nem `unwrap` que derrube o processo.
+#![deny(clippy::indexing_slicing, clippy::unwrap_used)]
+
 use chacha20poly1305::{
     ChaCha20Poly1305, Key, Nonce,
     aead::{Aead, KeyInit, Payload},
@@ -72,8 +75,12 @@ fn take<'a>(b: &mut &'a [u8], n: usize) -> Option<&'a [u8]> {
     Some(head)
 }
 
+fn take_u8(b: &mut &[u8]) -> Option<u8> {
+    take(b, 1)?.first().copied()
+}
+
 fn take_reach(b: &mut &[u8]) -> Option<Reach> {
-    let n = take(b, 1)?[0] as usize;
+    let n = take_u8(b)? as usize;
     if n == 0 || n > MAX_ADDR {
         return None;
     }
@@ -89,7 +96,7 @@ pub(crate) fn unhex(s: &str) -> Option<Vec<u8>> {
     if !s.len().is_multiple_of(2) || !s.is_ascii() {
         return None;
     }
-    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok()).collect()
+    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok()).collect()
 }
 
 impl Invite {
@@ -118,7 +125,7 @@ impl Invite {
         OsRng.fill_bytes(&mut nonce);
         raw.extend_from_slice(&nonce);
         let sealed = cipher(inviter_secret, &self.invitee, &self.server)?
-            .encrypt(Nonce::from_slice(&nonce), Payload { msg: &plain, aad: &raw[..HEAD] })
+            .encrypt(Nonce::from_slice(&nonce), Payload { msg: &plain, aad: raw.get(..HEAD)? })
             .ok()?;
         raw.extend_from_slice(&sealed);
         Some(format!("{PREFIX}{}", hex(&raw)))
@@ -130,15 +137,18 @@ impl Invite {
         if raw.len() < HEAD + NONCE_LEN + 16 {
             return Err(ServerError::BadInvite);
         }
-        let server: ServerId = raw[..16].try_into().expect("16");
-        let inviter: [u8; 32] = raw[16..48].try_into().expect("32");
-        let invitee: [u8; 32] = raw[48..80].try_into().expect("32");
+        let (aad, rest) = raw.split_at_checked(HEAD).ok_or(ServerError::BadInvite)?;
+        let (nonce, sealed) = rest.split_at_checked(NONCE_LEN).ok_or(ServerError::BadInvite)?;
+        let head = || {
+            let mut h = aad;
+            Some((take(&mut h, 16)?.try_into().ok()?, take(&mut h, 32)?.try_into().ok()?, take(&mut h, 32)?.try_into().ok()?))
+        };
+        let (server, inviter, invitee): (ServerId, [u8; 32], [u8; 32]) = head().ok_or(ServerError::BadInvite)?;
         if PublicKey::from(me).as_bytes() != &invitee {
             return Err(ServerError::NotForYou);
         }
-        let nonce = &raw[HEAD..HEAD + NONCE_LEN];
         let plain = cipher(me, &inviter, &server)
-            .and_then(|c| c.decrypt(Nonce::from_slice(nonce), Payload { msg: &raw[HEAD + NONCE_LEN..], aad: &raw[..HEAD] }).ok())
+            .and_then(|c| c.decrypt(Nonce::from_slice(nonce), Payload { msg: sealed, aad }).ok())
             .ok_or(ServerError::BadInvite)?;
         Self::parse(server, inviter, invitee, &plain).ok_or(ServerError::BadInvite)
     }
@@ -148,13 +158,13 @@ impl Invite {
         let epoch = u16::from_be_bytes(take(b, 2)?.try_into().ok()?);
         let secret = take(b, 32)?.try_into().ok()?;
         let owner_vk = take(b, 32)?.try_into().ok()?;
-        let n = take(b, 1)?[0] as usize;
+        let n = take_u8(b)? as usize;
         if n > MAX_NAME {
             return None;
         }
         let name = String::from_utf8(take(b, n)?.to_vec()).ok().filter(|n| valid_name(n))?;
         let inviter = Hint { key: inviter, reach: take_reach(b)? };
-        let count = take(b, 1)?[0] as usize;
+        let count = take_u8(b)? as usize;
         if count > MAX_HINTS {
             return None;
         }
@@ -168,6 +178,7 @@ impl Invite {
 }
 
 #[cfg(test)]
+#[allow(clippy::indexing_slicing, clippy::unwrap_used)]
 mod tests {
     use super::*;
 
