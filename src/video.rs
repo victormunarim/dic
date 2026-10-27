@@ -217,6 +217,9 @@ const QP_MIN: f32 = 28.0;
 const QP_MAX: f32 = 51.0;
 /// QP do primeiro quadro-chave; se não couber, o seguinte sai em [`QP_MAX`].
 const QP_START: f32 = 38.0;
+/// Tamanho máximo de cada fatia do quadro, em bytes. Com fatias o openh264 divide o quadro entre os núcleos: um
+/// quadro de 1080p com texto leva ≈ 20 ms em vez de ≈ 26 ms, e é o que deixa caber os 33 ms de um quadro a 30 fps.
+const SLICE_LEN: u32 = 1500;
 /// A cada +10 de QP o quadro encolhe pela metade, aproximadamente.
 const QP_PER_OCTAVE: f32 = 10.0;
 /// Quanto o QP pode subir ou descer entre dois quadros: subir é rápido (o quadro grande já custou),
@@ -360,6 +363,7 @@ impl H264Encoder {
             .qp(QpRange::new(qp, qp))
             .max_frame_rate(FrameRate::from_hz(fps))
             .skip_frames(false)
+            .max_slice_len(SLICE_LEN)
             // Quadro-chave grande (dezenas de kB) leva segundos no circuito e congela a imagem: só periódico
             // de longe em longe; perda e quem entra pedem o seu por `WANT_KEY`.
             .intra_frame_period(IntraFramePeriod::from_num_frames((fps * 30.0) as u32));
@@ -732,6 +736,42 @@ mod tests {
         let out = out.expect("imagem");
         let px = &out.rgba[(32 * 64 + 32) * 4..][..3];
         assert!(px[0] > 150 && px[1] < 80 && px[2] < 80, "{px:?}");
+    }
+
+    /// Texto rolando em 1080p: o que o usuário vê quando compartilha uma página.
+    fn page(w: usize, h: usize, off: usize) -> RawFrame {
+        let mut rgba = vec![255u8; w * h * 4];
+        for y in 0..h {
+            let sy = y + off;
+            for x in 0..w {
+                let glyph = ((sy / 14) * 31 + (x / 9) * 17) % 5 < 2 && (sy % 14) < 10 && (x % 9) < 6;
+                let v = if glyph { 30 } else { 245 };
+                rgba[(y * w + x) * 4..][..3].fill(v);
+            }
+        }
+        RawFrame::new(w, h, rgba).unwrap()
+    }
+
+    #[test]
+    fn sliced_full_hd_frames_decode_close_to_the_source() {
+        let open = H264Encoder::bitrate_for(crate::phone::OPEN_SCREEN_SLOT);
+        let mut enc = H264Encoder::new(open).unwrap();
+        let mut dec = H264Decoder::new().unwrap();
+        let (mut shown, mut last) = (0, None);
+        for i in 0..12 {
+            let src = page(1920, 1080, i * 40);
+            let Some(f) = enc.encode(&src, false).unwrap() else { continue };
+            assert!(f.data.len() <= MAX_FRAME, "quadro {i}: {} B", f.data.len());
+            if let Some(out) = dec.decode(&f.data).unwrap() {
+                assert_eq!((out.width, out.height), (1920, 1080));
+                shown += 1;
+                last = Some((out, src));
+            }
+        }
+        assert!(shown >= 10, "só {shown} de 12 quadros viraram imagem");
+        let (out, src) = last.unwrap();
+        let err: u64 = out.rgba.iter().zip(&src.rgba).step_by(4).map(|(a, b)| a.abs_diff(*b) as u64).sum::<u64>() / (1920 * 1080);
+        assert!(err < 12, "erro médio {err} por pixel");
     }
 
     #[test]
