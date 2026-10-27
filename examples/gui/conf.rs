@@ -134,6 +134,7 @@ pub(crate) struct Form {
     /// Microfone e alto-falante escolhidos (vazio = padrão do sistema).
     pub(crate) input_dev: String,
     pub(crate) output_dev: String,
+    pub(crate) new_name: String,
     pub(crate) new_code: String,
     /// O arquivo de configuração existia e foi lido ao abrir (para a janela mostrar de onde veio).
     pub(crate) loaded: bool,

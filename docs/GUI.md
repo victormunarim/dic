@@ -12,7 +12,7 @@ A janela segue o estilo do Discord: a barra lateral é estreita e só de ícones
 
 | Aba | O que tem |
 |---|---|
-| **Contatos** | A lista (Ligar / Remover) e *Adicionar contato* (só o código; o contato aparece com o começo da chave até ele se apresentar) |
+| **Contatos** | A lista (Ligar / Remover) e *Adicionar contato* (nome e código) |
 | *Servidor* (pelo trilho) | As *Salas de voz* com quem está em cada uma e o aro verde de quem fala, *Telas da sala*, os *Membros* (online e offline) e o convite com o aviso de IP. Detalhes em [SERVIDORES.md](SERVIDORES.md) |
 | **Chamada** | *Ligar para um código* (sem chamada); abre sozinha quando uma chamada 1:1 começa (entrar numa sala não troca de aba): a conversa, *Compartilhar a minha tela* (com a linha de diagnóstico) e a *Tela de ...* de quem transmite para você, que se amplia em outra janela |
 | **Vídeo** | *Transmissão de tela*: privacidade, *Priorizar* fluidez ou nitidez e codificar pela placa de vídeo; valem da próxima transmissão, na chamada e nas salas |
