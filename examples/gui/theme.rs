@@ -189,3 +189,18 @@ pub(crate) fn nav_item(ui: &mut Ui, selected: bool, icon: &str, label: &str, bad
     }
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
+
+/// Símbolo de ligar/desligar (arco aberto em cima e um traço), desenhado à mão para não depender de fonte.
+pub(crate) fn power_icon(ui: &Ui, rect: egui::Rect, color: Color32) {
+    let (c, r) = (rect.center(), rect.width() * 0.2);
+    let stroke = egui::Stroke::new(rect.width() * 0.055, color);
+    // Do ângulo de -60° ao de 240° (em torno do topo), passando por baixo.
+    let arc: Vec<egui::Pos2> = (0..=24)
+        .map(|i| {
+            let a = (-60.0f32 + 300.0 * i as f32 / 24.0).to_radians();
+            c + vec2(a.cos(), a.sin()) * r
+        })
+        .collect();
+    ui.painter().add(egui::Shape::line(arc, stroke));
+    ui.painter().line_segment([c - vec2(0.0, r * 1.25), c - vec2(0.0, r * 0.1)], stroke);
+}

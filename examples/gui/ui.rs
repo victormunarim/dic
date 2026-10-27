@@ -196,6 +196,10 @@ impl App {
             ui.horizontal(|ui| {
                 let me = theme::avatar(ui, &name, 40.0, Some(color));
                 if offline {
+                    if me.hovered() {
+                        ui.painter().circle_filled(me.rect.center(), me.rect.width() / 2.0, Color32::from_black_alpha(150));
+                        theme::power_icon(ui, me.rect, GREEN);
+                    }
                     if me.on_hover_text("Clique para ficar online").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                         self.go_online(ctx);
                     }
