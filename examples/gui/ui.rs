@@ -195,13 +195,19 @@ impl App {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 let me = theme::avatar(ui, &name, 40.0, Some(color));
-                if offline {
+                // Em chamada não dá para ficar offline: o botão da aba Início também fica travado.
+                if offline || !in_call {
                     if me.hovered() {
                         ui.painter().circle_filled(me.rect.center(), me.rect.width() / 2.0, Color32::from_black_alpha(150));
-                        theme::power_icon(ui, me.rect, GREEN);
+                        theme::power_icon(ui, me.rect, if offline { GREEN } else { RED });
                     }
-                    if me.on_hover_text("Clique para ficar online").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-                        self.go_online(ctx);
+                    let tip = if offline { "Clique para ficar online" } else { "Clique para ficar offline" };
+                    if me.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                        if offline {
+                            self.go_online(ctx);
+                        } else if let Some(r) = &self.running {
+                            r.stop.store(true, Ordering::Relaxed);
+                        }
                     }
                 }
                 ui.vertical(|ui| {
