@@ -135,11 +135,6 @@ pub(crate) fn note(ui: &mut Ui, text: impl Into<String>) {
     ui.label(RichText::new(text.into()).size(14.0).color(MUTED));
 }
 
-/// Rótulo de seção em caixa alta, como as categorias da barra lateral do Discord.
-pub(crate) fn section_label(ui: &mut Ui, text: &str) {
-    ui.label(RichText::new(text.to_uppercase()).size(12.0).strong().color(MUTED));
-}
-
 /// Cor estável de um nome, para o avatar.
 fn hue(name: &str) -> Color32 {
     const PALETTE: [Color32; 6] = [
@@ -178,9 +173,10 @@ pub(crate) fn status_dot(ui: &mut Ui, color: Color32, text: &str) {
     });
 }
 
-/// Item da barra lateral: linha inteira clicável, com destaque para a aba atual. `badge` põe uma bolinha à direita.
+/// Item da barra lateral: só o ícone, centralizado; o nome aparece ao passar o mouse. Destaque para a aba atual;
+/// `badge` põe uma bolinha no canto.
 pub(crate) fn nav_item(ui: &mut Ui, selected: bool, icon: &str, label: &str, badge: Option<Color32>) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 42.0), egui::Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 48.0), egui::Sense::click());
     let fill = if selected {
         SELECTED
     } else if resp.hovered() {
@@ -189,14 +185,15 @@ pub(crate) fn nav_item(ui: &mut Ui, selected: bool, icon: &str, label: &str, bad
         Color32::TRANSPARENT
     };
     let p = ui.painter();
-    p.rect_filled(rect, CornerRadius::same(6), fill);
+    p.rect_filled(rect, CornerRadius::same(10), fill);
     let color = if selected { Color32::WHITE } else if resp.hovered() { TEXT } else { MUTED };
-    p.text(rect.left_center() + vec2(14.0, 0.0), egui::Align2::LEFT_CENTER, icon, FontId::proportional(19.0), color);
-    p.text(rect.left_center() + vec2(46.0, 0.0), egui::Align2::LEFT_CENTER, label, FontId::proportional(16.5), color);
+    p.text(rect.center(), egui::Align2::CENTER_CENTER, icon, FontId::proportional(23.0), color);
     if let Some(c) = badge {
-        p.circle_filled(rect.right_center() - vec2(16.0, 0.0), 5.0, c);
+        let at = rect.right_top() + vec2(-9.0, 9.0);
+        p.circle_filled(at, 7.0, PANEL);
+        p.circle_filled(at, 5.0, c);
     }
-    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+    resp.on_hover_text(label).on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// Símbolo de ligar/desligar (arco aberto em cima e um traço), desenhado à mão para não depender de fonte.
