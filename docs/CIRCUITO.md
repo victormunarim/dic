@@ -154,7 +154,7 @@ Cifra de link:
 
 - **Autentica o relay**: quem disca conhece a **chave de link** do relay (`link_key` do descritor, `Candidate::link_public`). Com a chave errada o handshake falha e o link não abre. Relay para relay funciona igual: o cliente inclui a chave de link do próximo relay no pedido de extensão.
 - **Oculta** ids de circuito, comandos e conteúdo de quem observa a rede, e impede injetar ou alterar células. O tamanho já é fixo; a temporização é coberta pelo cover traffic (seção abaixo).
-- Nonces em ordem estrita por direção, handshake com prazo de 3 s, e `max_links` (512) conta também conexões ainda em handshake. Quem manda célula em claro, sem handshake, é desconectado.
+- Nonces em ordem estrita por direção, handshake com prazo de 3 s, e `max_links` (512) conta também conexões ainda em handshake. `max_links_per_ip` (32) limita o que uma só origem (IPv4, ou /64 de IPv6) ocupa desse total; o loopback não conta. Quem manda célula em claro, sem handshake, é desconectado.
 - **Duas chaves distintas**: a do circuito (`onion_key`, handshake estilo ntor) e a do link (`link_key`, Noise NK), ambas no descritor assinado. Vazar ou girar uma não afeta a outra. Por padrão `RelayServer` gera a chave de link a cada início; para mantê-la, passe `ServerConfig::link_secret` e publique um descritor novo se ela mudar. Usar a chave do circuito como chave de link não abre o link (há teste).
 
 Outros limites:

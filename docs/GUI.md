@@ -20,7 +20,7 @@ A janela segue o estilo do Discord: a barra lateral é estreita e só de ícones
 | **Configurações** | *Conexão* (Ficar online / offline, o estado e a caixa *Tentar ficar online ao abrir o programa*, ligada por padrão; desmarcar grava `no_auto_online=1` em `~/.clam-gui.conf`), *Meu código de contato* (com *Copiar o código*), *Identidade* (a chave secreta, oculta; *Gerar nova identidade*), *Seu nome*, *Endereço* público, *Encontrar contatos* (DHT, circuito da DHT, aceitar apresentações) e *Âncoras* (servir de âncora, as que você usa e o código da sua) |
 | **Atividade** | O registro do que o programa está fazendo (avisos de endereço, apresentações, erros) |
 
-Tudo o que a janela guarda fica em `~/.clam-gui.conf` e nos arquivos ao lado (`.clam-gui.known`, `.clam-gui.relay`, `.clam-gui.intro`, `.clam-gui.servers`); a chave secreta vai para o chaveiro do sistema, quando há ([SEGURANCA.md](SEGURANCA.md#chaveiro)).
+Tudo o que a janela guarda fica em `~/.clam-gui.conf` e nos arquivos ao lado (`.clam-gui.known`, `.clam-gui.relay`, `.clam-gui.intro`, `.clam-gui.servers`); a chave secreta vai para o chaveiro do sistema, quando há ([SEGURANCA.md](SEGURANCA.md#chaveiro)). Se o chaveiro não responde, a janela avisa em *Identidade* e não cria uma identidade nova no lugar.
 
 ## Áudio e dispositivos
 
