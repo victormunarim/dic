@@ -7,6 +7,7 @@
 //!
 //! Sem cancelamento de eco: use fones, ou o alto-falante realimenta o microfone.
 
+use crate::sync::LockExt;
 use std::{
     collections::VecDeque,
     sync::{
@@ -239,23 +240,23 @@ impl Audio {
 
     /// Erro que um fluxo de áudio sofreu desde a última chamada (por exemplo, o fone foi desconectado).
     pub fn take_error(&self) -> Option<String> {
-        self.failure.lock().unwrap().take()
+        self.failure.lock_unpoisoned().take()
     }
 
     /// Próximo quadro de 160 amostras capturado, se já houver. Se o consumidor atrasar, o excesso antigo é descartado.
     pub fn mic_frame(&self) -> Option<Vec<i16>> {
-        let mut q = self.capture.lock().unwrap();
+        let mut q = self.capture.lock_unpoisoned();
         if q.len() < self.frame {
             return None;
         }
         let mut pcm: Vec<i16> = q.drain(..self.frame).collect();
         drop(q);
         let before = pcm.clone();
-        let mut guard = self.apm.lock().unwrap();
-        let far = clean_capture(&mut guard.0, &mut pcm, &mut self.tap.lock().unwrap(), self.frame / 2);
+        let mut guard = self.apm.lock_unpoisoned();
+        let far = clean_capture(&mut guard.0, &mut pcm, &mut self.tap.lock_unpoisoned(), self.frame / 2);
         if far && guard.1.echo_cancel {
             let energy = |v: &[i16]| v.iter().map(|&x| (x as f64).powi(2)).sum::<f64>() / v.len() as f64;
-            let mut m = self.erle.lock().unwrap();
+            let mut m = self.erle.lock_unpoisoned();
             m.0 += (energy(&before) - m.0) * 0.02;
             m.1 += (energy(&pcm) - m.1) * 0.02;
         }
@@ -265,26 +266,26 @@ impl Audio {
     /// Liga ou desliga estágios do tratamento do microfone. Só refaz o processador (e o cancelador de eco
     /// recomeça a aprender) quando algo mudou.
     pub fn set_processing(&self, on: Processing) {
-        let mut guard = self.apm.lock().unwrap();
+        let mut guard = self.apm.lock_unpoisoned();
         if guard.1 != on {
             *guard = (voice_processor(self.rate, on), on);
-            *self.erle.lock().unwrap() = (0.0, 0.0);
+            *self.erle.lock_unpoisoned() = (0.0, 0.0);
         }
     }
 
     /// O que o cancelador de eco mede agora: quantos dB ele tira do eco (só tem valor depois que o
     /// alto-falante tocou algo) e o atraso que achou entre tocar e o microfone ouvir.
     pub fn echo_stats(&self) -> EchoStats {
-        let guard = self.apm.lock().unwrap();
+        let guard = self.apm.lock_unpoisoned();
         let st = guard.0.statistics();
-        let (e_in, e_out) = *self.erle.lock().unwrap();
+        let (e_in, e_out) = *self.erle.lock_unpoisoned();
         let erle_db = (e_in > 1.0 && e_out > 0.0).then(|| (10.0 * (e_in / e_out).log10()).max(0.0));
         EchoStats { erle_db, delay_ms: st.delay_ms }
     }
 
     /// Tratamento do microfone em uso.
     pub fn processing(&self) -> Processing {
-        self.apm.lock().unwrap().1
+        self.apm.lock_unpoisoned().1
     }
 
     /// Dispositivos e formatos em uso, para diagnóstico.
@@ -299,7 +300,7 @@ impl Audio {
 
     /// Enfileira PCM recebido para o alto-falante.
     pub fn play(&self, pcm: &[i16]) {
-        push_capped(&mut self.playback.lock().unwrap(), pcm.iter().copied(), max_queued(self.rate));
+        push_capped(&mut self.playback.lock_unpoisoned(), pcm.iter().copied(), max_queued(self.rate));
     }
 }
 
@@ -511,9 +512,9 @@ where
                 let mono = frame.iter().map(|s| s.to_sample::<f32>()).sum::<f32>() / ch as f32;
                 out.extend(down.push(mono));
             }
-            push_capped(&mut q.lock().unwrap(), out.into_iter(), max_queued(rate));
+            push_capped(&mut q.lock_unpoisoned(), out.into_iter(), max_queued(rate));
         },
-        move |e| *fail.lock().unwrap() = Some(format!("microfone: {e}")),
+        move |e| *fail.lock_unpoisoned() = Some(format!("microfone: {e}")),
         None,
     )
     .map_err(err)
@@ -563,9 +564,9 @@ where
     dev.build_output_stream(
         cfg,
         move |data: &mut [T], _| {
-            let mut q = q.lock().unwrap();
+            let mut q = q.lock_unpoisoned();
             up.set_scale(drift.scale(q.len()));
-            let mut tap = tap.lock().unwrap();
+            let mut tap = tap.lock_unpoisoned();
             for frame in data.chunks_mut(ch) {
                 let before = q.len();
                 let f = up.pull(&mut q).unwrap_or(0.0);
@@ -579,7 +580,7 @@ where
                 }
             }
         },
-        move |e| *fail.lock().unwrap() = Some(format!("alto-falante: {e}")),
+        move |e| *fail.lock_unpoisoned() = Some(format!("alto-falante: {e}")),
         None,
     )
     .map_err(err)

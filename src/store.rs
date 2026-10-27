@@ -1,6 +1,7 @@
 //! Abstração do armazenamento distribuído (DHT). O transporte real (libp2p)
 //! implementa `RecordStore`; `MemoryStore` serve a testes e simulações.
 
+use crate::sync::LockExt;
 use std::{collections::HashMap, sync::Mutex};
 
 pub trait RecordStore {
@@ -28,21 +29,21 @@ impl MemoryStore {
 
     /// Chaves consultadas até agora, na ordem; é o que um observador da DHT veria.
     pub fn observed_gets(&self) -> Vec<[u8; 32]> {
-        self.gets.lock().unwrap().clone()
+        self.gets.lock_unpoisoned().clone()
     }
 
     pub fn keys(&self) -> Vec<[u8; 32]> {
-        self.records.lock().unwrap().keys().copied().collect()
+        self.records.lock_unpoisoned().keys().copied().collect()
     }
 }
 
 impl RecordStore for MemoryStore {
     fn put(&self, key: [u8; 32], value: Vec<u8>) {
-        self.records.lock().unwrap().insert(key, value);
+        self.records.lock_unpoisoned().insert(key, value);
     }
 
     fn get(&self, key: &[u8; 32]) -> Option<Vec<u8>> {
-        self.gets.lock().unwrap().push(*key);
-        self.records.lock().unwrap().get(key).cloned()
+        self.gets.lock_unpoisoned().push(*key);
+        self.records.lock_unpoisoned().get(key).cloned()
     }
 }

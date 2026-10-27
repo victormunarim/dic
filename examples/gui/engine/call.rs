@@ -1,5 +1,6 @@
 //! Conversa 1:1: laço de áudio, queda de rede e religação.
 
+use clam::sync::LockExt;
 use super::*;
 
 /// Envia um tom (ou o microfone) a cada 20 ms e relata, por segundo, o que chegou. Termina ao desligar
@@ -161,7 +162,7 @@ pub(crate) async fn talk(mut c: ActiveCall, hz: f64, stop: Arc<AtomicBool>, out:
                     end = End::Lost;
                     break;
                 }
-                *shared.link.lock().unwrap() = quality(s.received - prev.received, s.concealed - prev.concealed, s.delay_ms);
+                *shared.link.lock_unpoisoned() = quality(s.received - prev.received, s.concealed - prev.concealed, s.delay_ms);
                 let rms = if frames > 0 { (energy / frames as f64).sqrt() } else { 0.0 };
                 out.line(format!(
                     "recebidos +{:<3} (total {})  escondidos +{}  atraso {} ms  volume {:.0}  mic {:.0}{}",
@@ -173,7 +174,7 @@ pub(crate) async fn talk(mut c: ActiveCall, hz: f64, stop: Arc<AtomicBool>, out:
             }
         }
     }
-    shared.link.lock().unwrap().clear();
+    shared.link.lock_unpoisoned().clear();
     shared.screen.reset();
     shared.audio.set_level(0.0);
     let s = c.stats();

@@ -8,6 +8,7 @@
 //!
 //! A chamada vai pelos relays dos próprios contatos, de ponta a ponta.
 
+use crate::sync::LockExt;
 use std::{
     collections::HashMap,
     io,
@@ -215,8 +216,8 @@ type History = Arc<Mutex<HashMap<[u8; 32], Vec<RelayInfo>>>>;
 
 /// `relay` passa a ser o endereço guardado de `peer`; o que estava guardado vai para o histórico.
 fn set_known(known: &Known, history: &History, peer: &[u8; 32], relay: RelayInfo) {
-    let old = known.lock().unwrap().insert(*peer, relay.clone());
-    let mut history = history.lock().unwrap();
+    let old = known.lock_unpoisoned().insert(*peer, relay.clone());
+    let mut history = history.lock_unpoisoned();
     let list = history.entry(*peer).or_default();
     list.retain(|r| *r != relay);
     if let Some(old) = old.filter(|o| *o != relay) {
@@ -301,13 +302,13 @@ impl Dialer {
     /// Relays de `peer` para tentar antes da DHT e das âncoras, em ordem: o guardado de uma ligação ou aviso, o
     /// que o convite dele trouxe (que ninguém verificou) e os endereços antigos, do mais novo ao mais velho.
     pub(crate) fn stored_for(&self, peer: &[u8; 32]) -> Vec<RelayInfo> {
-        let mut v: Vec<RelayInfo> = self.known.lock().unwrap().get(peer).cloned().into_iter().collect();
-        if let Some(h) = self.hints.lock().unwrap().get(peer)
+        let mut v: Vec<RelayInfo> = self.known.lock_unpoisoned().get(peer).cloned().into_iter().collect();
+        if let Some(h) = self.hints.lock_unpoisoned().get(peer)
             && !v.contains(h)
         {
             v.push(h.clone());
         }
-        for old in self.history.lock().unwrap().get(peer).into_iter().flatten() {
+        for old in self.history.lock_unpoisoned().get(peer).into_iter().flatten() {
             if !v.contains(old) {
                 v.push(old.clone());
             }
@@ -318,7 +319,7 @@ impl Dialer {
     /// Guarda o relay que `peer` informou (o código de contato direto) como dica: é o
     /// primeiro endereço que [`Dialer::dial`] tenta e só vira endereço de confiança depois de uma chamada completa.
     pub fn add_hint(&self, peer: [u8; 32], relay: RelayInfo) {
-        self.hints.lock().unwrap().insert(peer, relay);
+        self.hints.lock_unpoisoned().insert(peer, relay);
     }
 
     /// Primeiro relay de `stored` cujo circuito fica pronto em 5 s, com o cliente já aberto.
@@ -337,7 +338,7 @@ impl Dialer {
     /// Uma chamada completou por `used`: passa a ser o endereço guardado de `peer`. É aqui que uma dica de
     /// convite (sem prova de quem a mandou) vira endereço de confiança.
     fn remember(&self, peer: &[u8; 32], used: RelayInfo) {
-        let mut hints = self.hints.lock().unwrap();
+        let mut hints = self.hints.lock_unpoisoned();
         if hints.get(peer) == Some(&used) {
             hints.remove(peer);
         }
@@ -350,14 +351,14 @@ impl Dialer {
     /// que não era autenticada, perde o lugar.
     fn apply_update(&self, update: &AddressUpdate) -> bool {
         {
-            let mut seen = self.seen_seq.lock().unwrap();
+            let mut seen = self.seen_seq.lock_unpoisoned();
             if seen.get(&update.peer).is_some_and(|s| *s >= update.record.seq) {
                 return false;
             }
             seen.insert(update.peer, update.record.seq);
         }
         let r = &update.record;
-        self.hints.lock().unwrap().remove(&update.peer);
+        self.hints.lock_unpoisoned().remove(&update.peer);
         set_known(&self.known, &self.history, &update.peer, RelayInfo { addr: r.addr.clone(), onion: r.onion, link: r.link });
         true
     }
@@ -453,9 +454,9 @@ impl Dialer {
     /// Relays de contatos para montar o circuito até um gateway da DHT, sem o
     /// deste nó e sem os dos contatos em `exclude`.
     fn gateway_pool(&self, exclude: &[[u8; 32]]) -> Vec<RelayInfo> {
-        let mut found: Vec<([u8; 32], RelayInfo)> = self.known.lock().unwrap().iter().map(|(k, r)| (*k, r.clone())).collect();
-        found.extend(self.hints.lock().unwrap().iter().map(|(k, r)| (*k, r.clone())));
-        for (k, list) in self.history.lock().unwrap().iter() {
+        let mut found: Vec<([u8; 32], RelayInfo)> = self.known.lock_unpoisoned().iter().map(|(k, r)| (*k, r.clone())).collect();
+        found.extend(self.hints.lock_unpoisoned().iter().map(|(k, r)| (*k, r.clone())));
+        for (k, list) in self.history.lock_unpoisoned().iter() {
             found.extend(list.iter().map(|r| (*k, r.clone())));
         }
         let mut pool: Vec<RelayInfo> = Vec::new();
@@ -732,15 +733,15 @@ impl Reachability {
     fn set(&self, addr: String, published: bool) -> bool {
         let mine = RelayInfo { addr: addr.clone(), onion: self.onion, link: self.link };
         let own = own_relay(&mine, published);
-        let mut now = self.own.lock().unwrap();
+        let mut now = self.own.lock_unpoisoned();
         if *now == own {
             return false;
         }
         if let Some(r) = &own {
-            *self.notice.lock().unwrap() = Some(format!("seu endereço mudou: agora {}", r.addr));
+            *self.notice.lock_unpoisoned() = Some(format!("seu endereço mudou: agora {}", r.addr));
         }
         *now = own;
-        *self.addr.lock().unwrap() = addr;
+        *self.addr.lock_unpoisoned() = addr;
         self.phone.set_relay_hint(relay_hint(&mine, published));
         true
     }
@@ -780,12 +781,12 @@ async fn watch_address(reach: Reachability, mut mapping: Option<upnp::Mapping>, 
 async fn track_address(own: Arc<Mutex<Option<RelayInfo>>>, current: Current) {
     let mut seq = 0u64;
     loop {
-        let mine = own.lock().unwrap().clone().filter(|m| (1..=MAX_ADDR).contains(&m.addr.len()));
+        let mine = own.lock_unpoisoned().clone().filter(|m| (1..=MAX_ADDR).contains(&m.addr.len()));
         if let Some(mine) = mine {
-            let changed = current.lock().unwrap().as_ref().is_none_or(|c| c.addr != mine.addr || c.onion != mine.onion || c.link != mine.link);
+            let changed = current.lock_unpoisoned().as_ref().is_none_or(|c| c.addr != mine.addr || c.onion != mine.onion || c.link != mine.link);
             if changed {
                 seq = (unix_millis() as u64).max(seq + 1);
-                *current.lock().unwrap() = Some(AddressRecord { seq, addr: mine.addr, onion: mine.onion, link: mine.link });
+                *current.lock_unpoisoned() = Some(AddressRecord { seq, addr: mine.addr, onion: mine.onion, link: mine.link });
             }
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
@@ -800,7 +801,7 @@ async fn outbox(dialer: Dialer, contacts: phone::Contacts, current: Current, ret
     let mut live: HashMap<[u8; 32], AbortHandle> = HashMap::new();
     let mut announced = 0u64;
     loop {
-        let record = current.lock().unwrap().clone();
+        let record = current.lock_unpoisoned().clone();
         if let Some(record) = record {
             if record.seq != announced {
                 for h in live.values() {
@@ -809,7 +810,7 @@ async fn outbox(dialer: Dialer, contacts: phone::Contacts, current: Current, ret
                 live.clear();
                 announced = record.seq;
             }
-            let keys: Vec<[u8; 32]> = contacts.lock().unwrap().clone();
+            let keys: Vec<[u8; 32]> = contacts.lock_unpoisoned().clone();
             live.retain(|k, _| keys.contains(k));
             for k in keys {
                 live.entry(k).or_insert_with(|| tasks.spawn(push_address(dialer.clone(), contacts.clone(), k, record.clone(), retry, slots.clone())));
@@ -828,9 +829,9 @@ async fn rendezvous_publisher(dialer: Dialer, contacts: phone::Contacts, current
     let mut state: HashMap<[u8; 32], (u64, u64, Instant)> = HashMap::new();
     let mut put_seq = 0i64;
     loop {
-        let record = current.lock().unwrap().clone();
+        let record = current.lock_unpoisoned().clone();
         if let Some(record) = record {
-            let keys: Vec<[u8; 32]> = contacts.lock().unwrap().iter().take(DHT_CONTACTS).copied().collect();
+            let keys: Vec<[u8; 32]> = contacts.lock_unpoisoned().iter().take(DHT_CONTACTS).copied().collect();
             state.retain(|k, _| keys.contains(k));
             let period = unix_secs() / 86400;
             let due: Vec<[u8; 32]> = keys.into_iter().filter(|k| state.get(k).is_none_or(|(seq, day, at)| *seq != record.seq || *day != period || Instant::now() >= *at)).collect();
@@ -865,7 +866,7 @@ async fn server_publisher(dialer: Dialer, hub: ServerHub, current: Current) {
     let mut state: HashMap<([u8; 16], u16), (u64, u64, Instant)> = HashMap::new();
     let mut put_seq = 0i64;
     loop {
-        let record = current.lock().unwrap().clone();
+        let record = current.lock_unpoisoned().clone();
         let (visible, secrets) = hub.read(|s, _| (s.visible(), s.secrets()));
         if let Some(record) = record.filter(|_| visible) {
             state.retain(|k, _| secrets.iter().any(|(id, epoch, _)| (*id, *epoch) == *k));
@@ -894,7 +895,7 @@ async fn server_publisher(dialer: Dialer, hub: ServerHub, current: Current) {
 async fn push_address(dialer: Dialer, contacts: phone::Contacts, peer: [u8; 32], record: AddressRecord, retry: Duration, slots: Arc<Semaphore>) {
     let (mut wait, give_up) = (retry, Instant::now() + UPDATE_GIVE_UP);
     loop {
-        if !contacts.lock().unwrap().contains(&peer) {
+        if !contacts.lock_unpoisoned().contains(&peer) {
             return;
         }
         let acked = {
@@ -1057,7 +1058,7 @@ impl Node {
                 while let Some(u) = rx.recv().await {
                     if dialer.apply_update(&u) {
                         let hex: String = u.peer[..4].iter().map(|b| format!("{b:02x}")).collect();
-                        *notice.lock().unwrap() = Some(format!("{hex}... mudou de endereço e avisou: agora {}", u.record.addr));
+                        *notice.lock_unpoisoned() = Some(format!("{hex}... mudou de endereço e avisou: agora {}", u.record.addr));
                     }
                 }
             }));
@@ -1084,7 +1085,7 @@ impl Node {
             let introduced = introduced.clone();
             background.push(tokio::spawn(async move {
                 while let Some(Introduction { peer, intro }) = rx.recv().await {
-                    let mut queue = introduced.lock().unwrap();
+                    let mut queue = introduced.lock_unpoisoned();
                     // Quem se apresenta de novo (a confirmação se perdeu) não entra duas vezes na fila.
                     queue.retain(|i| i.peer != peer);
                     queue.push(Introduced { peer, name: intro.name, reach: intro.reach });
@@ -1097,7 +1098,7 @@ impl Node {
     /// Aceita convites de `keys` além dos contatos.
     pub fn allow(&self, keys: &[[u8; 32]]) {
         let c = self.phone.contacts();
-        let mut c = c.lock().unwrap();
+        let mut c = c.lock_unpoisoned();
         for k in keys {
             if !c.contains(k) {
                 c.push(*k);
@@ -1107,7 +1108,7 @@ impl Node {
 
     /// Quem está na minha sala de voz e pode ligar sem ser contato (substitui a lista anterior).
     pub fn set_room_peers(&self, keys: &[[u8; 32]]) {
-        *self.phone.room_peers().lock().unwrap() = keys.to_vec();
+        *self.phone.room_peers().lock_unpoisoned() = keys.to_vec();
     }
 
     /// Novo contato: passa a ser atendido e, se o código dele trouxe o relay, esse é o primeiro endereço para ligar a ele.
@@ -1123,7 +1124,7 @@ impl Node {
     /// Insiste com espera crescente até a confirmação ou `UPDATE_GIVE_UP` (3 dias); o endereço dele vem do código que se
     /// tem, da DHT ou das âncoras. Chamar de novo para o mesmo contato não duplica a entrega.
     pub fn introduce(&self, peer: [u8; 32]) {
-        let mut tasks = self.introducing.lock().unwrap();
+        let mut tasks = self.introducing.lock_unpoisoned();
         if tasks.contains_key(&peer) {
             return;
         }
@@ -1134,11 +1135,11 @@ impl Node {
                 let (mut wait, give_up) = (retry, Instant::now() + UPDATE_GIVE_UP);
                 let seq = unix_millis() as u64;
                 loop {
-                    if !contacts.lock().unwrap().contains(&peer) {
+                    if !contacts.lock_unpoisoned().contains(&peer) {
                         break;
                     }
                     // O relay é o de agora (pode ter mudado entre as tentativas); sem endereço que alguém de fora use, espera.
-                    let reach = own.lock().unwrap().clone().map(|r| update::Reach { addr: r.addr, onion: r.onion, link: r.link });
+                    let reach = own.lock_unpoisoned().clone().map(|r| update::Reach { addr: r.addr, onion: r.onion, link: r.link });
                     if let Some(reach) = reach
                         && dialer.deliver_intro(peer, &Intro { seq, name: name.clone(), reach }, INTRO_ACK_WAIT).await
                     {
@@ -1150,7 +1151,7 @@ impl Node {
                     tokio::time::sleep(wait).await;
                     wait = (wait * 2).min(UPDATE_MAX_WAIT);
                 }
-                tasks_done.lock().unwrap().remove(&peer);
+                tasks_done.lock_unpoisoned().remove(&peer);
             }),
         );
     }
@@ -1158,25 +1159,25 @@ impl Node {
     /// Contatos a quem [`Node::introduce`] ainda não entregou (sem confirmação até agora), para o app guardar e
     /// chamar `introduce` de novo no próximo início.
     pub fn pending_introductions(&self) -> Vec<[u8; 32]> {
-        self.introducing.lock().unwrap().keys().copied().collect()
+        self.introducing.lock_unpoisoned().keys().copied().collect()
     }
 
     /// Quem adicionou esta pessoa e se apresentou desde a última chamada. Cada um já foi confirmado a quem
     /// mandou, mas nada mudou aqui: o app decide se vira contato ([`Node::add_contact`]). Fica vazio com
     /// [`NodeConfig::introductions`] desligado.
     pub fn take_introductions(&self) -> Vec<Introduced> {
-        std::mem::take(&mut *self.introduced.lock().unwrap())
+        std::mem::take(&mut *self.introduced.lock_unpoisoned())
     }
 
     /// Contato removido: deixa de ser atendido e some o endereço dele guardado (`known` e `hints`).
     pub fn forget(&self, peer: &[u8; 32]) {
-        if let Some(task) = self.introducing.lock().unwrap().remove(peer) {
+        if let Some(task) = self.introducing.lock_unpoisoned().remove(peer) {
             task.abort();
         }
-        self.phone.contacts().lock().unwrap().retain(|k| k != peer);
-        self.known.lock().unwrap().remove(peer);
-        self.hints.lock().unwrap().remove(peer);
-        self.history.lock().unwrap().remove(peer);
+        self.phone.contacts().lock_unpoisoned().retain(|k| k != peer);
+        self.known.lock_unpoisoned().remove(peer);
+        self.hints.lock_unpoisoned().remove(peer);
+        self.history.lock_unpoisoned().remove(peer);
     }
 
     pub fn public_key(&self) -> [u8; 32] {
@@ -1195,13 +1196,13 @@ impl Node {
 
     /// Endereço do relay como foi informado ou aberto por UPnP (na falta, o local).
     pub fn published_addr(&self) -> String {
-        self.addr.lock().unwrap().clone()
+        self.addr.lock_unpoisoned().clone()
     }
 
     /// Relay desta máquina como os outros o alcançam (endereço público ou, na falta, o da rede local), para
     /// montar o código de contato direto. `None` se não há endereço que alguém de fora use.
     pub fn relay_info(&self) -> Option<RelayInfo> {
-        self.own.lock().unwrap().clone()
+        self.own.lock_unpoisoned().clone()
     }
 
     /// Guarda o relay que `peer` informou (veja [`Dialer::add_hint`]).
@@ -1216,31 +1217,31 @@ impl Node {
 
     /// Últimos endereços de relay conhecidos por contato, para guardar e devolver em [`NodeConfig::known`].
     pub fn known(&self) -> Vec<([u8; 32], RelayInfo)> {
-        self.known.lock().unwrap().iter().map(|(k, v)| (*k, v.clone())).collect()
+        self.known.lock_unpoisoned().iter().map(|(k, v)| (*k, v.clone())).collect()
     }
 
     /// Relays que contatos mandaram nos convites e que ainda não foram confirmados por uma chamada, para
     /// guardar e devolver em [`NodeConfig::hints`]. Ligar de volta para quem te ligou funciona sem outro endereço.
     pub fn hints(&self) -> Vec<([u8; 32], RelayInfo)> {
-        self.hints.lock().unwrap().iter().map(|(k, v)| (*k, v.clone())).collect()
+        self.hints.lock_unpoisoned().iter().map(|(k, v)| (*k, v.clone())).collect()
     }
 
     /// Endereços antigos de relay por contato, do mais novo ao mais velho (até [`HISTORY`] por contato), para
     /// guardar e devolver em [`NodeConfig::history`]. Quem mudou de endereço sem avisar ainda é achado por eles.
     pub fn history(&self) -> Vec<([u8; 32], RelayInfo)> {
-        self.history.lock().unwrap().iter().flat_map(|(k, v)| v.iter().map(|r| (*k, r.clone()))).collect()
+        self.history.lock_unpoisoned().iter().flat_map(|(k, v)| v.iter().map(|r| (*k, r.clone()))).collect()
     }
 
     /// Motivo de um convite descartado em silêncio (veja [`Phone::take_notice`]), aviso de que um contato
     /// mandou o endereço novo dele ou de que o endereço deste nó mudou, se houve; uma vez só.
     pub fn take_notice(&self) -> Option<String> {
-        self.phone.take_notice().or_else(|| self.update_notice.lock().unwrap().take())
+        self.phone.take_notice().or_else(|| self.update_notice.lock_unpoisoned().take())
     }
 
     pub async fn next_incoming(&mut self) -> Option<IncomingCall> {
         let inc = self.phone.next_incoming().await?;
         if let Some(h) = inc.relay_hint() {
-            self.hints.lock().unwrap().insert(*inc.caller().as_bytes(), RelayInfo { addr: h.addr.to_string(), onion: h.onion, link: h.link });
+            self.hints.lock_unpoisoned().insert(*inc.caller().as_bytes(), RelayInfo { addr: h.addr.to_string(), onion: h.onion, link: h.link });
         }
         Some(inc)
     }
@@ -1274,7 +1275,7 @@ impl Drop for Node {
         if let Some(t) = &self.renew {
             t.abort();
         }
-        for t in self.introducing.lock().unwrap().values() {
+        for t in self.introducing.lock_unpoisoned().values() {
             t.abort();
         }
         for t in &self.background {

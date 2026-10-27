@@ -1,5 +1,6 @@
 //! Laço do nó: atende, disca e executa os comandos da janela.
 
+use clam::sync::LockExt;
 use super::*;
 
 /// Roda o nó até `stop`: atende contatos sozinho e disca quando a janela pede.
@@ -39,8 +40,8 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
     }
     out.line(format!("{} endereço(s) de contatos guardados em {} ({} deles só vieram de convites)", cfg.known.len() + cfg.hints.len(), known_path().display(), cfg.hints.len()));
     let mut node = Node::start(cfg).await.map_err(|e| format!("não ficou online: {e}"))?;
-    *shared.status.lock().unwrap() = format!("online em {}", node.published_addr());
-    *shared.relay.lock().unwrap() = node.relay_info();
+    *shared.status.lock_unpoisoned() = format!("online em {}", node.published_addr());
+    *shared.relay.lock_unpoisoned() = node.relay_info();
     out.line(format!("online; os outros chegam em {}", node.published_addr()));
     if let Some(n) = node.network_note() {
         out.line(n);
@@ -58,7 +59,7 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
     if !form.my_name.trim().is_empty() {
         hub.run(|s, now| s.set_name(form.my_name.trim(), now));
     }
-    *shared.servers.lock().unwrap() = Some(hub.clone());
+    *shared.servers.lock_unpoisoned() = Some(hub.clone());
     let mut servers_saved = hub.read(|s, _| s.export());
     let mut servers_check = tokio::time::Instant::now();
     // A sala de voz em que estou: o canal da tarefa e quem está na malha (esses são atendidos sem tocar).
@@ -194,10 +195,10 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
                     shared.hangup.store(false, Ordering::Relaxed);
                     // Marca a sala antes de abrir o áudio: a janela não pode ver "em chamada" sem "em sala" e
                     // abrir a aba Chamada.
-                    shared.room.lock().unwrap().at = Some((server, room_id));
+                    shared.room.lock_unpoisoned().at = Some((server, room_id));
                     if let Err(e) = hub.try_act(|s, now| s.join_room(&server, Some(room_id), now)) {
                         out.line(format!("não entrei na sala: {e}"));
-                        shared.room.lock().unwrap().clear();
+                        shared.room.lock_unpoisoned().clear();
                         shared.in_call.store(false, Ordering::Relaxed);
                         continue;
                     }
@@ -297,7 +298,7 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
                 node.add_contact(i.peer, Some(clam::node::RelayInfo { addr: r.addr.clone(), onion: r.onion, link: r.link }));
                 out.line(format!("{} ({}) adicionou você e se apresentou: já está nos seus contatos", if i.name.is_empty() { "alguém" } else { &i.name }, &hex(&i.peer)[..8]));
             }
-            shared.introduced.lock().unwrap().extend(introduced);
+            shared.introduced.lock_unpoisoned().extend(introduced);
             saver.sync(&book_of(&node), &out);
         }
         // Os endereços mudam sozinhos (renovação na DHT, convites): grava quando mudam, não só
@@ -312,7 +313,7 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
     if let Some((tx, _)) = room.take() {
         let _ = tx.send(RoomCmd::Leave);
     }
-    *shared.servers.lock().unwrap() = None;
+    *shared.servers.lock_unpoisoned() = None;
     shared.hangup.store(true, Ordering::Relaxed);
     Ok(())
 }

@@ -24,6 +24,7 @@
 //! [`ScreenEvent`] em [`ActiveCall::next_screen`]. A chamada que ligou também precisa estar
 //! registrada no telefone da própria máquina ([`PhoneLink`]) para receber esse circuito.
 
+use crate::sync::LockExt;
 use std::{
     collections::HashMap,
     io,
@@ -164,7 +165,7 @@ impl ActiveCall {
     }
 
     pub fn stats(&self) -> CallStats {
-        *self.stats.lock().expect("estatísticas")
+        *self.stats.lock_unpoisoned()
     }
 
     /// Desliga: manda o pacote de desligar e encerra.
@@ -302,11 +303,11 @@ async fn drive<C: Codec>(
                 for f in call.playout(now()) {
                     let _ = speaker.try_send(f);
                 }
-                *stats.lock().expect("estatísticas") = call.stats();
+                *stats.lock_unpoisoned() = call.stats();
             }
         }
     }
-    *stats.lock().expect("estatísticas") = call.stats();
+    *stats.lock_unpoisoned() = call.stats();
 }
 
 /// Entrega ao app os quadros de tela prontos e avisa quando a contagem de quadros perdidos mudou.
@@ -459,11 +460,11 @@ impl PhoneLink {
     /// outro lado poder ligar de volta (`None`: não leva). Vale também para o que já foi criado
     /// por [`Phone::link`].
     pub fn set_relay_hint(&self, hint: Option<RelayHint>) {
-        *self.hint.lock().unwrap() = hint;
+        *self.hint.lock_unpoisoned() = hint;
     }
 
     fn current_hint(link: Option<&PhoneLink>) -> Option<RelayHint> {
-        link.and_then(|l| l.hint.lock().unwrap().clone())
+        link.and_then(|l| l.hint.lock_unpoisoned().clone())
     }
 }
 
@@ -497,32 +498,32 @@ pub struct ScreenShare {
 impl ScreenShare {
     /// Entrega um quadro codificado. `Ok(false)`: descartado porque a fila encheu e falta um quadro-chave.
     pub fn push(&self, data: &[u8], keyframe: bool) -> Result<bool, MediaError> {
-        self.stream.lock().expect("tela").push_frame(data, keyframe)
+        self.stream.lock_unpoisoned().push_frame(data, keyframe)
     }
 
     /// Quem assiste perdeu imagem (ou a fila encheu): force um quadro-chave no codec. Consome o pedido.
     pub fn keyframe_wanted(&self) -> bool {
-        self.stream.lock().expect("tela").take_keyframe_request()
+        self.stream.lock_unpoisoned().take_keyframe_request()
     }
 
     pub fn stats(&self) -> ScreenStats {
-        self.stream.lock().expect("tela").stats()
+        self.stream.lock_unpoisoned().stats()
     }
 
     /// O último relatório de perda de quem assiste, uma vez só.
     pub fn take_report(&self) -> Option<LossReport> {
-        self.stream.lock().expect("tela").take_report()
+        self.stream.lock_unpoisoned().take_report()
     }
 
     /// Há quanto tempo chegou o último relatório de perda e quantos pacotes de vídeo saíram desde então;
     /// `None` se nunca chegou (quem assiste pode ser uma versão sem relatórios).
     pub fn report_age(&self) -> Option<(Duration, u64)> {
-        self.stream.lock().expect("tela").report_age()
+        self.stream.lock_unpoisoned().report_age()
     }
 
     /// Fragmentos esperando saída no circuito.
     pub fn queued(&self) -> usize {
-        self.stream.lock().expect("tela").queued()
+        self.stream.lock_unpoisoned().queued()
     }
 
     /// Avisa quem assiste e encerra o circuito.
@@ -572,7 +573,7 @@ pub async fn share_screen_slot(mut client: CircuitClient, keys: &CallKeys, wait:
     let max_burst = if slot == SCREEN_SLOT { 1.0 } else { OPEN_SCREEN_BURST };
     let stream = Arc::new(Mutex::new(ScreenStream::new(keys)));
     let stopping = Arc::new(AtomicBool::new(false));
-    let hello = stream.lock().expect("tela").next_packet()?;
+    let hello = stream.lock_unpoisoned().next_packet()?;
     client.send(&hello).await.map_err(|_| CallError::NoCircuit)?;
     let task = {
         let (stream, stopping) = (stream.clone(), stopping.clone());
@@ -586,7 +587,7 @@ pub async fn share_screen_slot(mut client: CircuitClient, keys: &CallKeys, wait:
                     _ = tick.tick() => {
                         if stopping.load(Ordering::Relaxed) {
                             for _ in 0..3 {
-                                let p = stream.lock().expect("tela").stop_packet();
+                                let p = stream.lock_unpoisoned().stop_packet();
                                 if let Ok(p) = p {
                                     let _ = client.send(&p).await;
                                 }
@@ -599,7 +600,7 @@ pub async fn share_screen_slot(mut client: CircuitClient, keys: &CallKeys, wait:
                         last = now;
                         while credit >= 1.0 {
                             let p = {
-                                let mut s = stream.lock().expect("tela");
+                                let mut s = stream.lock_unpoisoned();
                                 s.has_data().then(|| s.next_packet())
                             };
                             let Some(Ok(p)) = p else { break };
@@ -608,7 +609,7 @@ pub async fn share_screen_slot(mut client: CircuitClient, keys: &CallKeys, wait:
                         }
                     }
                     ev = client.next_event() => match ev {
-                        Some(Event::Data(d)) => { let _ = stream.lock().expect("tela").receive(&d); }
+                        Some(Event::Data(d)) => { let _ = stream.lock_unpoisoned().receive(&d); }
                         Some(_) => {}
                         None => break,
                     },
@@ -786,7 +787,7 @@ impl Phone {
     /// Motivo do último convite descartado em silêncio (remetente fora dos contatos, ou relógios
     /// diferentes), uma vez só. Só para diagnóstico local: o remetente não recebe resposta.
     pub fn take_notice(&self) -> Option<String> {
-        self.notice.lock().unwrap().take()
+        self.notice.lock_unpoisoned().take()
     }
 
     /// Fila das atualizações de endereço que contatos mandam (cada uma já foi confirmada ao contato). Só se
@@ -809,7 +810,7 @@ impl Phone {
 
     /// Passa a atender os quadros de servidor com `handler` (veja [`ServerHandler`]).
     pub fn set_server_handler(&self, handler: ServerHandler) {
-        *self.servers.lock().unwrap() = Some(handler);
+        *self.servers.lock_unpoisoned() = Some(handler);
     }
 
     /// Próximo convite de um contato. `None` = o telefone parou.
@@ -952,7 +953,7 @@ async fn run_actor(
                             server_window = (Instant::now(), 0);
                         }
                         server_window.1 += 1;
-                        let handler = servers.lock().unwrap().clone();
+                        let handler = servers.lock_unpoisoned().clone();
                         if server_window.1 <= SERVER_PER_MINUTE
                             && let Some(handler) = handler
                             && let Some(ack) = handler(&data)
@@ -981,7 +982,7 @@ async fn run_actor(
                         continue;
                     }
                     // Aviso de endereço de um contato: confirma e entrega, sem tocar o telefone.
-                    let known: Vec<[u8; 32]> = contacts.lock().unwrap().clone();
+                    let known: Vec<[u8; 32]> = contacts.lock_unpoisoned().clone();
                     if let Some((peer, record)) = update::open_update(&secret, known, &data) {
                         if let Ok(ack) = update::seal_ack(&secret, &PublicKey::from(peer), record.seq)
                             && let Some(w) = writers.get(&conn)
@@ -992,10 +993,10 @@ async fn run_actor(
                         continue;
                     }
                     let invite = Incoming::parse(&secret, &data).ok().filter(|i| {
-                        let known = contacts.lock().unwrap().contains(i.caller().as_bytes()) || room_peers.lock().unwrap().contains(i.caller().as_bytes());
+                        let known = contacts.lock_unpoisoned().contains(i.caller().as_bytes()) || room_peers.lock_unpoisoned().contains(i.caller().as_bytes());
                         if !known {
                             let hex: String = i.caller().as_bytes()[..4].iter().map(|b| format!("{b:02x}")).collect();
-                            *notice.lock().unwrap() = Some(format!("convite de {hex}... ignorado: essa chave não está em Contatos"));
+                            *notice.lock_unpoisoned() = Some(format!("convite de {hex}... ignorado: essa chave não está em Contatos"));
                             return false;
                         }
                         // O convite não leva prazo que dependa de relógio: o mesmo convite repetido não toca de novo.

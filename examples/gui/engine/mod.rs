@@ -2,6 +2,7 @@
 //!
 //! `sound` (áudio e controles), `screen` (tela compartilhada), `call` (conversa 1:1), `node` (laço do nó que recebe os comandos).
 
+use clam::sync::LockExt;
 use std::{
     sync::{
         Arc, Mutex,
@@ -46,7 +47,7 @@ pub(crate) struct Sink {
 
 impl Sink {
     pub(crate) fn line(&self, s: impl Into<String>) {
-        let mut l = self.log.lock().unwrap();
+        let mut l = self.log.lock_unpoisoned();
         l.push(s.into());
         if l.len() > 500 {
             l.drain(..100);
@@ -121,7 +122,7 @@ mod tests {
         for i in 0..650 {
             s.line(format!("linha {i}"));
         }
-        let l = s.log.lock().unwrap();
+        let l = s.log.lock_unpoisoned();
         assert!(l.len() <= 500);
         assert_eq!(l.last().unwrap(), "linha 649");
     }

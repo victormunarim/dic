@@ -11,6 +11,7 @@
 //! corte grande da taxa recomeçam o processo, que sempre abre com um quadro-chave. A saída chega com
 //! alguns quadros de atraso, então [`HwEncoder::encode`] devolve o que já saiu, não o quadro que entrou.
 
+use crate::sync::LockExt;
 use std::{
     io::{Read, Write},
     process::{Child, Command, Stdio},
@@ -165,7 +166,7 @@ impl HwEncoder {
     /// O filho morreu ou não produziu nada: tenta de novo algumas vezes, depois desiste.
     fn fail(&mut self) -> Result<Option<Au>, HwError> {
         self.failures += 1;
-        let why = self.run.as_ref().map(|r| r.errors.lock().unwrap().clone()).unwrap_or_default();
+        let why = self.run.as_ref().map(|r| r.errors.lock_unpoisoned().clone()).unwrap_or_default();
         self.run = None;
         self.awaiting_key = true;
         if self.failures >= MAX_FAILURES { Err(HwError::Dead(why)) } else { Ok(None) }
@@ -226,7 +227,7 @@ impl HwEncoder {
         std::thread::spawn(move || {
             let mut text = String::new();
             let _ = stderr.read_to_string(&mut text);
-            *seen.lock().unwrap() = text.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or_default().to_string();
+            *seen.lock_unpoisoned() = text.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or_default().to_string();
         });
         self.awaiting_key = true;
         self.run = Some(Run { child, feed, out, dims, kbps, started: Instant::now(), got_any: false, errors });

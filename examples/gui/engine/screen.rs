@@ -1,5 +1,6 @@
 //! Tela compartilhada numa chamada 1:1: captura e envio de quem transmite, decodificação de quem assiste.
 
+use clam::sync::LockExt;
 use std::{collections::HashMap, sync::atomic::AtomicU64};
 
 use super::*;
@@ -40,7 +41,7 @@ pub(crate) struct ScreenState {
 
 impl ScreenState {
     pub(crate) fn set_image(&self, who: [u8; 32], img: Option<RawFrame>) {
-        let mut m = self.images.lock().unwrap();
+        let mut m = self.images.lock_unpoisoned();
         match img {
             Some(img) => {
                 m.insert(who, (self.seq.fetch_add(1, Ordering::Relaxed), img));
@@ -54,7 +55,7 @@ impl ScreenState {
     /// Linha de diagnóstico da janela: lado que recebe e lado que envia.
     pub(crate) fn diagnostics(&self) -> String {
         let n = |i: usize| self.rx[i].load(Ordering::Relaxed);
-        let mut out = self.tx_info.lock().unwrap().clone();
+        let mut out = self.tx_info.lock_unpoisoned().clone();
         if n(0) + n(3) > 0 {
             if !out.is_empty() {
                 out.push_str(" · ");
@@ -70,7 +71,7 @@ impl ScreenState {
             c.store(0, Ordering::Relaxed);
         }
         self.want_share.store(false, Ordering::Relaxed);
-        self.images.lock().unwrap().clear();
+        self.images.lock_unpoisoned().clear();
     }
 }
 
@@ -168,10 +169,10 @@ pub(crate) async fn share_task(dialer: Dialer, peer: [u8; 32], keys: clam::media
     let st = &shared.screen;
     let fail = |why: String| {
         out.line(format!("tela: {why}"));
-        *st.note.lock().unwrap() = why;
+        *st.note.lock_unpoisoned() = why;
         st.want_share.store(false, Ordering::Relaxed);
     };
-    st.note.lock().unwrap().clear();
+    st.note.lock_unpoisoned().clear();
     let wanted = || st.want_share.load(Ordering::Relaxed) && !shared.hangup.load(Ordering::Relaxed);
     let (mut src, mut enc, private) = match start_capture(&shared, &out).await {
         Ok(x) => x,
@@ -208,7 +209,7 @@ pub(crate) async fn share_task(dialer: Dialer, peer: [u8; 32], keys: clam::media
             match pump(src.as_mut(), &mut enc, &share) {
                 Ok(true) => pushed += 1,
                 Ok(false) => skipped += 1,
-                Err(e) => *flag.screen.note.lock().unwrap() = format!("codec: {e}"),
+                Err(e) => *flag.screen.note.lock_unpoisoned() = format!("codec: {e}"),
             }
             let t = share.stats();
             let span = mark.elapsed().as_secs_f64();
@@ -216,7 +217,7 @@ pub(crate) async fn share_task(dialer: Dialer, peer: [u8; 32], keys: clam::media
                 rate = (t.packets_sent - mark_packets) as f64 / span;
                 (mark, mark_packets) = (std::time::Instant::now(), t.packets_sent);
             }
-            *flag.screen.tx_info.lock().unwrap() = format!(
+            *flag.screen.tx_info.lock_unpoisoned() = format!(
                 "enviados {pushed}, pulados {skipped} ({} pelo codificador, {} adiados com o circuito cheio, {} largados da camada alta), descartados na fila {}, saindo {rate:.0} pacotes/s, taxa {} kbps, QP {}, imagem 1/{}, codificar leva {:.0} ms, codificador {}",
                 enc.skipped, enc.held, enc.layer_dropped, t.frames_dropped, enc.bitrate() / 1000, enc.qp(), enc.scale(), enc.encode_ms,
                 match (enc.hardware(), &enc.hw_note) {
@@ -233,7 +234,7 @@ pub(crate) async fn share_task(dialer: Dialer, peer: [u8; 32], keys: clam::media
     .await;
     st.sharing.store(false, Ordering::Relaxed);
     st.want_share.store(false, Ordering::Relaxed);
-    st.tx_info.lock().unwrap().clear();
+    st.tx_info.lock_unpoisoned().clear();
     if let Ok(share) = share {
         share.stop().await;
     }
@@ -258,12 +259,12 @@ pub(crate) struct RoomCapture {
 /// Abre a captura e deixa uma thread à espera dos espectadores: só captura quando há ao menos um.
 pub(crate) async fn start_room_capture(shared: Arc<Shared>, out: Sink) -> Option<RoomCapture> {
     let st = &shared.screen;
-    st.note.lock().unwrap().clear();
+    st.note.lock_unpoisoned().clear();
     let (mut src, mut enc, private) = match start_capture(&shared, &out).await {
         Ok(x) => x,
         Err(e) => {
             out.line(format!("tela: {e}"));
-            *st.note.lock().unwrap() = e;
+            *st.note.lock_unpoisoned() = e;
             return None;
         }
     };
@@ -303,9 +304,9 @@ pub(crate) async fn start_room_capture(shared: Arc<Shared>, out: Sink) -> Option
             match pump_all(src.as_mut(), &mut enc, &refs, std::mem::take(&mut force_key)) {
                 Ok(0) => skipped += 1,
                 Ok(_) => pushed += 1,
-                Err(e) => *shared.screen.note.lock().unwrap() = format!("codec: {e}"),
+                Err(e) => *shared.screen.note.lock_unpoisoned() = format!("codec: {e}"),
             }
-            *shared.screen.tx_info.lock().unwrap() = format!(
+            *shared.screen.tx_info.lock_unpoisoned() = format!(
                 "para {} pessoas: enviados {pushed}, pulados {skipped} ({} pelo codificador, {} adiados com o circuito cheio), taxa {} kbps, QP {}, imagem 1/{}, codificar leva {:.0} ms",
                 shares.len(), enc.skipped, enc.held, enc.bitrate() / 1000, enc.qp(), enc.scale(), enc.encode_ms
             );
@@ -316,7 +317,7 @@ pub(crate) async fn start_room_capture(shared: Arc<Shared>, out: Sink) -> Option
             handle.block_on(share.stop());
         }
         shared.screen.sharing.store(false, Ordering::Relaxed);
-        shared.screen.tx_info.lock().unwrap().clear();
+        shared.screen.tx_info.lock_unpoisoned().clear();
     });
     Some(RoomCapture { ctl, private })
 }
@@ -339,14 +340,14 @@ mod tests {
         let mut dec = None;
         let f = enc.encode(&frame(64, 48, [10, 200, 10]), false).unwrap().unwrap();
         assert!(on_screen_event(&st, WHO, &mut dec, ScreenEvent::Frame(ScreenFrame { data: f.data, keyframe: f.keyframe })));
-        let (n, img) = st.images.lock().unwrap().get(&WHO).cloned().expect("imagem");
+        let (n, img) = st.images.lock_unpoisoned().get(&WHO).cloned().expect("imagem");
         assert_eq!((img.width, img.height), (64, 48));
         assert!(on_screen_event(&st, WHO, &mut dec, ScreenEvent::Stopped));
-        assert!(st.images.lock().unwrap().is_empty());
+        assert!(st.images.lock_unpoisoned().is_empty());
         // Cada imagem nova leva um número maior: a janela sabe quando refazer a textura.
         let f = enc.encode(&frame(64, 48, [200, 10, 10]), true).unwrap().unwrap();
         on_screen_event(&st, WHO, &mut dec, ScreenEvent::Frame(ScreenFrame { data: f.data, keyframe: true }));
-        assert!(st.images.lock().unwrap()[&WHO].0 > n);
+        assert!(st.images.lock_unpoisoned()[&WHO].0 > n);
     }
 
     #[test]
@@ -355,11 +356,11 @@ mod tests {
         let mut dec = None;
         let junk = ScreenFrame { data: vec![0xff; 300], keyframe: false };
         let _ = on_screen_event(&st, WHO, &mut dec, ScreenEvent::Frame(junk));
-        assert!(st.images.lock().unwrap().is_empty());
+        assert!(st.images.lock_unpoisoned().is_empty());
         let mut enc = H264Encoder::new(H264Encoder::default_bitrate()).unwrap();
         let f = enc.encode(&frame(32, 32, [1, 2, 3]), false).unwrap().unwrap();
         assert!(on_screen_event(&st, WHO, &mut dec, ScreenEvent::Frame(ScreenFrame { data: f.data, keyframe: true })));
-        assert!(st.images.lock().unwrap().contains_key(&WHO));
+        assert!(st.images.lock_unpoisoned().contains_key(&WHO));
     }
 
     #[test]
@@ -369,6 +370,6 @@ mod tests {
         st.set_image(WHO, Some(frame(2, 2, [0; 3])));
         st.reset();
         assert!(!st.want_share.load(Ordering::Relaxed));
-        assert!(st.images.lock().unwrap().is_empty());
+        assert!(st.images.lock_unpoisoned().is_empty());
     }
 }

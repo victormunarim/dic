@@ -5,6 +5,7 @@
 //! taxa pedidos por um tubo; assim não há dependência de compilação do PipeWire, só do GStreamer
 //! em tempo de execução (`gstreamer1.0-tools`, `gstreamer1.0-pipewire` e `gstreamer1.0-plugins-base`).
 
+use crate::sync::LockExt;
 use std::{
     io::Read,
     os::fd::AsRawFd,
@@ -91,7 +92,7 @@ fn read_frames(mut src: impl Read, (w, h): (usize, usize), slot: &Latest) {
             return;
         }
         if let Ok(f) = RawFrame::new(w, h, rgba) {
-            *slot.0.lock().unwrap() = Some(f);
+            *slot.0.lock_unpoisoned() = Some(f);
             slot.1.notify_one();
         }
     }
@@ -160,7 +161,7 @@ impl ScreenSource for PortalScreen {
     /// chegar logo depois do instante da consulta); `None` se nada mudou nesse tempo.
     fn grab(&mut self) -> Option<RawFrame> {
         let (slot, news) = &*self.latest;
-        let guard = slot.lock().unwrap();
+        let guard = slot.lock_unpoisoned();
         let (mut guard, _) = news.wait_timeout_while(guard, GRAB_WAIT, |f| f.is_none()).unwrap();
         guard.take()
     }
@@ -204,9 +205,9 @@ mod tests {
         bytes.extend(vec![3u8; 5]); // quadro cortado no fim do fluxo
         let slot: Latest = (Mutex::new(None), Condvar::new());
         read_frames(&bytes[..], (w, h), &slot);
-        let f = slot.0.lock().unwrap().take().expect("quadro");
+        let f = slot.0.lock_unpoisoned().take().expect("quadro");
         assert!(f.rgba.iter().all(|b| *b == 2));
-        assert!(slot.0.lock().unwrap().is_none());
+        assert!(slot.0.lock_unpoisoned().is_none());
     }
 
     /// Manual: abre o diálogo do portal de verdade. `cargo test --features portal -- --ignored real_portal`.

@@ -1,5 +1,6 @@
 //! Janela (egui): barra lateral com uma aba por assunto, no estilo do Discord, e o motor por trás.
 
+use clam::sync::LockExt;
 use std::{sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -96,7 +97,7 @@ impl App {
         if let Err(e) = self.form.save_checked() {
             self.error = format!("não deu para gravar a configuração em {}: {e}; os contatos não ficam salvos", conf_path().display());
         }
-        self.log.lock().unwrap().clear();
+        self.log.lock_unpoisoned().clear();
         let (tx, rx) = mpsc::unbounded_channel();
         let stop = Arc::new(AtomicBool::new(false));
         let done = Arc::new(AtomicBool::new(false));
@@ -145,7 +146,7 @@ impl App {
 
 impl App {
     fn sidebar(&mut self, ctx: &egui::Context, offline: bool, in_call: bool, status: &str) {
-        let in_room = self.shared.room.lock().unwrap().at.is_some();
+        let in_room = self.shared.room.lock_unpoisoned().at.is_some();
         egui::SidePanel::left("abas")
             .exact_width(76.0)
             .resizable(false)
@@ -204,7 +205,7 @@ impl App {
             self.shared.audio.muted.store(!muted, Ordering::Relaxed);
         }
         if in_call {
-            let in_room = self.shared.room.lock().unwrap().at.is_some();
+            let in_room = self.shared.room.lock_unpoisoned().at.is_some();
             let hang = egui::Button::new(RichText::new("✖").strong().size(18.0).color(Color32::WHITE)).fill(RED).corner_radius(CornerRadius::same(10)).min_size(vec2(48.0, 40.0));
             if ui.add(hang).on_hover_text(if in_room { "Sair da sala" } else { "Desligar a chamada" }).clicked() {
                 if in_room {
@@ -229,7 +230,7 @@ impl App {
     /// que ele deu a si mesmo. Quem já tinha nome não muda, e não há apresentação de volta (senão as duas pontas
     /// ficariam se apresentando para sempre).
     fn absorb_introductions(&mut self) {
-        let introduced: Vec<_> = std::mem::take(&mut *self.shared.introduced.lock().unwrap());
+        let introduced: Vec<_> = std::mem::take(&mut *self.shared.introduced.lock_unpoisoned());
         let mut added = false;
         for i in introduced {
             if !parse_contacts(&self.form.contacts).iter().any(|(_, k)| *k == i.peer) {
@@ -388,7 +389,7 @@ impl App {
         }
         card(ui, "Em chamada", "", |ui| {
             status_dot(ui, GREEN, "Conversando agora");
-            let link = self.shared.link.lock().unwrap().clone();
+            let link = self.shared.link.lock_unpoisoned().clone();
             if !link.is_empty() {
                 note(ui, format!("Linha: {link}"));
             }
@@ -411,7 +412,7 @@ impl App {
         let st = &self.shared.screen;
         let mut shown: Vec<([u8; 32], u64, egui::ColorImage)> = Vec::new();
         {
-            let images = st.images.lock().unwrap();
+            let images = st.images.lock_unpoisoned();
             self.screen_tex.retain(|k, _| images.contains_key(k));
             for (who, (seq, img)) in images.iter() {
                 if self.screen_tex.get(who).is_none_or(|(n, _)| n != seq) {
@@ -439,7 +440,7 @@ impl App {
     fn screen_ui(&mut self, ui: &mut egui::Ui) {
         let st = &self.shared.screen;
         let (wanted, sharing) = (st.want_share.load(Ordering::Relaxed), st.sharing.load(Ordering::Relaxed));
-        let note_text = st.note.lock().unwrap().clone();
+        let note_text = st.note.lock_unpoisoned().clone();
         let diag = st.diagnostics();
 
         card(ui, "Compartilhar a minha tela", "O vídeo segue cifrado de ponta a ponta, em um circuito só dele.", |ui| {
@@ -680,7 +681,7 @@ impl App {
             note(ui, "Fique offline para mudar estes ajustes.");
         }
         card(ui, "Meu código de contato", "Envie este código a quem vai ligar para você.", |ui| {
-            let relay = self.shared.relay.lock().unwrap().clone();
+            let relay = self.shared.relay.lock_unpoisoned().clone();
             match self.form.my_code(relay.as_ref()) {
                 Some(code) => {
                     egui::Frame::new().fill(DEEP).corner_radius(CornerRadius::same(8)).inner_margin(Margin::same(12)).show(ui, |ui| {
@@ -747,7 +748,7 @@ impl App {
             });
         });
         if self.form.anchor
-            && let Some(r) = self.shared.relay.lock().unwrap().clone()
+            && let Some(r) = self.shared.relay.lock_unpoisoned().clone()
         {
             card(ui, "Código da sua âncora", "", |ui| {
                 ui.horizontal(|ui| {
@@ -764,7 +765,7 @@ impl App {
         egui::Frame::new().fill(DEEP).corner_radius(CornerRadius::same(10)).inner_margin(Margin::same(14)).show(ui, |ui| {
             ui.set_width(ui.available_width());
             egui::ScrollArea::vertical().auto_shrink(false).stick_to_bottom(true).show(ui, |ui| {
-                let lines = self.log.lock().unwrap();
+                let lines = self.log.lock_unpoisoned();
                 if lines.is_empty() {
                     note(ui, "Nada ainda. Fique online e o que o programa faz aparece aqui.");
                 }
@@ -792,7 +793,7 @@ impl App {
         let due = LAST_NOTE.with(|l| l.get()).is_none_or(|t| t.elapsed() >= Duration::from_secs(1));
         if due {
             LAST_NOTE.with(|l| l.set(Some(std::time::Instant::now())));
-            self.log.lock().unwrap().push(line);
+            self.log.lock_unpoisoned().push(line);
         }
     }
 
@@ -843,7 +844,7 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         let began = std::time::Instant::now();
-        let watching = !self.shared.screen.images.lock().unwrap().is_empty();
+        let watching = !self.shared.screen.images.lock_unpoisoned().is_empty();
         if let Some(end) = LAST_FRAME_END.with(|l| l.get()) {
             // Vendo tela a janela repinta a cada 16 ms: bem mais que isso sem atualizar é a janela travada fora da
             // nossa conta (troca de buffers, eventos do sistema).
@@ -855,9 +856,9 @@ impl eframe::App for App {
         if self.done.swap(false, Ordering::Relaxed) {
             self.running = None;
             self.shared.in_call.store(false, Ordering::Relaxed);
-            self.shared.room.lock().unwrap().clear();
-            self.shared.status.lock().unwrap().clear();
-            *self.shared.relay.lock().unwrap() = None;
+            self.shared.room.lock_unpoisoned().clear();
+            self.shared.status.lock_unpoisoned().clear();
+            *self.shared.relay.lock_unpoisoned() = None;
         }
         self.absorb_introductions();
         self.update_screen_textures(ctx);
@@ -867,7 +868,7 @@ impl eframe::App for App {
         let testing = self.shared.mic_test.load(Ordering::Relaxed);
         let calling = in_call && !testing;
         // Quando a chamada começa, a aba dela abre sozinha.
-        let in_room = self.shared.room.lock().unwrap().at.is_some();
+        let in_room = self.shared.room.lock_unpoisoned().at.is_some();
         if calling && !self.was_in_call && !in_room {
             self.tab = Tab::Call;
         }
@@ -877,7 +878,7 @@ impl eframe::App for App {
         st.open_path.store(!self.form.screen_private, Ordering::Relaxed);
         st.sharp.store(self.form.screen_sharp, Ordering::Relaxed);
         st.hardware.store(self.form.screen_hardware, Ordering::Relaxed);
-        let status = self.shared.status.lock().unwrap().clone();
+        let status = self.shared.status.lock_unpoisoned().clone();
 
         self.server_rail(ctx, offline);
         self.sidebar(ctx, offline, calling, &status);

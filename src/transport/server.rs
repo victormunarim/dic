@@ -1,5 +1,6 @@
 //! Lado do relay: escuta links, repassa células e abre os fluxos de saída.
 
+use crate::sync::LockExt;
 use super::*;
 
 // ---------------------------------------------------------------------------
@@ -49,7 +50,7 @@ impl Origins {
     /// Reserva uma vaga para `ip`; `None` se a origem já tem `max`.
     fn take(self: &Arc<Self>, ip: IpAddr, max: usize) -> Option<OriginSlot> {
         let key = origin_key(ip);
-        let mut open = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut open = self.0.lock_unpoisoned();
         let n = open.get(&key).copied().unwrap_or(0);
         if n >= max {
             return None;
@@ -61,7 +62,7 @@ impl Origins {
 
 impl Drop for OriginSlot {
     fn drop(&mut self) {
-        let mut open = self.origins.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut open = self.origins.0.lock_unpoisoned();
         if let Some(n) = open.get_mut(&self.key) {
             *n -= 1;
             if *n == 0 {
@@ -346,7 +347,7 @@ mod tests {
         drop(a);
         assert!(origins.take(ip("203.0.113.7"), 2).is_some(), "a vaga solta volta");
         assert!(origins.take(ip("203.0.113.9"), 0).is_none(), "teto zero recusa tudo");
-        assert!(origins.0.lock().unwrap().get(&ip("203.0.113.9")).is_none(), "recusa não deixa rastro");
+        assert!(origins.0.lock_unpoisoned().get(&ip("203.0.113.9")).is_none(), "recusa não deixa rastro");
     }
 
     #[test]
@@ -363,6 +364,6 @@ mod tests {
     fn the_table_forgets_origins_with_no_links() {
         let origins = Arc::new(Origins::default());
         drop(origins.take(ip("203.0.113.7"), 4));
-        assert!(origins.0.lock().unwrap().is_empty());
+        assert!(origins.0.lock_unpoisoned().is_empty());
     }
 }

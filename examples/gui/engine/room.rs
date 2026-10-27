@@ -4,6 +4,7 @@
 //! disca, e a outra atende sozinha, sem tocar. Quem sai da sala (ou cai) deixa de estar na malha e sua
 //! chamada é desligada; quem cai com a malha ainda valendo é religado pelo lado que discou.
 
+use clam::sync::LockExt;
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
@@ -48,7 +49,7 @@ impl RoomLive {
 /// Peço (ou deixo de pedir) para assistir à tela de `who`, que está na minha sala. O pedido se repete
 /// sozinho enquanto a imagem não chega.
 pub(crate) fn follow(shared: &Shared, who: [u8; 32], on: bool) {
-    let mut live = shared.room.lock().unwrap();
+    let mut live = shared.room.lock_unpoisoned();
     let Some((server, _)) = live.at else { return };
     if on {
         live.watching.insert(who);
@@ -57,7 +58,7 @@ pub(crate) fn follow(shared: &Shared, who: [u8; 32], on: bool) {
         shared.screen.set_image(who, None);
     }
     drop(live);
-    if let Some(hub) = shared.servers.lock().unwrap().as_ref() {
+    if let Some(hub) = shared.servers.lock_unpoisoned().as_ref() {
         let _ = hub.try_act(|s, now| s.watch(&server, who, on, now));
     }
 }
@@ -172,7 +173,7 @@ async fn link_loop(
 /// Para de transmitir a tela e avisa a sala.
 fn stop_sharing(shared: &Shared) {
     shared.screen.want_share.store(false, Ordering::Relaxed);
-    if let Some(hub) = shared.servers.lock().unwrap().as_ref() {
+    if let Some(hub) = shared.servers.lock_unpoisoned().as_ref() {
         hub.run(|s, now| s.set_sharing(false, now));
     }
 }
@@ -223,7 +224,7 @@ pub(crate) async fn run_room(mut rx: mpsc::UnboundedReceiver<RoomCmd>, me_tx: mp
                     }
                     if let Some(f) = last {
                         if rms(&f) > SPEAKING_RMS {
-                            shared.room.lock().unwrap().spoke.insert(*key, Instant::now());
+                            shared.room.lock_unpoisoned().spoke.insert(*key, Instant::now());
                         }
                         heard.push(f);
                     }
@@ -245,12 +246,12 @@ pub(crate) async fn run_room(mut rx: mpsc::UnboundedReceiver<RoomCmd>, me_tx: mp
                     }
                 }
                 // Quem eu assisto e ainda não mandou imagem recebe o pedido de novo (o quadro pode ter se perdido).
-                let wanted: Vec<[u8; 32]> = shared.room.lock().unwrap().watching.iter().copied().collect();
+                let wanted: Vec<[u8; 32]> = shared.room.lock_unpoisoned().watching.iter().copied().collect();
                 for who in wanted {
                     if !mesh.contains(&who) {
-                        shared.room.lock().unwrap().watching.remove(&who);
+                        shared.room.lock_unpoisoned().watching.remove(&who);
                         asked.remove(&who);
-                    } else if !shared.screen.images.lock().unwrap().contains_key(&who) && asked.get(&who).is_none_or(|t| t.elapsed() >= ASK_AGAIN) {
+                    } else if !shared.screen.images.lock_unpoisoned().contains_key(&who) && asked.get(&who).is_none_or(|t| t.elapsed() >= ASK_AGAIN) {
                         asked.insert(who, Instant::now());
                         follow(&shared, who, true);
                     }
@@ -267,7 +268,7 @@ pub(crate) async fn run_room(mut rx: mpsc::UnboundedReceiver<RoomCmd>, me_tx: mp
                         let _ = tx.send(RoomCmd::Dialed(key, r));
                     });
                 }
-                shared.room.lock().unwrap().connected = links.keys().copied().collect();
+                shared.room.lock_unpoisoned().connected = links.keys().copied().collect();
             }
             cmd = rx.recv() => match cmd {
                 Some(RoomCmd::Mesh(peers)) => mesh = peers,
@@ -362,7 +363,7 @@ pub(crate) async fn run_room(mut rx: mpsc::UnboundedReceiver<RoomCmd>, me_tx: mp
     stop_sharing(&shared);
     shared.screen.reset();
     shared.audio.set_level(0.0);
-    shared.room.lock().unwrap().clear();
+    shared.room.lock_unpoisoned().clear();
     out.line("saiu da sala");
 }
 

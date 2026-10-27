@@ -31,6 +31,7 @@
 //!   ao menos um `bootstrap` ou sementes.
 //! - Sybil: veja [`crate::descriptor`].
 
+use crate::sync::LockExt;
 use std::{
     sync::{Arc, Mutex},
     time::Duration,
@@ -88,7 +89,7 @@ impl Discovery {
     /// Valida e guarda um descritor recebido por qualquer canal.
     pub fn ingest(&self, bytes: &[u8]) -> Result<Inserted, InsertError> {
         let now = (self.clock)();
-        self.dir.lock().expect("lock").insert_bytes(bytes, now)
+        self.dir.lock_unpoisoned().insert_bytes(bytes, now)
     }
 
     /// Carrega sementes: um descritor em hexadecimal por linha; `#` inicia comentário.
@@ -105,11 +106,11 @@ impl Discovery {
     /// Relays válidos agora, no formato do gerente de circuitos.
     pub fn candidates(&self) -> Vec<Candidate> {
         let now = (self.clock)();
-        self.dir.lock().expect("lock").candidates(now)
+        self.dir.lock_unpoisoned().candidates(now)
     }
 
     pub fn len(&self) -> usize {
-        self.dir.lock().expect("lock").len()
+        self.dir.lock_unpoisoned().len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -117,7 +118,7 @@ impl Discovery {
     }
 
     fn export(&self) -> Vec<Vec<u8>> {
-        self.dir.lock().expect("lock").export()
+        self.dir.lock_unpoisoned().export()
     }
 }
 

@@ -1,5 +1,6 @@
 //! Microfone, alto-falante e os ajustes de áudio da janela.
 
+use clam::sync::LockExt;
 use super::*;
 
 #[cfg(feature = "audio")]
@@ -102,10 +103,10 @@ const FAR_HOLD_FRAMES: u32 = 8;
 
 impl Controls {
     pub(crate) fn prefs(&self) -> AudioPrefs {
-        *self.prefs.lock().unwrap_or_else(|e| e.into_inner())
+        *self.prefs.lock_unpoisoned()
     }
     pub(crate) fn set_prefs(&self, p: AudioPrefs) {
-        *self.prefs.lock().unwrap_or_else(|e| e.into_inner()) = p;
+        *self.prefs.lock_unpoisoned() = p;
     }
     pub(crate) fn volume(&self) -> f32 {
         self.prefs().volume
@@ -153,7 +154,7 @@ impl Controls {
     /// se estiver mudo (no mudo o medidor fica parado).
     pub(crate) fn outgoing(&self, f: &mut [i16]) {
         let prefs = self.prefs();
-        let m = self.voice.lock().unwrap_or_else(|e| e.into_inner()).process(f, &prefs, self.far_now());
+        let m = self.voice.lock_unpoisoned().process(f, &prefs, self.far_now());
         if self.muted.load(Ordering::Relaxed) {
             self.level.store(0f32.to_bits(), Ordering::Relaxed);
             f.fill(0);

@@ -5,6 +5,7 @@
 //! por destinatário, e o relógio e o endereço do nó são entregues ao motor. Quadro perdido não é reenviado:
 //! a presença e a sincronização do motor já se repetem sozinhas.
 
+use crate::sync::LockExt;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     sync::{Arc, Mutex},
@@ -63,7 +64,7 @@ impl Inner {
             // Fila cheia: o quadro cai, como o perdido no caminho (a presença e a sincronização se repetem).
             let _ = self.send.try_send(o);
         }
-        let mut events = self.events.lock().unwrap();
+        let mut events = self.events.lock_unpoisoned();
         for e in out.events {
             match e {
                 Event::Address { key, reach } => self.dialer.add_hint(key, RelayInfo { addr: reach.addr, onion: reach.onion, link: reach.link }),
@@ -96,21 +97,21 @@ impl ServerHub {
             let inner = inner.clone();
             Arc::new(move |frame: &[u8]| {
                 // Convites só vêm de contatos: a lista é copiada antes para não segurar as duas travas juntas.
-                let known: Vec<[u8; 32]> = contacts.lock().unwrap().clone();
-                let out = inner.servers.lock().unwrap().handle_with(frame, now(), &known);
+                let known: Vec<[u8; 32]> = contacts.lock_unpoisoned().clone();
+                let out = inner.servers.lock_unpoisoned().handle_with(frame, now(), &known);
                 inner.dispatch(out).map(|f| f.to_vec())
             })
         };
         phone.set_server_handler(handler);
         let tasks = vec![tokio::spawn(deliver_loop(inner.clone(), queue)), tokio::spawn(clock(inner.clone(), own))];
-        *inner.tasks.lock().unwrap() = tasks;
+        *inner.tasks.lock_unpoisoned() = tasks;
         Self { inner }
     }
 
     /// Muda o estado e manda o que a mudança pede.
     pub fn run(&self, f: impl FnOnce(&mut Servers, u64) -> Output) {
         let out = {
-            let mut s = self.inner.servers.lock().unwrap();
+            let mut s = self.inner.servers.lock_unpoisoned();
             f(&mut s, now())
         };
         self.inner.dispatch(out);
@@ -119,7 +120,7 @@ impl ServerHub {
     /// Como [`run`](Self::run), para o que pode falhar e devolve algo (o servidor criado, a sala criada...).
     pub fn try_run<T>(&self, f: impl FnOnce(&mut Servers, u64) -> Result<(T, Output), ServerError>) -> Result<T, ServerError> {
         let result = {
-            let mut s = self.inner.servers.lock().unwrap();
+            let mut s = self.inner.servers.lock_unpoisoned();
             f(&mut s, now())
         };
         let (value, out) = result?;
@@ -134,22 +135,22 @@ impl ServerHub {
 
     /// Lê o estado (visões, exportação...).
     pub fn read<R>(&self, f: impl FnOnce(&Servers, u64) -> R) -> R {
-        f(&self.inner.servers.lock().unwrap(), now())
+        f(&self.inner.servers.lock_unpoisoned(), now())
     }
 
     /// Eventos desde a última chamada, do mais velho ao mais novo.
     pub fn take_events(&self) -> Vec<Event> {
-        self.inner.events.lock().unwrap().drain(..).collect()
+        self.inner.events.lock_unpoisoned().drain(..).collect()
     }
 
     /// Chave pública desta pessoa.
     pub fn my_key(&self) -> [u8; 32] {
-        self.inner.servers.lock().unwrap().my_key()
+        self.inner.servers.lock_unpoisoned().my_key()
     }
 
     /// Para as tarefas de rede (o nó chama ao parar).
     pub fn stop(&self) {
-        for t in self.inner.tasks.lock().unwrap().drain(..) {
+        for t in self.inner.tasks.lock_unpoisoned().drain(..) {
             t.abort();
         }
     }
@@ -169,10 +170,10 @@ async fn clock(inner: Arc<Inner>, own: Arc<Mutex<Option<RelayInfo>>>) {
     let mut ticks = tokio::time::interval(Duration::from_secs(1));
     loop {
         ticks.tick().await;
-        let mine = own.lock().unwrap().clone();
+        let mine = own.lock_unpoisoned().clone();
         let first = last.is_none();
         let out = {
-            let mut s = inner.servers.lock().unwrap();
+            let mut s = inner.servers.lock_unpoisoned();
             let mut out = Output::default();
             if last.as_ref() != Some(&mine) {
                 let reach = mine.clone().map(|r| Reach { addr: r.addr, onion: r.onion, link: r.link });
@@ -242,23 +243,23 @@ async fn deliver(inner: &Inner, peer: [u8; 32], batch: Vec<Outbound>) {
     let invites: Vec<usize> = (0..batch.len()).filter(|i| batch[*i].server == INVITE_SERVER).collect();
     let got = Mutex::new(HashSet::new());
     let acked = |i: usize, reply: &[u8]| {
-        let ok = inner.servers.lock().unwrap().is_ack(&batch[i], reply);
+        let ok = inner.servers.lock_unpoisoned().is_ack(&batch[i], reply);
         if ok {
-            got.lock().unwrap().insert(i);
+            got.lock_unpoisoned().insert(i);
         }
         ok
     };
     let confirmed = inner.dialer.deliver_batch(peer, &frames, acked, ACK_WAIT, !invites.is_empty()).await;
-    if !invites.is_empty() && invites.iter().all(|i| got.lock().unwrap().contains(i)) {
-        inner.servers.lock().unwrap().invite_delivered(&peer, now());
+    if !invites.is_empty() && invites.iter().all(|i| got.lock_unpoisoned().contains(i)) {
+        inner.servers.lock_unpoisoned().invite_delivered(&peer, now());
     }
     if confirmed > 0 {
         return;
     }
     // Nada confirmado: o membro pode ter mudado de endereço. Procura o registro que ele deixou para os membros.
-    let shared = inner.servers.lock().unwrap().shared_secrets(&peer);
+    let shared = inner.servers.lock_unpoisoned().shared_secrets(&peer);
     let due = {
-        let mut searched = inner.searched.lock().unwrap();
+        let mut searched = inner.searched.lock_unpoisoned();
         searched.retain(|_, at| at.elapsed() < SEARCH_EVERY);
         !shared.is_empty() && searched.insert(peer, Instant::now()).is_none()
     };

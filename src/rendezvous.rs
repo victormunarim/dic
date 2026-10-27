@@ -32,6 +32,7 @@
 //! Pedidos: `1 ‖ chave (32) ‖ sal (32)` (ler) e `2 ‖ chave (32) ‖ assinatura (64) ‖ seq (8) ‖ sal (32) ‖ valor` (gravar).
 //! Respostas: `1 ‖ valor` ou `1` (achou/gravou) e `0` (não achou/falhou).
 
+use crate::sync::LockExt;
 use std::{
     collections::HashMap,
     io,
@@ -258,7 +259,7 @@ impl Anchor {
 
     /// Itens guardados agora (sem contar os expirados que ainda não saíram).
     pub fn len(&self) -> usize {
-        self.items.lock().unwrap().len()
+        self.items.lock_unpoisoned().len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -269,7 +270,7 @@ impl Anchor {
         if item.value.len() != RECORD_LEN || !item.verify() {
             return false;
         }
-        let mut items = self.items.lock().unwrap();
+        let mut items = self.items.lock_unpoisoned();
         let target = (item.key, item.salt);
         if items.get(&target).is_some_and(|(old, at)| at.elapsed() < ANCHOR_KEEP && old.seq >= item.seq) {
             return false;
@@ -289,7 +290,7 @@ impl Anchor {
 
 impl Store for Anchor {
     async fn read(&self, key: &[u8; 32], salt: &[u8; 32]) -> Option<Vec<u8>> {
-        let items = self.items.lock().unwrap();
+        let items = self.items.lock_unpoisoned();
         items.get(&(*key, *salt)).filter(|(_, at)| at.elapsed() < ANCHOR_KEEP).map(|(item, _)| item.value.clone())
     }
 
@@ -310,7 +311,7 @@ impl Budget {
     }
 
     fn take(&self) -> bool {
-        let mut b = self.window.lock().unwrap();
+        let mut b = self.window.lock_unpoisoned();
         if b.0.elapsed() >= Duration::from_secs(60) {
             *b = (Instant::now(), 0);
         }

@@ -171,6 +171,7 @@ fn next_wait(now: u64, epoch_secs: u64, lead: u64, refresh_secs: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sync::LockExt;
     use crate::{epoch_of, DEFAULT_EPOCH_SECS as E};
     use rand_core::OsRng;
     use std::sync::Mutex;
@@ -185,7 +186,7 @@ mod tests {
 
     impl RecordStore for Fake {
         fn put(&self, key: [u8; 32], value: Vec<u8>) {
-            self.puts.lock().unwrap().push((key, value));
+            self.puts.lock_unpoisoned().push((key, value));
         }
         fn get(&self, _: &[u8; 32]) -> Option<Vec<u8>> {
             None
@@ -194,19 +195,19 @@ mod tests {
 
     impl TopicControl for Fake {
         fn subscribe(&self, t: &str) {
-            self.topics.lock().unwrap().insert(t.into());
+            self.topics.lock_unpoisoned().insert(t.into());
         }
         fn unsubscribe(&self, t: &str) {
-            self.topics.lock().unwrap().remove(t);
+            self.topics.lock_unpoisoned().remove(t);
         }
     }
 
     impl Fake {
         fn put_count(&self) -> usize {
-            self.puts.lock().unwrap().len()
+            self.puts.lock_unpoisoned().len()
         }
         fn has_put(&self, key: &[u8; 32]) -> bool {
-            self.puts.lock().unwrap().iter().any(|(k, _)| k == key)
+            self.puts.lock_unpoisoned().iter().any(|(k, _)| k == key)
         }
     }
 
@@ -259,10 +260,10 @@ mod tests {
         let id = r.keys.lookup_id(epoch_of(BASE, E));
         assert!(r.store.has_put(&id));
         assert!(!r.store.has_put(&r.keys.lookup_id(epoch_of(BASE, E) + 1)));
-        let rec = r.store.puts.lock().unwrap().iter().find(|(k, _)| *k == id).unwrap().1.clone();
+        let rec = r.store.puts.lock_unpoisoned().iter().find(|(k, _)| *k == id).unwrap().1.clone();
         let got = presence::open(&r.keys, &r.signer.verifying_key(), &id, &rec).unwrap();
         assert_eq!(got, vec![b"relay:4001".to_vec()]);
-        assert_eq!(r.store.topics.lock().unwrap().len(), 4);
+        assert_eq!(r.store.topics.lock_unpoisoned().len(), 4);
     }
 
     #[tokio::test(start_paused = true)]
@@ -290,7 +291,7 @@ mod tests {
         let old = r.circle.topic(crate::circle::TopicKind::Presence, e);
         let newest = r.circle.topic(crate::circle::TopicKind::Presence, e + 2);
         advance(E + E / 2).await;
-        let topics = r.store.topics.lock().unwrap();
+        let topics = r.store.topics.lock_unpoisoned();
         assert!(!topics.contains(&old));
         assert!(topics.contains(&newest));
         assert_eq!(topics.len(), 4);

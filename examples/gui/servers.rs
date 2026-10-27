@@ -1,5 +1,6 @@
 //! Servidores: trilho sempre visível com os servidores, e a aba com salas de voz, quem está nelas e os membros online/offline.
 
+use clam::sync::LockExt;
 use std::sync::atomic::Ordering;
 
 use clam::server::{Output, Role, ServerId, ServerView};
@@ -39,7 +40,7 @@ fn role_name(r: Role) -> &'static str {
 
 impl App {
     pub(crate) fn servers_tab(&mut self, ui: &mut egui::Ui, offline: bool, busy: bool) {
-        let hub = self.shared.servers.lock().unwrap().clone();
+        let hub = self.shared.servers.lock_unpoisoned().clone();
         let Some(hub) = hub.filter(|_| !offline) else {
             card(ui, "Servidores", "Grupos de pessoas com salas de voz, sem servidor no meio: cada membro guarda o grupo e fica de pé enquanto estiver online.", |ui| {
                 note(ui, "Fique online (aba Configurações) para ver e usar os seus servidores.");
@@ -66,7 +67,7 @@ impl App {
     /// Coluna estreita à esquerda da janela, sempre visível como a do Discord: um ícone por servidor e o "＋".
     /// Clicar abre a aba Servidores naquele servidor.
     pub(crate) fn server_rail(&mut self, ctx: &egui::Context, offline: bool) {
-        let hub = self.shared.servers.lock().unwrap().clone().filter(|_| !offline);
+        let hub = self.shared.servers.lock_unpoisoned().clone().filter(|_| !offline);
         let views = hub.as_ref().map(|h| h.read(|s, now| s.views(now))).unwrap_or_default();
         if self.srv.sel.is_some_and(|id| !views.iter().any(|v| v.id == id)) {
             self.srv.sel = None;
@@ -180,7 +181,7 @@ impl App {
         let name_of = |key: &[u8; 32], given: &str| if given.is_empty() { member_name(&contacts, key) } else { given.to_string() };
         let online = v.members.iter().filter(|m| m.online).count();
         let manages = v.my_role.is_some_and(|r| r.manages());
-        let my_room = self.shared.room.lock().unwrap().at;
+        let my_room = self.shared.room.lock_unpoisoned().at;
         card(ui, &v.name, &format!("{} membro(s), {online} online · você é {}", v.members.len(), v.my_role.map_or("convidado", role_name)), |ui| {
             if v.joining {
                 note(ui, "Aguardando o convidante responder para trazer o servidor (ele precisa estar online).");
@@ -227,7 +228,7 @@ impl App {
                                 }
                         });
                     });
-                    let live = self.shared.room.lock().unwrap();
+                    let live = self.shared.room.lock_unpoisoned();
                     let (sharing, mut action) = (self.shared.screen.want_share.load(Ordering::Relaxed), None);
                     for id in &room.people {
                         let Some(m) = v.members.iter().find(|m| m.id == *id) else { continue };
@@ -290,7 +291,7 @@ impl App {
         });
 
         if my_room.is_some_and(|(server, _)| server == v.id) {
-            let (sharing, note_text) = (self.shared.screen.sharing.load(Ordering::Relaxed), self.shared.screen.note.lock().unwrap().clone());
+            let (sharing, note_text) = (self.shared.screen.sharing.load(Ordering::Relaxed), self.shared.screen.note.lock_unpoisoned().clone());
             let wanted = self.shared.screen.want_share.load(Ordering::Relaxed);
             if wanted || !self.screen_tex.is_empty() || !note_text.is_empty() {
                 let names = self.form.names();
