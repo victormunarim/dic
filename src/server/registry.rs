@@ -4,6 +4,10 @@
 //! operação só vale se, naquele ponto da ordem, o autor era membro, a assinatura confere e a permissão existe.
 //! Chegou uma operação mais antiga que outras já guardadas, o estado é refeito do começo, então todos
 //! convergem para o mesmo estado ao terem as mesmas operações, em qualquer ordem de chegada.
+//!
+//! O relógio `lamport` não pode saltar: uma operação cujo `lamport` passa de um acima do maior já visto na
+//! ordem é ignorada (volta a valer quando as que faltam chegam). Sem isso um membro assinaria `u32::MAX` e
+//! ninguém mais conseguiria fazer a próxima operação.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -68,13 +72,15 @@ pub struct Registry {
     ops: BTreeMap<(u32, MemberId, u32), Entry>,
     by_seq: HashMap<(MemberId, u32), (u32, MemberId, u32)>,
     state: State,
+    /// Maior `lamport` que conta, depois da última dobra: o relógio de onde sai a próxima operação.
+    clock: u32,
 }
 
 impl Registry {
     /// Registro vazio de `server`; `owner_vk` é a chave de verificação do dono, que o convite traz e que só
     /// vale para a primeira operação (o dono se juntando).
     pub fn new(server: ServerId, owner_vk: [u8; 32]) -> Self {
-        Self { server, owner_vk, ops: BTreeMap::new(), by_seq: HashMap::new(), state: State::default() }
+        Self { server, owner_vk, ops: BTreeMap::new(), by_seq: HashMap::new(), state: State::default(), clock: 0 }
     }
 
     pub fn server(&self) -> &ServerId {
@@ -163,8 +169,8 @@ impl Registry {
 
     /// `(lamport, seq)` da próxima operação de `author`.
     pub fn next_for(&self, author: &MemberId) -> (u32, u32) {
-        let lamport = self.ops.keys().next_back().map_or(0, |k| k.0) + 1;
-        let seq = self.ops().filter(|o| o.author == *author).map(|o| o.seq).max().unwrap_or(0) + 1;
+        let lamport = self.clock.saturating_add(1);
+        let seq = self.ops().filter(|o| o.author == *author).map(|o| o.seq).max().unwrap_or(0).saturating_add(1);
         (lamport, seq)
     }
 
@@ -188,9 +194,14 @@ impl Registry {
 
     fn refold(&mut self) {
         let mut state = State::default();
+        let mut clock = 0u32;
         let (server, owner_vk) = (self.server, self.owner_vk);
         for e in self.ops.values_mut() {
             let op = &e.op;
+            if op.lamport > clock.saturating_add(1) {
+                continue;
+            }
+            clock = clock.max(op.lamport);
             let checked = &mut e.checked;
             apply(&mut state, &owner_vk, op, &mut |vk| match checked {
                 Some((k, ok)) if k == vk => *ok,
@@ -202,6 +213,7 @@ impl Registry {
             });
         }
         self.state = state;
+        self.clock = clock;
     }
 }
 
@@ -421,11 +433,11 @@ mod tests {
         let mut r = started(&a, &b);
         let before = r.state().clone();
         // Assinada por uma chave que não é a do autor declarado.
-        let forged = Op::sign(&SID, &e.sk, a.id, 99, 99, Action::RemoveMember { target: b.id });
+        let forged = Op::sign(&SID, &e.sk, a.id, 3, 99, Action::RemoveMember { target: b.id });
         assert_eq!(r.insert(forged), Insert::Added, "guarda (pode ser de um autor que ainda não conhecemos)");
         assert_eq!(r.state(), &before, "mas não vale");
         // Assinatura de outro servidor.
-        let other = Op::sign(&[7; 16], &a.sk, a.id, 100, 100, Action::RemoveMember { target: b.id });
+        let other = Op::sign(&[7; 16], &a.sk, a.id, 3, 100, Action::RemoveMember { target: b.id });
         r.insert(other);
         assert_eq!(r.state(), &before);
         // O estranho não vira membro por ter feito a operação antes de ser convidado.
@@ -439,12 +451,39 @@ mod tests {
         let (a, b) = (person(1), person(2));
         let mut r = started(&a, &b);
         r.make(&a.sk, a.id, Action::RemoveMember { target: b.id }).unwrap();
-        let late = Op::sign(&SID, &b.sk, b.id, 50, 1, Action::CreateRoom { room: [1; 16], name: "x".into() });
+        let late = Op::sign(&SID, &b.sk, b.id, 4, 1, Action::CreateRoom { room: [1; 16], name: "x".into() });
         r.insert(late);
         assert!(r.state().rooms.is_empty());
         r.make(&a.sk, a.id, Action::AddMember { key: b.key, vk: vk(&b) }).unwrap();
         assert!(r.state().members.contains_key(&b.id), "convidado de novo");
         assert!(r.state().rooms.is_empty(), "o que fez removido não ressuscita");
+    }
+
+    #[test]
+    fn a_member_cannot_jump_the_clock_to_freeze_the_server() {
+        let (a, b) = (person(1), person(2));
+        let mut r = started(&a, &b);
+        let jump = Op::sign(&SID, &b.sk, b.id, u32::MAX, 1, Action::CreateRoom { room: [1; 16], name: "x".into() });
+        assert_eq!(r.insert(jump.clone()), Insert::Added, "guarda, mas não conta");
+        assert!(r.state().rooms.is_empty());
+        assert_eq!(r.next_for(&a.id), (3, 3), "o relógio não andou");
+        assert!(r.make(&a.sk, a.id, Action::CreateRoom { room: [2; 16], name: "y".into() }).is_some());
+        // Um salto de mais de um também é ignorado, e vale quando a que faltava chega.
+        let skip = Op::sign(&SID, &b.sk, b.id, 5, 3, Action::CreateRoom { room: [3; 16], name: "z".into() });
+        r.insert(skip.clone());
+        assert!(!r.state().rooms.contains_key(&[3; 16]));
+        let fill = Op::sign(&SID, &b.sk, b.id, 4, 2, Action::SetName { name: "Bia".into() });
+        r.insert(fill);
+        assert!(r.state().rooms.contains_key(&[3; 16]), "com o buraco preenchido a operação conta");
+        // Todo mundo chega ao mesmo estado.
+        let mut other = Registry::new(SID, vk(&a));
+        let mut all: Vec<Op> = r.ops().cloned().collect();
+        all.reverse();
+        all.push(jump);
+        for op in all {
+            other.insert(op);
+        }
+        assert_eq!(other.state(), r.state());
     }
 
     #[test]
@@ -466,8 +505,8 @@ mod tests {
     fn two_different_operations_with_the_same_author_and_seq_resolve_the_same_everywhere() {
         let (a, b) = (person(1), person(2));
         let base = started(&a, &b);
-        let x = Op::sign(&SID, &b.sk, b.id, 10, 1, Action::CreateRoom { room: [1; 16], name: "um".into() });
-        let y = Op::sign(&SID, &b.sk, b.id, 11, 1, Action::CreateRoom { room: [2; 16], name: "dois".into() });
+        let x = Op::sign(&SID, &b.sk, b.id, 3, 1, Action::CreateRoom { room: [1; 16], name: "um".into() });
+        let y = Op::sign(&SID, &b.sk, b.id, 3, 1, Action::CreateRoom { room: [2; 16], name: "dois".into() });
         let build = |first: &Op, second: &Op| {
             let mut r = Registry::new(SID, vk(&a));
             for op in base.ops() {

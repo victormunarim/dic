@@ -57,6 +57,8 @@ A chave é **par a par**: `HKDF(DH(minha secreta, pública do outro), "clam/serv
 
 **Entrega do convite pela rede.** *Enviar convite* parte o texto em até 8 pedaços (`InviteChunk`, 151 B cada) e os entrega ao contato pelo mesmo circuito dos outros quadros, sem outro canal. Como o convidado ainda não conhece o servidor, a chave desses quadros usa um servidor fictício (`INVITE_SERVER`, todo zero) no lugar do `server_id`. Só se aceitam pedaços de **contatos** (a lista do telefone); de quem não é contato some sem resposta. Cada pedaço é confirmado (`Ack`); quando chegam todos, o convite é aberto e vira um aviso na aba *Servidores* (*Convites recebidos*: Aceitar ou Recusar). O endereço do contato é procurado como numa chamada (guardado, DHT, âncoras). Se ele estiver offline, o convidante repete a entrega a cada 60 s, até 24 h; depois da confirmação, só lembra a cada 10 min (para quem reiniciou antes de aceitar). Quem recusa não recebe o mesmo convite de novo enquanto o programa estiver aberto. O texto para copiar (*Gerar só o texto*) continua existindo, para quem não é contato.
 
+**Relógio.** O `lamport` de uma operação tem de ser, no máximo, um acima do maior que veio antes dela na ordem do registro; senão ela fica guardada mas não conta (e passa a contar quando as que faltam chegam). Assim ninguém trava o servidor assinando `u32::MAX`.
+
 **Remover membro.** `RemoveMember` seguido de `Rekey`: o segredo novo vai a cada membro restante em `Gift`. O removido guarda o que já viu (nomes, endereços de então), mas não abre mais nada novo.
 
 ## Salas de voz

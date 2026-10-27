@@ -11,6 +11,7 @@ Garantias e limites, limitações conhecidas e chaveiro.
 - O modo direto expõe o seu IP ao contato; o código exige confiança e aviso confirmado, mas o aviso na interface é responsabilidade do app.
 - O relógio é passado como argumento (`agora_unix`); use um relógio confiável. Defasagem maior que uma época faz a busca falhar.
 - Não há proteção contra replay de um registro antigo dentro da janela de três épocas. (No aplicativo o registro de endereço leva um `seq` que só cresce, e o contato descarta o que não for mais novo.)
+- Servidores: o relógio `lamport` das operações não pode saltar (uma operação que passa de um acima do maior já visto é ignorada até as que faltam chegarem), então um membro não congela o servidor assinando um valor enorme. Limite que sobra: quem foi removido pode ter operações já assinadas com `lamport` antigo que valem na ordem do registro, por serem indistinguíveis de operações feitas ao mesmo tempo que a remoção. Quem já soube da remoção descarta o que o removido manda; a janela é a da propagação da remoção, ou um membro cúmplice que repasse as operações. O dono não pode ser removido por elas. Um membro também pode encher o registro até `MAX_OPS`.
 - A tela sem a opção de privacidade deixa de ter cover: quem observa a rede vê quando a imagem se mexe. O conteúdo segue cifrado de ponta a ponta.
 
 ## Limitações
