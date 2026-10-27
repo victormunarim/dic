@@ -116,6 +116,15 @@ pub(crate) fn button(ui: &mut Ui, enabled: bool, text: &str, fill: Color32) -> e
     )
 }
 
+/// Botão quadrado só com ícone; o nome da ação aparece ao passar o mouse.
+pub(crate) fn icon_button(ui: &mut Ui, enabled: bool, icon: &str, tip: &str, fill: Color32) -> egui::Response {
+    ui.add_enabled(
+        enabled,
+        egui::Button::new(RichText::new(icon).size(18.0).color(Color32::WHITE)).fill(fill).corner_radius(CornerRadius::same(6)).min_size(vec2(42.0, 38.0)),
+    )
+    .on_hover_text(tip)
+}
+
 /// Campo de texto de uma linha, alto e largo.
 pub(crate) fn field<'t>(text: &'t mut String, hint: &str) -> egui::TextEdit<'t> {
     egui::TextEdit::singleline(text).hint_text(hint).margin(Margin::symmetric(12, 10)).desired_width(f32::INFINITY)

@@ -246,13 +246,13 @@ impl App {
                                 tip.on_hover_text("transmitindo a tela");
                             }
                             if here && m.is_me {
-                                let (label, fill) = if sharing { ("Parar de compartilhar", RED) } else { ("🖥 Compartilhar tela", BLURPLE) };
-                                if button(ui, true, label, fill).clicked() {
+                                let (icon, tip, fill) = if sharing { ("⏹", "Parar de compartilhar", RED) } else { ("🖥", "Compartilhar tela", BLURPLE) };
+                                if icon_button(ui, true, icon, tip, fill).clicked() {
                                     action = Some((None, !sharing));
                                 }
                             } else if here && m.sharing {
                                 let on = live.watching.contains(&m.key);
-                                if button(ui, true, if on { "Parar de assistir" } else { "Assistir" }, if on { GREY_BUTTON } else { GREEN }).clicked() {
+                                if icon_button(ui, true, if on { "⏹" } else { "👁" }, if on { "Parar de assistir" } else { "Assistir" }, if on { GREY_BUTTON } else { GREEN }).clicked() {
                                     action = Some((Some(m.key), !on));
                                 }
                             }
@@ -305,7 +305,7 @@ impl App {
                     order.sort_by_key(|(k, _)| **k);
                     for (who, (_, tex)) in order {
                         ui.label(RichText::new(format!("Tela de {}", member_name(&names, who))).strong());
-                        if ui.button("🔍  Ampliar").on_hover_text("Abre a tela numa janela maior").clicked() {
+                        if ui.button("🔍").on_hover_text("Ampliar: abre a tela numa janela maior").clicked() {
                             self.zoom = Some(*who);
                         }
                         if self.zoom != Some(*who) {

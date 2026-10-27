@@ -296,7 +296,7 @@ impl App {
                 card(ui, "Ligar para um código", "Cole o código de contato de alguém, ou o nome de um contato.", |ui| {
                     let live = !offline && !in_call;
                     ui.add_enabled(live, field(&mut self.form.peer, "código de contato ou nome de um contato"));
-                    if button(ui, live, "📞  Ligar", GREEN).clicked() {
+                    if icon_button(ui, live, "📞", "Ligar", GREEN).clicked() {
                         match self.form.target() {
                             Ok(k) => {
                                 self.form.save();
@@ -374,7 +374,7 @@ impl App {
                         if button(ui, true, "Remover", GREY_BUTTON).clicked() {
                             remove = Some(i);
                         }
-                        if button(ui, online && !in_call, "📞  Ligar", GREEN).clicked() {
+                        if icon_button(ui, online && !in_call, "📞", "Ligar", GREEN).clicked() {
                             self.dial(*key);
                         }
                     });
@@ -456,10 +456,10 @@ impl App {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 let muted = self.shared.audio.muted.load(Ordering::Relaxed);
-                if button(ui, true, if muted { "🔇  Tirar do mudo" } else { "🎤  Silenciar" }, if muted { RED } else { GREY_BUTTON }).clicked() {
+                if icon_button(ui, true, if muted { "🔇" } else { "🎤" }, if muted { "Tirar do mudo" } else { "Silenciar" }, if muted { RED } else { GREY_BUTTON }).clicked() {
                     self.shared.audio.muted.store(!muted, Ordering::Relaxed);
                 }
-                if big_button(ui, "Desligar", RED).clicked() {
+                if icon_button(ui, true, "✖", "Desligar a chamada", RED).clicked() {
                     self.shared.hangup.store(true, Ordering::Relaxed);
                 }
             });
@@ -505,8 +505,8 @@ impl App {
 
         card(ui, "Compartilhar a minha tela", "O vídeo segue cifrado de ponta a ponta, em um circuito só dele.", |ui| {
             ui.horizontal(|ui| {
-                let (label, fill) = if wanted { ("⏹  Parar de compartilhar", RED) } else { ("🖥  Compartilhar minha tela", BLURPLE) };
-                if big_button(ui, label, fill).clicked() {
+                let (icon, tip, fill) = if wanted { ("⏹", "Parar de compartilhar", RED) } else { ("🖥", "Compartilhar minha tela", BLURPLE) };
+                if icon_button(ui, true, icon, tip, fill).clicked() {
                     st.want_share.store(!wanted, Ordering::Relaxed);
                 }
                 if sharing {
@@ -529,7 +529,7 @@ impl App {
         order.sort_by_key(|(k, _)| **k);
         for (who, (_, tex)) in order {
             card(ui, &format!("Tela de {}", member_name(&names, who)), "", |ui| {
-                if ui.button("🔍  Ampliar").on_hover_text("Abre a tela numa janela maior").clicked() {
+                if ui.button("🔍").on_hover_text("Ampliar: abre a tela numa janela maior").clicked() {
                     self.zoom = Some(*who);
                 }
                 // Ampliada, a miniatura sai: a imagem só aparece na janela ampliada (e não é desenhada duas vezes).
