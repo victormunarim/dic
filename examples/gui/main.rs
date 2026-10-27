@@ -5,7 +5,7 @@
 //! ```text
 //! cargo run --release --features gui,audio --example gui
 //! ```
-//! Você informa a identidade e os contatos; "Ficar online" sobe relay e telefone; "Ligar" usa o código de
+//! Você informa a identidade e os contatos; o programa tenta ficar online ao abrir (dá para desligar na aba Início) e "Ficar online" sobe relay e telefone; "Ligar" usa o código de
 //! contato do outro (a chave e, na primeira vez, o relay dele). Chamadas de contatos da lista são atendidas
 //! sozinhas. Sem `--features audio` (ou sem a opção marcada),
 //! cada lado envia um tom (440 Hz quem liga, 660 Hz quem atende).
@@ -41,7 +41,7 @@ fn main() -> eframe::Result {
             let form = Form::load();
             let shared = Arc::<engine::Shared>::default();
             shared.audio.set_prefs(form.audio);
-            Ok(Box::new(App {
+            let mut app = App {
                 rt,
                 form,
                 log: Arc::default(),
@@ -59,7 +59,11 @@ fn main() -> eframe::Result {
                 devs: clam::audio::devices(),
                 #[cfg(not(feature = "audio"))]
                 devs: Default::default(),
-            }))
+            };
+            if app.form.auto_online {
+                app.go_online(&cc.egui_ctx);
+            }
+            Ok(Box::new(app))
         }),
     )
 }

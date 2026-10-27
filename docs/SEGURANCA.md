@@ -25,7 +25,7 @@ Tudo fica na pasta pessoal (`~` no Unix, `%USERPROFILE%` no Windows), gravado po
 
 | Arquivo | Conteúdo |
 |---|---|
-| `.clam-gui.conf` | Contatos e configurações. A chave secreta fica aqui em hex só se não houver chaveiro (`secret=@keyring` quando há). Opções: `no_dht`, `dht_circuit`, `no_anchor`, `anchors`, `intros`, `name`, `public_addr`, `no_screen_privacy`, `screen_sharp`, `screen_hardware`, `no_opus`, e as do áudio |
+| `.clam-gui.conf` | Contatos e configurações. A chave secreta fica aqui em hex só se não houver chaveiro (`secret=@keyring` quando há). Opções: `no_dht`, `dht_circuit`, `no_anchor`, `anchors`, `intros`, `name`, `public_addr`, `no_screen_privacy`, `screen_sharp`, `screen_hardware`, `no_opus`, `no_auto_online`, e as do áudio |
 | `.clam-gui.known` | Uma linha por endereço de relay de contato: `chave addr onion link`, com `dica` (veio do convite, sem confirmação) ou `antigo` (histórico) no fim |
 | `.clam-gui.relay` | As duas chaves secretas do relay (`onion` e `link`), para o endereço que os contatos guardaram continuar valendo depois de reabrir |
 | `.clam-gui.intro` | Contatos a quem a apresentação ainda não foi confirmada (uma chave por linha) |

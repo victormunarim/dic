@@ -243,6 +243,9 @@ impl App {
             {
                 r.stop.store(true, Ordering::Relaxed);
             }
+            if ui.checkbox(&mut self.form.auto_online, "Tentar ficar online ao abrir o programa").changed() {
+                self.form.save();
+            }
             if !self.error.is_empty() {
                 ui.colored_label(Color32::from_rgb(0xf2, 0x7b, 0x7e), &self.error);
             }
