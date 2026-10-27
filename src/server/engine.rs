@@ -162,17 +162,19 @@ impl Server {
         Hello { room: self.room, fp: self.reg.fingerprint(), count: self.reg.len().min(u16::MAX as usize) as u16, epoch: self.epoch, sharing: self.sharing && self.room.is_some() }
     }
 
-    fn is_member(&self, id: &MemberId) -> bool {
-        self.reg.state().members.contains_key(id)
+    /// `key` é a chave inteira de um membro. O `MemberId` tem só 8 bytes (o começo da chave), então um id
+    /// igual não basta: sem conferir a chave, quem fabricasse uma com o mesmo começo passaria por esse membro.
+    fn has(&self, key: &[u8; 32]) -> bool {
+        self.reg.state().members.get(&member_id(key)).is_some_and(|m| m.key == *key)
     }
 
     fn people_in(&self, room: &RoomId, now: u64) -> usize {
-        self.peers.iter().filter(|(id, p)| self.is_member(id) && p.online(now) && p.room.as_ref() == Some(room)).count() + usize::from(self.room.as_ref() == Some(room))
+        self.peers.values().filter(|p| self.has(&p.key) && p.online(now) && p.room.as_ref() == Some(room)).count() + usize::from(self.room.as_ref() == Some(room))
     }
 
     fn mesh_now(&self, now: u64) -> (Option<RoomId>, Vec<[u8; 32]>) {
         let Some(room) = self.room else { return (None, Vec::new()) };
-        let mut peers: Vec<[u8; 32]> = self.peers.iter().filter(|(id, p)| self.is_member(id) && p.online(now) && p.room == Some(room)).map(|(_, p)| p.key).collect();
+        let mut peers: Vec<[u8; 32]> = self.peers.values().filter(|p| self.has(&p.key) && p.online(now) && p.room == Some(room)).map(|p| p.key).collect();
         peers.sort();
         (Some(room), peers)
     }
@@ -358,11 +360,11 @@ impl Servers {
     pub fn invite(&mut self, server: &ServerId, invitee: [u8; 32], now: u64) -> Result<String, ServerError> {
         let reach = self.reach.as_ref().map(|r| r.1.clone()).ok_or(ServerError::NoAddress)?;
         let s = self.servers.get_mut(server).ok_or(ServerError::UnknownServer)?;
-        if !s.is_member(&self.me.id) {
+        if !s.has(&self.me.key) {
             return Err(ServerError::NotMember);
         }
         let id = member_id(&invitee);
-        if s.is_member(&id) {
+        if s.has(&invitee) {
             return Err(ServerError::AlreadyIn);
         }
         if !s.invited.contains_key(&id) && s.reg.state().members.len() + s.invited.len() >= super::MAX_MEMBERS {
@@ -371,7 +373,7 @@ impl Servers {
         let hints = s
             .peers
             .values()
-            .filter(|p| s.reg.state().members.contains_key(&member_id(&p.key)) && p.online(now) && p.key != invitee)
+            .filter(|p| s.has(&p.key) && p.online(now) && p.key != invitee)
             .filter_map(|p| p.reach.as_ref().map(|r| Hint { key: p.key, reach: r.1.clone() }))
             .take(MAX_HINTS)
             .collect();
@@ -442,7 +444,7 @@ impl Servers {
 
     fn act(&mut self, server: &ServerId, action: Action, now: u64) -> Result<(Option<Op>, Output), ServerError> {
         let s = self.servers.get_mut(server).ok_or(ServerError::UnknownServer)?;
-        if !s.is_member(&self.me.id) {
+        if !s.has(&self.me.key) {
             return Err(ServerError::NotMember);
         }
         let op = s.reg.make(&self.me.sk, self.me.id, action).ok_or(ServerError::Forbidden)?;
@@ -450,7 +452,7 @@ impl Servers {
         let mut out = Output::default();
         out.events.push(Event::Changed(*server));
         let s = &self.servers[server];
-        for p in s.peers.values().filter(|p| p.online(now) && s.is_member(&member_id(&p.key))) {
+        for p in s.peers.values().filter(|p| p.online(now) && s.has(&p.key)) {
             out.send.extend(seal_to(&self.me, s, &p.key, &Msg::Op(op.clone())));
         }
         Ok((Some(op), out))
@@ -498,7 +500,7 @@ impl Servers {
             s.epoch = epoch;
             s.secret = secret;
             let s = &self.servers[server];
-            for p in s.peers.values().filter(|p| p.online(now) && s.is_member(&member_id(&p.key))) {
+            for p in s.peers.values().filter(|p| p.online(now) && s.has(&p.key)) {
                 out.send.extend(seal_to(&self.me, s, &p.key, &Msg::Gift { epoch, secret: s.secret }));
             }
         }
@@ -547,7 +549,7 @@ impl Servers {
     /// Entra em `room` (ou sai de qualquer sala com `None`).
     pub fn join_room(&mut self, server: &ServerId, room: Option<RoomId>, now: u64) -> Result<Output, ServerError> {
         let s = self.servers.get_mut(server).ok_or(ServerError::UnknownServer)?;
-        if !s.is_member(&self.me.id) {
+        if !s.has(&self.me.key) {
             return Err(ServerError::NotMember);
         }
         if let Some(r) = room {
@@ -589,7 +591,7 @@ impl Servers {
     /// Peço (`on`) ou deixo de pedir para assistir à tela de `target`, que está na minha sala.
     pub fn watch(&mut self, server: &ServerId, target: [u8; 32], on: bool, now: u64) -> Result<Output, ServerError> {
         let s = self.servers.get_mut(server).ok_or(ServerError::UnknownServer)?;
-        if !s.is_member(&self.me.id) {
+        if !s.has(&self.me.key) {
             return Err(ServerError::NotMember);
         }
         let there = s.room.is_some() && s.peers.get(&member_id(&target)).is_some_and(|p| p.online(now) && p.room == s.room);
@@ -609,7 +611,7 @@ impl Servers {
         }
         for s in self.servers.values_mut().filter(|s| s.member) {
             let hello = s.hello();
-            let keys: Vec<[u8; 32]> = s.peers.values().filter(|p| s.reg.state().members.contains_key(&member_id(&p.key)) && (!only_online || p.online(now))).map(|p| p.key).collect();
+            let keys: Vec<[u8; 32]> = s.peers.values().filter(|p| s.has(&p.key) && (!only_online || p.online(now))).map(|p| p.key).collect();
             for k in keys {
                 out.send.extend(seal_to(&self.me, s, &k, &Msg::Hello(hello)));
                 s.peer(k).last_hello = Some(now);
@@ -632,7 +634,7 @@ impl Servers {
         }
         if let Some(s) = self.servers.get_mut(server).filter(|s| s.member) {
             let hello = s.hello();
-            let keys: Vec<[u8; 32]> = s.peers.values().filter(|p| s.reg.state().members.contains_key(&member_id(&p.key))).map(|p| p.key).collect();
+            let keys: Vec<[u8; 32]> = s.peers.values().filter(|p| s.has(&p.key)).map(|p| p.key).collect();
             for k in keys {
                 out.send.extend(seal_to(&self.me, s, &k, &Msg::Hello(hello)));
                 s.peer(k).last_hello = Some(now);
@@ -650,7 +652,7 @@ impl Servers {
         };
         self.reach = Some((seq, reach.clone()));
         for s in self.servers.values().filter(|s| s.member) {
-            for p in s.peers.values().filter(|p| p.online(now) && s.is_member(&member_id(&p.key))) {
+            for p in s.peers.values().filter(|p| p.online(now) && s.has(&p.key)) {
                 out.send.extend(seal_to(&self.me, s, &p.key, &Msg::MyAddr { seq, reach: reach.clone() }));
             }
         }
@@ -701,7 +703,7 @@ impl Servers {
             let due: Vec<[u8; 32]> = s
                 .peers
                 .values()
-                .filter(|p| s.reg.state().members.contains_key(&member_id(&p.key)))
+                .filter(|p| s.has(&p.key))
                 .filter(|p| p.last_hello.is_none_or(|t| now >= t + if p.online(now) { HEARTBEAT } else { PROBE }))
                 .map(|p| p.key)
                 .collect();
@@ -789,7 +791,7 @@ impl Servers {
         let visible = self.visible;
         let my_reach = self.reach.clone();
         let s = self.servers.get_mut(&sid).expect("existe");
-        let is_member = s.is_member(&id);
+        let is_member = s.has(&key);
         match msg {
             Msg::Hello(h) | Msg::HelloAck(h) if !is_member => {
                 let _ = h;
@@ -867,15 +869,15 @@ impl Servers {
             }
             Msg::Join { vk, reach } => {
                 let mine = s.invited.get(&id) == Some(&key) || s.reg.state().members.get(&id).is_some_and(|m| m.added_by == me.id);
-                if !mine || !s.is_member(&me.id) {
+                if !mine || !s.has(&me.key) {
                     return out;
                 }
                 s.peer(key).reach = Some((0, reach.clone()));
                 out.events.push(Event::Address { key, reach });
-                if !s.is_member(&id) {
+                if !s.has(&key) {
                     let Some(added) = s.reg.make(&me.sk, me.id, Action::AddMember { key, vk }) else { return out };
                     s.sync_peers(me);
-                    let others: Vec<[u8; 32]> = s.peers.values().filter(|p| p.online(now) && p.key != key && s.is_member(&member_id(&p.key))).map(|p| p.key).collect();
+                    let others: Vec<[u8; 32]> = s.peers.values().filter(|p| p.online(now) && p.key != key && s.has(&p.key)).map(|p| p.key).collect();
                     for k in others {
                         out.send.extend(seal_to(me, s, &k, &Msg::Op(added.clone())));
                     }
@@ -922,7 +924,7 @@ impl Servers {
         let mut announce = Vec::new();
         for id in ids {
             let s = self.servers.get_mut(&id).expect("existe");
-            let in_registry = s.is_member(&self.me.id);
+            let in_registry = s.has(&self.me.key);
             if in_registry && !s.member {
                 s.member = true;
                 s.joining = None;

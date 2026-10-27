@@ -5,6 +5,11 @@
 //! Chegou uma operação mais antiga que outras já guardadas, o estado é refeito do começo, então todos
 //! convergem para o mesmo estado ao terem as mesmas operações, em qualquer ordem de chegada.
 //!
+//! O registro tem teto, e o teto não é de ninguém só: quem já foi membro tem a assinatura conferida na entrada
+//! (uma operação falsa com o nome de outro não gasta a cota dele nem toma o lugar da verdadeira), cada autor
+//! guarda até [`MAX_OPS_PER_AUTHOR`], quem nunca foi membro até [`MAX_STRANGER_OPS`] no total, e as últimas
+//! [`OWNER_RESERVE`] vagas só o dono ocupa, para ele remover e trocar a chave mesmo com o resto cheio.
+//!
 //! O relógio `lamport` não pode saltar: uma operação cujo `lamport` passa de um acima do maior já visto na
 //! ordem é ignorada (volta a valer quando as que faltam chegam). Sem isso um membro assinaria `u32::MAX` e
 //! ninguém mais conseguiria fazer a próxima operação.
@@ -21,6 +26,14 @@ use super::{
 
 /// Operações guardadas por servidor; passando disto, as novas são recusadas.
 pub const MAX_OPS: usize = 4096;
+/// Operações de um mesmo autor (menos o dono); passando disto, as novas dele são recusadas. Um membro sozinho
+/// não enche o registro.
+pub const MAX_OPS_PER_AUTHOR: usize = 512;
+/// Operações de autores que nunca foram membros aqui (ainda não convidados, ou lixo) e cuja assinatura, por
+/// isso, não dá para conferir. Passando disto, as novas são recusadas (voltam quando o autor for conhecido).
+pub const MAX_STRANGER_OPS: usize = 64;
+/// Das `MAX_OPS` vagas, as últimas só o dono ocupa.
+pub const OWNER_RESERVE: usize = 256;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Member {
@@ -76,13 +89,15 @@ pub struct Registry {
     state: State,
     /// Maior `lamport` que conta, depois da última dobra: o relógio de onde sai a próxima operação.
     clock: u32,
+    /// Chave de verificação de quem já foi membro (a última com que entrou), mesmo removido depois.
+    vks: HashMap<MemberId, [u8; 32]>,
 }
 
 impl Registry {
     /// Registro vazio de `server`; `owner_vk` é a chave de verificação do dono, que o convite traz e que só
     /// vale para a primeira operação (o dono se juntando).
     pub fn new(server: ServerId, owner_vk: [u8; 32]) -> Self {
-        Self { server, owner_vk, ops: BTreeMap::new(), by_seq: HashMap::new(), state: State::default(), clock: 0 }
+        Self { server, owner_vk, ops: BTreeMap::new(), by_seq: HashMap::new(), state: State::default(), clock: 0, vks: HashMap::new() }
     }
 
     pub fn server(&self) -> &ServerId {
@@ -112,6 +127,14 @@ impl Registry {
     /// Guarda uma operação vinda de fora (ou feita aqui) e refaz o estado.
     pub fn insert(&mut self, op: Op) -> Insert {
         let key = op.order();
+        // De quem já foi membro a assinatura se confere agora: sem isso qualquer um escreveria com o nome de outro
+        // para gastar a cota dele, ou para tomar o lugar da operação verdadeira de mesmo autor e `seq`.
+        let known = self.vks.get(&op.author).copied();
+        if let Some(vk) = &known
+            && !op.verify(&self.server, vk)
+        {
+            return Insert::Refused;
+        }
         if let Some(old) = self.by_seq.get(&(op.author, op.seq)).copied() {
             if old == key && self.ops.get(&old).is_some_and(|e| e.op == op) {
                 return Insert::Known;
@@ -123,13 +146,25 @@ impl Registry {
                 return Insert::Refused;
             }
             self.ops.remove(&old);
-        } else if self.ops.len() >= MAX_OPS {
+        } else if !self.has_room(&op.author, known.is_some()) {
             return Insert::Refused;
         }
         self.by_seq.insert((op.author, op.seq), key);
-        self.ops.insert(key, Entry { op, checked: None });
+        self.ops.insert(key, Entry { checked: known.map(|vk| (vk, true)), op });
         self.refold();
         Insert::Added
+    }
+
+    /// Cabe mais uma operação de `author`? `known`: ele já foi membro (a assinatura foi conferida).
+    fn has_room(&self, author: &MemberId, known: bool) -> bool {
+        let owner = self.vks.get(author) == Some(&self.owner_vk);
+        if self.ops.len() >= MAX_OPS || (!owner && self.ops.len() >= MAX_OPS - OWNER_RESERVE) {
+            return false;
+        }
+        if !owner && self.ops.values().filter(|e| e.op.author == *author).count() >= MAX_OPS_PER_AUTHOR {
+            return false;
+        }
+        known || self.ops.values().filter(|e| !self.vks.contains_key(&e.op.author)).count() < MAX_STRANGER_OPS
     }
 
     /// Operações de `author` com `seq` maior que `after`, em ordem de `seq`.
@@ -196,6 +231,7 @@ impl Registry {
 
     fn refold(&mut self) {
         let mut state = State::default();
+        let mut vks = HashMap::new();
         let mut clock = 0u32;
         let (server, owner_vk) = (self.server, self.owner_vk);
         for e in self.ops.values_mut() {
@@ -205,7 +241,7 @@ impl Registry {
             }
             clock = clock.max(op.lamport);
             let checked = &mut e.checked;
-            apply(&mut state, &owner_vk, op, &mut |vk| match checked {
+            let applied = apply(&mut state, &owner_vk, op, &mut |vk| match checked {
                 Some((k, ok)) if k == vk => *ok,
                 _ => {
                     let ok = op.verify(&server, vk);
@@ -213,7 +249,11 @@ impl Registry {
                     ok
                 }
             });
+            if applied && let Action::AddMember { key, vk } = &op.action {
+                vks.insert(member_id(key), *vk);
+            }
         }
+        self.vks = vks;
         self.state = state;
         self.clock = clock;
     }
@@ -437,15 +477,15 @@ mod tests {
         let before = r.state().clone();
         // Assinada por uma chave que não é a do autor declarado.
         let forged = Op::sign(&SID, &e.sk, a.id, 3, 99, Action::RemoveMember { target: b.id });
-        assert_eq!(r.insert(forged), Insert::Added, "guarda (pode ser de um autor que ainda não conhecemos)");
-        assert_eq!(r.state(), &before, "mas não vale");
+        assert_eq!(r.insert(forged), Insert::Refused, "autor conhecido: a assinatura é conferida na entrada");
+        assert_eq!(r.state(), &before);
         // Assinatura de outro servidor.
         let other = Op::sign(&[7; 16], &a.sk, a.id, 3, 100, Action::RemoveMember { target: b.id });
         r.insert(other);
         assert_eq!(r.state(), &before);
         // O estranho não vira membro por ter feito a operação antes de ser convidado.
         let early = Op::sign(&SID, &e.sk, e.id, 1, 1, Action::CreateRoom { room: [9; 16], name: "x".into() });
-        r.insert(early);
+        assert_eq!(r.insert(early), Insert::Added, "guarda: pode ser de quem o convite ainda não chegou");
         assert!(r.state().rooms.is_empty());
     }
 
@@ -523,5 +563,67 @@ mod tests {
         assert_eq!(r1.state(), r2.state());
         assert_eq!(r1.fingerprint(), r2.fingerprint());
         assert_eq!(r1.state().rooms.len(), 1);
+    }
+    /// `n` operações de `p`, cada uma trocando o nome dele; devolve quantas o registro aceitou.
+    fn rename_many(r: &mut Registry, p: &Person, n: usize) -> usize {
+        (0..n).filter(|i| r.make(&p.sk, p.id, Action::SetName { name: format!("n{i}") }).is_some()).count()
+    }
+
+    #[test]
+    fn one_member_cannot_fill_the_registry() {
+        let (a, b) = (person(1), person(2));
+        let mut r = started(&a, &b);
+        let mine = r.ops().filter(|o| o.author == b.id).count();
+        assert_eq!(rename_many(&mut r, &b, MAX_OPS_PER_AUTHOR + 50), MAX_OPS_PER_AUTHOR - mine);
+        assert!(r.make(&b.sk, b.id, Action::SetName { name: "mais".into() }).is_none(), "passou da cota");
+        assert!(r.make(&a.sk, a.id, Action::CreateRoom { room: [1; 16], name: "geral".into() }).is_some(), "os outros seguem");
+    }
+
+    #[test]
+    fn members_in_collusion_cannot_take_the_owners_reserve() {
+        let a = person(1);
+        let mut r = Registry::new(SID, vk(&a));
+        r.make(&a.sk, a.id, Action::AddMember { key: a.key, vk: vk(&a) }).unwrap();
+        let crowd: Vec<Person> = (2..=10).map(person).collect();
+        for p in &crowd {
+            r.make(&a.sk, a.id, Action::AddMember { key: p.key, vk: vk(p) }).unwrap();
+        }
+        for p in &crowd {
+            rename_many(&mut r, p, MAX_OPS_PER_AUTHOR);
+        }
+        assert_eq!(r.len(), MAX_OPS - OWNER_RESERVE, "o conluio para onde a reserva começa");
+        assert!(r.make(&crowd[0].sk, crowd[0].id, Action::SetName { name: "x".into() }).is_none());
+        let target = crowd[0].id;
+        assert!(r.make(&a.sk, a.id, Action::RemoveMember { target }).is_some(), "o dono ainda remove");
+        assert!(r.make(&a.sk, a.id, Action::Rekey { epoch: 1, commit: [1; 32] }).is_some(), "e troca a chave");
+    }
+
+    #[test]
+    fn a_forged_operation_cannot_spend_anothers_quota_or_replace_a_real_one() {
+        let (a, b, e) = (person(1), person(2), person(5));
+        let mut r = started(&a, &b);
+        let owner_ops = r.ops().filter(|o| o.author == a.id).count();
+        // Com o nome do dono, assinadas por quem não é ele: nenhuma entra, nem para ocupar `seq` nem para trocar a verdadeira.
+        for seq in 1..=(MAX_OPS_PER_AUTHOR as u32 + 10) {
+            let forged = Op::sign(&SID, &e.sk, a.id, 2, seq, Action::SetName { name: "x".into() });
+            assert_eq!(r.insert(forged), Insert::Refused);
+        }
+        assert_eq!(r.ops().filter(|o| o.author == a.id).count(), owner_ops);
+        assert!(r.make(&a.sk, a.id, Action::CreateRoom { room: [1; 16], name: "geral".into() }).is_some());
+    }
+
+    #[test]
+    fn strangers_get_a_small_shared_pool() {
+        let (a, b) = (person(1), person(2));
+        let mut r = started(&a, &b);
+        for n in 0..MAX_STRANGER_OPS as u8 {
+            let junk = person(100 + n);
+            let op = Op::sign(&SID, &junk.sk, junk.id, 1, 1, Action::SetName { name: "x".into() });
+            assert_eq!(r.insert(op), Insert::Added, "{n}");
+        }
+        let more = person(200);
+        let op = Op::sign(&SID, &more.sk, more.id, 1, 1, Action::SetName { name: "x".into() });
+        assert_eq!(r.insert(op), Insert::Refused, "o poço dos estranhos encheu");
+        assert!(r.make(&b.sk, b.id, Action::SetName { name: "Bia".into() }).is_some(), "membro não depende dele");
     }
 }
