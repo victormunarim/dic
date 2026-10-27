@@ -344,7 +344,7 @@ mod tests {
         assert!(r.make(&b.sk, b.id, Action::DeleteRoom { room: [1; 16] }).is_some(), "criador apaga a sua");
         assert!(r.make(&d.sk, d.id, Action::CreateRoom { room: [3; 16], name: "x".into() }).is_none(), "estranho não faz nada");
         assert!(r.make(&a.sk, a.id, Action::RemoveMember { target: c.id }).is_some(), "dono remove");
-        assert!(r.state().members.get(&c.id).is_none());
+        assert!(!r.state().members.contains_key(&c.id));
         assert!(r.state().rooms.contains_key(&[2; 16]), "a sala de quem saiu continua");
     }
 

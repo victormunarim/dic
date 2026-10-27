@@ -221,11 +221,10 @@ impl App {
                             } else if button(ui, !busy, "Entrar", GREEN).clicked() {
                                 self.send(Cmd::JoinRoom(v.id, room.id));
                             }
-                            if manages && ui.add(egui::Button::new("🗑").frame(false)).on_hover_text("Apagar a sala").clicked() {
-                                if let Err(e) = hub.try_act(|s, now| s.delete_room(&v.id, room.id, now)) {
+                            if manages && ui.add(egui::Button::new("🗑").frame(false)).on_hover_text("Apagar a sala").clicked()
+                                && let Err(e) = hub.try_act(|s, now| s.delete_room(&v.id, room.id, now)) {
                                     self.srv.msg = e.to_string();
                                 }
-                            }
                         });
                     });
                     let live = self.shared.room.lock().unwrap();
@@ -334,18 +333,16 @@ impl App {
                     });
                     if manages && !m.is_me && m.role != Role::Owner {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if button(ui, true, "Remover", GREY_BUTTON).clicked() {
-                                if let Err(e) = hub.try_act(|s, now| s.remove_member(&v.id, m.id, now)) {
+                            if button(ui, true, "Remover", GREY_BUTTON).clicked()
+                                && let Err(e) = hub.try_act(|s, now| s.remove_member(&v.id, m.id, now)) {
                                     self.srv.msg = e.to_string();
                                 }
-                            }
                             if v.my_role == Some(Role::Owner) {
                                 let (label, to) = if m.role == Role::Admin { ("Tirar admin", Role::Member) } else { ("Tornar admin", Role::Admin) };
-                                if button(ui, true, label, GREY_BUTTON).clicked() {
-                                    if let Err(e) = hub.try_act(|s, now| s.set_role(&v.id, m.id, to, now)) {
+                                if button(ui, true, label, GREY_BUTTON).clicked()
+                                    && let Err(e) = hub.try_act(|s, now| s.set_role(&v.id, m.id, to, now)) {
                                         self.srv.msg = e.to_string();
                                     }
-                                }
                             }
                         });
                     }

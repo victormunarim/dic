@@ -194,6 +194,9 @@ struct Delivery {
     next: u64,
 }
 
+/// Convite em montagem: (remetente, identificador) e os pedaços que já chegaram.
+type Assembly = (([u8; 32], [u8; 4]), Vec<Option<Vec<u8>>>);
+
 pub struct Servers {
     me: Me,
     visible: bool,
@@ -203,7 +206,7 @@ pub struct Servers {
     /// Convites que estou entregando, por servidor e convidado.
     deliveries: BTreeMap<(ServerId, MemberId), Delivery>,
     /// Pedaços de convite que chegaram, por remetente e identificador.
-    assembling: Vec<(([u8; 32], [u8; 4]), Vec<Option<Vec<u8>>>)>,
+    assembling: Vec<Assembly>,
     pending: BTreeMap<ServerId, PendingInvite>,
     declined: std::collections::BTreeSet<ServerId>,
 }
@@ -303,8 +306,7 @@ impl Servers {
     /// offline a entrega se repete até ele receber (ou por [`INVITE_TTL`]).
     pub fn invite_send(&mut self, server: &ServerId, invitee: [u8; 32], now: u64) -> Result<Output, ServerError> {
         let text = self.invite(server, invitee, now)?;
-        let mut out = Output::default();
-        out.send = self.invite_frames(&text, &invitee);
+        let out = Output { send: self.invite_frames(&text, &invitee), ..Output::default() };
         let d = self.deliveries.entry((*server, member_id(&invitee))).or_insert(Delivery { first: now, next: now });
         d.next = now + INVITE_RESEND;
         Ok(out)
@@ -821,11 +823,10 @@ impl Servers {
                     out.send.extend(seal_to(me, s, &key, &Msg::Gift { epoch: s.epoch, secret: s.secret }));
                 }
                 // A conversa também me diz onde ele está, se eu ainda não sei.
-                if s.peer(key).reach.is_none() {
-                    if let Some((seq, r)) = my_reach {
+                if s.peer(key).reach.is_none()
+                    && let Some((seq, r)) = my_reach {
                         out.send.extend(seal_to(me, s, &key, &Msg::MyAddr { seq, reach: r }));
                     }
-                }
             }
             Msg::Vector { page, pages, entries } => {
                 let p = s.peer(key);
@@ -847,12 +848,11 @@ impl Servers {
                 }
             }
             Msg::Op(op) => {
-                if is_member || s.joining.is_some() || s.invited.contains_key(&id) {
-                    if s.reg.insert(op) == Insert::Added {
+                if (is_member || s.joining.is_some() || s.invited.contains_key(&id))
+                    && s.reg.insert(op) == Insert::Added {
                         s.sync_peers(me);
                         out.events.push(Event::Changed(sid));
                     }
-                }
             }
             Msg::MyAddr { seq, reach } => {
                 if is_member || s.joining.as_ref().is_some_and(|h| h.key == key) {
@@ -927,11 +927,10 @@ impl Servers {
                 out.events.push(Event::Removed(id));
                 continue;
             }
-            if let Some(r) = s.room {
-                if !s.reg.state().rooms.contains_key(&r) {
+            if let Some(r) = s.room
+                && !s.reg.state().rooms.contains_key(&r) {
                     s.room = None;
                 }
-            }
             let mesh = s.mesh_now(now);
             if mesh != s.mesh {
                 out.events.push(Event::Mesh { server: id, room: mesh.0, peers: mesh.1.clone() });

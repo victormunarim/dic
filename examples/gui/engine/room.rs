@@ -110,6 +110,7 @@ fn rms(f: &[i16]) -> f64 {
 }
 
 /// A chamada com uma pessoa: leva o microfone até ela e o que ela diz até a mistura.
+#[allow(clippy::too_many_arguments)]
 async fn link_loop(
     mut c: ActiveCall,
     key: [u8; 32],

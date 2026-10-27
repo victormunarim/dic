@@ -183,7 +183,7 @@ fn decode(b: &[u8]) -> Option<Msg> {
             if rest.len() != *n as usize * 10 || *n as usize > VECTOR_PER_FRAME || *pages == 0 || page >= pages {
                 return None;
             }
-            let entries = rest.chunks_exact(10).map(|c| (c[..8].try_into().expect("8"), u16::from_be_bytes([c[8], c[9]]))).collect();
+            let entries = rest.as_chunks::<10>().0.iter().map(|c| (c[..8].try_into().expect("8"), u16::from_be_bytes([c[8], c[9]]))).collect();
             Msg::Vector { page: *page, pages: *pages, entries }
         }
         4 => Msg::Op(Op::decode(b)?),
