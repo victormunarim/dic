@@ -157,7 +157,6 @@ impl App {
                     (Tab::Home, "🏠", "Início", None),
                     (Tab::Contacts, "👥", "Contatos", None),
                     (Tab::Call, "📞", "Chamada", (in_call && !in_room).then_some(GREEN)),
-                    (Tab::Servers, "🛡", "Servidores", in_room.then_some(GREEN)),
                 ];
                 for (tab, icon, label, badge) in items {
                     if nav_item(ui, self.tab == tab, icon, label, badge).clicked() {

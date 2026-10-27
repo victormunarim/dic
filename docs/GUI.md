@@ -8,13 +8,13 @@ Uso da GUI (`examples/gui`): as abas, volume, sensibilidade do microfone, dispos
 
 A janela segue o estilo do Discord: a barra lateral é estreita e só de ícones (uma aba por assunto, com o nome ao passar o mouse; sem título nem subtítulo) e, no pé, o seu avatar com o estado (offline, conectando, online, em chamada; o texto do estado aparece ao passar o mouse), o botão de mudo e o de desligar; passar o mouse no círculo com a sua inicial mostra o ícone de ligar/desligar e clicar alterna entre online e offline (menos em chamada). Com a janela larga (≥ 780 px) cada página se divide em duas colunas. Os botões de ação (ligar, desligar, mudo, compartilhar a tela, assistir, ampliar) são só um ícone, e o nome da ação aparece ao passar o mouse; assistir é um olho (com um risco quando já está assistindo); o quadradinho vermelho de "transmitindo" só aparece em quem não tem botão.
 
-À esquerda da janela fica, em qualquer aba, o *trilho de servidores* (como o do Discord): um ícone com a inicial de cada servidor e o **＋** para criar ou aceitar convite. Clicar num ícone abre a aba Servidores naquele servidor.
+À esquerda da janela fica, em qualquer aba, o *trilho de servidores* (como o do Discord): um ícone com a inicial de cada servidor e o **＋** para criar ou aceitar convite. Clicar num ícone abre a página daquele servidor; a barra de abas não tem item de Servidores, só o trilho.
 
 | Aba | O que tem |
 |---|---|
 | **Início** | *Conexão* (Ficar online / offline e o estado), *Meu código de contato* (com *Copiar o código*) e *Ligar para um código* |
 | **Contatos** | A lista (Ligar / Remover) e *Adicionar contato* (nome e código) |
-| **Servidores** | As *Salas de voz* com quem está em cada uma e o aro verde de quem fala, *Telas da sala*, os *Membros* (online e offline) e o convite com o aviso de IP. Detalhes em [SERVIDORES.md](SERVIDORES.md) |
+| *Servidor* (pelo trilho) | As *Salas de voz* com quem está em cada uma e o aro verde de quem fala, *Telas da sala*, os *Membros* (online e offline) e o convite com o aviso de IP. Detalhes em [SERVIDORES.md](SERVIDORES.md) |
 | **Chamada** | Abre sozinha quando uma chamada 1:1 começa (entrar numa sala não troca de aba): a conversa, *Compartilhar a minha tela* (com a linha de diagnóstico) e a *Tela de ...* de quem transmite para você, que se amplia em outra janela |
 | **Vídeo** | *Transmissão de tela*: privacidade, *Priorizar* fluidez ou nitidez e codificar pela placa de vídeo; valem da próxima transmissão, na chamada e nas salas |
 | **Áudio** | *Dispositivos* (usar microfone e alto-falante, escolha dos dois), *Volume e microfone* (mudo, volume, ganho, medidor, sensibilidade, teste) e *Tratamento da voz* (ruído, eco, porta, graves, volume automático, Opus) |
