@@ -239,12 +239,6 @@ impl App {
                             avatar(ui, &who, 26.0, speaking.then_some(GREEN));
                             let text = RichText::new(if m.is_me { format!("{who} (você)") } else { who }).color(if speaking { GREEN } else { TEXT });
                             ui.label(if speaking { text.strong() } else { text });
-                            if m.sharing {
-                                // Quadradinho vermelho, como o de parar de gravar.
-                                let (rect, tip) = ui.allocate_exact_size(vec2(12.0, 12.0), egui::Sense::hover());
-                                ui.painter().rect_filled(rect, CornerRadius::same(2), RED);
-                                tip.on_hover_text("transmitindo a tela");
-                            }
                             if here && m.is_me {
                                 let (icon, tip, fill) = if sharing { ("⏹", "Parar de compartilhar", RED) } else { ("🖥", "Compartilhar tela", BLURPLE) };
                                 if icon_button(ui, true, icon, tip, fill).clicked() {
@@ -252,9 +246,20 @@ impl App {
                                 }
                             } else if here && m.sharing {
                                 let on = live.watching.contains(&m.key);
-                                if icon_button(ui, true, if on { "⏹" } else { "👁" }, if on { "Parar de assistir" } else { "Assistir" }, if on { GREY_BUTTON } else { GREEN }).clicked() {
+                                let reply = icon_button(ui, true, "👁", if on { "Parar de assistir" } else { "Assistir" }, if on { GREY_BUTTON } else { GREEN });
+                                if on {
+                                    // O mesmo olho com um risco por cima.
+                                    let r = reply.rect.shrink2(vec2(11.0, 9.0));
+                                    ui.painter().line_segment([r.left_bottom(), r.right_top()], egui::Stroke::new(2.5f32, Color32::WHITE));
+                                }
+                                if reply.clicked() {
                                     action = Some((Some(m.key), !on));
                                 }
+                            } else if m.sharing {
+                                // Sem botão (não é a sala em que você está), o quadradinho vermelho, como o de parar de gravar, avisa.
+                                let (rect, tip) = ui.allocate_exact_size(vec2(12.0, 12.0), egui::Sense::hover());
+                                ui.painter().rect_filled(rect, CornerRadius::same(2), RED);
+                                tip.on_hover_text("transmitindo a tela");
                             }
                         });
                     }

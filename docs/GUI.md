@@ -6,7 +6,7 @@ Uso da GUI (`examples/gui`): as abas, volume, sensibilidade do microfone, dispos
 
 ## As abas
 
-A janela segue o estilo do Discord: a barra lateral tem uma aba por assunto e, no pé, o seu avatar com o estado (offline, conectando, online, em chamada), o botão de mudo e o de desligar; offline, passar o mouse no círculo com a sua inicial mostra o ícone de ligar/desligar e clicar alterna entre online e offline (menos em chamada). Com a janela larga (≥ 780 px) cada página se divide em duas colunas. Os botões de ação (ligar, desligar, mudo, compartilhar a tela, assistir, ampliar) são só um ícone, e o nome da ação aparece ao passar o mouse; assistir é um olho.
+A janela segue o estilo do Discord: a barra lateral tem uma aba por assunto e, no pé, o seu avatar com o estado (offline, conectando, online, em chamada), o botão de mudo e o de desligar; offline, passar o mouse no círculo com a sua inicial mostra o ícone de ligar/desligar e clicar alterna entre online e offline (menos em chamada). Com a janela larga (≥ 780 px) cada página se divide em duas colunas. Os botões de ação (ligar, desligar, mudo, compartilhar a tela, assistir, ampliar) são só um ícone, e o nome da ação aparece ao passar o mouse; assistir é um olho (com um risco quando já está assistindo); o quadradinho vermelho de "transmitindo" só aparece em quem não tem botão.
 
 À esquerda da janela fica, em qualquer aba, o *trilho de servidores* (como o do Discord): um ícone com a inicial de cada servidor e o **＋** para criar ou aceitar convite. Clicar num ícone abre a aba Servidores naquele servidor.
 
