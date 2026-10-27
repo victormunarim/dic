@@ -30,9 +30,9 @@
 //! - Células inválidas fecham o link (violação de protocolo).
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io,
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -265,11 +265,50 @@ async fn write_loop(mut wr: LinkWriter, mut rx: mpsc::Receiver<Cell>, mut cover:
 }
 
 /// Disca `addr` e cifra o link, autenticando o relay por `key`.
-async fn dial(addr: String, key: [u8; 32], limit: Duration) -> Option<(LinkReader, LinkWriter)> {
-    let s = timeout(limit, TcpStream::connect(addr)).await.ok()?.ok()?;
+///
+/// Com `public_only`, só conecta a endereço público (resolvido aqui, e é a esse que conecta): um estranho que
+/// pede um `Extend` não usa o relay para varrer a rede local, nem as portas desta máquina.
+async fn dial(addr: String, key: [u8; 32], limit: Duration, public_only: bool) -> Option<(LinkReader, LinkWriter)> {
+    let s = if public_only {
+        let target = timeout(limit, tokio::net::lookup_host(addr)).await.ok()?.ok()?.find(|a| is_public(&a.ip()))?;
+        timeout(limit, TcpStream::connect(target)).await.ok()?.ok()?
+    } else {
+        timeout(limit, TcpStream::connect(addr)).await.ok()?.ok()?
+    };
     // Sem isto o Nagle seguraria quadros pequenos de voz esperando o ACK do anterior.
     let _ = s.set_nodelay(true);
     link::connect(s, &key).await.ok()
+}
+
+/// `ip` é um endereço da internet pública (nem local, nem privado, nem reservado)?
+pub fn is_public(ip: &IpAddr) -> bool {
+    match ip.to_canonical() {
+        IpAddr::V4(a) => {
+            let o = a.octets();
+            !(a.is_unspecified()
+                || a.is_loopback()
+                || a.is_private()
+                || a.is_link_local()
+                || a.is_broadcast()
+                || a.is_multicast()
+                || a.is_documentation()
+                || o[0] == 0
+                || o[0] >= 240
+                || (o[0] == 100 && (o[1] & 0xc0) == 64)
+                || (o[0] == 192 && o[1] == 0 && o[2] == 0)
+                || (o[0] == 198 && (o[1] & 0xfe) == 18))
+        }
+        IpAddr::V6(a) => {
+            let s = a.segments();
+            !(a.is_unspecified()
+                || a.is_loopback()
+                || a.is_multicast()
+                || (s[0] & 0xfe00) == 0xfc00
+                || (s[0] & 0xffc0) == 0xfe80
+                || (s[0] == 0x2001 && s[1] == 0x0db8)
+                || (s[0] == 0x0064 && s[1] == 0xff9b))
+        }
+    }
 }
 
 mod client;
@@ -277,3 +316,34 @@ mod server;
 
 pub use client::{CircuitClient, ClientOptions};
 pub use server::RelayServer;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_global_addresses_are_public() {
+        for a in ["8.8.8.8", "1.1.1.1", "93.184.216.34", "2606:4700::1111", "100.63.255.255", "172.32.0.1"] {
+            assert!(is_public(&a.parse().unwrap()), "{a}");
+        }
+        for a in [
+            "127.0.0.1", "0.0.0.0", "10.1.2.3", "172.16.0.1", "172.31.255.255", "192.168.1.1", "169.254.169.254", "100.64.0.1",
+            "192.0.0.8", "198.18.0.1", "224.0.0.1", "255.255.255.255", "240.0.0.1", "203.0.113.5",
+            "::1", "::", "fe80::1", "fc00::1", "fd12::1", "ff02::1", "2001:db8::1", "::ffff:127.0.0.1", "::ffff:10.0.0.1",
+        ] {
+            assert!(!is_public(&a.parse().unwrap()), "{a}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stranger_cannot_make_the_relay_dial_this_machine() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let accepted = tokio::spawn(async move { listener.accept().await.is_ok() });
+        assert!(dial(addr.clone(), [0; 32], Duration::from_millis(500), true).await.is_none());
+        assert!(dial(format!("localhost:{}", addr.rsplit(':').next().unwrap()), [0; 32], Duration::from_millis(500), true).await.is_none());
+        // O pedido do dono do relay não tem essa restrição (o handshake falha só porque a chave é falsa).
+        let _ = dial(addr, [0; 32], Duration::from_millis(500), false).await;
+        assert!(accepted.await.unwrap(), "o dono chegou a conectar; o estranho não");
+    }
+}

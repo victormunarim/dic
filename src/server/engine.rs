@@ -18,7 +18,7 @@ use super::{
     invite::{Hint, Invite, MAX_HINTS, PREFIX, hex, unhex},
     op::{Action, Op, Role},
     registry::{Insert, Registry},
-    signing_key, valid_name,
+    secret_commit, signing_key, valid_name,
     wire::{self, Hello, INVITE_CHUNK, INVITE_CHUNKS, INVITE_SERVER, Msg, VECTOR_PER_FRAME},
 };
 use crate::media::{signal::Frame, update::Reach};
@@ -490,11 +490,13 @@ impl Servers {
     pub fn remove_member(&mut self, server: &ServerId, target: MemberId, now: u64) -> Result<Output, ServerError> {
         let (_, mut out) = self.act(server, Action::RemoveMember { target }, now)?;
         let epoch = self.servers[server].reg.state().epoch + 1;
-        if let Ok((_, more)) = self.act(server, Action::Rekey { epoch }, now) {
+        let mut secret = [0u8; 32];
+        OsRng.fill_bytes(&mut secret);
+        if let Ok((_, more)) = self.act(server, Action::Rekey { epoch, commit: secret_commit(server, epoch, &secret) }, now) {
             out.merge(more);
             let s = self.servers.get_mut(server).expect("existe");
             s.epoch = epoch;
-            OsRng.fill_bytes(&mut s.secret);
+            s.secret = secret;
             let s = &self.servers[server];
             for p in s.peers.values().filter(|p| p.online(now) && s.is_member(&member_id(&p.key))) {
                 out.send.extend(seal_to(&self.me, s, &p.key, &Msg::Gift { epoch, secret: s.secret }));
@@ -900,7 +902,11 @@ impl Servers {
                 }
             }
             Msg::Gift { epoch, secret } => {
-                if is_member && epoch == s.reg.state().epoch && epoch > s.epoch {
+                // O segredo tem de reproduzir o compromisso que o `Rekey` fixou; num `Rekey` antigo (sem compromisso)
+                // só vale o que vem de quem administra.
+                let st = s.reg.state();
+                let genuine = if st.commit == [0; 32] { st.role_of(&id).is_some_and(Role::manages) } else { secret_commit(&sid, epoch, &secret) == st.commit };
+                if is_member && genuine && epoch == st.epoch && epoch > s.epoch {
                     s.epoch = epoch;
                     s.secret = secret;
                     out.events.push(Event::Changed(sid));

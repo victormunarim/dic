@@ -42,6 +42,8 @@ pub struct State {
     pub members: BTreeMap<MemberId, Member>,
     pub rooms: BTreeMap<RoomId, Room>,
     pub epoch: u16,
+    /// `secret_commit` do segredo da época atual (zerado antes do primeiro `Rekey`, ou num `Rekey` antigo).
+    pub commit: [u8; 32],
 }
 
 impl State {
@@ -281,11 +283,12 @@ fn apply(state: &mut State, owner_vk: &[u8; 32], op: &Op, sig_ok: &mut dyn FnMut
             }
             state.rooms.remove(room);
         }
-        Action::Rekey { epoch } => {
+        Action::Rekey { epoch, commit } => {
             if !role.manages() || *epoch != state.epoch.wrapping_add(1) {
                 return false;
             }
             state.epoch = *epoch;
+            state.commit = *commit;
         }
         Action::SetName { name } => {
             if let Some(m) = state.members.get_mut(&op.author) {
@@ -378,9 +381,9 @@ mod tests {
     fn rekey_only_goes_one_epoch_at_a_time_and_names_are_self_service() {
         let (a, b) = (person(1), person(2));
         let mut r = started(&a, &b);
-        assert!(r.make(&b.sk, b.id, Action::Rekey { epoch: 1 }).is_none());
-        assert!(r.make(&a.sk, a.id, Action::Rekey { epoch: 2 }).is_none());
-        assert!(r.make(&a.sk, a.id, Action::Rekey { epoch: 1 }).is_some());
+        assert!(r.make(&b.sk, b.id, Action::Rekey { epoch: 1, commit: [1; 32] }).is_none());
+        assert!(r.make(&a.sk, a.id, Action::Rekey { epoch: 2, commit: [2; 32] }).is_none());
+        assert!(r.make(&a.sk, a.id, Action::Rekey { epoch: 1, commit: [1; 32] }).is_some());
         assert_eq!(r.state().epoch, 1);
         r.make(&b.sk, b.id, Action::SetName { name: "Bia".into() }).unwrap();
         assert_eq!(r.state().members[&b.id].name, "Bia");

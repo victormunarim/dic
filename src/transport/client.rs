@@ -181,7 +181,7 @@ pub(super) async fn client_actor(
                         dialing.insert(to.clone(), vec![cell]);
                         let tx = tx.clone();
                         tasks.spawn(async move {
-                            let l = dial(to.clone(), key, connect_timeout).await;
+                            let l = dial(to.clone(), key, connect_timeout, false).await;
                             let _ = tx.send(ClientEvent::Connected(to, l)).await;
                         });
                     }

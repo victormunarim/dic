@@ -36,7 +36,9 @@ pub struct CircRef {
 #[allow(clippy::large_enum_variant)] // um `Cell` por variante: encaixotar custaria uma alocação por célula
 pub enum Action {
     Send { link: LinkId, cell: Cell },
-    Connect { link: LinkId, addr: String, key: [u8; 32] },
+    /// `via` é o link de onde veio o pedido de `Extend`: quem implementa a rede decide por ele se `addr` pode ser
+    /// qualquer endereço (pedido do próprio dono do relay) ou só um público (pedido de um estranho).
+    Connect { link: LinkId, addr: String, key: [u8; 32], via: LinkId },
     OpenStream { circ: CircRef, dest: String },
     Deliver { circ: CircRef, payload: Vec<u8> },
     CloseStream { circ: CircRef },
@@ -418,7 +420,7 @@ impl RelayNode {
                 c.extending = true;
                 self.rev.insert(CircRef { link, circ: next_circ }, key);
                 self.connecting.insert(link, PendingExtend { prev: key, next_circ, create_body });
-                vec![Action::Connect { link, addr, key: link_key }]
+                vec![Action::Connect { link, addr, key: link_key, via: key.link }]
             }
             RelayCmd::Begin => {
                 if c.pos + 1 != MAX_HOPS || c.stream.is_some() {

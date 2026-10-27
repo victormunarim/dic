@@ -7,7 +7,8 @@ use super::*;
 // ---------------------------------------------------------------------------
 
 pub(super) enum RelayEvent {
-    Linked(LinkReader, LinkWriter, OwnedSemaphorePermit),
+    /// O último campo diz se o outro lado está nesta máquina (o cliente do próprio dono do relay).
+    Linked(LinkReader, LinkWriter, OwnedSemaphorePermit, bool),
     Cell(LinkId, Cell),
     LinkClosed(LinkId),
     Connected(LinkId, Option<(LinkReader, LinkWriter)>),
@@ -73,6 +74,8 @@ pub(super) struct RelayIo {
     tx: mpsc::Sender<RelayEvent>,
     tasks: JoinSet<()>,
     writers: HashMap<LinkId, mpsc::Sender<Cell>>,
+    /// Links de entrada que vêm desta máquina. Só o `Extend` deles pode apontar para endereço privado.
+    local: HashSet<LinkId>,
     streams: HashMap<CircRef, mpsc::Sender<Vec<u8>>>,
     next_in: LinkId,
     started: Instant,
@@ -119,10 +122,11 @@ impl RelayIo {
                         let _ = w.try_send(cell);
                     }
                 }
-                Action::Connect { link, addr, key } => {
+                Action::Connect { link, addr, key, via } => {
                     let (tx, to) = (self.tx.clone(), self.cfg.connect_timeout);
+                    let public_only = !self.local.contains(&via);
                     self.tasks.spawn(async move {
-                        let l = dial(addr, key, to).await;
+                        let l = dial(addr, key, to, public_only).await;
                         let _ = tx.send(RelayEvent::Connected(link, l)).await;
                     });
                 }
@@ -181,6 +185,7 @@ pub(super) async fn relay_actor(mut node: RelayNode, secret: Zeroizing<[u8; 32]>
         tx: tx.clone(),
         tasks: JoinSet::new(),
         writers: HashMap::new(),
+        local: HashSet::new(),
         streams: HashMap::new(),
         next_in: 1,
         started: Instant::now(),
@@ -193,13 +198,14 @@ pub(super) async fn relay_actor(mut node: RelayNode, secret: Zeroizing<[u8; 32]>
             accepted = listener.accept() => {
                 // Erros de accept (ex.: sem descritores) não derrubam o relay.
                 // Sem vaga livre (`max_links`), a conexão é fechada na hora.
-                if let Ok((s, _)) = accepted {
+                if let Ok((s, peer)) = accepted {
                     let _ = s.set_nodelay(true);
+                    let local = peer.ip().to_canonical().is_loopback();
                     if let Ok(permit) = slots.clone().try_acquire_owned() {
                         let (tx, secret) = (tx.clone(), secret.clone());
                         io.tasks.spawn(async move {
                             if let Ok((rd, wr)) = link::accept(s, &secret).await {
-                                let _ = tx.send(RelayEvent::Linked(rd, wr, permit)).await;
+                                let _ = tx.send(RelayEvent::Linked(rd, wr, permit, local)).await;
                             }
                         });
                     }
@@ -211,9 +217,12 @@ pub(super) async fn relay_actor(mut node: RelayNode, secret: Zeroizing<[u8; 32]>
                 io.run(acts);
             }
             Some(ev) = rx.recv() => match ev {
-                RelayEvent::Linked(rd, wr, permit) => {
+                RelayEvent::Linked(rd, wr, permit, local) => {
                     let link = io.next_in;
                     io.next_in += 1; // < FIRST_OUTBOUND_LINK na prática
+                    if local {
+                        io.local.insert(link);
+                    }
                     io.attach(link, rd, wr, Some(permit));
                 }
                 RelayEvent::Cell(link, cell) => {
@@ -223,6 +232,7 @@ pub(super) async fn relay_actor(mut node: RelayNode, secret: Zeroizing<[u8; 32]>
                 }
                 RelayEvent::LinkClosed(link) => {
                     io.writers.remove(&link);
+                    io.local.remove(&link);
                 }
                 RelayEvent::Connected(link, Some((rd, wr))) => {
                     io.attach(link, rd, wr, None);

@@ -5,7 +5,7 @@ use std::collections::{HashSet, VecDeque};
 use clam::{
     media::{signal::Frame, update::Reach},
     rand_core::OsRng,
-    server::{Event, MemberId, Output, Role, ServerError, ServerId, ServerView, Servers, engine::{HEARTBEAT, LEASE}},
+    server::{Event, MemberId, Output, Role, ServerError, ServerId, ServerView, Servers, engine::{HEARTBEAT, LEASE}, wire::{self, Msg}},
     x25519_dalek::StaticSecret,
 };
 
@@ -15,12 +15,14 @@ struct Net {
     down: HashSet<usize>,
     events: Vec<Vec<Event>>,
     now: u64,
+    /// Descarta os `Gift` deste servidor (para testar o que acontece antes de o segredo certo chegar).
+    block_gifts: Option<ServerId>,
 }
 
 impl Net {
     fn new(n: usize) -> Net {
         let secrets: Vec<StaticSecret> = (0..n).map(|_| StaticSecret::random_from_rng(OsRng)).collect();
-        let mut net = Net { nodes: secrets.iter().map(|s| Servers::new(s.clone())).collect(), secrets, down: HashSet::new(), events: vec![Vec::new(); n], now: 1000 };
+        let mut net = Net { nodes: secrets.iter().map(|s| Servers::new(s.clone())).collect(), secrets, down: HashSet::new(), events: vec![Vec::new(); n], now: 1000, block_gifts: None };
         for i in 0..n {
             let reach = Reach { addr: format!("n{i}.exemplo:4001"), onion: [i as u8; 32], link: [i as u8 + 100; 32] };
             let out = net.nodes[i].set_reach(Some(reach), 1, net.now);
@@ -58,6 +60,11 @@ impl Net {
         self.events[from].extend(out.events);
         for o in out.send {
             let to = (0..self.nodes.len()).find(|&j| self.key(j) == o.to).expect("destino existe");
+            if let Some(server) = self.block_gifts
+                && matches!(wire::open(&self.secrets[to], &self.key(from), &server, &o.frame), Some(Msg::Gift { .. }))
+            {
+                continue;
+            }
             queue.push_back((to, o.frame));
         }
     }
@@ -253,6 +260,31 @@ fn any_member_creates_rooms_but_only_managers_remove_people() {
     assert_eq!(v.epoch, 1, "o segredo trocou");
     assert_eq!(net.view(0, &server).epoch, 1);
     assert_eq!(net.view(2, &server).epoch, 0, "quem saiu não recebe o segredo novo");
+}
+
+#[test]
+fn a_fake_gift_from_a_plain_member_does_not_replace_the_server_secret() {
+    let (mut net, server) = Net::group(4);
+    net.advance(2);
+    net.down.insert(3);
+    net.block_gifts = Some(server);
+    let target = net.id(2);
+    let out = net.nodes[0].remove_member(&server, target, net.now).unwrap();
+    net.run(0, out);
+    net.down.clear();
+    let out = net.nodes[3].online(net.now);
+    net.run(3, out);
+    net.advance(3);
+    assert_eq!(net.view(3, &server).epoch, 0, "ainda sem o segredo novo");
+    // Um membro comum entrega um segredo qualquer, para a época certa.
+    let fake = wire::seal(&net.secrets[1], &net.key(3), &server, &Msg::Gift { epoch: 1, secret: [9; 32] }).unwrap();
+    let contacts: Vec<[u8; 32]> = (0..4).map(|j| net.key(j)).collect();
+    net.nodes[3].handle_with(&fake, net.now, &contacts);
+    assert_eq!(net.view(3, &server).epoch, 0, "o segredo falso não vale");
+    // O verdadeiro ainda entra.
+    net.block_gifts = None;
+    net.advance(HEARTBEAT * 2);
+    assert_eq!(net.view(3, &server).epoch, 1);
 }
 
 #[test]

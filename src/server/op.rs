@@ -60,7 +60,8 @@ pub enum Action {
     RenameRoom { room: RoomId, name: String },
     DeleteRoom { room: RoomId },
     /// O segredo do servidor passa para a época `epoch` (a entrega do segredo novo é à parte, par a par).
-    Rekey { epoch: u16 },
+    /// `commit` é o [`secret_commit`](super::secret_commit) do segredo novo; zerado, é um `Rekey` do formato antigo.
+    Rekey { epoch: u16, commit: [u8; 32] },
     /// Quem assina diz como quer ser chamado.
     SetName { name: String },
 }
@@ -96,7 +97,12 @@ impl Action {
                 b.extend_from_slice(name.as_bytes());
             }
             Action::DeleteRoom { room } => b.extend_from_slice(room),
-            Action::Rekey { epoch } => b.extend_from_slice(&epoch.to_be_bytes()),
+            Action::Rekey { epoch, commit } => {
+                b.extend_from_slice(&epoch.to_be_bytes());
+                if *commit != [0; 32] {
+                    b.extend_from_slice(commit);
+                }
+            }
             Action::SetName { name } => b.extend_from_slice(name.as_bytes()),
         }
         b
@@ -113,7 +119,10 @@ impl Action {
                 if code == 4 { Action::CreateRoom { room, name } } else { Action::RenameRoom { room, name } }
             }
             6 if b.len() == 16 => Action::DeleteRoom { room: b.try_into().ok()? },
-            7 if b.len() == 2 => Action::Rekey { epoch: u16::from_be_bytes(b.try_into().ok()?) },
+            7 if b.len() == 2 || b.len() == 34 => Action::Rekey {
+                epoch: u16::from_be_bytes(b[..2].try_into().ok()?),
+                commit: if b.len() == 34 { b[2..].try_into().ok()? } else { [0; 32] },
+            },
             8 if !b.is_empty() && b.len() <= MAX_NAME => Action::SetName { name: name(b)? },
             _ => return None,
         })
@@ -208,7 +217,8 @@ mod tests {
             Action::CreateRoom { room: [4; 16], name: "geral".into() },
             Action::RenameRoom { room: [4; 16], name: "papo".into() },
             Action::DeleteRoom { room: [4; 16] },
-            Action::Rekey { epoch: 3 },
+            Action::Rekey { epoch: 3, commit: [8; 32] },
+            Action::Rekey { epoch: 4, commit: [0; 32] },
             Action::SetName { name: "Ana".into() },
         ]
     }

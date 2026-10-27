@@ -37,6 +37,18 @@ pub const MAX_ROOM_PEOPLE: usize = 8;
 /// Bytes do nome de um servidor, de uma sala ou de um membro.
 pub const MAX_NAME: usize = 32;
 
+/// Compromisso com o segredo de uma época: o `Rekey` leva este valor, e só um `Gift` com o segredo que o
+/// reproduz vale. Sem isso qualquer membro entregaria um segredo falso a quem ainda não recebeu o verdadeiro.
+pub fn secret_commit(server: &ServerId, epoch: u16, secret: &[u8; 32]) -> [u8; 32] {
+    use sha2::Digest;
+    let mut h = Sha256::new();
+    h.update(b"clam/servidor/segredo/v1");
+    h.update(server);
+    h.update(epoch.to_be_bytes());
+    h.update(secret);
+    h.finalize().into()
+}
+
 pub fn member_id(key: &[u8; 32]) -> MemberId {
     key[..8].try_into().expect("8 bytes")
 }

@@ -60,6 +60,8 @@ impl Priority {
 /// passa de [`MAX_FRAME`] e nada chega a quem assiste.
 pub const MAX_WIDTH: usize = 1920;
 const MAX_SHRINK: usize = 8;
+/// Maior imagem que o decodificador aceita (~16 MB em RGBA): o codificador nunca passa de [`MAX_WIDTH`] de largura.
+pub const MAX_DECODED_PIXELS: usize = MAX_WIDTH * 2160;
 
 #[derive(Debug, Error)]
 pub enum VideoError {
@@ -67,6 +69,8 @@ pub enum VideoError {
     Codec(String),
     #[error("imagem {0}x{1} pequena demais ou com buffer de tamanho errado")]
     Size(usize, usize),
+    #[error("imagem {0}x{1} grande demais para decodificar")]
+    TooLarge(usize, usize),
     #[error("o circuito de tela recusou o quadro")]
     Push,
 }
@@ -643,6 +647,10 @@ impl H264Decoder {
     pub fn decode(&mut self, data: &[u8]) -> Result<Option<RawFrame>, VideoError> {
         let Some(yuv) = self.inner.decode(data).map_err(codec_err)? else { return Ok(None) };
         let (width, height) = yuv.dimensions();
+        // As dimensões vêm do quadro-chave de quem transmite: sem teto, ele escolheria quanto alocamos.
+        if width.saturating_mul(height) > MAX_DECODED_PIXELS {
+            return Err(VideoError::TooLarge(width, height));
+        }
         let mut rgba = vec![0u8; width * height * 4];
         yuv.write_rgba8(&mut rgba);
         Ok(Some(RawFrame { width, height, rgba }))
@@ -720,6 +728,19 @@ mod tests {
         assert!(f.data.len() <= MAX_FRAME);
         let out = dec.decode(&f.data).unwrap().expect("imagem");
         assert_eq!((out.width, out.height), (320, 240));
+    }
+
+    #[test]
+    fn the_decoder_refuses_an_oversized_image() {
+        let encode = |w: usize, h: usize| {
+            let mut enc = Encoder::with_api_config(openh264::OpenH264API::from_source(), EncoderConfig::new()).unwrap();
+            let rgba = vec![90u8; w * h * 4];
+            enc.encode(&YUVBuffer::from_rgba8_source(RgbaSliceU8::new(&rgba, (w, h)))).unwrap().to_vec()
+        };
+        let mut dec = H264Decoder::new().unwrap();
+        assert!(matches!(dec.decode(&encode(3840, 2160)), Err(VideoError::TooLarge(3840, 2160))));
+        let mut dec = H264Decoder::new().unwrap();
+        assert!(dec.decode(&encode(1920, 1080)).unwrap().is_some());
     }
 
     #[test]

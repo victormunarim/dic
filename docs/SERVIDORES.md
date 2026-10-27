@@ -59,7 +59,7 @@ A chave é **par a par**: `HKDF(DH(minha secreta, pública do outro), "clam/serv
 
 **Relógio.** O `lamport` de uma operação tem de ser, no máximo, um acima do maior que veio antes dela na ordem do registro; senão ela fica guardada mas não conta (e passa a contar quando as que faltam chegam). Assim ninguém trava o servidor assinando `u32::MAX`.
 
-**Remover membro.** `RemoveMember` seguido de `Rekey`: o segredo novo vai a cada membro restante em `Gift`. O removido guarda o que já viu (nomes, endereços de então), mas não abre mais nada novo.
+**Remover membro.** `RemoveMember` seguido de `Rekey`: o segredo novo vai a cada membro restante em `Gift`. O `Rekey` leva um compromisso do segredo novo (`secret_commit`, hash do servidor, da época e do segredo), e um `Gift` só troca o segredo se o reproduz: um membro comum não impõe um segredo falso. Num `Rekey` do formato antigo (sem compromisso) o `Gift` só vale se vier de quem administra. O removido guarda o que já viu (nomes, endereços de então), mas não abre mais nada novo.
 
 ## Salas de voz
 
