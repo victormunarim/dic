@@ -12,7 +12,7 @@ A janela segue o estilo do Discord: a barra lateral é estreita e só de ícones
 
 | Aba | O que tem |
 |---|---|
-| **Contatos** | A lista (Ligar / Remover) e *Adicionar contato* (nome e código) |
+| **Contatos** | A lista (Ligar / Remover) e *Adicionar contato* (só o código; o nome vem do próprio contato) |
 | *Servidor* (pelo trilho) | As *Salas de voz* com quem está em cada uma e o aro verde de quem fala, *Telas da sala*, os *Membros* (online e offline) e o convite com o aviso de IP. Detalhes em [SERVIDORES.md](SERVIDORES.md) |
 | **Chamada** | *Ligar para um código* (sem chamada); abre sozinha quando uma chamada 1:1 começa (entrar numa sala não troca de aba): a conversa, *Compartilhar a minha tela* (com a linha de diagnóstico) e a *Tela de ...* de quem transmite para você, que se amplia em outra janela |
 | **Vídeo** | *Transmissão de tela*: privacidade, *Priorizar* fluidez ou nitidez e codificar pela placa de vídeo; valem da próxima transmissão, na chamada e nas salas |
@@ -78,7 +78,7 @@ Quando o relay de um contato muda (IP novo, outra porta), o programa avisa os co
 
 #### Contato de duas vias
 
-Ao "Adicionar contato" com o nó online, o programa manda ao outro lado uma apresentação cifrada (seu nome, sua chave e o seu relay) e insiste até ele confirmar, mesmo se ele estiver desligado agora (as pendentes ficam em `~/.clam-gui.intro`; com o nó parado, a apresentação sai no próximo início). Do outro lado, a pessoa passa a aparecer na lista de contatos sozinha, já com o endereço para ligar de volta, e a aba Atividade avisa quem foi. O nome vem do campo "Seu nome" (aba Configurações; `name=`); vazio, aparece só o começo da chave. Quem não quer isso desliga "Aceitar quem me adiciona como contato" (`intros=0`): a apresentação é descartada sem resposta. Remover um contato não remove do outro lado. Detalhes em [ENCONTRO.md](ENCONTRO.md#contato-de-duas-vias-a-apresentação-fase-4).
+Ao "Adicionar contato" com o nó online, o programa manda ao outro lado uma apresentação cifrada (seu nome, sua chave e o seu relay) e insiste até ele confirmar, mesmo se ele estiver desligado agora (as pendentes ficam em `~/.clam-gui.intro`; com o nó parado, a apresentação sai no próximo início). Do outro lado, a pessoa passa a aparecer na lista de contatos sozinha, já com o endereço para ligar de volta, e a aba Atividade avisa quem foi. O nome vem do campo "Seu nome" (aba Configurações; `name=`); vazio, aparece só o começo da chave. Quem não quer isso desliga "Aceitar quem me adiciona como contato" (`intros=0`): a apresentação é descartada sem resposta. Quem recebe a apresentação de alguém novo manda a sua de volta, e assim quem adicionou só pelo código fica com o nome que o contato deu a si mesmo (campo "Seu nome" dele); até lá aparece o começo da chave. O nome só é preenchido se a linha ainda não tem nome. Se o outro lado desligou "Aceitar quem me adiciona como contato", o nome não chega. Remover um contato não remove do outro lado. Detalhes em [ENCONTRO.md](ENCONTRO.md#contato-de-duas-vias-a-apresentação-fase-4).
 
 Limites: o `seq` é a hora em ms: relógio que volta mais que o intervalo entre dois inícios faz o contato ignorar o aviso até o `seq` passar do último que ele viu.
 

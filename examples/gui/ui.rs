@@ -224,7 +224,10 @@ impl App {
 // ---------------------------------------------------------------------------------------------------
 
 impl App {
-    /// Quem adicionou esta pessoa se apresentou (o nó já o atende): entra na lista, também na tela dele.
+    /// Quem se apresentou (o nó já o atende): se é novo, entra na lista e recebe de volta a apresentação desta
+    /// pessoa, para ele ter o nome dela; se já era contato sem nome (foi adicionado só pelo código), ganha o nome
+    /// que ele deu a si mesmo. Quem já tinha nome não muda, e não há apresentação de volta (senão as duas pontas
+    /// ficariam se apresentando para sempre).
     fn absorb_introductions(&mut self) {
         let introduced: Vec<_> = std::mem::take(&mut *self.shared.introduced.lock().unwrap());
         let mut added = false;
@@ -234,6 +237,13 @@ impl App {
                     self.form.contacts.push('\n');
                 }
                 self.form.contacts.push_str(&intro_line(&i.name, &i.peer, &i.reach));
+                if let Some(r) = &self.running {
+                    let relay = clam::node::RelayInfo { addr: i.reach.addr.clone(), onion: i.reach.onion, link: i.reach.link };
+                    let _ = r.cmds.send(Cmd::Contact(i.peer, Some(relay)));
+                }
+                added = true;
+            } else if let Some(text) = name_contact(&self.form.contacts, &i.peer, &i.name) {
+                self.form.contacts = text;
                 added = true;
             }
         }
@@ -245,10 +255,9 @@ impl App {
     fn contacts_tab(&mut self, ui: &mut egui::Ui, online: bool, in_call: bool) {
         card(ui, "Adicionar contato", "Peça o código de contato de um amigo. Ele também aparece na sua lista, se você deixar.", |ui| {
             let w = ui.available_width();
-            let (name_w, button_w) = (200.0_f32.min(w * 0.3), 170.0);
+            let button_w = 170.0;
             ui.horizontal(|ui| {
-                ui.add(field(&mut self.form.new_name, "Nome").desired_width(name_w));
-                ui.add(field(&mut self.form.new_code, "Código de contato").desired_width((w - name_w - button_w - 2.0 * ui.spacing().item_spacing.x).max(160.0)));
+                ui.add(field(&mut self.form.new_code, "Código de contato").desired_width((w - button_w - ui.spacing().item_spacing.x).max(160.0)));
                 if button(ui, true, "Adicionar", BLURPLE).clicked() {
                     self.add_contact();
                 }
@@ -312,7 +321,6 @@ impl App {
             self.error = "Esse código de contato não parece certo (são 64 letras e números, e o que vem depois deles tem de estar inteiro).".into();
             return;
         }
-        let name: String = self.form.new_name.chars().filter(|c| !matches!(c, ';' | '\n')).collect();
         if let Some((key, relay)) = split_direct(&self.form.new_code) {
             match (&self.running, relay) {
                 (Some(r), relay) => {
@@ -326,12 +334,10 @@ impl App {
                 }
             }
         }
-        let line = format!("{} {}", name.trim(), self.form.new_code.trim());
         if !self.form.contacts.trim().is_empty() {
             self.form.contacts.push('\n');
         }
-        self.form.contacts.push_str(line.trim());
-        self.form.new_name.clear();
+        self.form.contacts.push_str(self.form.new_code.trim());
         self.form.new_code.clear();
         self.error.clear();
         self.form.save();

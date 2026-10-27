@@ -134,7 +134,6 @@ pub(crate) struct Form {
     /// Microfone e alto-falante escolhidos (vazio = padrão do sistema).
     pub(crate) input_dev: String,
     pub(crate) output_dev: String,
-    pub(crate) new_name: String,
     pub(crate) new_code: String,
     /// O arquivo de configuração existia e foi lido ao abrir (para a janela mostrar de onde veio).
     pub(crate) loaded: bool,
@@ -349,11 +348,38 @@ pub(crate) fn anchor_code(r: &clam::node::RelayInfo) -> String {
     format!("{}#{}#{}", r.addr, hex(&r.onion), hex(&r.link))
 }
 
+/// O nome que alguém deu a si mesmo, sem o que atrapalharia a linha de contato.
+fn clean_contact_name(name: &str) -> String {
+    let name: String = name.chars().filter(|c| !c.is_control() && !matches!(c, ';' | '#' | '@')).collect();
+    name.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Dá a `key` o nome `name` (o que ela mesma deu numa apresentação) se a linha dela ainda não tem nome
+/// (nenhum, ou só o começo da chave). Nome que a pessoa escolheu nunca é trocado. `None`: nada mudou.
+pub(crate) fn name_contact(text: &str, key: &[u8; 32], name: &str) -> Option<String> {
+    let name = clean_contact_name(name);
+    if name.is_empty() {
+        return None;
+    }
+    let mut changed = false;
+    let lines: Vec<String> = text
+        .lines()
+        .map(|l| match parse_contacts(l).as_slice() {
+            [(n, k)] if k == key && *n == hex(key)[..8] => {
+                changed = true;
+                let codes: Vec<&str> = l.split_whitespace().filter(|t| split_code(t).is_some()).collect();
+                format!("{name} {}", codes.join(" "))
+            }
+            _ => l.to_string(),
+        })
+        .collect();
+    changed.then(|| lines.join("\n"))
+}
+
 /// A linha de contato de quem se apresentou: o nome que ele deu (limpo) e o código que a apresentação traz.
 pub(crate) fn intro_line(name: &str, key: &[u8; 32], reach: &clam::media::update::Reach) -> String {
     use clam::media::update::Reach;
-    let name: String = name.chars().filter(|c| !c.is_control() && !matches!(c, ';' | '#' | '@')).collect();
-    let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
+    let name = clean_contact_name(name);
     let name = if name.is_empty() { hex(key)[..8].to_string() } else { name };
     let Reach { addr, onion, link } = reach;
     format!("{name} {}#{addr}#{}#{}", hex(key), hex(onion), hex(link))
@@ -647,6 +673,22 @@ mod tests {
         let text = format!("ana {a}\nlixo\nbia {b}");
         assert_eq!(remove_contact(&text, 0), format!("lixo\nbia {b}"));
         assert_eq!(remove_contact(&text, 1), format!("ana {a}\nlixo"));
+    }
+
+    #[test]
+    fn a_nameless_contact_takes_the_name_it_gave_itself_but_a_chosen_name_stays() {
+        let (a, b) = ([1u8; 32], [2u8; 32]);
+        let code = format!("{}#h:1#{}#{}", hex(&a), hex(&[7u8; 32]), hex(&[8u8; 32]));
+        let text = format!("{code}\nbia {}\n{} {}", hex(&b), &hex(&a)[..8], hex(&a));
+        let named = name_contact(&text, &a, "Ana;  M #x").unwrap();
+        let got = parse_contacts(&named);
+        assert_eq!((got[0].0.as_str(), got[0].1), ("Ana M x", a));
+        assert_eq!(named.lines().next().unwrap().split_whitespace().last().unwrap(), code, "o endereço da linha fica");
+        assert_eq!(got[1].0, "bia");
+        assert_eq!(got[2].0, "Ana M x");
+        assert_eq!(name_contact(&text, &b, "Outra"), None);
+        assert_eq!(name_contact(&text, &[3; 32], "Outra"), None);
+        assert_eq!(name_contact(&text, &a, " ; "), None);
     }
 
     #[test]
