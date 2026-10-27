@@ -781,30 +781,30 @@ impl App {
                     card(ui, "Endereço", "Só se o IP que os outros enxergam não serve, como atrás de NAT: ip:porta (a porta precisa estar aberta no roteador; pode ser um nome).", |ui| {
                         ui.add(field(&mut self.form.public_addr, "ip:porta"));
                     });
-                    card(ui, "Encontrar contatos", "", |ui| {
+                    card(ui, "Encontrar contatos", "Quando um contato muda de endereço (IP novo, outra rede), o programa avisa direto. Se vocês dois mudarem enquanto estavam separados, o aviso não chega, e o reencontro usa a DHT, as âncoras ou as duas. Nada passa por servidor do projeto, e o que é guardado vai cifrado só para o contato.", |ui| {
                         // A DHT vem ligada: a caixa é para desligá-la.
                         let mut no_dht = !self.form.use_dht;
                         let off = ui
                             .checkbox(&mut no_dht, "Não usar a DHT (BitTorrent) para reencontrar contatos")
-                            .on_hover_text("Quando você e um contato mudam de endereço ao mesmo tempo, os dois se acham por ela, sem servidor. O conteúdo vai cifrado só para o contato, mas quem opera nós da DHT vê o seu IP. Com a DHT ligada, seu nó também atende a DHT para circuitos de outros nós.");
+                            .on_hover_text("A DHT do BitTorrent é uma rede pública e descentralizada de milhões de computadores. Seu nó guarda nela o endereço atual dele, cifrado para cada contato, e consulta o dos contatos ao ligar. Serve quando você e um contato mudam de endereço ao mesmo tempo. Só o contato lê o conteúdo, mas quem opera nós da DHT vê o seu IP (a opção abaixo esconde). Ligada, seu nó também atende a DHT para circuitos de outros nós. Desligada, sobram o aviso direto e as âncoras.");
                         if off.changed() {
                             self.form.use_dht = !no_dht;
                         }
                         ui.add_enabled_ui(self.form.use_dht, |ui| {
                             ui.checkbox(&mut self.form.dht_circuit, "Falar com a DHT pelos relays dos contatos (esconde o seu IP)")
-                                .on_hover_text("Usa um circuito de dois relays de contatos: o primeiro vê o seu IP mas não o pedido, o segundo vê o pedido mas não o seu IP. Precisa de ao menos dois contatos com endereço guardado; sem eles a DHT não é usada.");
+                                .on_hover_text("Em vez de falar com a DHT do seu IP, o pedido vai por um circuito de dois relays de contatos: o primeiro vê o seu IP mas não o pedido, o segundo vê o pedido mas não o seu IP, e a DHT só vê o IP do segundo. Precisa de ao menos dois contatos com endereço guardado; sem eles a DHT fica parada, e nunca cai para o acesso direto. Um pouco mais lento.");
                         });
                     });
-                    card(ui, "Âncoras", "Guardam o endereço cifrado de quem as usa, para os contatos o acharem.", |ui| {
+                    card(ui, "Âncoras", "Uma âncora é um computador com endereço fixo que guarda o seu endereço atual, cifrado para cada contato, para eles o acharem quando a DHT está bloqueada ou não basta. Escolha âncoras de pessoas em quem você confia: elas veem o IP de quem as usa, mas não o conteúdo.", |ui| {
                         // Servir de âncora vem ligado: a caixa é para não servir.
                         let mut no_anchor = !self.form.anchor;
                         let off = ui
                             .checkbox(&mut no_anchor, "Não servir de âncora para os registros de endereço dos outros")
-                            .on_hover_text("Guarda, em memória, o endereço cifrado de quem usa este computador como âncora, para os contatos dele o acharem. Não lê o conteúdo nem forja item. Precisa de um endereço que os outros alcancem; quem a usa vê o IP do relay dela.");
+                            .on_hover_text("Seu computador guarda, só em memória, o endereço cifrado de quem o usa como âncora, para os contatos dessa pessoa a acharem. Não lê o conteúdo nem forja item. Precisa de um endereço que os outros alcancem. Quem usa a sua âncora vê o IP do seu relay; o código da sua âncora aparece abaixo, para você passar a quem quiser.");
                         if off.changed() {
                             self.form.anchor = !no_anchor;
                         }
-                        ui.label("Âncoras que você usa (uma por linha: ip:porta#chave-do-circuito#chave-do-link):");
+                        ui.label("Âncoras que você usa (uma por linha, no código que o dono da âncora te passa: ip:porta#chave-do-circuito#chave-do-link):");
                         ui.add(egui::TextEdit::multiline(&mut self.form.anchors).desired_rows(3).desired_width(f32::INFINITY).margin(Margin::symmetric(12, 10)));
                     });
                 }
