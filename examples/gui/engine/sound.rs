@@ -149,15 +149,17 @@ impl Controls {
     }
 
     /// Prepara um quadro do microfone para enviar: trata a voz, mede o nível (depois do filtro de graves e
-    /// antes de porta e ganhos, para o medidor mostrar que o microfone funciona), e zera se estiver mudo.
+    /// antes de porta e ganhos, para o medidor mostrar que o microfone funciona), e zera o quadro e o medidor
+    /// se estiver mudo (no mudo o medidor fica parado).
     pub(crate) fn outgoing(&self, f: &mut [i16]) {
         let prefs = self.prefs();
         let m = self.voice.lock().unwrap_or_else(|e| e.into_inner()).process(f, &prefs, self.far_now());
-        self.level.store(m.level.to_bits(), Ordering::Relaxed);
         if self.muted.load(Ordering::Relaxed) {
+            self.level.store(0f32.to_bits(), Ordering::Relaxed);
             f.fill(0);
             self.speaking.store(false, Ordering::Relaxed);
         } else {
+            self.level.store(m.level.to_bits(), Ordering::Relaxed);
             self.speaking.store(m.speaking, Ordering::Relaxed);
         }
     }
@@ -246,13 +248,13 @@ mod tests {
     }
 
     #[test]
-    fn outgoing_measures_before_mute_and_gain() {
+    fn outgoing_keeps_the_meter_still_while_muted() {
         let c = Controls::default();
         let mut f = sine_frame(4000.0);
         c.muted.store(true, Ordering::Relaxed);
         c.outgoing(&mut f);
         assert!(f.iter().all(|x| *x == 0));
-        assert!(c.level() > 0.5, "o medidor deve mostrar o microfone mesmo mudo");
+        assert_eq!(c.level(), 0.0, "mudo, o medidor não se mexe");
         assert!(!c.speaking(), "mudo nunca aparece como falando");
         c.muted.store(false, Ordering::Relaxed);
         c.set_prefs(AudioPrefs { high_pass: false, denoise: false, agc: false, mic_gain: 0.5, ..AudioPrefs::default() });
