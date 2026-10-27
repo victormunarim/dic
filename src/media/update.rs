@@ -236,6 +236,28 @@ pub fn open_update(my_static: &StaticSecret, contacts: impl IntoIterator<Item = 
     None
 }
 
+/// `true` se `addr` é um `host:porta` que vale a pena discar: só ASCII visível, porta de 1 a 65535 e, se o
+/// host é um IP, que não seja o não especificado, multicast nem link-local (onde fica, por exemplo, o
+/// serviço de metadados de nuvem). Endereços vêm de contatos, convites e da DHT: quem os escreve não é de
+/// confiança, e o programa conecta neles sozinho.
+pub fn valid_addr(addr: &str) -> bool {
+    use std::net::{IpAddr, Ipv4Addr};
+    if addr.is_empty() || addr.len() > MAX_ADDR || !addr.bytes().all(|b| b.is_ascii_graphic()) {
+        return false;
+    }
+    let Some((host, port)) = addr.rsplit_once(':') else { return false };
+    if host.is_empty() || port.parse::<u16>().is_ok_and(|p| p == 0) || port.parse::<u16>().is_err() {
+        return false;
+    }
+    match host.trim_start_matches('[').trim_end_matches(']').parse::<IpAddr>() {
+        Ok(ip) => match ip.to_canonical() {
+            IpAddr::V4(a) => !(a.is_unspecified() || a.is_multicast() || a.is_link_local() || a == Ipv4Addr::BROADCAST),
+            IpAddr::V6(a) => !(a.is_unspecified() || a.is_multicast() || (a.segments()[0] & 0xffc0) == 0xfe80),
+        },
+        Err(_) => true,
+    }
+}
+
 fn parse(plain: &[u8]) -> Option<AddressRecord> {
     if plain.len() != PLAIN_LEN || plain[0] != VERSION {
         return None;
@@ -244,9 +266,10 @@ fn parse(plain: &[u8]) -> Option<AddressRecord> {
     if n == 0 || n > MAX_ADDR {
         return None;
     }
+    let addr = String::from_utf8(plain[10..10 + n].to_vec()).ok().filter(|a| valid_addr(a))?;
     Some(AddressRecord {
         seq: u64::from_be_bytes(plain[1..9].try_into().ok()?),
-        addr: String::from_utf8(plain[10..10 + n].to_vec()).ok()?,
+        addr,
         onion: plain[10 + MAX_ADDR..42 + MAX_ADDR].try_into().ok()?,
         link: plain[42 + MAX_ADDR..].try_into().ok()?,
     })
@@ -319,7 +342,10 @@ pub fn open_intro(my_static: &StaticSecret, frame: &[u8]) -> Option<([u8; 32], I
     }
     let text = &plain[INTRO_HEAD..INTRO_HEAD + addr_len + name_len];
     let addr = String::from_utf8(text[..addr_len].to_vec()).ok()?;
-    let name = String::from_utf8(text[addr_len..].to_vec()).ok()?;
+    let name = String::from_utf8(text[addr_len..].to_vec()).ok().filter(|n| !n.chars().any(char::is_control))?;
+    if !valid_addr(&addr) {
+        return None;
+    }
     let reach = Reach { addr, onion: plain[12..44].try_into().ok()?, link: plain[44..76].try_into().ok()? };
     Some((author, Intro { seq: u64::from_be_bytes(plain[1..9].try_into().ok()?), name, reach }))
 }
@@ -502,6 +528,23 @@ mod tests {
     }
 
     #[test]
+    fn only_dialable_addresses_and_clean_names_come_out_of_an_introduction() {
+        for ok in ["203.0.113.7:4001", "casa.exemplo.com:4001", "[2001:db8::1]:4001", "127.0.0.1:4001", "192.168.0.2:4001"] {
+            assert!(valid_addr(ok), "{ok}");
+        }
+        for bad in ["", "sem-porta", ":4001", "host:0", "host:70000", "host:abc", "a b:4001", "h\n:4001", "169.254.169.254:80", "0.0.0.0:4001", "224.0.0.1:4001", "[fe80::1]:4001", "[::]:4001", "é.exemplo:4001"] {
+            assert!(!valid_addr(bad), "{bad:?}");
+        }
+        let (a, b) = ids();
+        let pb = PublicKey::from(&b);
+        for (name, addr) in [("Ana\u{7}", "203.0.113.7:4001"), ("Ana", "169.254.169.254:80")] {
+            let bad = Intro { name: name.into(), reach: Reach { addr: addr.into(), onion: [3; 32], link: [4; 32] }, ..intro(1) };
+            let frame = seal_intro(&a, &pb, &bad).unwrap();
+            assert!(open_intro(&b, &frame).is_none(), "{name:?} {addr}");
+        }
+    }
+
+    #[test]
     fn the_introduction_trims_the_name_to_fit() {
         let (a, b) = ids();
         let pb = PublicKey::from(&b);
@@ -510,7 +553,7 @@ mod tests {
         assert_eq!(got.reach, long.reach);
         assert!(got.name.len() <= MAX_NAME && got.name.chars().all(|c| c == 'é') && !got.name.is_empty());
         // Endereço no limite: o nome encolhe para caber, o endereço não perde nada.
-        let tight = Intro { seq: 3, name: "x".repeat(MAX_NAME), reach: Reach { addr: "h".repeat(MAX_ADDR), onion: [1; 32], link: [2; 32] } };
+        let tight = Intro { seq: 3, name: "x".repeat(MAX_NAME), reach: Reach { addr: format!("{}:4001", "h".repeat(MAX_ADDR - 5)), onion: [1; 32], link: [2; 32] } };
         let (_, got) = open_intro(&b, &seal_intro(&a, &pb, &tight).unwrap()).unwrap();
         assert_eq!(got.reach, tight.reach);
         assert_eq!(got.name.len(), INTRO_TEXT - MAX_ADDR);

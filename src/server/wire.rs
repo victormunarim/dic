@@ -19,7 +19,7 @@ use sha2::Sha256;
 use x25519_dalek::{PublicKey, StaticSecret};
 
 use super::{MemberId, RoomId, ServerId, op::Op};
-use crate::media::{packet::PACKET_LEN, signal::Frame, update::Reach};
+use crate::media::{packet::PACKET_LEN, signal::Frame, update::{Reach, valid_addr}};
 
 pub const TAG_SERVER: u8 = 8;
 /// Servidor fictício dos quadros de convite: quem recebe ainda não conhece o servidor, então a chave do quadro
@@ -98,7 +98,7 @@ fn take_reach(b: &[u8]) -> Option<Reach> {
     if n == 0 || n > MAX_ADDR || b.len() != 1 + n + 64 {
         return None;
     }
-    Some(Reach { addr: String::from_utf8(b[1..1 + n].to_vec()).ok()?, onion: b[1 + n..33 + n].try_into().ok()?, link: b[33 + n..].try_into().ok()? })
+    Some(Reach { addr: String::from_utf8(b[1..1 + n].to_vec()).ok().filter(|a| valid_addr(a))?, onion: b[1 + n..33 + n].try_into().ok()?, link: b[33 + n..].try_into().ok()? })
 }
 
 fn encode(msg: &Msg) -> Vec<u8> {
@@ -269,8 +269,8 @@ mod tests {
             Msg::HelloAck(Hello { room: None, ..hello }),
             Msg::Vector { page: 1, pages: 3, entries: (0..VECTOR_PER_FRAME as u8).map(|i| ([i; 8], 1000 + i as u16)).collect() },
             Msg::Op(op),
-            Msg::MyAddr { seq: u64::MAX, reach: Reach { addr: "a".repeat(MAX_ADDR), onion: [8; 32], link: [9; 32] } },
-            Msg::Join { vk: [4; 32], reach: Reach { addr: "a".repeat(MAX_ADDR), onion: [8; 32], link: [9; 32] } },
+            Msg::MyAddr { seq: u64::MAX, reach: Reach { addr: format!("{}:4001", "a".repeat(MAX_ADDR - 5)), onion: [8; 32], link: [9; 32] } },
+            Msg::Join { vk: [4; 32], reach: Reach { addr: format!("{}:4001", "a".repeat(MAX_ADDR - 5)), onion: [8; 32], link: [9; 32] } },
             Msg::Joined,
             Msg::Gift { epoch: 2, secret: [7; 32] },
             Msg::Ack([3; 8]),

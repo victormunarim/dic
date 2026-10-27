@@ -319,8 +319,10 @@ fn unix_now() -> u64 {
 pub fn save_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
     use std::io::Write;
     let tmp = path.with_extension("tmp");
+    // O modo só vale na criação: um temporário que sobrou de antes, com modo mais largo, não pode ser reaproveitado.
+    let _ = std::fs::remove_file(&tmp);
     let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
+    opts.write(true).create_new(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
     let mut f = opts.open(&tmp)?;

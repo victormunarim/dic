@@ -388,8 +388,10 @@ pub(crate) fn load_relay_keys() -> (clam::node::RelayKeys, Option<std::io::Error
 pub(crate) fn write_private(path: &std::path::Path, text: &str) -> std::io::Result<()> {
     use std::io::Write;
     let tmp = path.with_extension("tmp");
+    // O modo só vale na criação: um temporário que sobrou de antes, com modo mais largo, não pode ser reaproveitado.
+    let _ = std::fs::remove_file(&tmp);
     let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
+    opts.write(true).create_new(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
     let result = opts.open(&tmp).and_then(|mut f| f.write_all(text.as_bytes())).and_then(|()| std::fs::rename(&tmp, path));

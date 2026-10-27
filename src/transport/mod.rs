@@ -269,12 +269,15 @@ async fn write_loop(mut wr: LinkWriter, mut rx: mpsc::Receiver<Cell>, mut cover:
 /// Com `public_only`, só conecta a endereço público (resolvido aqui, e é a esse que conecta): um estranho que
 /// pede um `Extend` não usa o relay para varrer a rede local, nem as portas desta máquina.
 async fn dial(addr: String, key: [u8; 32], limit: Duration, public_only: bool) -> Option<(LinkReader, LinkWriter)> {
-    let s = if public_only {
-        let target = timeout(limit, tokio::net::lookup_host(addr)).await.ok()?.ok()?.find(|a| is_public(&a.ip()))?;
-        timeout(limit, TcpStream::connect(target)).await.ok()?.ok()?
-    } else {
-        timeout(limit, TcpStream::connect(addr)).await.ok()?.ok()?
+    // Rede privada e loopback só para o link local (LAN, testes); link-local (serviço de metadados de nuvem),
+    // não especificado e multicast, para ninguém.
+    let usable = |ip: &IpAddr| match ip.to_canonical() {
+        IpAddr::V4(a) => !(a.is_unspecified() || a.is_link_local() || a.is_multicast() || a.is_broadcast()),
+        IpAddr::V6(a) => !(a.is_unspecified() || a.is_multicast() || (a.segments()[0] & 0xffc0) == 0xfe80),
     };
+    let targets = timeout(limit, tokio::net::lookup_host(addr)).await.ok()?.ok()?;
+    let target = targets.into_iter().find(|a| if public_only { is_public(&a.ip()) } else { usable(&a.ip()) })?;
+    let s = timeout(limit, TcpStream::connect(target)).await.ok()?.ok()?;
     // Sem isto o Nagle seguraria quadros pequenos de voz esperando o ACK do anterior.
     let _ = s.set_nodelay(true);
     link::connect(s, &key).await.ok()

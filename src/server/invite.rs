@@ -18,7 +18,7 @@ use sha2::Sha256;
 use x25519_dalek::{PublicKey, StaticSecret};
 
 use super::{MAX_NAME, ServerError, ServerId, valid_name};
-use crate::media::update::{MAX_ADDR, Reach};
+use crate::media::update::{MAX_ADDR, Reach, valid_addr};
 
 pub const PREFIX: &str = "clam-servidor:";
 const NONCE_LEN: usize = 12;
@@ -77,7 +77,7 @@ fn take_reach(b: &mut &[u8]) -> Option<Reach> {
     if n == 0 || n > MAX_ADDR {
         return None;
     }
-    let addr = String::from_utf8(take(b, n)?.to_vec()).ok()?;
+    let addr = String::from_utf8(take(b, n)?.to_vec()).ok().filter(|a| valid_addr(a))?;
     Some(Reach { addr, onion: take(b, 32)?.try_into().ok()?, link: take(b, 32)?.try_into().ok()? })
 }
 

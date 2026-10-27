@@ -3,7 +3,7 @@
 //!
 //! ```text
 //! chamador                                    chamado
-//!   Invite: tag 1 ‖ e_i ‖ AEAD(s_i ‖ hora) ‖ AEAD(dica de relay)  ─>
+//!   Invite: tag 1 ‖ e_i ‖ AEAD(s_i ‖ prova de autoria) ‖ AEAD(dica de relay)  ─>
 //!                                           <─  Accept: tag 2 ‖ e_r      (ou Reject: tag 3)
 //!   [pacotes de voz de 200 B nos dois sentidos, chaves de `CallKeys`]
 //! ```
@@ -11,14 +11,17 @@
 //! - O convite cifra a identidade do chamador (`s_i`) com uma chave de `DH(e_i, s_r)`: o relay
 //!   de saída, que vê estes quadros, **não** descobre quem liga. Vê só que é um convite.
 //! - O chamado confere se `s_i` é um contato conhecido (quem chama decide isso: [`Incoming::caller`]).
-//! - O convite não prova quem chama (qualquer um pode escrever um `s_i` alheio), mas quem não
-//!   tem a chave secreta de `s_i` não deriva as chaves da chamada ([`CallKeys`]): o aceite
-//!   vai para o vazio e a voz nunca autentica.
+//! - O convite prova quem chama: junto de `s_i` vai uma prova de autoria, derivada de `DH(s_i, s_r)`
+//!   e amarrada à efêmera do convite ([`author_proof`]). Quem não tem a chave secreta de `s_i` não
+//!   a calcula, então ninguém faz o telefone tocar em nome de um contato; [`Incoming::parse`] recusa
+//!   o convite sem ela. Além disso, quem não tem essa chave não deriva as chaves da chamada
+//!   ([`CallKeys`]), e a voz nunca autentica.
 //! - O convite não depende do relógio de quem recebe: duas máquinas com a hora desencontrada
 //!   ainda se ligam. A repetição de um convite gravado é
 //!   barrada por quem recebe, que lembra as efêmeras já vistas ([`Incoming::nonce`]); sem
 //!   essa memória (telefone reiniciado) o replay só faz o telefone tocar, não dá acesso à
-//!   chamada. A hora de quem liga segue no convite só para telefones de versão anterior, que a conferem.
+//!   chamada. O lugar onde ia a hora de quem liga (que nenhum lado confere mais) leva a prova de autoria;
+//!   por isso telefones de versão anterior, que conferiam a hora, não falam com os de agora.
 //! - O convite pode levar uma **dica de relay** ([`RelayHint`]): o endereço e as chaves do relay de
 //!   quem liga, num segundo bloco cifrado com a mesma chave (nonce diferente). Quem atende guarda a
 //!   dica para ligar de volta. Telefones de versão anterior não olham esses
@@ -63,6 +66,8 @@ const TAIL_AT: usize = HINT_AT + HINT_SEALED_LEN;
 /// Bytes da etiqueta do codec: um sorteio e o código de autenticação dele.
 const TAG_SALT_LEN: usize = 4;
 const TAG_MAC_LEN: usize = 8;
+/// Bytes da prova de autoria do convite (veja [`author_proof`]).
+const PROOF_LEN: usize = 8;
 
 /// Onde chegar ao relay de quem liga: o que o chamado precisa para ligar de volta.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -125,6 +130,16 @@ fn codec_tag(dh: &[u8; 32], e_i: &[u8; 32], s_r: &[u8; 32], salt: &[u8], codec: 
     mac
 }
 
+/// Prova de que o dono de `s_i` fez o convite: `PRF(DH(s_i, s_r), e_i ‖ s_r)`. Só quem tem a chave secreta
+/// de `s_i` (ou a de `s_r`) a calcula; o chamado a confere com a chave pública que o convite diz ser do chamador.
+fn author_proof(dh: &[u8; 32], e_i: &[u8; 32], s_r: &[u8; 32]) -> [u8; PROOF_LEN] {
+    let mut info = e_i.to_vec();
+    info.extend_from_slice(s_r);
+    let mut proof = [0u8; PROOF_LEN];
+    Hkdf::<Sha256>::new(Some(b"clam/v1/invite-author"), dh).expand(&info, &mut proof).expect("8 bytes é válido");
+    proof
+}
+
 /// Um quadro de sinalização, pronto para ir ao circuito.
 pub type Frame = [u8; PACKET_LEN];
 
@@ -149,7 +164,7 @@ pub enum Answer {
 }
 
 impl Caller {
-    /// Monta o convite para `peer` (a chave do pareamento). `now_secs`: relógio Unix.
+    /// Monta o convite para `peer` (a chave do pareamento). `now_secs` não é mais usado (ficou na assinatura).
     pub fn invite(my_static: &StaticSecret, peer: &PublicKey, now_secs: u64) -> Result<(Self, Frame), MediaError> {
         Self::invite_with_hint(my_static, peer, now_secs, None)
     }
@@ -164,16 +179,20 @@ impl Caller {
     pub fn invite_codec(
         my_static: &StaticSecret,
         peer: &PublicKey,
-        now_secs: u64,
+        _now_secs: u64,
         hint: Option<&RelayHint>,
         codec: CodecId,
     ) -> Result<(Self, Frame), MediaError> {
         let eph = Ephemeral::generate();
         let dh = eph.diffie_hellman(peer)?;
         let cipher = invite_key(&dh, &eph.public(), peer.as_bytes());
+        let author = my_static.diffie_hellman(peer);
+        if !author.was_contributory() {
+            return Err(MediaError::BadKey);
+        }
         let mut plain = [0u8; 40];
         plain[..32].copy_from_slice(PublicKey::from(my_static).as_bytes());
-        plain[32..].copy_from_slice(&now_secs.to_be_bytes());
+        plain[32..].copy_from_slice(&author_proof(author.as_bytes(), &eph.public(), peer.as_bytes()));
         let sealed = cipher.encrypt(&Nonce::default(), plain.as_slice()).expect("cifrar em memória não falha");
         let mut f = [0u8; PACKET_LEN];
         f[0] = TAG_INVITE;
@@ -235,6 +254,10 @@ impl Incoming {
         let cipher = invite_key(dh.as_bytes(), &eph, me.as_bytes());
         let plain = cipher.decrypt(&Nonce::default(), &frame[33..HINT_AT]).map_err(|_| MediaError::Decrypt)?;
         let caller: [u8; 32] = plain[..32].try_into().expect("32 bytes");
+        let author = my_static.diffie_hellman(&PublicKey::from(caller));
+        if !author.was_contributory() || !bool::from(author_proof(author.as_bytes(), &eph, me.as_bytes()).ct_eq(&plain[32..])) {
+            return Err(MediaError::BadKey);
+        }
         // Convite de versão anterior ou sem dica: o bloco não autentica e fica `None`.
         let hint = cipher.decrypt(&hint_nonce(), &frame[HINT_AT..HINT_AT + HINT_SEALED_LEN]).ok().and_then(|p| RelayHint::decode(&p));
         // Sem etiqueta que confira (telefone antigo, ou o padrão): G.722.
@@ -446,6 +469,28 @@ mod tests {
         assert!(Incoming::parse(&b, &bad).is_err());
         assert_eq!(Incoming::parse(&b, &inv[..100]).err(), Some(MediaError::Size));
         assert_eq!(Incoming::parse(&b, &[2u8; PACKET_LEN]).err(), Some(MediaError::Malformed));
+    }
+
+    #[test]
+    fn an_invite_in_anothers_name_is_refused() {
+        let (a, b) = ids();
+        let x = StaticSecret::random_from_rng(OsRng);
+        // `x` monta um convite com a identidade de `a` e a prova calculada com a própria chave.
+        let eph = Ephemeral::generate();
+        let dh = eph.diffie_hellman(&PublicKey::from(&b)).unwrap();
+        let mut plain = [0u8; 40];
+        plain[..32].copy_from_slice(PublicKey::from(&a).as_bytes());
+        let own = x.diffie_hellman(&PublicKey::from(&b));
+        plain[32..].copy_from_slice(&author_proof(own.as_bytes(), &eph.public(), PublicKey::from(&b).as_bytes()));
+        let sealed = invite_key(&dh, &eph.public(), PublicKey::from(&b).as_bytes()).encrypt(&Nonce::default(), plain.as_slice()).unwrap();
+        let mut f = [0u8; PACKET_LEN];
+        f[0] = TAG_INVITE;
+        f[1..33].copy_from_slice(&eph.public());
+        f[33..HINT_AT].copy_from_slice(&sealed);
+        OsRng.fill_bytes(&mut f[HINT_AT..]);
+        assert_eq!(Incoming::parse(&b, &f).err(), Some(MediaError::BadKey));
+        let (_, real) = Caller::invite(&a, &PublicKey::from(&b), 0).unwrap();
+        assert_eq!(Incoming::parse(&b, &real).unwrap().caller(), &PublicKey::from(&a));
     }
 
     #[test]
