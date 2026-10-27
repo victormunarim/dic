@@ -192,14 +192,17 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
                         continue;
                     }
                     shared.hangup.store(false, Ordering::Relaxed);
+                    // Marca a sala antes de abrir o áudio: a janela não pode ver "em chamada" sem "em sala" e
+                    // abrir a aba Chamada.
+                    shared.room.lock().unwrap().at = Some((server, room_id));
                     if let Err(e) = hub.try_act(|s, now| s.join_room(&server, Some(room_id), now)) {
                         out.line(format!("não entrei na sala: {e}"));
+                        shared.room.lock().unwrap().clear();
                         shared.in_call.store(false, Ordering::Relaxed);
                         continue;
                     }
                     let sound = open_sound(form.use_audio, &form, &out);
                     let (tx, rrx) = mpsc::unbounded_channel();
-                    shared.room.lock().unwrap().at = Some((server, room_id));
                     let (sh, o, d, me) = (shared.clone(), out.clone(), dialer.clone(), hub.my_key());
                     let tx2 = tx.clone();
                     tokio::spawn(async move {

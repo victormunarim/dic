@@ -18,6 +18,7 @@ pub(crate) enum Tab {
     Contacts,
     Call,
     Servers,
+    Video,
     Audio,
     Settings,
     Log,
@@ -174,7 +175,7 @@ impl App {
                 ui.add_space(14.0);
                 section_label(ui, "Ajustes");
                 ui.add_space(2.0);
-                for (tab, icon, label) in [(Tab::Audio, "🎤", "Áudio"), (Tab::Settings, "⚙", "Configurações"), (Tab::Log, "📜", "Atividade")] {
+                for (tab, icon, label) in [(Tab::Video, "🖥", "Vídeo"), (Tab::Audio, "🎤", "Áudio"), (Tab::Settings, "⚙", "Configurações"), (Tab::Log, "📜", "Atividade")] {
                     if nav_item(ui, self.tab == tab, icon, label, None).clicked() {
                         self.tab = tab;
                     }
@@ -484,10 +485,6 @@ impl App {
     fn screen_ui(&mut self, ui: &mut egui::Ui) {
         let st = &self.shared.screen;
         let (wanted, sharing) = (st.want_share.load(Ordering::Relaxed), st.sharing.load(Ordering::Relaxed));
-        // A escolha vale a partir da próxima transmissão; fica salva para não precisar mudar de novo.
-        st.open_path.store(!self.form.screen_private, Ordering::Relaxed);
-        st.sharp.store(self.form.screen_sharp, Ordering::Relaxed);
-        st.hardware.store(self.form.screen_hardware, Ordering::Relaxed);
         let note_text = st.note.lock().unwrap().clone();
         let diag = st.diagnostics();
 
@@ -506,9 +503,43 @@ impl App {
             if !wanted && !sharing && !note_text.is_empty() {
                 ui.colored_label(Color32::from_rgb(0xf2, 0x7b, 0x7e), note_text);
             }
-            ui.add_space(6.0);
-            ui.add_enabled_ui(!wanted && !sharing, |ui| {
-                ui.label(RichText::new("Opções da próxima transmissão").strong().color(MUTED));
+            if !diag.is_empty() {
+                ui.add_space(4.0);
+                ui.label(RichText::new(diag).monospace().size(13.0).color(MUTED));
+            }
+        });
+
+        let names = self.form.names();
+        let mut order: Vec<_> = self.screen_tex.iter().collect();
+        order.sort_by_key(|(k, _)| **k);
+        for (who, (_, tex)) in order {
+            card(ui, &format!("Tela de {}", member_name(&names, who)), "", |ui| {
+                if ui.button("🔍  Ampliar").on_hover_text("Abre a tela numa janela maior").clicked() {
+                    self.zoom = Some(*who);
+                }
+                // Ampliada, a miniatura sai: a imagem só aparece na janela ampliada (e não é desenhada duas vezes).
+                if self.zoom != Some(*who) {
+                    ui.add(egui::Image::new(tex).max_width(ui.available_width()).corner_radius(CornerRadius::same(8)).shrink_to_fit());
+                }
+            });
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Vídeo
+// ---------------------------------------------------------------------------------------------------
+
+impl App {
+    /// Preferências da transmissão de tela: valem da próxima transmissão em diante, na chamada e nas salas.
+    fn video_tab(&mut self, ui: &mut egui::Ui) {
+        let st = &self.shared.screen;
+        let busy = st.want_share.load(Ordering::Relaxed) || st.sharing.load(Ordering::Relaxed);
+        card(ui, "Transmissão de tela", "Valem a partir da próxima transmissão e ficam salvas.", |ui| {
+            if busy {
+                note(ui, "Há uma transmissão em andamento: pare de compartilhar para mudar.");
+            }
+            ui.add_enabled_ui(!busy, |ui| {
                 let changed = ui
                     .checkbox(&mut self.form.screen_private, "Privacidade na transmissão da tela")
                     .on_hover_text("Ligada, a tela sai num ritmo constante, com tráfego de enchimento, e quem observa a rede não vê quando a imagem se mexe. Desligada, só sai o que há para enviar e o ritmo máximo dobra: a imagem fica mais nítida e fluida, mas o vídeo segue cifrado. Vale na próxima transmissão.")
@@ -538,26 +569,7 @@ impl App {
                     self.form.save();
                 }
             });
-            if !diag.is_empty() {
-                ui.add_space(4.0);
-                ui.label(RichText::new(diag).monospace().size(13.0).color(MUTED));
-            }
         });
-
-        let names = self.form.names();
-        let mut order: Vec<_> = self.screen_tex.iter().collect();
-        order.sort_by_key(|(k, _)| **k);
-        for (who, (_, tex)) in order {
-            card(ui, &format!("Tela de {}", member_name(&names, who)), "", |ui| {
-                if ui.button("🔍  Ampliar").on_hover_text("Abre a tela numa janela maior").clicked() {
-                    self.zoom = Some(*who);
-                }
-                // Ampliada, a miniatura sai: a imagem só aparece na janela ampliada (e não é desenhada duas vezes).
-                if self.zoom != Some(*who) {
-                    ui.add(egui::Image::new(tex).max_width(ui.available_width()).corner_radius(CornerRadius::same(8)).shrink_to_fit());
-                }
-            });
-        }
     }
 }
 
@@ -820,6 +832,7 @@ impl App {
             })),
             Tab::Call => ("Chamada", "A conversa e a tela compartilhada.".into()),
             Tab::Servers => ("Servidores", "Grupos de pessoas com salas de voz.".into()),
+            Tab::Video => ("Vídeo", "Como a sua tela é transmitida.".into()),
             Tab::Audio => ("Áudio", "Dispositivos, volume e tratamento da voz.".into()),
             Tab::Settings => ("Configurações", "Identidade, rede e privacidade.".into()),
             Tab::Log => ("Atividade", "O que o programa está fazendo agora.".into()),
@@ -859,6 +872,11 @@ impl eframe::App for App {
             self.tab = Tab::Call;
         }
         self.was_in_call = calling;
+        // As preferências de tela são lidas ao começar a transmissão, esteja a pessoa em que aba estiver.
+        let st = &self.shared.screen;
+        st.open_path.store(!self.form.screen_private, Ordering::Relaxed);
+        st.sharp.store(self.form.screen_sharp, Ordering::Relaxed);
+        st.hardware.store(self.form.screen_hardware, Ordering::Relaxed);
         let status = self.shared.status.lock().unwrap().clone();
 
         self.sidebar(ctx, offline, calling, &status);
@@ -876,6 +894,7 @@ impl eframe::App for App {
                     Tab::Contacts => self.contacts_tab(ui, !offline, calling),
                     Tab::Call => self.call_tab(ui, calling && !in_room),
                     Tab::Servers => self.servers_tab(ui, offline, calling),
+                    Tab::Video => self.video_tab(ui),
                     Tab::Audio => self.audio_tab(ui, offline, calling, testing),
                     Tab::Settings => self.settings_tab(ui, offline),
                     Tab::Log => {}

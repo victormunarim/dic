@@ -57,11 +57,8 @@ impl App {
                 for v in &views {
                     let on = self.srv.sel == Some(v.id);
                     let initial = v.name.chars().next().map_or("?".to_string(), |c| c.to_uppercase().to_string());
-                    let b = egui::Button::new(RichText::new(initial).size(22.0).strong().color(Color32::WHITE))
-                        .fill(if on { BLURPLE } else { PANEL })
-                        .corner_radius(CornerRadius::same(if on { 14 } else { 24 }))
-                        .min_size(vec2(52.0, 52.0));
-                    if ui.add(b).on_hover_text(&v.name).clicked() {
+                    let reply = server_icon(ui, &initial, if on { BLURPLE } else { PANEL }, Color32::WHITE, if on { 14 } else { 24 });
+                    if reply.on_hover_text(&v.name).clicked() {
                         self.srv.sel = Some(v.id);
                         self.srv.msg.clear();
                         self.srv.info.clear();
@@ -70,8 +67,8 @@ impl App {
                     }
                     ui.add_space(4.0);
                 }
-                let plus = egui::Button::new(RichText::new("＋").size(22.0).color(GREEN)).fill(PANEL).corner_radius(CornerRadius::same(24)).min_size(vec2(52.0, 52.0));
-                if ui.add(plus).on_hover_text("Criar ou entrar em um servidor").clicked() {
+                let plus = server_icon(ui, "＋", PANEL, GREEN, 24);
+                if plus.on_hover_text("Criar ou entrar em um servidor").clicked() {
                     self.srv.sel = None;
                 }
             });
@@ -386,4 +383,14 @@ impl App {
             let _ = r.cmds.send(c);
         }
     }
+}
+
+/// Ícone quadrado de um servidor na coluna da esquerda, com a inicial desenhada no centro exato do retângulo
+/// (o texto de um botão fica à esquerda quando a coluna é mais larga que ele).
+fn server_icon(ui: &mut egui::Ui, text: &str, fill: Color32, ink: Color32, radius: u8) -> egui::Response {
+    let (rect, reply) = ui.allocate_exact_size(vec2(52.0, 52.0), egui::Sense::click());
+    let fill = if reply.hovered() && fill == PANEL { PANEL.gamma_multiply(1.4) } else { fill };
+    ui.painter().rect_filled(rect, CornerRadius::same(radius), fill);
+    ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, text, egui::FontId::proportional(24.0), ink);
+    reply.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
