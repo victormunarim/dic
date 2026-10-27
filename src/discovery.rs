@@ -143,7 +143,7 @@ impl DiscoveryRunner {
     pub fn spawn(
         discovery: Arc<Discovery>,
         gossip: Gossip,
-        mut incoming: mpsc::UnboundedReceiver<Vec<u8>>,
+        mut incoming: mpsc::Receiver<Vec<u8>>,
         announcer: Option<Announcer>,
         cfg: DiscoveryConfig,
     ) -> Self {

@@ -33,6 +33,21 @@ pub enum NetError {
     MissingPeerId(Multiaddr),
     #[error("o nó foi encerrado")]
     Closed,
+    #[error("o nó está com a fila de comandos cheia")]
+    Busy,
+}
+
+/// Comandos que esperam o nó; passando disto, os novos são recusados (`NetError::Busy`) em vez de crescer sem fim.
+const CMD_QUEUE: usize = 1024;
+/// Mensagens e descritores da rede que esperam quem os lê; passando disto, os novos caem (quem lê devagar perde,
+/// a memória não cresce). Chegam de qualquer um no tópico.
+const RX_QUEUE: usize = 256;
+
+fn send_cmd(cmd: &mpsc::Sender<Command>, c: Command) -> Result<(), NetError> {
+    cmd.try_send(c).map_err(|e| match e {
+        mpsc::error::TrySendError::Full(_) => NetError::Busy,
+        mpsc::error::TrySendError::Closed(_) => NetError::Closed,
+    })
 }
 
 #[derive(Debug, Clone, Default)]
@@ -74,16 +89,16 @@ enum Command {
 /// Alça clonável para assinar e publicar tópicos GossipSub.
 #[derive(Clone)]
 pub struct Gossip {
-    cmd: mpsc::UnboundedSender<Command>,
+    cmd: mpsc::Sender<Command>,
 }
 
 impl Gossip {
     pub fn subscribe(&self, topic: &str) -> Result<(), NetError> {
-        self.cmd.send(Command::Subscribe { topic: topic.into() }).map_err(|_| NetError::Closed)
+        send_cmd(&self.cmd, Command::Subscribe { topic: topic.into() })
     }
 
     pub fn publish(&self, topic: &str, data: Vec<u8>) -> Result<(), NetError> {
-        self.cmd.send(Command::Publish { topic: topic.into(), data }).map_err(|_| NetError::Closed)
+        send_cmd(&self.cmd, Command::Publish { topic: topic.into(), data })
     }
 }
 
@@ -94,38 +109,38 @@ impl Gossip {
 /// nunca direto de uma tarefa async.
 #[derive(Clone)]
 pub struct NetStore {
-    cmd: mpsc::UnboundedSender<Command>,
+    cmd: mpsc::Sender<Command>,
     get_timeout: Duration,
 }
 
 impl RecordStore for NetStore {
     fn put(&self, key: [u8; 32], value: Vec<u8>) {
-        let _ = self.cmd.send(Command::Put { key, value });
+        let _ = send_cmd(&self.cmd, Command::Put { key, value });
     }
 
     fn get(&self, key: &[u8; 32]) -> Option<Vec<u8>> {
         let (reply, rx) = std_mpsc::channel();
-        self.cmd.send(Command::Get { key: *key, reply }).ok()?;
+        send_cmd(&self.cmd, Command::Get { key: *key, reply }).ok()?;
         rx.recv_timeout(self.get_timeout).ok().flatten()
     }
 }
 
 impl TopicControl for NetStore {
     fn subscribe(&self, topic: &str) {
-        let _ = self.cmd.send(Command::Subscribe { topic: topic.into() });
+        let _ = send_cmd(&self.cmd, Command::Subscribe { topic: topic.into() });
     }
 
     fn unsubscribe(&self, topic: &str) {
-        let _ = self.cmd.send(Command::Unsubscribe { topic: topic.into() });
+        let _ = send_cmd(&self.cmd, Command::Unsubscribe { topic: topic.into() });
     }
 }
 
 /// Nó libp2p em execução. Encerra a tarefa interna ao ser descartado.
 pub struct Node {
     peer_id: PeerId,
-    cmd: mpsc::UnboundedSender<Command>,
-    messages: mpsc::UnboundedReceiver<GossipMessage>,
-    descriptors: Option<mpsc::UnboundedReceiver<Vec<u8>>>,
+    cmd: mpsc::Sender<Command>,
+    messages: mpsc::Receiver<GossipMessage>,
+    descriptors: Option<mpsc::Receiver<Vec<u8>>>,
     get_timeout: Duration,
     task: tokio::task::JoinHandle<()>,
 }
@@ -178,9 +193,9 @@ impl Node {
         }
 
         let peer_id = *swarm.local_peer_id();
-        let (cmd, cmd_rx) = mpsc::unbounded_channel();
-        let (msg_tx, messages) = mpsc::unbounded_channel();
-        let (desc_tx, descriptors) = mpsc::unbounded_channel();
+        let (cmd, cmd_rx) = mpsc::channel(CMD_QUEUE);
+        let (msg_tx, messages) = mpsc::channel(RX_QUEUE);
+        let (desc_tx, descriptors) = mpsc::channel(RX_QUEUE);
         let task = tokio::spawn(run(swarm, cmd_rx, msg_tx, desc_tx, cfg.relay_policy));
         Ok(Node {
             peer_id,
@@ -204,26 +219,26 @@ impl Node {
     /// Endereços em que o nó já está escutando (vazio até o `listen_on` concluir).
     pub async fn listen_addrs(&self) -> Result<Vec<Multiaddr>, NetError> {
         let (reply, rx) = oneshot::channel();
-        self.cmd.send(Command::Listeners { reply }).map_err(|_| NetError::Closed)?;
+        send_cmd(&self.cmd, Command::Listeners { reply })?;
         rx.await.map_err(|_| NetError::Closed)
     }
 
     /// Disca para `addr` (com `/p2p/<PeerId>`) e o registra na tabela Kademlia.
     pub fn dial(&self, addr: Multiaddr) -> Result<(), NetError> {
         peer_of(&addr)?;
-        self.cmd.send(Command::Dial { addr }).map_err(|_| NetError::Closed)
+        send_cmd(&self.cmd, Command::Dial { addr })
     }
 
     pub fn subscribe(&self, topic: &str) -> Result<(), NetError> {
-        self.cmd.send(Command::Subscribe { topic: topic.into() }).map_err(|_| NetError::Closed)
+        send_cmd(&self.cmd, Command::Subscribe { topic: topic.into() })
     }
 
     pub fn unsubscribe(&self, topic: &str) -> Result<(), NetError> {
-        self.cmd.send(Command::Unsubscribe { topic: topic.into() }).map_err(|_| NetError::Closed)
+        send_cmd(&self.cmd, Command::Unsubscribe { topic: topic.into() })
     }
 
     pub fn publish(&self, topic: &str, data: Vec<u8>) -> Result<(), NetError> {
-        self.cmd.send(Command::Publish { topic: topic.into(), data }).map_err(|_| NetError::Closed)
+        send_cmd(&self.cmd, Command::Publish { topic: topic.into(), data })
     }
 
     /// Alça clonável para assinar e publicar no GossipSub.
@@ -233,7 +248,7 @@ impl Node {
 
     /// Fila dos descritores de relays já validados que chegam em [`RELAY_TOPIC`].
     /// Só pode ser retirada uma vez; essas mensagens não passam por [`Self::next_message`].
-    pub fn take_descriptors(&mut self) -> Option<mpsc::UnboundedReceiver<Vec<u8>>> {
+    pub fn take_descriptors(&mut self) -> Option<mpsc::Receiver<Vec<u8>>> {
         self.descriptors.take()
     }
 
@@ -255,9 +270,9 @@ fn peer_of(addr: &Multiaddr) -> Result<PeerId, NetError> {
 
 async fn run(
     mut swarm: libp2p::Swarm<Behaviour>,
-    mut cmds: mpsc::UnboundedReceiver<Command>,
-    messages: mpsc::UnboundedSender<GossipMessage>,
-    descriptors: mpsc::UnboundedSender<Vec<u8>>,
+    mut cmds: mpsc::Receiver<Command>,
+    messages: mpsc::Sender<GossipMessage>,
+    descriptors: mpsc::Sender<Vec<u8>>,
     relay_policy: DirectoryConfig,
 ) {
     let mut pending: HashMap<kad::QueryId, std_mpsc::Sender<Option<Vec<u8>>>> = HashMap::new();
@@ -304,10 +319,11 @@ async fn run(
                         verdict,
                     );
                     if valid {
+                        // Fila cheia: a mensagem cai, o laço do swarm nunca espera por quem lê.
                         if is_relay_topic {
-                            let _ = descriptors.send(message.data);
+                            let _ = descriptors.try_send(message.data);
                         } else {
-                            let _ = messages.send(GossipMessage { topic, data: message.data });
+                            let _ = messages.try_send(GossipMessage { topic, data: message.data });
                         }
                     }
                 }

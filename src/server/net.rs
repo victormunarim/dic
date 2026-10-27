@@ -35,6 +35,8 @@ const BACKLOG: usize = 64;
 const SEARCH_EVERY: Duration = Duration::from_secs(120);
 /// Eventos que esperam a janela; passando disto, os mais velhos caem.
 const EVENTS: usize = 512;
+/// Quadros que esperam o laço de entrega; passando disto, os novos caem (como o que passa de `BACKLOG`).
+const QUEUE: usize = 1024;
 
 fn now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
@@ -46,7 +48,7 @@ fn millis() -> u64 {
 
 struct Inner {
     servers: Mutex<Servers>,
-    send: mpsc::UnboundedSender<Outbound>,
+    send: mpsc::Sender<Outbound>,
     events: Mutex<VecDeque<Event>>,
     dialer: Dialer,
     tasks: Mutex<Vec<JoinHandle<()>>>,
@@ -58,7 +60,8 @@ impl Inner {
     /// Põe na fila o que o motor mandou fazer e devolve a confirmação a dar, se houver.
     fn dispatch(&self, out: Output) -> Option<Frame> {
         for o in out.send {
-            let _ = self.send.send(o);
+            // Fila cheia: o quadro cai, como o perdido no caminho (a presença e a sincronização se repetem).
+            let _ = self.send.try_send(o);
         }
         let mut events = self.events.lock().unwrap();
         for e in out.events {
@@ -87,7 +90,7 @@ impl ServerHub {
     /// `own` é o relay deste nó como os outros o alcançam (veja [`crate::node::Node::relay_info`]).
     pub fn start(servers: Servers, dialer: Dialer, phone: &Phone, own: Arc<Mutex<Option<RelayInfo>>>) -> Self {
         let contacts = phone.contacts();
-        let (send, queue) = mpsc::unbounded_channel();
+        let (send, queue) = mpsc::channel(QUEUE);
         let inner = Arc::new(Inner { servers: Mutex::new(servers), send, events: Mutex::default(), dialer, tasks: Mutex::default(), searched: Mutex::default() });
         let handler: ServerHandler = {
             let inner = inner.clone();
@@ -191,10 +194,11 @@ async fn clock(inner: Arc<Inner>, own: Arc<Mutex<Option<RelayInfo>>>) {
 }
 
 /// Entrega a fila: um circuito por destinatário com o que ele tem à espera, no máximo [`PARALLEL`] ao mesmo tempo.
-async fn deliver_loop(inner: Arc<Inner>, mut queue: mpsc::UnboundedReceiver<Outbound>) {
+async fn deliver_loop(inner: Arc<Inner>, mut queue: mpsc::Receiver<Outbound>) {
     let mut backlog: HashMap<[u8; 32], VecDeque<Outbound>> = HashMap::new();
     let mut busy: HashSet<[u8; 32]> = HashSet::new();
-    let (done_tx, mut done) = mpsc::unbounded_channel::<[u8; 32]>();
+    // No máximo `PARALLEL` entregas ao mesmo tempo, cada uma avisa uma vez: a fila nunca passa disso.
+    let (done_tx, mut done) = mpsc::channel::<[u8; 32]>(PARALLEL);
     loop {
         tokio::select! {
             Some(o) = queue.recv() => {
@@ -219,7 +223,7 @@ async fn deliver_loop(inner: Arc<Inner>, mut queue: mpsc::UnboundedReceiver<Outb
             let (inner, done_tx) = (inner.clone(), done_tx.clone());
             tokio::spawn(async move {
                 deliver(&inner, peer, batch).await;
-                let _ = done_tx.send(peer);
+                let _ = done_tx.send(peer).await;
             });
         }
         backlog.retain(|_, q| !q.is_empty());
