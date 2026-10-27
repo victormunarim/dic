@@ -182,19 +182,24 @@ impl App {
                 }
 
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-                    self.user_panel(ui, offline, in_call, status);
+                    self.user_panel(ctx, ui, offline, in_call, status);
                 });
             });
     }
 
     /// Cartão do usuário no pé da barra: avatar com o estado, nome, mudo e desligar.
-    fn user_panel(&mut self, ui: &mut egui::Ui, offline: bool, in_call: bool, status: &str) {
+    fn user_panel(&mut self, ctx: &egui::Context, ui: &mut egui::Ui, offline: bool, in_call: bool, status: &str) {
         let (color, text) = self.connection(offline, status);
         let name = if self.form.my_name.trim().is_empty() { "Você".to_string() } else { self.form.my_name.trim().to_string() };
         egui::Frame::new().fill(DEEP).corner_radius(CornerRadius::same(10)).inner_margin(Margin::same(10)).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
-                theme::avatar(ui, &name, 40.0, Some(color));
+                let me = theme::avatar(ui, &name, 40.0, Some(color));
+                if offline {
+                    if me.on_hover_text("Clique para ficar online").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                        self.go_online(ctx);
+                    }
+                }
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 0.0;
                     ui.label(RichText::new(name.chars().take(14).collect::<String>()).strong().color(Color32::WHITE));

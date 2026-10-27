@@ -144,9 +144,9 @@ fn hue(name: &str) -> Color32 {
     PALETTE[name.bytes().fold(7usize, |h, b| h.wrapping_mul(31).wrapping_add(b as usize)) % PALETTE.len()]
 }
 
-/// Círculo colorido com a inicial do nome; `dot` põe um ponto de estado no canto.
-pub(crate) fn avatar(ui: &mut Ui, name: &str, size: f32, dot: Option<Color32>) {
-    let (rect, _) = ui.allocate_exact_size(vec2(size, size), egui::Sense::hover());
+/// Círculo colorido com a inicial do nome; `dot` põe um ponto de estado no canto. A resposta aceita clique.
+pub(crate) fn avatar(ui: &mut Ui, name: &str, size: f32, dot: Option<Color32>) -> egui::Response {
+    let (rect, reply) = ui.allocate_exact_size(vec2(size, size), egui::Sense::click());
     let p = ui.painter();
     p.circle_filled(rect.center(), size / 2.0, hue(name));
     let initial = name.trim().chars().next().map_or('?', |c| c.to_uppercase().next().unwrap_or(c)).to_string();
@@ -157,6 +157,7 @@ pub(crate) fn avatar(ui: &mut Ui, name: &str, size: f32, dot: Option<Color32>) {
         p.circle_filled(at, r + 2.5, PANEL);
         p.circle_filled(at, r, color);
     }
+    reply
 }
 
 /// Ponto de estado seguido do texto.
