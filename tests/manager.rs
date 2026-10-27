@@ -353,3 +353,51 @@ fn failover_keeps_cadence_with_standby_cover() {
     let w = window(&n, &s, t1, n.now);
     assert!((48..=52).contains(&w.0), "novo ativo, subida: {w:?}");
 }
+
+fn direct_cfg(exit: &str) -> ManagerConfig {
+    ManagerConfig { direct: true, exit_addr: Some(exit.into()), ..Default::default() }
+}
+
+/// Direto: só o relay de saída vê o cliente, sem extend, sem reserva e sem outro relay no caminho.
+#[test]
+fn a_direct_circuit_uses_only_the_exit_relay() {
+    let mut n = Net::with_cfg(&["A", "B", "C"], direct_cfg("B"));
+    n.start();
+    n.run(500, true);
+    let st = n.mgr.status();
+    let active = st.active.expect("ativo");
+    assert!(active.ready);
+    assert_eq!((active.first.as_str(), active.second.as_str()), ("B", "B"));
+    assert!(st.standby.is_none(), "não há outro caminho para um reserva");
+    assert!(n.events.iter().any(|(_, e)| matches!(e, Event::Ready { .. })));
+    assert!(n.events.iter().any(|(_, e)| *e == Event::Data(b"eco:voz".to_vec())), "o eco volta");
+    assert!(n.tx_log.iter().chain(&n.rx_log).all(|(_, r)| r == "B"), "só o relay de saída fala com o cliente");
+    assert_eq!(n.wires.len(), 3, "o relay não abriu link para nenhum outro relay");
+}
+
+#[test]
+fn a_direct_circuit_needs_the_exit_among_the_candidates() {
+    let mut n = Net::with_cfg(&["A", "B"], direct_cfg("Z"));
+    n.start();
+    n.run(300, false);
+    assert!(n.mgr.status().active.is_none());
+    assert_eq!(n.mgr.send(b"x").unwrap_err(), SendError::Unavailable);
+}
+
+/// O relay de saída é o único caminho: sem cooldown, a nova tentativa acontece assim que ele volta.
+#[test]
+fn a_direct_circuit_is_rebuilt_when_the_exit_comes_back() {
+    let mut n = Net::with_cfg(&["A", "B"], direct_cfg("B"));
+    n.start();
+    n.run(300, true);
+    assert!(n.mgr.status().active.is_some_and(|a| a.ready));
+    n.down.insert("B".into());
+    n.run(1_000, true);
+    assert!(n.events.iter().any(|(_, e)| matches!(e, Event::CircuitFailed { reason: FailReason::Silent, .. })));
+    assert!(n.events.iter().any(|(_, e)| *e == Event::NoCircuit));
+    n.down.remove("B");
+    let before = n.data_times().len();
+    n.run(5_000, true);
+    assert!(n.mgr.status().active.is_some_and(|a| a.ready), "refeito sem esperar o cooldown");
+    assert!(n.data_times().len() > before, "a mídia voltou");
+}

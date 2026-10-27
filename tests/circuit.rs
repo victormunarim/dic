@@ -291,3 +291,50 @@ fn failed_connect_destroys_the_circuit() {
     s.exec("A", follow);
     assert_eq!(s.client_recv(&mut cc), Event::Destroyed);
 }
+
+/// Circuito de um salto só: o relay A abre o fluxo para o destino, sem relay no meio.
+fn build_direct(s: &mut Sim) -> ClientCircuit {
+    let (mut cc, create) = ClientCircuit::create(1, &s.pubkey("A"));
+    s.client_send(create);
+    assert_eq!(s.client_recv(&mut cc), Event::HopReady(0));
+    let begin = cc.begin("contato:9").unwrap();
+    s.client_send(begin);
+    cc
+}
+
+#[test]
+fn a_single_hop_circuit_opens_the_stream_at_the_first_relay() {
+    let mut s = sim();
+    let mut cc = build_direct(&mut s);
+    assert_eq!(cc.hops(), 1);
+
+    let cell = cc.send_data(b"ola direto").unwrap();
+    s.client_send(cell);
+    assert_eq!(s.delivered, vec![("A".to_string(), b"ola direto".to_vec())]);
+    assert_eq!(s.client_recv(&mut cc), Event::Data(b"eco:ola direto".to_vec()));
+    let cell = cc.ping(0, 7).unwrap();
+    s.client_send(cell);
+    assert_eq!(s.client_recv(&mut cc), Event::Pong { hop: 0, nonce: 7 });
+    assert_eq!(s.nodes["B"].circuit_count(), 0, "nenhum outro relay entra");
+
+    // Sem a camada do segundo salto, a célula leva mais dados.
+    s.echo = false;
+    let cell = cc.send_data(&vec![0; max_data(0)]).unwrap();
+    s.client_send(cell);
+    assert_eq!(s.delivered.last().map(|(n, p)| (n.as_str(), p.len())), Some(("A", max_data(0))));
+    assert!(cc.send_data(&vec![0; max_data(0) + 1]).is_err());
+    for (from, to, cell) in &s.observed {
+        assert_eq!(cell.to_bytes().len(), Cell::WIRE_LEN, "{from}->{to}");
+    }
+}
+
+#[test]
+fn a_relay_with_a_stream_refuses_to_extend_the_circuit() {
+    let mut s = sim();
+    let mut cc = build_direct(&mut s);
+    let ext = cc.extend("B", &s.pubkey("B"), &s.pubkey("B")).unwrap();
+    s.client_send(ext);
+    assert_eq!(s.client_recv(&mut cc), Event::Destroyed);
+    assert_eq!(s.nodes["A"].circuit_count(), 0);
+    assert_eq!(s.closed_streams, 1);
+}

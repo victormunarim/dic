@@ -666,11 +666,16 @@ impl Dialer {
     }
 
     fn client_with(&self, peer: &[u8; 32], exit: &RelayInfo, mut relays: Vec<Candidate>, options: ClientOptions) -> CircuitClient {
-        // Último recurso para o primeiro salto: o próprio relay (por loopback). Perde o anonimato
-        // perante o outro lado, mas permite ligar quando só há duas pessoas online.
-        relays.push(Candidate { addr: format!("127.0.0.1:{}", self.relay_port), public: self.mine.onion, link_public: self.mine.link, score: 0.5 });
+        if options.direct {
+            // Direto, o único salto é o relay do contato: nenhum outro candidato entra.
+            relays.clear();
+        } else {
+            // Último recurso para o primeiro salto: o próprio relay (por loopback). Perde o anonimato
+            // perante o outro lado, mas permite ligar quando só há duas pessoas online.
+            relays.push(Candidate { addr: format!("127.0.0.1:{}", self.relay_port), public: self.mine.onion, link_public: self.mine.link, score: 0.5 });
+        }
         relays.push(exit.candidate());
-        let cfg = ManagerConfig { exit_addr: Some(exit.addr.clone()), ..Default::default() };
+        let cfg = ManagerConfig { exit_addr: Some(exit.addr.clone()), direct: options.direct, ..Default::default() };
         CircuitClient::spawn_with(CircuitManager::new(cfg, &dest_for(peer), relays), Duration::from_secs(3), options)
     }
 
@@ -689,7 +694,7 @@ impl Dialer {
     }
 
     /// Transmite a tela da chamada `call` para `peer`, por um circuito só da tela (cover de
-    /// [`phone::SCREEN_SLOT`]). Sempre por circuito, com cover.
+    /// [`phone::SCREEN_SLOT`]). Privada: por circuito de 2 saltos, com cover.
     pub async fn share_screen(&self, peer: [u8; 32], call: &ActiveCall, wait: Duration) -> Result<ScreenShare, DialError> {
         self.share_screen_keys(peer, &call.next_share_keys(), wait).await
     }
@@ -700,9 +705,11 @@ impl Dialer {
         self.share_screen_keys_with(peer, keys, wait, true).await
     }
 
-    /// Como [`Self::share_screen_keys`]. Com `private` falso o circuito abre mão do cover: não manda pacote
-    /// nos instantes sem vídeo (quem observa a rede vê quando a tela se mexe) e o ritmo máximo quadruplica
-    /// ([`OPEN_SCREEN_SLOT`]). O vídeo e as chaves seguem cifrados. Quem transmite deve usar
+    /// Como [`Self::share_screen_keys`]. Com `private` falso a tela abre mão da privacidade da rede: vai direto ao
+    /// relay do contato, sem relay no meio (ele vê o seu IP, que os contatos já conhecem), e sem cover, então não
+    /// manda pacote nos instantes sem vídeo (quem observa a rede vê quando a tela se mexe) e o ritmo máximo
+    /// quadruplica ([`OPEN_SCREEN_SLOT`]). O relay do contato precisa ser desta versão ou mais nova. O vídeo e as
+    /// chaves seguem cifrados. Quem transmite deve usar
     /// [`H264Encoder::bitrate_for`](crate::video::H264Encoder::bitrate_for) com o mesmo intervalo.
     pub async fn share_screen_keys_with(&self, peer: [u8; 32], keys: &CallKeys, wait: Duration, private: bool) -> Result<ScreenShare, DialError> {
         let (options, slot): (fn() -> ClientOptions, Duration) = if private { (screen_client_options, SCREEN_SLOT) } else { (open_screen_client_options, OPEN_SCREEN_SLOT) };

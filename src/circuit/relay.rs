@@ -138,6 +138,14 @@ struct Circ {
     down: VecDeque<Vec<u8>>,
 }
 
+impl Circ {
+    /// Este relay é o último salto do circuito: abre o fluxo e responde o cover. É o 2º salto
+    /// de um circuito privado ou o único de um circuito direto (veja `ManagerConfig::direct`).
+    fn is_last(&self) -> bool {
+        self.next.is_none() && !self.extending
+    }
+}
+
 /// Quadros do destino esperando a vez no cover; os mais antigos caem primeiro.
 const MAX_DOWN_QUEUE: usize = 64;
 
@@ -404,7 +412,7 @@ impl RelayNode {
         let c = self.circs.get_mut(&key).expect("existe");
         match rc.cmd {
             RelayCmd::Extend => {
-                if c.pos + 1 >= MAX_HOPS || c.next.is_some() || c.extending || rc.data.len() <= 64 {
+                if c.pos + 1 >= MAX_HOPS || !c.is_last() || c.stream.is_some() || rc.data.len() <= 64 {
                     return self.remove_circ(key);
                 }
                 let Ok(addr) = String::from_utf8(rc.data[64..].to_vec()) else { return self.remove_circ(key) };
@@ -423,7 +431,7 @@ impl RelayNode {
                 vec![Action::Connect { link, addr, key: link_key, via: key.link }]
             }
             RelayCmd::Begin => {
-                if c.pos + 1 != MAX_HOPS || c.stream.is_some() {
+                if !c.is_last() || c.stream.is_some() {
                     return self.remove_circ(key);
                 }
                 let Ok(dest) = String::from_utf8(rc.data) else { return self.remove_circ(key) };
@@ -439,7 +447,7 @@ impl RelayNode {
                 None => vec![],
             },
             RelayCmd::Drop => {
-                if c.pos + 1 != MAX_HOPS {
+                if !c.is_last() {
                     return vec![];
                 }
                 c.cover = true;

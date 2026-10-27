@@ -37,11 +37,14 @@ pub struct ClientOptions {
     pub circuit_cover: Option<Duration>,
     /// Perfil de custo; quando presente, substitui `cover` e `circuit_cover`.
     pub profile: Option<CoverProfile>,
+    /// Circuito direto, sem relay no meio (veja [`ManagerConfig::direct`](crate::circuit::manager::ManagerConfig::direct)).
+    /// O gerente precisa ter `exit_addr`. Padrão: `false`.
+    pub direct: bool,
 }
 
 impl Default for ClientOptions {
     fn default() -> Self {
-        Self { reputation: None, cover: Some(DEFAULT_COVER), circuit_cover: Some(DEFAULT_CIRCUIT_COVER), profile: None }
+        Self { reputation: None, cover: Some(DEFAULT_COVER), circuit_cover: Some(DEFAULT_CIRCUIT_COVER), profile: None, direct: false }
     }
 }
 
@@ -70,11 +73,12 @@ impl CircuitClient {
     /// Inicia o gerente com opções (reputação, cover traffic).
     pub fn spawn_with(mut manager: CircuitManager, connect_timeout: Duration, options: ClientOptions) -> Self {
         crate::timer::fine_timers();
-        let ClientOptions { reputation: rep, mut cover, mut circuit_cover, profile } = options;
+        let ClientOptions { reputation: rep, mut cover, mut circuit_cover, profile, direct } = options;
         if let Some(p) = profile {
             (cover, circuit_cover) = (p.link_interval(), p.circuit_interval());
         }
         manager.set_cover(circuit_cover.map(|d| d.as_millis() as u64));
+        manager.set_direct(direct);
         // O gerente emite no máximo uma célula de cover por tick: o tick precisa caber no intervalo.
         let tick = circuit_cover.map_or(MANAGER_TICK, |d| d.clamp(Duration::from_millis(1), MANAGER_TICK));
         let (cmd_tx, cmd_rx) = mpsc::channel(CHANNEL);

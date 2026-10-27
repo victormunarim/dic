@@ -17,7 +17,7 @@ pub(crate) struct ScreenState {
     pub(crate) want_share: AtomicBool,
     /// Há uma tarefa de transmissão viva (ligando ou enviando).
     pub(crate) share_task: AtomicBool,
-    /// A pessoa abriu mão da privacidade da tela (sem cover, o dobro do ritmo); falso é o padrão. A janela
+    /// A pessoa abriu mão da privacidade da tela (direto ao contato, sem cover, o dobro do ritmo); falso é o padrão. A janela
     /// copia a escolha da configuração a cada quadro.
     pub(crate) open_path: AtomicBool,
     /// A pessoa prefere nitidez a fluidez (metade dos quadros por segundo); a janela copia a escolha da
@@ -197,7 +197,7 @@ pub(crate) async fn share_task(dialer: Dialer, peer: [u8; 32], keys: clam::media
         }
     };
     st.sharing.store(true, Ordering::Relaxed);
-    out.line(if private { "tela: transmitindo" } else { "tela: transmitindo sem privacidade (sem cover)" });
+    out.line(if private { "tela: transmitindo" } else { "tela: transmitindo sem privacidade (direto ao contato, sem cover)" });
     let flag = shared.clone();
     // Capturar e codificar pesa: fora do executor.
     let share = tokio::task::spawn_blocking(move || {
@@ -252,7 +252,8 @@ pub(crate) enum ShareCtl {
 /// encerra a captura e os circuitos.
 pub(crate) struct RoomCapture {
     pub(crate) ctl: std::sync::mpsc::Sender<ShareCtl>,
-    /// Os circuitos de tela devem abrir sem cover (o ritmo do codificador foi escolhido para isso).
+    /// Com privacidade os circuitos de tela abrem com 2 saltos e cover; sem ela, direto ao espectador e sem cover (o
+    /// ritmo do codificador foi escolhido para isso).
     pub(crate) private: bool,
 }
 

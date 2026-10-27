@@ -497,7 +497,7 @@ impl App {
             ui.add_enabled_ui(!busy, |ui| {
                 let changed = ui
                     .checkbox(&mut self.form.screen_private, "Privacidade na transmissão da tela")
-                    .on_hover_text("Ligada, a tela sai num ritmo constante, com tráfego de enchimento, e quem observa a rede não vê quando a imagem se mexe. Desligada, só sai o que há para enviar e o ritmo máximo dobra: a imagem fica mais nítida e fluida, mas o vídeo segue cifrado. Vale na próxima transmissão.")
+                    .on_hover_text("Ligada, a tela passa por um relay no meio do caminho e sai num ritmo constante, com tráfego de enchimento: quem observa a rede não vê quando a imagem se mexe. Desligada, a tela vai direto ao relay de quem assiste, sem relay no meio (ele vê o seu IP), e só sai o que há para enviar; o ritmo máximo dobra e a imagem fica mais nítida e fluida, mas quem observa a rede vê quando a imagem se mexe. O vídeo segue cifrado nos dois casos. Quem assiste precisa de uma versão que aceite a tela direta. Vale na próxima transmissão.")
                     .changed();
                 if changed {
                     self.form.save();

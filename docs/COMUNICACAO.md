@@ -77,11 +77,12 @@ A tela anda num **circuito só dela**, aberto por quem transmite até o telefone
 
 | | Com privacidade (padrão) | Sem privacidade |
 |---|---|---|
+| Caminho | 2 saltos: o seu relay e o do contato | direto ao relay do contato, 1 salto |
 | Cover | link e circuito no ritmo do slot | nenhum, só sai o que há para mandar |
 | Slot (`phone::SCREEN_SLOT` / `OPEN_SCREEN_SLOT`) | 2 ms (500 pacotes/s, capacidade 684 kbps) | 0,5 ms (2000 pacotes/s, 2,7 Mbps, 512 kB/s no fio) |
 | Orçamento do codec (90 %) | ≈ 615 kbps | ≈ 2,5 Mbps |
 | Quadros por segundo (fluidez) | 15 | 30 |
-| O que um observador vê | taxa constante, a tela parada ou mexendo | quando a tela se mexe (o conteúdo segue cifrado) |
+| O que um observador vê | taxa constante, a tela parada ou mexendo | quando a tela se mexe e o seu IP falando com o relay do contato (o conteúdo segue cifrado) |
 
 - **Fluidez ou nitidez** (`video::Priority`): a taxa de bits é uma só; fluidez a reparte em mais quadros por segundo, nitidez em metade dos quadros com o dobro de bits.
 - **Perda:** quem assiste pede de volta o que faltou (`NACK`, no pacote de preenchimento) e o emissor reenvia os últimos 660 fragmentos que guardou, à frente da fila, em pacote novo. Sem FEC. Reparo que não vem em 800 ms abandona o quadro e pede um quadro-chave.
@@ -123,10 +124,10 @@ O endereço de um relay muda (IP novo, outra porta). Para o código antigo não 
 
 ## Limites conhecidos
 
-- O primeiro salto é sempre o seu relay: o contato vê o seu IP. O circuito esconde o conteúdo e o destino de quem observa, mas não o seu IP do contato.
+- O primeiro salto é o seu relay (menos na tela sem privacidade, que vai direto ao relay do contato): o contato vê o seu IP. O circuito esconde o conteúdo e o destino de quem observa, mas não o seu IP do contato.
 - Sem CGNAT/porta alcançável não se recebe chamada. Não há furo de NAT.
 - Quem controla o primeiro salto e a saída do mesmo circuito liga as pontas. Como os relays são os dos próprios contatos, isso exige que ambos sejam o mesmo adversário.
-- A tela sem privacidade revela quando a imagem se mexe.
+- A tela sem privacidade revela quando a imagem se mexe e vai direto ao relay do contato, sem relay no meio. Um contato com versão antiga não abre essa tela.
 - A tela em hardware (`hwenc`) só foi testada com `x264enc` no lugar do codificador de GPU.
 
 ## Onde está cada coisa

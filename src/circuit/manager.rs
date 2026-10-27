@@ -69,6 +69,11 @@ pub struct ManagerConfig {
     /// Endereço do relay que deve ser sempre o segundo salto (o de saída). Útil quando só um relay
     /// conhece o destino (o nó do chamado). Os demais ficam como primeiro salto. `None`: ambos sorteados.
     pub exit_addr: Option<String>,
+    /// Circuito direto: um salto só, o relay de `exit_addr`, sem relay no meio. Quem observa a
+    /// rede (e o próprio relay de saída) vê o seu IP ligado ao destino, em troca de menos
+    /// latência e células maiores. Exige `exit_addr`; não monta circuito reserva, porque não há
+    /// outro caminho, e o relay que falhou não entra em cooldown. Padrão: `false`.
+    pub direct: bool,
 }
 
 impl Default for ManagerConfig {
@@ -84,6 +89,7 @@ impl Default for ManagerConfig {
             cover_ms: None,
             standby_cover: true,
             exit_addr: None,
+            direct: false,
         }
     }
 }
@@ -227,6 +233,11 @@ impl CircuitManager {
         self.cfg.cover_ms = every_ms;
     }
 
+    /// Liga ou desliga o circuito direto (veja [`ManagerConfig::direct`]). Vale para os próximos circuitos.
+    pub fn set_direct(&mut self, direct: bool) {
+        self.cfg.direct = direct;
+    }
+
     pub fn status(&self) -> Status {
         let info = |s: &Slot| SlotInfo {
             first: s.first.addr.clone(),
@@ -304,7 +315,7 @@ impl CircuitManager {
                 None => self.next_active_attempt = now + self.cfg.retry_ms,
             }
         }
-        if self.standby.is_none() && now >= self.next_standby_attempt
+        if !self.cfg.direct && self.standby.is_none() && now >= self.next_standby_attempt
             && let Some(active) = &self.active {
                 let (a, b) = (active.first.addr.clone(), active.second.addr.clone());
                 // Do mais ao menos independente: evita ambos, depois só o primeiro, depois só o segundo.
@@ -332,7 +343,7 @@ impl CircuitManager {
         match result {
             Err(_) => {} // célula inválida ou repetida: ignora; o ping decide se o circuito morreu
             Ok(CircuitEvent::Destroyed) => self.fail(is_active, FailReason::Destroyed, now, &mut out),
-            Ok(CircuitEvent::HopReady(0)) => {
+            Ok(CircuitEvent::HopReady(0)) if !self.cfg.direct => {
                 let (addr, key, link) = (slot.second.addr.clone(), slot.second.public, slot.second.link_public);
                 if let Ok(c) = slot.circuit.extend(&addr, &key, &link) {
                     out.push(Out::Send { to: slot.first.addr.clone(), cell: c });
@@ -419,6 +430,9 @@ impl CircuitManager {
         let Some(slot) = slot else { return };
         let until = now + self.cfg.cooldown_ms;
         match reason {
+            // O único relay do circuito direto é o destino da chamada: pô-lo de molho
+            // só impediria a nova tentativa.
+            _ if self.cfg.direct => {}
             FailReason::BuildTimeout("create") => {
                 self.cooldown.insert(slot.first.addr.clone(), until);
             }
@@ -458,7 +472,9 @@ impl CircuitManager {
                         self.no_circuit_reported = true;
                         out.push(Out::Event(Event::NoCircuit));
                     }
-                    self.next_active_attempt = now;
+                    // Sem cooldown no modo direto, a pausa é o que impede de refazer o circuito
+                    // sem parar contra um relay que o derruba (uma versão antiga, por exemplo).
+                    self.next_active_attempt = if self.cfg.direct { now + self.cfg.retry_ms } else { now };
                 }
             }
         } else {
@@ -467,23 +483,29 @@ impl CircuitManager {
     }
 
     /// Escolhe dois relays distintos fora de `avoid` e do cooldown e inicia o circuito.
+    /// No modo direto escolhe só o relay de saída, que é também o primeiro salto.
     fn build(&mut self, avoid: &HashSet<String>, now: u64, out: &mut Vec<Out>) -> Option<Slot> {
         let mut pool: Vec<&Candidate> = self
             .relays
             .iter()
             .filter(|c| !avoid.contains(&c.addr) && !self.cooldown.contains_key(&c.addr))
             .collect();
-        if pool.len() < 2 {
-            return None;
-        }
-        let second = match &self.cfg.exit_addr {
-            Some(x) => {
-                let i = pool.iter().position(|c| &c.addr == x)?;
-                pool.remove(i).clone()
+        let (first, second) = if self.cfg.direct {
+            let exit = pool.iter().find(|c| Some(&c.addr) == self.cfg.exit_addr.as_ref())?;
+            ((*exit).clone(), (*exit).clone())
+        } else {
+            if pool.len() < 2 {
+                return None;
             }
-            None => take_one(&mut pool).clone(),
+            let second = match &self.cfg.exit_addr {
+                Some(x) => {
+                    let i = pool.iter().position(|c| &c.addr == x)?;
+                    pool.remove(i).clone()
+                }
+                None => take_one(&mut pool).clone(),
+            };
+            (take_one(&mut pool).clone(), second)
         };
-        let first = take_one(&mut pool).clone();
 
         let circ = self.next_circ;
         self.next_circ = self.next_circ.wrapping_add(1).max(1);

@@ -673,3 +673,48 @@ async fn an_anchor_lets_two_moved_contacts_find_each_other() {
     assert!(b.known().iter().any(|(k, r)| *k == pa && *r == fresh_a));
     cb.hangup();
 }
+
+/// Liga A a B, A transmite a tela com `private` e B tem de receber o quadro. Devolve se chegou igual.
+async fn screen_arrives(private: bool) -> bool {
+    use clam::phone::ScreenEvent;
+    let (sa, sb) = (key(), key());
+    let (pa, pb) = (*PublicKey::from(&sa).as_bytes(), *PublicKey::from(&sb).as_bytes());
+    let a = Node::start(fixed(sa, free_port(), vec![pb])).await.unwrap();
+    let mut b = Node::start(fixed(sb, free_port(), vec![pa])).await.unwrap();
+    a.add_hint(pb, b.relay_info().unwrap());
+    let answer = tokio::spawn(async move {
+        let inc = timeout(Duration::from_secs(15), b.next_incoming()).await.unwrap().unwrap();
+        (inc.accept(Mulaw::new()).await.unwrap(), b)
+    });
+    let ca = a.dial(pb, Mulaw::new(), Duration::from_secs(15)).await.unwrap();
+    let (mut cb, _b) = answer.await.unwrap();
+
+    let share = a.dialer().share_screen_keys_with(pb, &ca.next_share_keys(), Duration::from_secs(15), private).await.unwrap();
+    let frame: Vec<u8> = (0..900).map(|i| (i as u8).wrapping_mul(7)).collect();
+    assert!(share.push(&frame, true).unwrap());
+    let got = timeout(Duration::from_secs(10), async {
+        loop {
+            match cb.next_screen().await {
+                Some(ScreenEvent::Frame(f)) => return Some(f.data),
+                Some(_) => {}
+                None => return None,
+            }
+        }
+    })
+    .await
+    .expect("o quadro de tela não chegou");
+    share.stop().await;
+    got.as_deref() == Some(frame.as_slice())
+}
+
+/// A tela privada passa por 2 saltos (o próprio relay e o do contato).
+#[tokio::test]
+async fn the_private_screen_reaches_the_contact() {
+    assert!(screen_arrives(true).await);
+}
+
+/// Sem privacidade a tela vai direto ao relay do contato, sem relay no meio, e chega do mesmo jeito.
+#[tokio::test]
+async fn the_screen_without_privacy_goes_straight_to_the_contact() {
+    assert!(screen_arrives(false).await);
+}

@@ -19,7 +19,7 @@ Garantias e limites, limitações conhecidas e chaveiro.
 - Endereços de terceiros (contatos, convites de servidor, DHT, apresentações): só valem se forem `host:porta` em ASCII visível, com porta de 1 a 65535 e sem IP não especificado, multicast ou link-local (`valid_addr`); o relay também não conecta nesses, nem quando o pedido vem do link local. Rede privada e loopback seguem permitidos nesse caminho, por causa da LAN. O nome numa apresentação não pode ter caractere de controle.
 - Arquivos privados (`0600`): o temporário que precede o `rename` é apagado e recriado com `create_new`, pois o modo só vale na criação.
 - Vídeo: o decodificador recusa imagem maior que `MAX_DECODED_PIXELS` (1920x2160), pois as dimensões vêm do quadro-chave de quem transmite e decidiriam quanta memória alocamos. O openh264 ainda aloca os próprios buffers internos pelo tamanho que o quadro-chave declara; esse teto é o dele.
-- A tela sem a opção de privacidade deixa de ter cover: quem observa a rede vê quando a imagem se mexe. O conteúdo segue cifrado de ponta a ponta.
+- A tela sem a opção de privacidade perde duas proteções: deixa de ter cover (quem observa a rede vê quando a imagem se mexe) e vai direto ao relay de quem assiste, sem relay no meio, então esse relay vê o IP de quem transmite ligado à chamada. O IP o contato já conhece (o primeiro salto é o relay de quem transmite), mas não é mais escondido de quem observa o relay do contato. O conteúdo segue cifrado de ponta a ponta. Quem assiste precisa de um relay desta versão ou mais nova: o antigo derruba o circuito direto e a tela não abre.
 
 ## Código que lê bytes da rede
 
