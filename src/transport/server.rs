@@ -8,13 +8,67 @@ use super::*;
 
 pub(super) enum RelayEvent {
     /// O último campo diz se o outro lado está nesta máquina (o cliente do próprio dono do relay).
-    Linked(LinkReader, LinkWriter, OwnedSemaphorePermit, bool),
+    Linked(LinkReader, LinkWriter, Slot, bool),
     Cell(LinkId, Cell),
     LinkClosed(LinkId),
     Connected(LinkId, Option<(LinkReader, LinkWriter)>),
     StreamOpened(CircRef, Option<TcpStream>),
     StreamData(CircRef, Vec<u8>),
     StreamClosed(CircRef),
+}
+
+/// Vaga de uma conexão de entrada: a global (`max_links`) e a da origem (`max_links_per_ip`).
+/// As duas voltam juntas quando o link acaba.
+pub(super) struct Slot {
+    _permit: OwnedSemaphorePermit,
+    _origin: Option<OriginSlot>,
+}
+
+/// Quantas conexões de entrada cada origem tem abertas.
+#[derive(Default)]
+struct Origins(std::sync::Mutex<HashMap<IpAddr, usize>>);
+
+struct OriginSlot {
+    origins: Arc<Origins>,
+    key: IpAddr,
+}
+
+/// A origem que se conta: o IPv4, ou o /64 do IPv6 (quem tem um /64 tem endereços de sobra para trocar).
+fn origin_key(ip: IpAddr) -> IpAddr {
+    match ip.to_canonical() {
+        IpAddr::V6(v6) => {
+            let mut octets = v6.octets();
+            octets[8..].fill(0);
+            IpAddr::V6(octets.into())
+        }
+        v4 => v4,
+    }
+}
+
+impl Origins {
+    /// Reserva uma vaga para `ip`; `None` se a origem já tem `max`.
+    fn take(self: &Arc<Self>, ip: IpAddr, max: usize) -> Option<OriginSlot> {
+        let key = origin_key(ip);
+        let mut open = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let n = open.get(&key).copied().unwrap_or(0);
+        if n >= max {
+            return None;
+        }
+        open.insert(key, n + 1);
+        Some(OriginSlot { origins: self.clone(), key })
+    }
+}
+
+impl Drop for OriginSlot {
+    fn drop(&mut self) {
+        let mut open = self.origins.0.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(n) = open.get_mut(&self.key) {
+            *n -= 1;
+            if *n == 0 {
+                open.remove(&self.key);
+            }
+        }
+    }
 }
 
 /// Relay em execução. Larga-se com [`RelayServer::stop`] (ou ao descartar o valor).
@@ -87,12 +141,12 @@ impl RelayIo {
     }
 
     /// Registra um link cifrado e lança seus leitores/escritores.
-    /// `permit` (links de entrada) fica retida até o link acabar.
-    pub(super) fn attach(&mut self, link: LinkId, rd: LinkReader, wr: LinkWriter, permit: Option<OwnedSemaphorePermit>) {
+    /// `slot` (links de entrada) fica retida até o link acabar.
+    pub(super) fn attach(&mut self, link: LinkId, rd: LinkReader, wr: LinkWriter, slot: Option<Slot>) {
         let (wtx, wrx) = mpsc::channel(WRITE_QUEUE);
         self.writers.insert(link, wtx);
         let cover = Cover {
-            initiate: permit.is_none(),
+            initiate: slot.is_none(),
             slots: Some(self.cover_slots.clone()),
             interval: self.cover.clone(),
             ..Cover::off()
@@ -101,7 +155,7 @@ impl RelayIo {
         self.tasks.spawn(write_loop(wr, wrx, cover));
         let tx = self.tx.clone();
         self.tasks.spawn(async move {
-            let _permit = permit;
+            let _slot = slot;
             let cell_tx = tx.clone();
             read_cells(rd, peer_cover, move |c| {
                 let tx = cell_tx.clone();
@@ -177,6 +231,7 @@ pub(super) async fn read_frames(mut rd: OwnedReadHalf, circ: CircRef, tx: mpsc::
 
 pub(super) async fn relay_actor(mut node: RelayNode, secret: Zeroizing<[u8; 32]>, listener: TcpListener, cfg: ServerConfig, cover: watch::Receiver<Option<Duration>>) {
     let slots = Arc::new(Semaphore::new(cfg.max_links));
+    let (origins, per_ip) = (Arc::new(Origins::default()), cfg.max_links_per_ip);
     let (tx, mut rx) = mpsc::channel(CHANNEL);
     let mut io = RelayIo {
         cover,
@@ -197,15 +252,17 @@ pub(super) async fn relay_actor(mut node: RelayNode, secret: Zeroizing<[u8; 32]>
         tokio::select! {
             accepted = listener.accept() => {
                 // Erros de accept (ex.: sem descritores) não derrubam o relay.
-                // Sem vaga livre (`max_links`), a conexão é fechada na hora.
+                // Sem vaga livre (`max_links`, ou `max_links_per_ip` para a origem), a conexão é fechada na hora.
                 if let Ok((s, peer)) = accepted {
                     let _ = s.set_nodelay(true);
                     let local = peer.ip().to_canonical().is_loopback();
-                    if let Ok(permit) = slots.clone().try_acquire_owned() {
+                    let origin = if local { Some(None) } else { origins.take(peer.ip(), per_ip).map(Some) };
+                    if let (Some(origin), Ok(permit)) = (origin, slots.clone().try_acquire_owned()) {
+                        let slot = Slot { _permit: permit, _origin: origin };
                         let (tx, secret) = (tx.clone(), secret.clone());
                         io.tasks.spawn(async move {
                             if let Ok((rd, wr)) = link::accept(s, &secret).await {
-                                let _ = tx.send(RelayEvent::Linked(rd, wr, permit, local)).await;
+                                let _ = tx.send(RelayEvent::Linked(rd, wr, slot, local)).await;
                             }
                         });
                     }
@@ -217,13 +274,13 @@ pub(super) async fn relay_actor(mut node: RelayNode, secret: Zeroizing<[u8; 32]>
                 io.run(acts);
             }
             Some(ev) = rx.recv() => match ev {
-                RelayEvent::Linked(rd, wr, permit, local) => {
+                RelayEvent::Linked(rd, wr, slot, local) => {
                     let link = io.next_in;
                     io.next_in += 1; // < FIRST_OUTBOUND_LINK na prática
                     if local {
                         io.local.insert(link);
                     }
-                    io.attach(link, rd, wr, Some(permit));
+                    io.attach(link, rd, wr, Some(slot));
                 }
                 RelayEvent::Cell(link, cell) => {
                     let now = io.now();
@@ -268,5 +325,44 @@ pub(super) async fn relay_actor(mut node: RelayNode, secret: Zeroizing<[u8; 32]>
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn an_origin_cannot_take_more_than_its_share_and_gives_it_back() {
+        let origins = Arc::new(Origins::default());
+        let a = origins.take(ip("203.0.113.7"), 2).expect("1ª");
+        let _b = origins.take(ip("203.0.113.7"), 2).expect("2ª");
+        assert!(origins.take(ip("203.0.113.7"), 2).is_none(), "3ª passa do teto");
+        assert!(origins.take(ip("203.0.113.8"), 2).is_some(), "outro IP não é afetado");
+        drop(a);
+        assert!(origins.take(ip("203.0.113.7"), 2).is_some(), "a vaga solta volta");
+        assert!(origins.take(ip("203.0.113.9"), 0).is_none(), "teto zero recusa tudo");
+        assert!(origins.0.lock().unwrap().get(&ip("203.0.113.9")).is_none(), "recusa não deixa rastro");
+    }
+
+    #[test]
+    fn ipv6_counts_by_slash_64_and_mapped_ipv4_as_ipv4() {
+        let origins = Arc::new(Origins::default());
+        let _a = origins.take(ip("2001:db8:1:2::1"), 1).expect("1ª");
+        assert!(origins.take(ip("2001:db8:1:2:ffff::9"), 1).is_none(), "mesmo /64");
+        assert!(origins.take(ip("2001:db8:1:3::1"), 1).is_some(), "outro /64");
+        let _v4 = origins.take(ip("198.51.100.1"), 1).expect("v4");
+        assert!(origins.take(ip("::ffff:198.51.100.1"), 1).is_none(), "IPv4 mapeado é o mesmo IPv4");
+    }
+
+    #[test]
+    fn the_table_forgets_origins_with_no_links() {
+        let origins = Arc::new(Origins::default());
+        drop(origins.take(ip("203.0.113.7"), 4));
+        assert!(origins.0.lock().unwrap().is_empty());
     }
 }

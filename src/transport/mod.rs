@@ -85,6 +85,9 @@ pub struct ServerConfig {
     pub listen: SocketAddr,
     /// Conexões de entrada simultâneas. Padrão: 512.
     pub max_links: usize,
+    /// Conexões de entrada simultâneas de uma mesma origem (um IPv4, ou um /64 de IPv6), para uma só não
+    /// ocupar todas as vagas de `max_links`. Conexões desta máquina (loopback) não contam. Padrão: 32.
+    pub max_links_per_ip: usize,
     /// Prazo para conectar ao próximo salto ou ao destino. Padrão: 3 s.
     pub connect_timeout: Duration,
     pub exit: ExitPolicy,
@@ -106,7 +109,7 @@ pub struct ServerConfig {
 
 impl ServerConfig {
     pub fn new(listen: SocketAddr) -> Self {
-        Self { listen, max_links: 512, connect_timeout: Duration::from_secs(3), exit: deny_all(), link_secret: None, cover: Some(DEFAULT_COVER), max_cover_links: 64, profile: None }
+        Self { listen, max_links: 512, max_links_per_ip: 32, connect_timeout: Duration::from_secs(3), exit: deny_all(), link_secret: None, cover: Some(DEFAULT_COVER), max_cover_links: 64, profile: None }
     }
 }
 
