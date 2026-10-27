@@ -254,45 +254,6 @@ impl App {
                 format!("Configuração: {} ({})", conf_path().display(), if self.form.loaded { "lida ao abrir" } else { "não encontrada ao abrir; será criada" }),
             );
         });
-
-        split(ui, |ui, side| {
-            if side == 0 {
-                card(ui, "Meu código de contato", "Envie este código a quem vai ligar para você.", |ui| {
-                    let relay = self.shared.relay.lock().unwrap().clone();
-                    match self.form.my_code(relay.as_ref()) {
-                        Some(code) => {
-                            egui::Frame::new().fill(DEEP).corner_radius(CornerRadius::same(8)).inner_margin(Margin::same(12)).show(ui, |ui| {
-                                ui.set_width(ui.available_width());
-                                ui.add(egui::Label::new(RichText::new(if code.len() > 72 { format!("{}...", &code[..72]) } else { code.clone() }).monospace()).wrap());
-                            });
-                            if button(ui, true, "Copiar o código", BLURPLE).clicked() {
-                                ui.ctx().copy_text(code);
-                            }
-                        }
-                        None => {
-                            note(ui, "(identidade inválida: veja Configurações)");
-                        }
-                    }
-                });
-            } else {
-                card(ui, "Ligar para um código", "Cole o código de contato de alguém, ou o nome de um contato.", |ui| {
-                    let live = !offline && !in_call;
-                    ui.add_enabled(live, field(&mut self.form.peer, "código de contato ou nome de um contato"));
-                    if icon_button(ui, live, "📞", "Ligar", GREEN).clicked() {
-                        match self.form.target() {
-                            Ok(k) => {
-                                self.form.save();
-                                self.dial(k);
-                            }
-                            Err(e) => self.error = e,
-                        }
-                    }
-                    if offline {
-                        note(ui, "Fique online primeiro.");
-                    }
-                });
-            }
-        });
     }
 }
 
@@ -420,8 +381,29 @@ impl App {
 // ---------------------------------------------------------------------------------------------------
 
 impl App {
-    fn call_tab(&mut self, ui: &mut egui::Ui, in_call: bool) {
+    /// Cartão para ligar a um código de contato ou ao nome de um contato.
+    fn dial_card(&mut self, ui: &mut egui::Ui, offline: bool, busy: bool) {
+        card(ui, "Ligar para um código", "Cole o código de contato de alguém, ou o nome de um contato.", |ui| {
+            let live = !offline && !busy;
+            ui.add_enabled(live, field(&mut self.form.peer, "código de contato ou nome de um contato"));
+            if icon_button(ui, live, "📞", "Ligar", GREEN).clicked() {
+                match self.form.target() {
+                    Ok(k) => {
+                        self.form.save();
+                        self.dial(k);
+                    }
+                    Err(e) => self.error = e,
+                }
+            }
+            if offline {
+                note(ui, "Fique online primeiro.");
+            }
+        });
+    }
+
+    fn call_tab(&mut self, ui: &mut egui::Ui, offline: bool, busy: bool, in_call: bool) {
         if !in_call {
+            self.dial_card(ui, offline, busy);
             card(ui, "Nenhuma chamada em andamento", "Quando você ligar ou atender, ela aparece aqui, com a tela compartilhada.", |ui| {
                 if big_button(ui, "Escolher um contato", BLURPLE).clicked() {
                     self.tab = Tab::Contacts;
@@ -695,6 +677,23 @@ impl App {
         if !offline {
             note(ui, "Fique offline para mudar estes ajustes.");
         }
+        card(ui, "Meu código de contato", "Envie este código a quem vai ligar para você.", |ui| {
+            let relay = self.shared.relay.lock().unwrap().clone();
+            match self.form.my_code(relay.as_ref()) {
+                Some(code) => {
+                    egui::Frame::new().fill(DEEP).corner_radius(CornerRadius::same(8)).inner_margin(Margin::same(12)).show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.add(egui::Label::new(RichText::new(if code.len() > 72 { format!("{}...", &code[..72]) } else { code.clone() }).monospace()).wrap());
+                    });
+                    if button(ui, true, "Copiar o código", BLURPLE).clicked() {
+                        ui.ctx().copy_text(code);
+                    }
+                }
+                None => {
+                    note(ui, "(identidade inválida: veja Configurações)");
+                }
+            }
+        });
         ui.add_enabled_ui(offline, |ui| {
             split(ui, |ui, side| {
                 if side == 0 {
@@ -890,7 +889,7 @@ impl eframe::App for App {
                 match self.tab {
                     Tab::Home => self.home_tab(ctx, ui, offline, calling, &status),
                     Tab::Contacts => self.contacts_tab(ui, !offline, calling),
-                    Tab::Call => self.call_tab(ui, calling && !in_room),
+                    Tab::Call => self.call_tab(ui, offline, calling, calling && !in_room),
                     Tab::Servers => self.servers_tab(ui, offline, calling),
                     Tab::Video => self.video_tab(ui),
                     Tab::Audio => self.audio_tab(ui, offline, calling, testing),

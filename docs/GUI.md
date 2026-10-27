@@ -12,7 +12,7 @@ A janela segue o estilo do Discord: a barra lateral é estreita e só de ícones
 
 | Aba | O que tem |
 |---|---|
-| **Início** | *Conexão* (Ficar online / offline, o estado e a caixa *Tentar ficar online ao abrir o programa*, ligada por padrão; desmarcar grava `no_auto_online=1` em `~/.clam-gui.conf`), *Meu código de contato* (com *Copiar o código*) e *Ligar para um código* |
+| **Início** | *Conexão* (Ficar online / offline, o estado e a caixa *Tentar ficar online ao abrir o programa*, ligada por padrão; desmarcar grava `no_auto_online=1` em `~/.clam-gui.conf`). *Meu código de contato* (com *Copiar o código*) fica em **Configurações** e *Ligar para um código* em **Chamada** |
 | **Contatos** | A lista (Ligar / Remover) e *Adicionar contato* (nome e código) |
 | *Servidor* (pelo trilho) | As *Salas de voz* com quem está em cada uma e o aro verde de quem fala, *Telas da sala*, os *Membros* (online e offline) e o convite com o aviso de IP. Detalhes em [SERVIDORES.md](SERVIDORES.md) |
 | **Chamada** | Abre sozinha quando uma chamada 1:1 começa (entrar numa sala não troca de aba): a conversa, *Compartilhar a minha tela* (com a linha de diagnóstico) e a *Tela de ...* de quem transmite para você, que se amplia em outra janela |
@@ -49,7 +49,7 @@ Não há servidor nem diretório. O que cada nó usa para chegar a um contato:
 
 ### O código de contato direto
 
-*Meu código de contato* mostra, com o nó online,
+*Meu código de contato* (aba Configurações) mostra, com o nó online,
 
 ```
 <sua chave pública>#<ip:porta do seu relay>#<chave do circuito, 64 hex>#<chave do link, 64 hex>
