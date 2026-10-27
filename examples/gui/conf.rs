@@ -137,6 +137,9 @@ pub(crate) struct Form {
     pub(crate) new_code: String,
     /// O arquivo de configuração existia e foi lido ao abrir (para a janela mostrar de onde veio).
     pub(crate) loaded: bool,
+    /// A identidade está no chaveiro do sistema e ele não a devolveu ao abrir: `secret` fica vazio, sem
+    /// inventar outra, e a gravação mantém a marca `@keyring` no arquivo (veja [`Form::secret_to_write`]).
+    pub(crate) keyring_lost: bool,
 }
 
 /// Código de contato: a chave pública (64 hex), com o relay de quem o gerou depois de `#` (veja
@@ -197,6 +200,14 @@ pub(crate) fn vault() -> Option<keyring::Entry> {
 
 pub(crate) fn vault_get() -> Option<String> {
     vault()?.get_password().ok().filter(|s| unhex(s).is_ok())
+}
+
+/// A chave que o chaveiro devolveu e se ele falhou. Falhou: chave vazia, nunca uma sorteada.
+fn resolve_vault(stored: Option<String>) -> (String, bool) {
+    match stored {
+        Some(secret) => (secret, false),
+        None => (String::new(), true),
+    }
 }
 
 /// Guarda a identidade no chaveiro e confere que dá para ler de volta.
@@ -441,14 +452,16 @@ impl Form {
         let Ok(text) = std::fs::read_to_string(conf_path()) else { return Form::first_run() };
         let kv: HashMap<_, _> = text.lines().filter_map(|l| l.split_once('=')).map(|(k, v)| (k.to_string(), v.to_string())).collect();
         let get = |k: &str| kv.get(k).cloned().unwrap_or_default();
-        let secret = match get("secret").as_str() {
-            "" => hex(&StaticSecret::random_from_rng(OsRng).to_bytes()),
-            // Guardada no chaveiro do sistema; se ele sumiu, gera outra (a identidade antiga se perde).
-            KEYRING_MARK => vault_get().unwrap_or_else(|| hex(&StaticSecret::random_from_rng(OsRng).to_bytes())),
-            plain => plain.to_string(),
+        let (secret, keyring_lost) = match get("secret").as_str() {
+            "" => (hex(&StaticSecret::random_from_rng(OsRng).to_bytes()), false),
+            // Guardada no chaveiro do sistema; se ele não responde, a identidade fica vazia em vez de virar outra:
+            // trocá-la em silêncio e gravar depois apagaria a antiga.
+            KEYRING_MARK => resolve_vault(vault_get()),
+            plain => (plain.to_string(), false),
         };
         Form {
             secret,
+            keyring_lost,
             contacts: get("contacts").replace(';', "\n"),
             peer: get("peer"),
             public_addr: get("public_addr"),
@@ -486,8 +499,8 @@ impl Form {
 
     /// Como [`save`](Self::save), mas devolve o erro de gravação.
     pub(crate) fn save_checked(&self) -> std::io::Result<()> {
-        // Chave de identidade no chaveiro do sistema; só cai para o arquivo se ele não estiver disponível.
-        let secret = if vault_set(self.secret.trim()) { KEYRING_MARK } else { self.secret.trim() };
+        let secret = self.secret_to_write(vault_set);
+        let secret = secret.as_str();
         let text = format!(
             "audio={}\nsecret={}\ncontacts={}\npeer={}\npublic_addr={}\nno_dht={}\ndht_circuit={}\nname={}\nintros={}\nno_anchor={}\nno_screen_privacy={}\nscreen_sharp={}\nscreen_hardware={}\nanchors={}\ninput_dev={}\noutput_dev={}\nno_opus={}\nno_auto_online={}\n{}",
             u8::from(self.use_audio),
@@ -524,7 +537,24 @@ impl Form {
         clam::audio::Devices { input: self.input_dev.trim().to_string(), output: self.output_dev.trim().to_string() }
     }
 
+    /// O que vai em `secret=`. A chave de identidade fica no chaveiro do sistema (`set` a guarda e confere); só
+    /// cai para o arquivo se ele não estiver disponível. Com a identidade perdida do chaveiro (`keyring_lost`) e
+    /// nenhuma chave nova, mantém a marca: o chaveiro não é tocado e a antiga volta quando ele responder.
+    fn secret_to_write(&self, set: impl FnOnce(&str) -> bool) -> String {
+        let secret = self.secret.trim();
+        if secret.is_empty() && self.keyring_lost {
+            KEYRING_MARK.to_string()
+        } else if set(secret) {
+            KEYRING_MARK.to_string()
+        } else {
+            secret.to_string()
+        }
+    }
+
     pub(crate) fn identity(&self) -> Result<StaticSecret, String> {
+        if self.keyring_lost && self.secret.trim().is_empty() {
+            return Err("a identidade está no chaveiro do sistema e ele não respondeu: destrave-o e reabra o programa (ou cole a chave secreta em Configurações)".into());
+        }
         unhex(&self.secret).map(StaticSecret::from).map_err(|e| format!("identidade: {e}"))
     }
 
@@ -578,6 +608,23 @@ pub(crate) fn remove_contact(text: &str, idx: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_silent_keyring_keeps_the_mark_instead_of_inventing_an_identity() {
+        let (secret, lost) = resolve_vault(None);
+        assert!(secret.is_empty() && lost, "chaveiro mudo: sem identidade e marcado como perdido");
+        assert_eq!(resolve_vault(Some("ab".repeat(32))), ("ab".repeat(32), false));
+
+        let form = Form { secret, keyring_lost: lost, ..Form::default() };
+        assert!(form.identity().is_err());
+        assert_eq!(form.secret_to_write(|_| panic!("não mexe no chaveiro sem chave nova")), KEYRING_MARK);
+
+        // Com uma chave colada pela pessoa, grava como sempre: no chaveiro, ou no arquivo se ele não aceitar.
+        let pasted = Form { secret: hex(&[7; 32]), keyring_lost: true, ..Form::default() };
+        assert!(pasted.identity().is_ok());
+        assert_eq!(pasted.secret_to_write(|_| true), KEYRING_MARK);
+        assert_eq!(pasted.secret_to_write(|_| false), hex(&[7; 32]));
+    }
 
     #[test]
     fn write_private_replaces_atomically_with_owner_only_mode() {

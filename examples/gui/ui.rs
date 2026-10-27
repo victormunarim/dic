@@ -700,6 +700,9 @@ impl App {
             split(ui, |ui, side| {
                 if side == 0 {
                     card(ui, "Identidade", "A chave secreta (64 hex) é você. Não compartilhe com ninguém.", |ui| {
+                        if self.form.keyring_lost && self.form.secret.trim().is_empty() {
+                            note(ui, "A identidade está no chaveiro do sistema e ele não respondeu. Destrave-o e reabra o programa: a configuração segue apontando para ela. Gerar outra ou colar uma chave aqui a substitui.");
+                        }
                         ui.add(field(&mut self.form.secret, "chave secreta").password(true));
                         if ui.button("Gerar nova identidade").on_hover_text("O seu código de contato muda e os outros precisarão do novo.").clicked() {
                             self.form.secret = hex(&StaticSecret::random_from_rng(OsRng).to_bytes());
