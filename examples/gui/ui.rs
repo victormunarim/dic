@@ -777,10 +777,10 @@ impl App {
                         ui.checkbox(&mut self.form.intros, "Aceitar quem me adiciona como contato")
                             .on_hover_text("Quando alguém adiciona o seu código, ele manda uma apresentação cifrada e passa a aparecer na sua lista, para os dois se ligarem. Desligado, só entra na lista quem você adicionar. Só aceita de quem já tem o seu endereço; no máximo 20 por minuto.");
                     });
-                } else {
                     card(ui, "Endereço", "Só se o IP que os outros enxergam não serve, como atrás de NAT: ip:porta (a porta precisa estar aberta no roteador; pode ser um nome).", |ui| {
                         ui.add(field(&mut self.form.public_addr, "ip:porta"));
                     });
+                } else {
                     card(ui, "Encontrar contatos", "Quando um contato muda de endereço (IP novo, outra rede), o programa avisa direto. Se vocês dois mudarem enquanto estavam separados, o aviso não chega, e o reencontro usa a DHT, as âncoras ou as duas. Não existe servidor: o que é guardado vai cifrado e só o contato lê.", |ui| {
                         // A DHT vem ligada: a caixa é para desligá-la.
                         let mut no_dht = !self.form.use_dht;
