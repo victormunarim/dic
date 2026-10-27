@@ -65,14 +65,21 @@ fn client(cands: Vec<Candidate>) -> CircuitClient {
 
 /// Manda `n` quadros e devolve o que o outro lado tocar nesse tempo (mais 300 ms). Sem DTX, o
 /// alto-falante recebe quadros escondidos sem parar, então a coleta é por tempo, não até secar.
+///
+/// Quem recebe também fala (silêncio, como o microfone da GUI, que nunca para de mandar quadros): com o
+/// cover, cada célula que sobe é a vaga de uma célula que desce. Se quem recebe calasse, o circuito
+/// preencheria as vagas dele com o ping de 100 ms, cujo pong tira 1 de cada 5 vagas da volta (40 quadros/s
+/// para 50 mandados) e o atraso do outro lado só cresceria: o teste mediria o jitter buffer sob sobrecarga.
 async fn talk(tx: &ActiveCall, rx: &mut ActiveCall, n: usize) -> Vec<Vec<i16>> {
     let mut got = vec![];
     let end = Instant::now() + Duration::from_millis(20 * n as u64 + 300);
-    let mut sent = 0;
-    let mut tick = tokio::time::interval(Duration::from_millis(20));
+    let (mut sent, mut tick) = (0, tokio::time::interval(Duration::from_millis(20)));
     while Instant::now() < end {
         tokio::select! {
-            _ = tick.tick(), if sent < n => { tx.send(tone(sent)).await.unwrap(); sent += 1; }
+            _ = tick.tick() => {
+                if sent < n { tx.send(tone(sent)).await.unwrap(); sent += 1; }
+                rx.send(vec![0; 160]).await.unwrap();
+            }
             f = rx.next_pcm() => match f { Some(f) => got.push(f), None => break },
             _ = sleep_until(end) => break,
         }

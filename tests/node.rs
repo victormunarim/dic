@@ -20,8 +20,21 @@ fn tone(n: usize) -> Vec<i16> {
     (0..160).map(|i| (9000.0 * (std::f64::consts::TAU * 440.0 * (n * 160 + i) as f64 / 8000.0).sin()) as i16).collect()
 }
 
+/// Porto livre fora da faixa que o sistema dá às conexões de saída (32768–60999 no Linux, 49152 em diante no
+/// resto). Um porto dessa faixa pode ser tomado por qualquer socket de saída entre soltá-lo e subir o nó nele
+/// (e os testes que reiniciam um nó no mesmo porto passariam a discar para um desconhecido: o relay novo cai
+/// em outro porto e o endereço guardado aponta para o que não é ele). Cada processo de teste anda numa janela
+/// de 150 portos escolhida pelo pid e cada chamada pega o seguinte, para testes em paralelo, dentro do processo
+/// ou entre processos, não disputarem o mesmo.
 fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let window = 10_000 + (std::process::id() % 130) * 150;
+    loop {
+        let port = (window + NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 150) as u16;
+        if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return port;
+        }
+    }
 }
 
 /// Nó num porto conhecido, para o endereço dele poder ser escrito antes de subir.
