@@ -439,6 +439,10 @@ Além dos testes determinísticos de `tests/fuzz.rs`, o diretório `fuzz/` tem a
 | `presence` | `presence::open` | sem pânico com registro arbitrário |
 | `relay` | `RelayNode` com um circuito real aberto e células arbitrárias em 4 links | sem pânico; circuitos ≤ `max_circuits` |
 | `manager` | `CircuitManager` com cover ligado, células arbitrárias e relógio irregular | sem pânico |
+| `link` | Link Noise `NK` num socket de loopback: o alvo faz o iniciador anônimo (handshake de verdade e quadro cifrado com texto claro arbitrário), manda bytes crus e faz o relay hostil | sem pânico nem trava; `read_cell` aceita exatamente o que `Cell::from_bytes` aceita; handshake forjado e quadro cru são recusados |
+| `server_op` | `Op::decode`, `Op::verify` | sem pânico; operação aceita reproduz a entrada |
+| `server_msg` | `wire::decode`, `wire::open`, `wire::seal` | sem pânico; mensagem aceita sobrevive a codificar de novo e a ir num quadro selado |
+| `invite` | `Invite::open` com texto qualquer, com cabeçalho certo e bytes arbitrários, e com convite selado por quem convida com campos fora do formato | sem pânico; convite dentro do formato abre igual; o que abre sela de novo e abre igual |
 
 ```sh
 cargo install cargo-fuzz
@@ -449,7 +453,7 @@ cargo fuzz run relay -- -max_total_time=300
 RUSTC_BOOTSTRAP=1 cargo fuzz run -s none relay -- -max_total_time=300
 ```
 
-Um crash fica em `fuzz/artifacts/<alvo>/`; reproduza com `cargo fuzz run <alvo> fuzz/artifacts/<alvo>/crash-...`. O corpus (`fuzz/corpus`) e os artefatos não vão para o git.
+O crate `fuzz/` compila o `clam` com a feature `net` (o alvo `link` precisa do transporte), então a primeira compilação é mais demorada. Um crash fica em `fuzz/artifacts/<alvo>/`; reproduza com `cargo fuzz run <alvo> fuzz/artifacts/<alvo>/crash-...`. O corpus (`fuzz/corpus`) e os artefatos não vão para o git.
 
 Resultado (Rust 1.93 estável, `-s none`, sem AddressSanitizer): nenhum crash nem violação de propriedade em nenhuma rodada.
 
@@ -462,9 +466,11 @@ Resultado (Rust 1.93 estável, `-s none`, sem AddressSanitizer): nenhum crash ne
 | `relay` | sem crash | 0,6 M | 346 / 78 |
 | `manager` | sem crash | 3,1 M | 395 / 135 |
 
-A cobertura de `cell`, `descriptor` e `presence` parou cedo, o que é esperado: o parser é pequeno, e `presence` rejeita quase tudo porque a entrada precisa ser um registro cifrado válido. Os alvos `relay` e `manager` são os que mais ganhariam com mais tempo (são lentos por execução e ainda achavam caminhos novos). Uma campanha de verdade ainda deve rodar horas por alvo e com AddressSanitizer. O link (Noise) não tem alvo: o `snow` é a biblioteca que decifra, e fuzzing do protocolo de link exigiria um par instrumentado.
+Os alvos `link`, `server_op`, `server_msg` e `invite` rodaram 3 min cada, em paralelo, com AddressSanitizer (nightly), sem crash nem violação de propriedade: 60 mil, 2,9 M, 253 mil e 150 mil execuções (o `link` é o mais lento, 330 por segundo, porque cada execução faz um handshake Noise de verdade por TCP de loopback).
+
+A cobertura de `cell`, `descriptor` e `presence` parou cedo, o que é esperado: o parser é pequeno, e `presence` rejeita quase tudo porque a entrada precisa ser um registro cifrado válido. Os alvos `relay` e `manager` são os que mais ganhariam com mais tempo (são lentos por execução e ainda achavam caminhos novos). Uma campanha de verdade ainda deve rodar horas por alvo e com AddressSanitizer. O alvo `link` só exercita o nosso código em volta do `snow` (tamanho do quadro, prazo, célula dentro do quadro): a criptografia em si é da biblioteca, e o fuzzer não forja uma autenticação válida.
 
 ### O que ainda falta na Fase 3
 
 - Coletar as medições entre máquinas reais (roteiro e scripts prontos, nenhuma medição coletada).
-- Campanha longa de fuzzing (horas por alvo, com AddressSanitizer em nightly) e alvos novos para o quadro do link e para o gerente de descobertas.
+- Campanha longa de fuzzing (horas por alvo, com AddressSanitizer em nightly) e um alvo novo para o gerente de descobertas.

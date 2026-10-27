@@ -107,7 +107,8 @@ fn take_reach(b: &[u8]) -> Option<Reach> {
     Some(Reach { addr: String::from_utf8(addr.to_vec()).ok().filter(|a| valid_addr(a))?, onion: onion.try_into().ok()?, link: link.try_into().ok()? })
 }
 
-fn encode(msg: &Msg) -> Vec<u8> {
+/// Conteúdo de `msg` (tipo e corpo), antes de cifrar. Público para os alvos de fuzz de `fuzz/`.
+pub fn encode(msg: &Msg) -> Vec<u8> {
     let mut v = Vec::new();
     match msg {
         Msg::Hello(h) | Msg::HelloAck(h) => {
@@ -162,7 +163,8 @@ fn encode(msg: &Msg) -> Vec<u8> {
     v
 }
 
-fn decode(b: &[u8]) -> Option<Msg> {
+/// Lê o conteúdo de um quadro já decifrado; `None` se o tipo ou o corpo não fazem sentido.
+pub fn decode(b: &[u8]) -> Option<Msg> {
     let (&kind, b) = b.split_first()?;
     Some(match kind {
         1 | 2 => {

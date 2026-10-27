@@ -9,7 +9,11 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-clam = { path = ".." }
+# `net` liga o link, o único alvo que precisa de rede; o resto do `clam` compila igual.
+clam = { path = "..", features = ["net"] }
+arbitrary = { version = "1", features = ["derive"] }
+snow = "0.10"
+tokio = { version = "1", features = ["rt", "net", "io-util", "time", "macros"] }
 
 [workspace]
 
@@ -51,6 +55,34 @@ bench = false
 [[bin]]
 name = "manager"
 path = "fuzz_targets/manager.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "server_op"
+path = "fuzz_targets/server_op.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "server_msg"
+path = "fuzz_targets/server_msg.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "invite"
+path = "fuzz_targets/invite.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "link"
+path = "fuzz_targets/link.rs"
 test = false
 doc = false
 bench = false
