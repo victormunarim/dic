@@ -197,7 +197,7 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
                         shared.in_call.store(false, Ordering::Relaxed);
                         continue;
                     }
-                    let sound = open_sound(false, &form, &out);
+                    let sound = open_sound(form.use_audio, &form, &out);
                     let (tx, rrx) = mpsc::unbounded_channel();
                     shared.room.lock().unwrap().at = Some((server, room_id));
                     let (sh, o, d, me) = (shared.clone(), out.clone(), dialer.clone(), hub.my_key());
