@@ -240,7 +240,10 @@ impl App {
                             let text = RichText::new(if m.is_me { format!("{who} (você)") } else { who }).color(if speaking { GREEN } else { TEXT });
                             ui.label(if speaking { text.strong() } else { text });
                             if m.sharing {
-                                ui.label(RichText::new("🖥 transmitindo").size(13.0).color(GREEN));
+                                // Quadradinho vermelho, como o de parar de gravar.
+                                let (rect, tip) = ui.allocate_exact_size(vec2(12.0, 12.0), egui::Sense::hover());
+                                ui.painter().rect_filled(rect, CornerRadius::same(2), RED);
+                                tip.on_hover_text("transmitindo a tela");
                             }
                             if here && m.is_me {
                                 let (label, fill) = if sharing { ("Parar de compartilhar", RED) } else { ("🖥 Compartilhar tela", BLURPLE) };
