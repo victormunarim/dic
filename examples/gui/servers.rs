@@ -42,7 +42,7 @@ impl App {
         let hub = self.shared.servers.lock().unwrap().clone();
         let Some(hub) = hub.filter(|_| !offline) else {
             card(ui, "Servidores", "Grupos de pessoas com salas de voz, sem servidor no meio: cada membro guarda o grupo e fica de pé enquanto estiver online.", |ui| {
-                note(ui, "Fique online (aba Início) para ver e usar os seus servidores.");
+                note(ui, "Fique online (aba Configurações) para ver e usar os seus servidores.");
             });
             return;
         };

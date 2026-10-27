@@ -14,7 +14,6 @@ use crate::{conf::*, engine::*, theme::{self, *}};
 /// Uma aba da barra lateral.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Tab {
-    Home,
     Contacts,
     Call,
     Servers,
@@ -154,7 +153,6 @@ impl App {
             .show(ctx, |ui| {
                 ui.spacing_mut().item_spacing.y = 6.0;
                 let items = [
-                    (Tab::Home, "🏠", "Início", None),
                     (Tab::Contacts, "👥", "Contatos", None),
                     (Tab::Call, "📞", "Chamada", (in_call && !in_room).then_some(GREEN)),
                 ];
@@ -183,7 +181,7 @@ impl App {
         let (color, text) = self.connection(offline, status);
         let name = if self.form.my_name.trim().is_empty() { "Você".to_string() } else { self.form.my_name.trim().to_string() };
         let me = theme::avatar(ui, &name, 46.0, Some(color));
-        // Em chamada não dá para ficar offline: o botão da aba Início também fica travado.
+        // Em chamada não dá para ficar offline: o botão da aba Configurações também fica travado.
         let can_toggle = offline || !in_call;
         if can_toggle && me.hovered() {
             ui.painter().circle_filled(me.rect.center(), me.rect.width() / 2.0, Color32::from_black_alpha(150));
@@ -218,42 +216,6 @@ impl App {
                 }
             }
         }
-    }
-}
-
-// ---------------------------------------------------------------------------------------------------
-// Início
-// ---------------------------------------------------------------------------------------------------
-
-impl App {
-    fn home_tab(&mut self, ctx: &egui::Context, ui: &mut egui::Ui, offline: bool, in_call: bool, status: &str) {
-        let (color, text) = self.connection(offline, status);
-        card(ui, "Conexão", "Ficar online sobe o seu relay e o telefone; é daí que as chamadas chegam e saem.", |ui| {
-            status_dot(ui, color, text);
-            if !status.is_empty() {
-                note(ui, status);
-            }
-            ui.add_space(4.0);
-            if offline {
-                if big_button(ui, "Ficar online", GREEN).clicked() {
-                    self.go_online(ctx);
-                }
-            } else if ui.add_enabled(!in_call, egui::Button::new(RichText::new("Ficar offline").strong().size(17.0)).min_size(vec2(180.0, 46.0))).clicked()
-                && let Some(r) = &self.running
-            {
-                r.stop.store(true, Ordering::Relaxed);
-            }
-            if ui.checkbox(&mut self.form.auto_online, "Tentar ficar online ao abrir o programa").changed() {
-                self.form.save();
-            }
-            if !self.error.is_empty() {
-                ui.colored_label(Color32::from_rgb(0xf2, 0x7b, 0x7e), &self.error);
-            }
-            note(
-                ui,
-                format!("Configuração: {} ({})", conf_path().display(), if self.form.loaded { "lida ao abrir" } else { "não encontrada ao abrir; será criada" }),
-            );
-        });
     }
 }
 
@@ -673,7 +635,34 @@ impl App {
 // ---------------------------------------------------------------------------------------------------
 
 impl App {
-    fn settings_tab(&mut self, ui: &mut egui::Ui, offline: bool) {
+    fn settings_tab(&mut self, ctx: &egui::Context, ui: &mut egui::Ui, offline: bool, in_call: bool, status: &str) {
+        let (color, text) = self.connection(offline, status);
+        card(ui, "Conexão", "Ficar online sobe o seu relay e o telefone; é daí que as chamadas chegam e saem.", |ui| {
+            status_dot(ui, color, text);
+            if !status.is_empty() {
+                note(ui, status);
+            }
+            ui.add_space(4.0);
+            if offline {
+                if big_button(ui, "Ficar online", GREEN).clicked() {
+                    self.go_online(ctx);
+                }
+            } else if ui.add_enabled(!in_call, egui::Button::new(RichText::new("Ficar offline").strong().size(17.0)).min_size(vec2(180.0, 46.0))).clicked()
+                && let Some(r) = &self.running
+            {
+                r.stop.store(true, Ordering::Relaxed);
+            }
+            if ui.checkbox(&mut self.form.auto_online, "Tentar ficar online ao abrir o programa").changed() {
+                self.form.save();
+            }
+            if !self.error.is_empty() {
+                ui.colored_label(Color32::from_rgb(0xf2, 0x7b, 0x7e), &self.error);
+            }
+            note(
+                ui,
+                format!("Configuração: {} ({})", conf_path().display(), if self.form.loaded { "lida ao abrir" } else { "não encontrada ao abrir; será criada" }),
+            );
+        });
         if !offline {
             note(ui, "Fique offline para mudar estes ajustes.");
         }
@@ -820,7 +809,6 @@ impl App {
 
     fn title(&self) -> (&'static str, String) {
         match self.tab {
-            Tab::Home => ("Início", "Fique online para fazer e receber chamadas, sem servidor no meio.".into()),
             Tab::Contacts => ("Contatos", format!("{} na sua lista.", match parse_contacts(&self.form.contacts).len() {
                 0 => "Ninguém".to_string(),
                 1 => "1 pessoa".to_string(),
@@ -830,7 +818,7 @@ impl App {
             Tab::Servers => ("Servidores", "Grupos de pessoas com salas de voz.".into()),
             Tab::Video => ("Vídeo", "Como a sua tela é transmitida.".into()),
             Tab::Audio => ("Áudio", "Dispositivos, volume e tratamento da voz.".into()),
-            Tab::Settings => ("Configurações", "Identidade, rede e privacidade.".into()),
+            Tab::Settings => ("Configurações", "Conexão, identidade, rede e privacidade.".into()),
             Tab::Log => ("Atividade", "O que o programa está fazendo agora.".into()),
         }
     }
@@ -887,13 +875,12 @@ impl eframe::App for App {
             egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
                 ui.set_max_width(ui.available_width().min(1500.0));
                 match self.tab {
-                    Tab::Home => self.home_tab(ctx, ui, offline, calling, &status),
                     Tab::Contacts => self.contacts_tab(ui, !offline, calling),
                     Tab::Call => self.call_tab(ui, offline, calling, calling && !in_room),
                     Tab::Servers => self.servers_tab(ui, offline, calling),
                     Tab::Video => self.video_tab(ui),
                     Tab::Audio => self.audio_tab(ui, offline, calling, testing),
-                    Tab::Settings => self.settings_tab(ui, offline),
+                    Tab::Settings => self.settings_tab(ctx, ui, offline, calling, &status),
                     Tab::Log => {}
                 }
             });

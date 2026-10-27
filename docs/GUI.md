@@ -12,13 +12,12 @@ A janela segue o estilo do Discord: a barra lateral é estreita e só de ícones
 
 | Aba | O que tem |
 |---|---|
-| **Início** | *Conexão* (Ficar online / offline, o estado e a caixa *Tentar ficar online ao abrir o programa*, ligada por padrão; desmarcar grava `no_auto_online=1` em `~/.clam-gui.conf`). *Meu código de contato* (com *Copiar o código*) fica em **Configurações** e *Ligar para um código* em **Chamada** |
 | **Contatos** | A lista (Ligar / Remover) e *Adicionar contato* (nome e código) |
 | *Servidor* (pelo trilho) | As *Salas de voz* com quem está em cada uma e o aro verde de quem fala, *Telas da sala*, os *Membros* (online e offline) e o convite com o aviso de IP. Detalhes em [SERVIDORES.md](SERVIDORES.md) |
-| **Chamada** | Abre sozinha quando uma chamada 1:1 começa (entrar numa sala não troca de aba): a conversa, *Compartilhar a minha tela* (com a linha de diagnóstico) e a *Tela de ...* de quem transmite para você, que se amplia em outra janela |
+| **Chamada** | *Ligar para um código* (sem chamada); abre sozinha quando uma chamada 1:1 começa (entrar numa sala não troca de aba): a conversa, *Compartilhar a minha tela* (com a linha de diagnóstico) e a *Tela de ...* de quem transmite para você, que se amplia em outra janela |
 | **Vídeo** | *Transmissão de tela*: privacidade, *Priorizar* fluidez ou nitidez e codificar pela placa de vídeo; valem da próxima transmissão, na chamada e nas salas |
 | **Áudio** | *Dispositivos* (usar microfone e alto-falante, escolha dos dois), *Volume e microfone* (mudo, volume, ganho, medidor, sensibilidade, teste) e *Tratamento da voz* (ruído, eco, porta, graves, volume automático, Opus) |
-| **Configurações** | *Identidade* (a chave secreta, oculta; *Gerar nova identidade*), *Seu nome*, *Endereço* público, *Encontrar contatos* (DHT, circuito da DHT, aceitar apresentações) e *Âncoras* (servir de âncora, as que você usa e o código da sua) |
+| **Configurações** | *Conexão* (Ficar online / offline, o estado e a caixa *Tentar ficar online ao abrir o programa*, ligada por padrão; desmarcar grava `no_auto_online=1` em `~/.clam-gui.conf`), *Meu código de contato* (com *Copiar o código*), *Identidade* (a chave secreta, oculta; *Gerar nova identidade*), *Seu nome*, *Endereço* público, *Encontrar contatos* (DHT, circuito da DHT, aceitar apresentações) e *Âncoras* (servir de âncora, as que você usa e o código da sua) |
 | **Atividade** | O registro do que o programa está fazendo (avisos de endereço, apresentações, erros) |
 
 Tudo o que a janela guarda fica em `~/.clam-gui.conf` e nos arquivos ao lado (`.clam-gui.known`, `.clam-gui.relay`, `.clam-gui.intro`, `.clam-gui.servers`); a chave secreta vai para o chaveiro do sistema, quando há ([SEGURANCA.md](SEGURANCA.md#chaveiro)).

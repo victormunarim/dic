@@ -5,7 +5,7 @@
 //! ```text
 //! cargo run --release --features gui,audio --example gui
 //! ```
-//! Você informa a identidade e os contatos; o programa tenta ficar online ao abrir (dá para desligar na aba Início) e "Ficar online" sobe relay e telefone; "Ligar" usa o código de
+//! Você informa a identidade e os contatos; o programa tenta ficar online ao abrir (dá para desligar na aba Configurações) e "Ficar online" sobe relay e telefone; "Ligar" usa o código de
 //! contato do outro (a chave e, na primeira vez, o relay dele). Chamadas de contatos da lista são atendidas
 //! sozinhas. Sem `--features audio` (ou sem a opção marcada),
 //! cada lado envia um tom (440 Hz quem liga, 660 Hz quem atende).
@@ -49,7 +49,7 @@ fn main() -> eframe::Result {
                 running: None,
                 done: Arc::default(),
                 error: String::new(),
-                tab: Tab::Home,
+                tab: Tab::Contacts,
                 was_in_call: false,
                 audio_dirty: false,
                 screen_tex: Default::default(),
