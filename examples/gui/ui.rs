@@ -281,7 +281,14 @@ impl App {
                     theme::avatar(ui, name, 48.0, None);
                     ui.vertical(|ui| {
                         ui.spacing_mut().item_spacing.y = 2.0;
-                        ui.label(RichText::new(name).size(18.0).strong().color(Color32::WHITE));
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(name).size(18.0).strong().color(Color32::WHITE));
+                            // Adicionado só pelo código: o nome chega quando o contato devolve a apresentação.
+                            if *name == hex(key)[..8] {
+                                ui.label(RichText::new("❗").size(15.0).color(YELLOW))
+                                    .on_hover_text("O nome do contato aparecerá assim que você e ele estiverem online ao mesmo tempo.");
+                            }
+                        });
                         ui.label(RichText::new(&hex(key)[..16]).monospace().size(13.0).color(MUTED));
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
