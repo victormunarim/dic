@@ -1,11 +1,11 @@
-//! Aba de servidores: trilho com os servidores, salas de voz com quem está nelas e membros online/offline.
+//! Servidores: trilho sempre visível com os servidores, e a aba com salas de voz, quem está nelas e os membros online/offline.
 
 use std::sync::atomic::Ordering;
 
 use clam::server::{Output, Role, ServerId, ServerView};
 use eframe::egui::{self, Color32, CornerRadius, Margin, RichText, vec2};
 
-use crate::{conf::*, engine::*, theme::*, ui::App};
+use crate::{conf::*, engine::*, theme::*, ui::{App, Tab}};
 
 /// O que a aba lembra entre um quadro e outro.
 #[derive(Default)]
@@ -51,41 +51,54 @@ impl App {
             self.srv.sel = None;
         }
         self.invitations_card(ui, &hub);
-        ui.horizontal_top(|ui| {
-            ui.vertical(|ui| {
-                ui.set_width(60.0);
-                for v in &views {
-                    let on = self.srv.sel == Some(v.id);
-                    let initial = v.name.chars().next().map_or("?".to_string(), |c| c.to_uppercase().to_string());
-                    let reply = server_icon(ui, &initial, if on { BLURPLE } else { PANEL }, Color32::WHITE, if on { 14 } else { 24 });
-                    if reply.on_hover_text(&v.name).clicked() {
-                        self.srv.sel = Some(v.id);
-                        self.srv.msg.clear();
-                        self.srv.info.clear();
-                        self.srv.invite_out.clear();
-                        self.srv.confirm_leave = false;
+        match views.iter().find(|v| Some(v.id) == self.srv.sel) {
+            Some(v) => self.server_view(ui, &hub, v, busy),
+            None => self.server_add(ui, &hub),
+        }
+        if !self.srv.info.is_empty() {
+            ui.colored_label(GREEN, &self.srv.info);
+        }
+        if !self.srv.msg.is_empty() {
+            ui.colored_label(Color32::from_rgb(0xf2, 0x7b, 0x7e), &self.srv.msg);
+        }
+    }
+
+    /// Coluna estreita à esquerda da janela, sempre visível como a do Discord: um ícone por servidor e o "＋".
+    /// Clicar abre a aba Servidores naquele servidor.
+    pub(crate) fn server_rail(&mut self, ctx: &egui::Context, offline: bool) {
+        let hub = self.shared.servers.lock().unwrap().clone().filter(|_| !offline);
+        let views = hub.as_ref().map(|h| h.read(|s, now| s.views(now))).unwrap_or_default();
+        if self.srv.sel.is_some_and(|id| !views.iter().any(|v| v.id == id)) {
+            self.srv.sel = None;
+        }
+        let here = self.tab == Tab::Servers;
+        egui::SidePanel::left("trilho")
+            .exact_width(76.0)
+            .resizable(false)
+            .frame(egui::Frame::new().fill(DEEP).inner_margin(Margin::symmetric(12, 14)))
+            .show(ctx, |ui| {
+                ui.spacing_mut().item_spacing.y = 8.0;
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    for v in &views {
+                        let on = here && self.srv.sel == Some(v.id);
+                        let initial = v.name.chars().next().map_or("?".to_string(), |c| c.to_uppercase().to_string());
+                        let reply = server_icon(ui, &initial, if on { BLURPLE } else { PANEL }, Color32::WHITE, if on { 14 } else { 24 });
+                        if reply.on_hover_text(&v.name).clicked() {
+                            self.tab = Tab::Servers;
+                            self.srv.sel = Some(v.id);
+                            self.srv.msg.clear();
+                            self.srv.info.clear();
+                            self.srv.invite_out.clear();
+                            self.srv.confirm_leave = false;
+                        }
                     }
-                    ui.add_space(4.0);
-                }
-                let plus = server_icon(ui, "＋", PANEL, GREEN, 24);
-                if plus.on_hover_text("Criar ou entrar em um servidor").clicked() {
-                    self.srv.sel = None;
-                }
+                    let plus = server_icon(ui, "＋", PANEL, GREEN, 24);
+                    if plus.on_hover_text("Criar ou entrar em um servidor").clicked() {
+                        self.tab = Tab::Servers;
+                        self.srv.sel = None;
+                    }
+                });
             });
-            ui.vertical(|ui| {
-                ui.set_width(ui.available_width());
-                match views.iter().find(|v| Some(v.id) == self.srv.sel) {
-                    Some(v) => self.server_view(ui, &hub, v, busy),
-                    None => self.server_add(ui, &hub),
-                }
-                if !self.srv.info.is_empty() {
-                    ui.colored_label(GREEN, &self.srv.info);
-                }
-                if !self.srv.msg.is_empty() {
-                    ui.colored_label(Color32::from_rgb(0xf2, 0x7b, 0x7e), &self.srv.msg);
-                }
-            });
-        });
     }
 
     /// Convites que contatos mandaram pela rede.

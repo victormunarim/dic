@@ -8,11 +8,13 @@ Uso da GUI (`examples/gui`): as abas, volume, sensibilidade do microfone, dispos
 
 A janela segue o estilo do Discord: a barra lateral tem uma aba por assunto e, no pé, o seu avatar com o estado (offline, conectando, online, em chamada), o botão de mudo e o de desligar. Com a janela larga (≥ 780 px) cada página se divide em duas colunas.
 
+À esquerda da janela fica, em qualquer aba, o *trilho de servidores* (como o do Discord): um ícone com a inicial de cada servidor e o **＋** para criar ou aceitar convite. Clicar num ícone abre a aba Servidores naquele servidor.
+
 | Aba | O que tem |
 |---|---|
 | **Início** | *Conexão* (Ficar online / offline e o estado), *Meu código de contato* (com *Copiar o código*) e *Ligar para um código* |
 | **Contatos** | A lista (Ligar / Remover) e *Adicionar contato* (nome e código) |
-| **Servidores** | O trilho de servidores (criar, aceitar convite), as *Salas de voz* com quem está em cada uma e o aro verde de quem fala, *Telas da sala*, os *Membros* (online e offline) e o convite com o aviso de IP. Detalhes em [SERVIDORES.md](SERVIDORES.md) |
+| **Servidores** | As *Salas de voz* com quem está em cada uma e o aro verde de quem fala, *Telas da sala*, os *Membros* (online e offline) e o convite com o aviso de IP. Detalhes em [SERVIDORES.md](SERVIDORES.md) |
 | **Chamada** | Abre sozinha quando uma chamada 1:1 começa (entrar numa sala não troca de aba): a conversa, *Compartilhar a minha tela* (com a linha de diagnóstico) e a *Tela de ...* de quem transmite para você, que se amplia em outra janela |
 | **Vídeo** | *Transmissão de tela*: privacidade, *Priorizar* fluidez ou nitidez e codificar pela placa de vídeo; valem da próxima transmissão, na chamada e nas salas |
 | **Áudio** | *Dispositivos* (usar microfone e alto-falante, escolha dos dois), *Volume e microfone* (mudo, volume, ganho, medidor, sensibilidade, teste) e *Tratamento da voz* (ruído, eco, porta, graves, volume automático, Opus) |
