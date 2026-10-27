@@ -64,6 +64,8 @@ pub(crate) enum Cmd {
     Contact([u8; 32], Option<clam::node::RelayInfo>),
     /// Contato removido: parar de atender e esquecer o endereço guardado.
     Forget([u8; 32]),
+    /// Marca (ou desmarca) o contato como de confiança: a tela sem privacidade vai direto só para ele.
+    Trust([u8; 32], bool),
     /// Liga o microfone ao alto-falante para a pessoa conferir som e nível.
     MicTest,
     /// Entra na sala de voz do servidor.

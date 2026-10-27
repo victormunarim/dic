@@ -117,6 +117,9 @@ pub(crate) struct Form {
     /// Privacidade na transmissão da tela: circuito de tráfego constante, com cover. Desligada, o circuito
     /// só manda o que há para enviar e dobra o ritmo (veja `Dialer::share_screen_keys_with`).
     pub(crate) screen_private: bool,
+    /// Contatos de confiança, chaves em hex separadas por `;`: os únicos para quem a tela sem privacidade vai
+    /// direto, mostrando o IP de quem transmite (veja `Dialer::set_trusted`). Quem não é contato não conta.
+    pub(crate) trusted: String,
     /// Nitidez em vez de fluidez na transmissão da tela: metade dos quadros por segundo, cada um mais fino
     /// (veja `video::Priority`). Desligada (fluidez) de início.
     pub(crate) screen_sharp: bool,
@@ -475,6 +478,7 @@ impl Form {
             anchor: get("no_anchor") != "1",
             // Ligada de início: a chave guarda o "não", então o arquivo antigo, sem ela, também aceita.
             screen_private: get("no_screen_privacy") != "1",
+            trusted: get("trusted"),
             screen_sharp: get("screen_sharp") == "1",
             screen_hardware: get("screen_hardware") == "1",
             // Ligado de início: a chave guarda o "não", então o arquivo antigo, sem ela, também aceita.
@@ -502,7 +506,7 @@ impl Form {
         let secret = self.secret_to_write(vault_set);
         let secret = secret.as_str();
         let text = format!(
-            "audio={}\nsecret={}\ncontacts={}\npeer={}\npublic_addr={}\nno_dht={}\ndht_circuit={}\nname={}\nintros={}\nno_anchor={}\nno_screen_privacy={}\nscreen_sharp={}\nscreen_hardware={}\nanchors={}\ninput_dev={}\noutput_dev={}\nno_opus={}\nno_auto_online={}\n{}",
+            "audio={}\nsecret={}\ncontacts={}\npeer={}\npublic_addr={}\nno_dht={}\ndht_circuit={}\nname={}\nintros={}\nno_anchor={}\nno_screen_privacy={}\nscreen_sharp={}\nscreen_hardware={}\nanchors={}\ninput_dev={}\noutput_dev={}\nno_opus={}\nno_auto_online={}\ntrusted={}\n{}",
             u8::from(self.use_audio),
             secret,
             self.contacts.trim().replace('\n', ";"),
@@ -521,10 +525,30 @@ impl Form {
             self.output_dev.trim(),
             u8::from(!self.voice_opus),
             u8::from(!self.auto_online),
+            self.trusted.trim(),
             self.audio.to_conf()
         );
         // Contém a chave secreta: só o dono lê.
         write_private(&conf_path(), &text)
+    }
+
+    /// Contatos de confiança que ainda estão na lista.
+    pub(crate) fn trusted_keys(&self) -> Vec<[u8; 32]> {
+        let contacts = parse_contacts(&self.contacts);
+        self.trusted.split(';').filter_map(|k| unhex(k.trim()).ok()).filter(|k| contacts.iter().any(|(_, c)| c == k)).collect()
+    }
+
+    pub(crate) fn is_trusted(&self, key: &[u8; 32]) -> bool {
+        self.trusted_keys().contains(key)
+    }
+
+    /// Marca ou desmarca `key` como contato de confiança. Quem chama avisa antes que o contato passa a ver o IP.
+    pub(crate) fn set_trusted(&mut self, key: [u8; 32], on: bool) {
+        let mut keys: Vec<[u8; 32]> = self.trusted_keys().into_iter().filter(|k| *k != key).collect();
+        if on {
+            keys.push(key);
+        }
+        self.trusted = keys.iter().map(|k| hex(k)).collect::<Vec<_>>().join(";");
     }
 
     /// Nomes dos contatos, para mostrar quem liga ou transmite a tela.
@@ -748,6 +772,26 @@ mod tests {
         assert_eq!((k, r.unwrap().addr), (key, "203.0.113.7:4001".to_string()));
         let line = intro_line("", &key, &relay);
         assert_eq!(parse_contacts(&line), vec![(hex(&key)[..8].to_string(), key)]);
+    }
+
+    #[test]
+    fn trust_marks_only_contacts_and_dies_with_the_contact() {
+        let (a, b) = ([0xab; 32], [0xcd; 32]);
+        let mut f = Form { contacts: format!("ana {}\nbia {}", hex(&a), hex(&b)), ..Default::default() };
+        assert!(f.trusted_keys().is_empty(), "ninguém é de confiança de início");
+        f.set_trusted(a, true);
+        f.set_trusted(a, true);
+        assert_eq!(f.trusted_keys(), vec![a], "marcar duas vezes não duplica");
+        assert!(f.is_trusted(&a) && !f.is_trusted(&b));
+        f.set_trusted(b, true);
+        f.set_trusted(a, false);
+        assert_eq!(f.trusted_keys(), vec![b]);
+        // Chave que não é contato (ou lixo no arquivo) não conta.
+        f.trusted = format!("{};zz;{}", hex(&[1; 32]), hex(&b));
+        assert_eq!(f.trusted_keys(), vec![b]);
+        // Tirar o contato da lista tira a confiança, mesmo que a chave continue no texto.
+        f.contacts = remove_contact(&f.contacts, 1);
+        assert!(f.trusted_keys().is_empty());
     }
 
     #[test]

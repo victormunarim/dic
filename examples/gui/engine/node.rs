@@ -55,6 +55,10 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
     }
     let mut pending_saved = pending_now(&node);
     let dialer = node.dialer();
+    // Só vale quem ainda é contato (o `Form` já descarta o resto).
+    for key in form.trusted_keys() {
+        dialer.set_trusted(key, true);
+    }
     let hub = node.servers();
     if !form.my_name.trim().is_empty() {
         hub.run(|s, now| s.set_name(form.my_name.trim(), now));
@@ -182,6 +186,7 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
                     save_pending_if_changed(&node, &mut pending_saved, &out);
                     saver.sync(&book_of(&node), &out);
                 }
+                Some(Cmd::Trust(key, on)) => dialer.set_trusted(key, on),
                 Some(Cmd::Forget(key)) => {
                     node.forget(&key);
                     save_pending_if_changed(&node, &mut pending_saved, &out);

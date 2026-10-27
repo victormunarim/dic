@@ -6,6 +6,7 @@ use std::{collections::HashMap, sync::atomic::AtomicU64};
 use super::*;
 use clam::{
     node::Dialer,
+    path::PathMode,
     phone::{OPEN_SCREEN_SLOT, SCREEN_SLOT, ScreenEvent, ScreenShare},
     video::{H264Decoder, H264Encoder, Priority, RawFrame, ScreenSource, pump, pump_all},
 };
@@ -17,8 +18,8 @@ pub(crate) struct ScreenState {
     pub(crate) want_share: AtomicBool,
     /// Há uma tarefa de transmissão viva (ligando ou enviando).
     pub(crate) share_task: AtomicBool,
-    /// A pessoa abriu mão da privacidade da tela (direto ao contato, sem cover, o dobro do ritmo); falso é o padrão. A janela
-    /// copia a escolha da configuração a cada quadro.
+    /// A pessoa abriu mão da privacidade da tela (sem cover, o dobro do ritmo; direto só para contato de confiança,
+    /// por 2 relays para os demais); falso é o padrão. A janela copia a escolha da configuração a cada quadro.
     pub(crate) open_path: AtomicBool,
     /// A pessoa prefere nitidez a fluidez (metade dos quadros por segundo); a janela copia a escolha da
     /// configuração a cada quadro, e ela vale a partir da próxima transmissão.
@@ -197,7 +198,11 @@ pub(crate) async fn share_task(dialer: Dialer, peer: [u8; 32], keys: clam::media
         }
     };
     st.sharing.store(true, Ordering::Relaxed);
-    out.line(if private { "tela: transmitindo" } else { "tela: transmitindo sem privacidade (direto ao contato, sem cover)" });
+    out.line(match (private, dialer.screen_path(&peer, private)) {
+        (true, _) => "tela: transmitindo",
+        (false, PathMode::Direct) => "tela: transmitindo sem privacidade (direto ao contato de confiança, sem cover)",
+        (false, _) => "tela: transmitindo sem cover (por 2 relays: o contato não é de confiança)",
+    });
     let flag = shared.clone();
     // Capturar e codificar pesa: fora do executor.
     let share = tokio::task::spawn_blocking(move || {
@@ -252,8 +257,8 @@ pub(crate) enum ShareCtl {
 /// encerra a captura e os circuitos.
 pub(crate) struct RoomCapture {
     pub(crate) ctl: std::sync::mpsc::Sender<ShareCtl>,
-    /// Com privacidade os circuitos de tela abrem com 2 saltos e cover; sem ela, direto ao espectador e sem cover (o
-    /// ritmo do codificador foi escolhido para isso).
+    /// Com privacidade os circuitos de tela abrem com 2 saltos e cover; sem ela, sem cover (o ritmo do codificador foi
+    /// escolhido para isso), direto ao espectador de confiança e por 2 saltos para os demais.
     pub(crate) private: bool,
 }
 

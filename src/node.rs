@@ -10,7 +10,7 @@
 
 use crate::sync::LockExt;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io,
     net::SocketAddr,
     sync::{Arc, Mutex},
@@ -37,7 +37,8 @@ use crate::{
         signal::RelayHint,
         update::{self, AddressRecord, Intro, MAX_ADDR},
     },
-    phone::{self, ActiveCall, AddressUpdate, CallError, IncomingCall, Introduction, Phone, PhoneLink, ScreenShare, call_linked, open_screen_client_options, screen_client_options, share_screen_slot, OPEN_SCREEN_SLOT, SCREEN_SLOT},
+    path::{PathMode, PathRequest},
+    phone::{self, ActiveCall, AddressUpdate, CallError, IncomingCall, Introduction, Phone, PhoneLink, ScreenShare, call_linked, direct_screen_client_options, open_screen_client_options, screen_client_options, share_screen_slot, OPEN_SCREEN_SLOT, SCREEN_SLOT},
     server::net::{ServerHub, restore},
     rendezvous::{self, ANCHOR_DEST, Anchor, DhtOptions, GATEWAY_DEST, Remote, Rendezvous, Signed},
     transport::{CircuitClient, ClientOptions, RelayServer, ServerConfig, allow_list},
@@ -196,6 +197,8 @@ pub struct Dialer {
     dht_circuit: bool,
     /// Âncoras do usuário (veja [`NodeConfig::anchors`]).
     anchors: Vec<RelayInfo>,
+    /// Contatos de confiança: os únicos para quem a tela sem privacidade vai direto (veja [`Dialer::set_trusted`]).
+    trusted: Arc<Mutex<HashSet<[u8; 32]>>>,
 }
 
 /// Quem adicionou esta pessoa e se apresentou ([`Node::introduce`] do outro lado): ainda não é contato.
@@ -705,19 +708,52 @@ impl Dialer {
         self.share_screen_keys_with(peer, keys, wait, true).await
     }
 
-    /// Como [`Self::share_screen_keys`]. Com `private` falso a tela abre mão da privacidade da rede: vai direto ao
-    /// relay do contato, sem relay no meio (ele vê o seu IP, que os contatos já conhecem), e sem cover, então não
-    /// manda pacote nos instantes sem vídeo (quem observa a rede vê quando a tela se mexe) e o ritmo máximo
-    /// quadruplica ([`OPEN_SCREEN_SLOT`]). O relay do contato precisa ser desta versão ou mais nova. O vídeo e as
-    /// chaves seguem cifrados. Quem transmite deve usar
+    /// Marca (ou desmarca) `peer` como contato de confiança: a única pessoa para quem a tela sem privacidade
+    /// ([`Self::share_screen_keys_with`] com `private` falso) vai direto, mostrando o IP de quem transmite.
+    /// Quem chama deve ter avisado o usuário dessa exposição antes de marcar. Fora da lista, a tela segue
+    /// por 2 relays. Vale a partir da próxima transmissão.
+    pub fn set_trusted(&self, peer: [u8; 32], trusted: bool) {
+        let mut set = self.trusted.lock_unpoisoned();
+        if trusted {
+            set.insert(peer);
+        } else {
+            set.remove(&peer);
+        }
+    }
+
+    /// Se `peer` está marcado como contato de confiança (veja [`Self::set_trusted`]).
+    pub fn is_trusted(&self, peer: &[u8; 32]) -> bool {
+        self.trusted.lock_unpoisoned().contains(peer)
+    }
+
+    /// Como [`Self::share_screen_keys`]. Com `private` falso a tela abre mão do cover: não manda pacote nos
+    /// instantes sem vídeo (quem observa a rede vê quando a tela se mexe) e o ritmo máximo quadruplica
+    /// ([`OPEN_SCREEN_SLOT`]). O caminho depende de quem assiste (veja [`PathRequest::resolve`]): para um contato
+    /// de confiança ([`Self::set_trusted`]) vai direto ao relay dele, sem relay no meio, e ele vê o seu IP; para
+    /// os demais segue por 2 relays, que escondem o seu IP. O relay do contato de confiança precisa ser desta
+    /// versão ou mais nova. O vídeo e as chaves seguem cifrados. Quem transmite deve usar
     /// [`H264Encoder::bitrate_for`](crate::video::H264Encoder::bitrate_for) com o mesmo intervalo.
     pub async fn share_screen_keys_with(&self, peer: [u8; 32], keys: &CallKeys, wait: Duration, private: bool) -> Result<ScreenShare, DialError> {
-        let (options, slot): (fn() -> ClientOptions, Duration) = if private { (screen_client_options, SCREEN_SLOT) } else { (open_screen_client_options, OPEN_SCREEN_SLOT) };
+        let (options, slot): (fn() -> ClientOptions, Duration) = match (private, self.screen_path(&peer, private)) {
+            (true, _) => (screen_client_options, SCREEN_SLOT),
+            (false, PathMode::Direct) => (direct_screen_client_options, OPEN_SCREEN_SLOT),
+            (false, _) => (open_screen_client_options, OPEN_SCREEN_SLOT),
+        };
         let (found, tried_stored) = self.reachable_client(&peer, options).await;
         let Some((client, used)) = found else { return Err(DialError::NoAddress { tried_stored }) };
         let share = share_screen_slot(client, keys, wait, slot).await?;
         self.remember(&peer, used);
         Ok(share)
+    }
+
+    /// O caminho da tela para `peer`: sempre [`PathMode::TwoHop`] com `private`; sem ele, [`PathMode::Direct`] só
+    /// para contato de confiança ([`Self::set_trusted`]) e [`PathMode::TwoHop`] para os demais. Marcar alguém de
+    /// confiança pressupõe o aviso de exposição do IP já confirmado.
+    pub fn screen_path(&self, peer: &[u8; 32], private: bool) -> PathMode {
+        if private {
+            return PathMode::TwoHop;
+        }
+        PathRequest { mode: PathMode::Direct, contact_trusted: self.is_trusted(peer), ip_exposure_warning_acked: true }.resolve().unwrap_or_default()
     }
 }
 
@@ -1050,7 +1086,7 @@ impl Node {
         if let Some(n) = dht_note {
             push_note(&mut note, n);
         }
-        let dialer = Dialer { secret: secret.clone(), mine: mine.clone(), relay_port: port, known: known.clone(), hints: hints.clone(), history: history.clone(), seen_seq: Arc::default(), link: phone.link(), dht: dht_client.clone(), dht_circuit: dht_options.as_ref().is_some_and(|o| o.circuit), anchors };
+        let dialer = Dialer { secret: secret.clone(), mine: mine.clone(), relay_port: port, known: known.clone(), hints: hints.clone(), history: history.clone(), seen_seq: Arc::default(), link: phone.link(), dht: dht_client.clone(), dht_circuit: dht_options.as_ref().is_some_and(|o| o.circuit), anchors, trusted: Arc::default() };
         // Os convites levam este relay, para o outro lado ligar de volta.
         let link_to_phone = phone.link();
         let own = Arc::new(Mutex::new(own_relay(&mine, published)));
@@ -1185,6 +1221,7 @@ impl Node {
         self.known.lock_unpoisoned().remove(peer);
         self.hints.lock_unpoisoned().remove(peer);
         self.history.lock_unpoisoned().remove(peer);
+        self.dialer.set_trusted(*peer, false);
     }
 
     pub fn public_key(&self) -> [u8; 32] {
@@ -1261,6 +1298,11 @@ impl Node {
     /// Transmite a tela da chamada para `peer` (veja [`Dialer::share_screen`]).
     pub async fn share_screen(&self, peer: [u8; 32], call: &ActiveCall, wait: Duration) -> Result<ScreenShare, DialError> {
         self.dialer.share_screen(peer, call, wait).await
+    }
+
+    /// Marca `peer` como contato de confiança para a tela sem privacidade (veja [`Dialer::set_trusted`]).
+    pub fn set_trusted(&self, peer: [u8; 32], trusted: bool) {
+        self.dialer.set_trusted(peer, trusted);
     }
 
     /// Os servidores e salas desta pessoa: criar, convidar, presença, eventos. Cópia barata.

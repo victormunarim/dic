@@ -12,7 +12,7 @@ use clam::media::{
     codec::{Codec, CodecId, Mulaw},
     signal::{Answer, Caller},
 };
-use clam::phone::{ActiveCall, CallError, Phone, ScreenEvent, call, call_linked, open_screen_client_options, screen_client_options, share_screen, share_screen_slot, OPEN_SCREEN_SLOT};
+use clam::phone::{ActiveCall, CallError, Phone, ScreenEvent, call, call_linked, direct_screen_client_options, open_screen_client_options, screen_client_options, share_screen, share_screen_slot, OPEN_SCREEN_SLOT};
 use clam::transport::{CircuitClient, RelayServer, ServerConfig, allow_list};
 use clam::{
     rand_core::OsRng,
@@ -63,10 +63,15 @@ fn client(cands: Vec<Candidate>) -> CircuitClient {
     CircuitClient::spawn(CircuitManager::new(ManagerConfig::default(), "contato:9", cands), Duration::from_secs(2))
 }
 
-/// Cliente da tela sem privacidade: direto ao primeiro relay, que é também o de saída.
+/// Cliente da tela sem cover para quem não é de confiança: 2 saltos, como o da tela privada.
+fn open_screen_client(cands: Vec<Candidate>) -> CircuitClient {
+    CircuitClient::spawn_with(CircuitManager::new(ManagerConfig::default(), "contato:9", cands), Duration::from_secs(2), open_screen_client_options())
+}
+
+/// Cliente da tela para contato de confiança: direto ao primeiro relay, que é também o de saída.
 fn direct_screen_client(cands: Vec<Candidate>) -> CircuitClient {
-    let cfg = ManagerConfig { exit_addr: Some(cands[0].addr.clone()), ..Default::default() };
-    CircuitClient::spawn_with(CircuitManager::new(cfg, "contato:9", cands), Duration::from_secs(2), open_screen_client_options())
+    let cfg = ManagerConfig { exit_addr: Some(cands[0].addr.clone()), direct: true, ..Default::default() };
+    CircuitClient::spawn_with(CircuitManager::new(cfg, "contato:9", cands), Duration::from_secs(2), direct_screen_client_options())
 }
 
 /// Manda `n` quadros e devolve o que o outro lado tocar nesse tempo (mais 300 ms). Sem DTX, o
@@ -389,8 +394,32 @@ async fn the_screen_without_privacy_arrives_with_no_cover_and_a_faster_slot() {
     let mut b = incoming.accept(Mulaw::new()).await.unwrap();
     let a = caller.await.unwrap().unwrap();
 
-    let open = direct_screen_client(cands);
+    let open = open_screen_client(cands);
     let share = share_screen_slot(open, &a.next_share_keys(), WAIT, OPEN_SCREEN_SLOT).await.unwrap();
+    let frames = [video(900, 1), video(120, 2), video(2500, 3)];
+    for (i, f) in frames.iter().enumerate() {
+        assert!(share.push(f, i == 0).unwrap());
+    }
+    let got = collect_frames(&mut b, frames.len()).await;
+    for (g, want) in got.iter().zip(&frames) {
+        assert_eq!(&g.data, want);
+    }
+    share.stop().await;
+}
+
+#[tokio::test]
+async fn the_direct_screen_for_a_trusted_contact_arrives_through_the_contact_relay_alone() {
+    let (alice, bob) = ids();
+    let mut phone = Phone::bind("127.0.0.1:0".parse().unwrap(), bob.clone(), vec![*PublicKey::from(&alice).as_bytes()]).await.unwrap();
+    let (_srv, cands) = relays(4, &phone.local_addr().to_string()).await;
+    let bob_pub = PublicKey::from(&bob);
+    let voice = cands.clone();
+    let caller = tokio::spawn(async move { call(client(voice), &alice, &bob_pub, Mulaw::new(), WAIT).await });
+    let incoming = timeout(WAIT, phone.next_incoming()).await.unwrap().unwrap();
+    let mut b = incoming.accept(Mulaw::new()).await.unwrap();
+    let a = caller.await.unwrap().unwrap();
+
+    let share = share_screen_slot(direct_screen_client(cands), &a.next_share_keys(), WAIT, OPEN_SCREEN_SLOT).await.unwrap();
     let frames = [video(900, 1), video(120, 2), video(2500, 3)];
     for (i, f) in frames.iter().enumerate() {
         assert!(share.push(f, i == 0).unwrap());
@@ -434,7 +463,7 @@ async fn the_screen_without_privacy_carries_a_burst_of_big_frames_quickly() {
     let incoming = timeout(WAIT, phone.next_incoming()).await.unwrap().unwrap();
     let mut b = incoming.accept(Mulaw::new()).await.unwrap();
     let a = caller.await.unwrap().unwrap();
-    let c = direct_screen_client(cands);
+    let c = open_screen_client(cands);
     let share = share_screen_slot(c, &a.next_share_keys(), WAIT, OPEN_SCREEN_SLOT).await.unwrap();
     let started = std::time::Instant::now();
     let f = video(30_000, 1);
@@ -459,7 +488,7 @@ async fn the_viewer_reports_the_loss_back_to_the_sharer() {
     let incoming = timeout(WAIT, phone.next_incoming()).await.unwrap().unwrap();
     let mut b = incoming.accept(Mulaw::new()).await.unwrap();
     let a = caller.await.unwrap().unwrap();
-    let c = direct_screen_client(cands);
+    let c = open_screen_client(cands);
     let share = share_screen_slot(c, &a.next_share_keys(), WAIT, OPEN_SCREEN_SLOT).await.unwrap();
     // Vídeo por mais de meio segundo, para a janela de medição de quem assiste fechar.
     let f = video(20_000, 3);

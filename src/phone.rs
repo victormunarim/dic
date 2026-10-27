@@ -481,9 +481,15 @@ pub fn screen_client_options() -> ClientOptions {
     ClientOptions { cover: Some(every), circuit_cover: Some(every), ..Default::default() }
 }
 
-/// Opções do cliente de circuito da tela sem privacidade: direto ao relay do contato, sem relay
-/// no meio, e sem cover, só sai o que há para enviar.
+/// Opções do cliente de circuito da tela sem cover, para quem não é de confiança: segue com os 2 saltos, só
+/// sai o que há para enviar.
 pub fn open_screen_client_options() -> ClientOptions {
+    ClientOptions { cover: None, circuit_cover: None, ..Default::default() }
+}
+
+/// Opções do cliente de circuito da tela direto ao relay do contato de confiança: sem relay no meio e
+/// sem cover. Quem assiste vê o IP de quem transmite.
+pub fn direct_screen_client_options() -> ClientOptions {
     ClientOptions { cover: None, circuit_cover: None, direct: true, ..Default::default() }
 }
 

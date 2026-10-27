@@ -47,6 +47,8 @@ pub(crate) struct App {
     pub(crate) srv: crate::servers::ServersUi,
     /// Textura da tela de quem transmite para você e o número da imagem que ela mostra.
     pub(crate) screen_tex: std::collections::HashMap<[u8; 32], (u64, egui::TextureHandle)>,
+    /// Contato que a pessoa acabou de marcar como de confiança e ainda não confirmou o aviso do IP.
+    pub(crate) trust_ask: Option<[u8; 32]>,
 }
 
 /// Larguras a partir das quais o conteúdo se divide em duas colunas.
@@ -291,6 +293,19 @@ impl App {
                             }
                         });
                         ui.label(RichText::new(&hex(key)[..16]).monospace().size(13.0).color(MUTED));
+                        let mut trusted = self.form.is_trusted(key);
+                        if ui
+                            .checkbox(&mut trusted, "Contato de confiança")
+                            .on_hover_text("Só vale com a \"Privacidade na transmissão da tela\" desligada (aba Vídeo): a sua tela vai direto a este contato, sem relay no meio, e ele vê o seu IP. Os outros continuam recebendo por 2 relays. Marque só quem você conhece.")
+                            .changed()
+                        {
+                            // Marcar pede confirmação do aviso; desmarcar vale na hora.
+                            if trusted {
+                                self.trust_ask = Some(*key);
+                            } else {
+                                self.set_trust(*key, false);
+                            }
+                        }
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if button(ui, true, "Remover", GREY_BUTTON).clicked() {
@@ -309,6 +324,8 @@ impl App {
             self.form.contacts = remove_contact(&self.form.contacts, i);
             // O endereço guardado do contato vai junto (a menos que a mesma chave ainda esteja na lista).
             if !parse_contacts(&self.form.contacts).iter().any(|(_, k)| *k == key) {
+                // A confiança não volta sozinha se o contato for adicionado de novo.
+                self.form.set_trusted(key, false);
                 match &self.running {
                     Some(r) => {
                         let _ = r.cmds.send(Cmd::Forget(key));
@@ -321,6 +338,52 @@ impl App {
                 }
             }
             self.form.save();
+        }
+    }
+
+    /// Marca ou desmarca o contato como de confiança, grava e avisa o nó. Quem marca já confirmou o aviso do IP.
+    fn set_trust(&mut self, key: [u8; 32], on: bool) {
+        self.form.set_trusted(key, on);
+        self.form.save();
+        if let Some(r) = &self.running {
+            let _ = r.cmds.send(Cmd::Trust(key, on));
+        }
+    }
+
+    /// Aviso de que o contato de confiança vê o IP de quem transmite; a confiança só vale depois do "Confiar".
+    fn trust_window(&mut self, ctx: &egui::Context) {
+        let Some(key) = self.trust_ask else { return };
+        if !parse_contacts(&self.form.contacts).iter().any(|(_, k)| *k == key) {
+            self.trust_ask = None;
+            return;
+        }
+        let name = member_name(&self.form.names(), &key);
+        let mut answer = None;
+        egui::Window::new(format!("Confiar em {name}?"))
+            .id(egui::Id::new("confiar-contato"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.set_max_width(420.0);
+                ui.label(format!("Com a \"Privacidade na transmissão da tela\" desligada, a sua tela vai direto a {name}, sem relay no meio: {name} e quem observa a rede perto dele passam a ver o seu endereço IP."));
+                ui.add_space(4.0);
+                ui.label("Marque só quem você conhece. Quem não é de confiança continua recebendo a tela por 2 relays. O vídeo segue cifrado nos dois casos.");
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if button(ui, true, "Confiar", BLURPLE).clicked() {
+                        answer = Some(true);
+                    }
+                    if button(ui, true, "Cancelar", GREY_BUTTON).clicked() {
+                        answer = Some(false);
+                    }
+                });
+            });
+        if let Some(yes) = answer {
+            self.trust_ask = None;
+            if yes {
+                self.set_trust(key, true);
+            }
         }
     }
 
@@ -497,7 +560,7 @@ impl App {
             ui.add_enabled_ui(!busy, |ui| {
                 let changed = ui
                     .checkbox(&mut self.form.screen_private, "Privacidade na transmissão da tela")
-                    .on_hover_text("Ligada, a tela passa por um relay no meio do caminho e sai num ritmo constante, com tráfego de enchimento: quem observa a rede não vê quando a imagem se mexe. Desligada, a tela vai direto ao relay de quem assiste, sem relay no meio (ele vê o seu IP), e só sai o que há para enviar; o ritmo máximo dobra e a imagem fica mais nítida e fluida, mas quem observa a rede vê quando a imagem se mexe. O vídeo segue cifrado nos dois casos. Quem assiste precisa de uma versão que aceite a tela direta. Vale na próxima transmissão.")
+                    .on_hover_text("Ligada, a tela passa por um relay no meio do caminho e sai num ritmo constante, com tráfego de enchimento: quem observa a rede não vê quando a imagem se mexe. Desligada, só sai o que há para enviar; o ritmo máximo dobra e a imagem fica mais nítida e fluida, mas quem observa a rede vê quando a imagem se mexe. Para os contatos de confiança (aba Contatos) a tela ainda vai direto ao relay deles, sem relay no meio, e eles veem o seu IP; para os demais segue por 2 relays, que escondem o seu IP. O vídeo segue cifrado nos dois casos. O contato de confiança precisa de uma versão que aceite a tela direta. Vale na próxima transmissão.")
                     .changed();
                 if changed {
                     self.form.save();
@@ -863,6 +926,7 @@ impl eframe::App for App {
         self.absorb_introductions();
         self.update_screen_textures(ctx);
         self.zoom_window(ctx);
+        self.trust_window(ctx);
         let offline = self.running.is_none();
         let in_call = self.shared.in_call.load(Ordering::Relaxed);
         let testing = self.shared.mic_test.load(Ordering::Relaxed);
