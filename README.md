@@ -65,7 +65,7 @@ Para ligar a alguém: rode o `examples/gui` (veja [docs/GUI.md](docs/GUI.md)) ou
 | `examples/call.rs` | chamada de teste (`keygen`, `phone`, `dial`), usada por `scripts/call.sh` e `scripts/call-windows.ps1` |
 | `src/audio.rs` | microfone/alto-falante via `cpal`, reamostragem para a taxa do codec (feature `audio`) |
 | `examples/gui/` | o aplicativo (feature `gui`): `conf` (arquivos em disco), `engine` (sem janela, testável), `ui` (abas) e `theme` |
-| `src/node.rs` | `Node`: relay + telefone + fila de endereços (feature `net`) |
+| `src/node/` | `Node`: relay + telefone + fila de endereços; `Dialer` (discagem), entrega de avisos, busca por DHT e âncoras, endereço público (feature `net`) |
 | `src/rendezvous.rs` | ponto de encontro na DHT Mainline e âncoras (feature `net`) |
 | `src/upnp.rs`, `src/timer.rs` | porta no roteador; temporizador de 1 ms no Windows (feature `net`) |
 | `src/video.rs`, `src/hwenc.rs` | codificação da tela: controle de taxa e qualidade, NACK; codificador por hardware opcional (feature `video`) |

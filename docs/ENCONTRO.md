@@ -87,7 +87,7 @@ item   = cifrado(registro de endereço), assinado por sk, no alvo (pk, sal)
 - O leitor consulta os contatos em ordem, com o período atual, o anterior e o seguinte, porque o relógio pode estar errado (veja abaixo).
 - Limite: até 32 contatos por rodada, como no resto do nó.
 
-**Como ficou.** O cliente é o crate `mainline` (BEP 44), em `src/rendezvous.rs` (`Rendezvous`, `DhtOptions`). A derivação do alvo e a cifra do valor estão em `src/media/update.rs` (`rendezvous`, `seal_record`, `open_record`): o valor é `nonce ‖ AEAD(registro)` com 162 B, o mesmo registro da camada 1 com outro dado associado, e a semente ed25519 e o sal saem do HKDF como na proposta. Em `src/node.rs`:
+**Como ficou.** O cliente é o crate `mainline` (BEP 44), em `src/rendezvous.rs` (`Rendezvous`, `DhtOptions`). A derivação do alvo e a cifra do valor estão em `src/media/update.rs` (`rendezvous`, `seal_record`, `open_record`): o valor é `nonce ‖ AEAD(registro)` com 162 B, o mesmo registro da camada 1 com outro dado associado, e a semente ed25519 e o sal saem do HKDF como na proposta. Em `src/node/`:
 
 - `NodeConfig::dht` liga a camada (`None` por padrão na biblioteca; a GUI a liga de início). O registro do endereço atual (`seq` = hora em ms) é um só para a fila de saída e para a DHT, então o contato vê o mesmo `seq` por qualquer caminho.
 - A tarefa de gravação escreve o item de cada contato (até 32) ao subir, quando o endereço muda, quando entra contato novo, quando o dia vira e a cada hora; uma gravação que falha é refeita em 1 min. Cada gravação leva um `seq` de DHT novo (hora em ms), porque a DHT recusa o mesmo `seq` com outro valor e cada cifra sai com nonce novo.
@@ -140,7 +140,7 @@ Quem adiciona um contato pelo código só tem o código do outro; o outro lado n
 
 ## Onde está no código
 
-- `src/node.rs`: `Dialer::reachable_client` (a ordem de tentativa: guardado, dica e histórico; depois DHT e âncoras), a fila de saída (`deliver_update`), as apresentações (`deliver_intro`) e as tarefas de fundo que gravam o registro na DHT e nas âncoras e vigiam o IP.
+- `src/node/`: `dialer.rs` (`Dialer::reachable_client`: a ordem de tentativa, guardado, dica e histórico; depois DHT e âncoras), `deliver.rs` (`deliver_update`, `deliver_intro`), `lookup.rs` (consulta à DHT e às âncoras), `publish.rs` (a fila de saída e as tarefas que gravam o registro na DHT e nas âncoras) e `reach.rs` (vigia o IP e o registro do endereço atual).
 - `src/rendezvous.rs`: cliente da DHT (`Rendezvous`), o gateway (`dht:9`), a âncora (`anchor:9`) e o `Remote` que fala com os dois pelo circuito.
 - `src/media/update.rs`: os quadros de 200 B (aviso de endereço, confirmação, apresentação) e a cifra do registro.
 - `src/phone.rs`: o telefone confere e responde esses quadros sem tocar.

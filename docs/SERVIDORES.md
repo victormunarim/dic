@@ -108,8 +108,8 @@ O endereço de um membro pode mudar enquanto ele está offline. Cada membro publ
 | Quadros | `src/server/wire.rs` |
 | Motor (presença, anti-entropia, salas, malha, visão para a janela) | `src/server/engine.rs` |
 | Rede (lotes, `Ack`, busca) | `src/server/net.rs` |
-| Reencontro por servidor | `src/media/update.rs`, `src/node.rs` (`server_publisher`, `Dialer::find_member`) |
-| Chamadas de não-contatos da sala | `src/phone.rs`, `src/node.rs` (`set_room_peers`) |
+| Reencontro por servidor | `src/media/update.rs`, `src/node/publish.rs` (`server_publisher`), `src/node/lookup.rs` (`Dialer::find_member`) |
+| Chamadas de não-contatos da sala | `src/phone.rs`, `src/node/mod.rs` (`set_room_peers`) |
 | Sala de voz e tela da sala na janela | `examples/gui/engine/room.rs`, `engine/screen.rs` |
 | Aba | `examples/gui/servers.rs` |
 | Testes | `tests/server.rs` (motor), `tests/node_servers.rs` (rede: 3 nós, voz entre não-contatos, reencontro pela âncora) |
