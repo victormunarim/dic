@@ -153,7 +153,35 @@ impl App {
         let in_room = self.shared.room.lock_unpoisoned().at.is_some();
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
-            let me = theme::avatar(ui, &name, 40.0, Some(color));
+            // A bolinha de estado também liga/desliga o "aparecer online" para os membros dos servidores.
+            let hub = self.shared.servers.lock_unpoisoned().clone().filter(|_| !offline);
+            let hidden = hub.as_ref().is_some_and(|h| !h.read(|s, _| s.visible()));
+            let me = theme::avatar(ui, &name, 40.0, Some(if hidden { DEEP } else { color }));
+            if !offline && status.is_empty() {
+                // Conectando: um arco gira em volta do avatar até o nó dar sinal de vida.
+                let t = ui.input(|i| i.time) as f32;
+                let radius = 40.0 / 2.0 + 3.0;
+                let start = t * 4.0;
+                let arc: Vec<egui::Pos2> = (0..=16).map(|k| {
+                    let a = start + k as f32 * (std::f32::consts::PI * 1.2 / 16.0);
+                    me.rect.center() + vec2(a.cos(), a.sin()) * radius
+                }).collect();
+                ui.painter().add(egui::Shape::line(arc, egui::Stroke::new(2.5_f32, YELLOW)));
+                ctx.request_repaint();
+            }
+            if let Some(hub) = &hub {
+                let r = 40.0 * 0.17;
+                let at = me.rect.right_bottom() - vec2(r * 0.9, r * 0.9);
+                if hidden {
+                    ui.painter().circle_stroke(at, r - 1.0, egui::Stroke::new(2.0_f32, color));
+                }
+                let spot = egui::Rect::from_center_size(at, vec2(2.0 * r + 6.0, 2.0 * r + 6.0));
+                let dot = ui.interact(spot, ui.id().with("bolinha-presenca"), egui::Sense::click());
+                let tip = if hidden { "Invisível para os membros dos servidores. Clique para aparecer online" } else { "Aparecendo online para os membros dos servidores. Clique para ficar invisível" };
+                if dot.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                    hub.run(|s, now| s.set_visible(hidden, now));
+                }
+            }
             // Em chamada não dá para ficar offline: o botão da aba Configurações também fica travado.
             let can_toggle = offline || !in_call;
             if can_toggle && me.hovered() {
@@ -169,14 +197,9 @@ impl App {
                     r.stop.store(true, Ordering::Relaxed);
                 }
             }
-            if in_call && icon_button(ui, true, "✖", if in_room { "Sair da sala" } else { "Desligar a chamada" }, RED).clicked() {
-                if in_room {
-                    if let Some(r) = &self.running {
-                        let _ = r.cmds.send(Cmd::LeaveRoom);
-                    }
-                } else {
-                    self.shared.hangup.store(true, Ordering::Relaxed);
-                }
+            // Sair da sala fica na subseção "Sala conectada" acima deste painel; aqui só o desligar de uma chamada 1:1.
+            if in_call && !in_room && icon_button(ui, true, "✖", "Desligar a chamada", RED).clicked() {
+                self.shared.hangup.store(true, Ordering::Relaxed);
             }
             // Engrenagem e mudo ficam juntos na ponta direita da linha (a engrenagem por último, na borda).
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

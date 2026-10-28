@@ -81,7 +81,7 @@ Malha: cada pessoa envia e recebe N-1 fluxos, cerca de 100 kbps por par e direç
 
 ## Bate-papo da sala
 
-- Cada sala tem o seu bate-papo de texto, aberto pelo botão *Chat* da sala (só um por vez), visível só para quem está nela. Escrever manda um `Chat` a cada pessoa da malha (um quadro de 200 B por pessoa, pelo mesmo caminho dos outros quadros de servidor); não há mensagem para quem está fora da sala.
+- Cada sala tem o seu bate-papo de texto, mostrado no centro da janela quando você está na sala, visível só para quem está nela. Escrever manda um `Chat` a cada pessoa da malha (um quadro de 200 B por pessoa, pelo mesmo caminho dos outros quadros de servidor); não há mensagem para quem está fora da sala.
 - Quem recebe confere que o remetente é membro e está online **na mesma sala que ele**; senão ignora. O texto é limpo na entrada (sem controle, no máximo 157 bytes por linha; o envio corta no limite).
 - **Nada vai a disco.** O histórico fica em memória, até 100 linhas por sala, e é esquecido quando a sala fica **sem ninguém** (ou é apagada), segundo a presença que cada lado enxerga. Reiniciar o programa também apaga.
 - **Limites conhecidos:** quem entra depois não vê o que foi dito antes (não há sincronização de histórico); quem sai e volta com a sala ainda ocupada mantém só o que recebeu enquanto estava dentro; não há confirmação de entrega nem ordenação entre remetentes (cada lado mostra na ordem em que as linhas chegam); a linha leva só texto. Uma versão antiga ignora o quadro `Chat` (tipo desconhecido), então quem a usa não vê a conversa, mas o resto da sala segue normal.
@@ -97,7 +97,7 @@ O endereço de um membro pode mudar enquanto ele está offline. Cada membro publ
 ## Privacidade
 
 - **Membros veem o seu IP.** O relay de quem recebe vê o relay de quem liga, que é a sua máquina. A janela avisa antes de convidar e de aceitar, e exige o aceite do aviso.
-- **Presença revela horário e sala.** Existe o estado **invisível** (*Aparecer online* desmarcado): não responde `Hello` e não entra em presença.
+- **Presença revela horário e sala.** Existe o estado **invisível** (clique na bolinha de estado do perfil, no pé da coluna de salas: cheia = aparecendo, só o aro = invisível): não responde `Hello` e não entra em presença.
 - **O registro é a lista de membros inteira para todos.** Não há papéis nem membros ocultos.
 - **Cobertura:** os quadros de servidor viajam em circuito com a cobertura de hoje, dentro do link com preenchimento.
 - **Saída sem `Rekey`:** quem sai por conta própria continua com o segredo. Só uma troca de segredo o deixa de fora.
@@ -105,8 +105,8 @@ O endereço de um membro pode mudar enquanto ele está offline. Cada membro publ
 ## Janela
 
 - **Convites recebidos**: cartão no alto da aba, com *Aceitar* (exige o aviso de IP) e *Recusar*.
-- **Trilho de servidores** na aba *Servidores*: avatares, *＋* para criar ou aceitar convite.
-- No servidor: cabeçalho (aparecer online, sair), **telas da sala** (quando há) e as **salas** ficam na coluna à esquerda, ao lado do trilho de servidores (um clique entra; quem está em cada sala aparece embaixo, com aro verde em quem fala; 🗑 apaga; *＋ Nova sala* cria). Trocar de sala exige sair da atual antes. A página do servidor mostra a sala em que você está, com *Sair*, compartilhar/assistir tela e o botão *Chat*, que abre o bate-papo dela; só um chat fica aberto por vez. Os **membros** (online primeiro, papel, sala em que estão; *Tornar admin* e *Remover* ficam no menu ⋮ de cada um) ocupam uma coluna à direita, de ponta a ponta da janela, com o **convite** (＋ Convidar, discreto e recolhido) embaixo (escolha de um contato, aviso de IP, *Enviar convite* e, à parte, o texto para copiar).
+- **Trilho de servidores** na aba *Servidores*: avatares, *+* para criar ou aceitar convite.
+- No servidor: o cabeçalho da coluna de salas tem o ícone de porta com seta (*Sair do servidor*; abre um item vermelho *Confirmar saída*). As **salas** ficam na coluna à esquerda, ao lado do trilho de servidores (um clique entra; na sala em que você está, uma subseção "Sala conectada" aparece acima do perfil, com o ✖ vermelho que sai dela; quem está em cada sala aparece embaixo, com aro verde em quem fala; 🗑 apaga; o cartão apagado com + no fim da lista, que ao clicar vira o campo do nome (Enter cria, Esc cancela),). Trocar de sala exige sair da atual antes. Na sala em que você está, 🖥 compartilha a sua tela e 👁 assiste à de quem transmite, na própria linha da pessoa. O **centro** da janela é o **bate-papo** da sala em que você está (com as telas da sala acima dele, quando há); sem sala, uma dica. Os **membros** (online primeiro, papel, sala em que estão; *Promover*/*Rebaixar* e *Remover* ficam no menu ⋮ de cada um) ocupam uma coluna à direita, de ponta a ponta da janela, com o **convite** no fim da lista, dentro do cartão de membros (um cartão apagado com +, que ao clicar vira o formulário no lugar) (escolha de um contato, aviso de IP, *Enviar convite* e, à parte, o texto para copiar).
 - Estado em disco: `~/.clam-gui.servers` (modo `0600`): segredos, registros e membros de cada servidor, regravado a cada 5 s se mudou. Sem chaveiro por servidor, para funcionar onde não há chaveiro.
 
 ## Onde está no código

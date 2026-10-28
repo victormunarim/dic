@@ -26,7 +26,7 @@ impl App {
             {
                 r.stop.store(true, Ordering::Relaxed);
             }
-            if ui.checkbox(&mut self.form.auto_online, "Tentar ficar online ao abrir o programa").changed() {
+            if ui.check(&mut self.form.auto_online, "Tentar ficar online ao abrir o programa").changed() {
                 self.form.save();
             }
             if !self.error.is_empty() {
@@ -71,7 +71,7 @@ impl App {
                     });
                     card(ui, "Seu nome", "Aparece na lista de contatos de quem você adiciona.", |ui| {
                         ui.add(field(&mut self.form.my_name, "seu nome").char_limit(clam::media::update::MAX_NAME));
-                        ui.checkbox(&mut self.form.intros, "Aceitar quem me adiciona como contato")
+                        ui.check(&mut self.form.intros, "Aceitar quem me adiciona como contato")
                             .on_hover_text("Quando alguém adiciona o seu código, ele manda uma apresentação cifrada e passa a aparecer na sua lista, para os dois se ligarem. Desligado, só entra na lista quem você adicionar. Só aceita de quem já tem o seu endereço; no máximo 20 por minuto.");
                     });
                     card(ui, "Endereço", "Só se o IP que os outros enxergam não serve, como atrás de NAT: ip:porta (a porta precisa estar aberta no roteador; pode ser um nome).", |ui| {
@@ -82,13 +82,13 @@ impl App {
                         // A DHT vem ligada: a caixa é para desligá-la.
                         let mut no_dht = !self.form.use_dht;
                         let off = ui
-                            .checkbox(&mut no_dht, "Não usar a DHT (BitTorrent) para reencontrar contatos")
+                            .check(&mut no_dht, "Não usar a DHT (BitTorrent) para reencontrar contatos")
                             .on_hover_text("A DHT do BitTorrent é uma rede pública e descentralizada de milhões de computadores. Seu nó guarda nela o endereço atual dele, cifrado para cada contato, e consulta o dos contatos ao ligar. Serve quando você e um contato mudam de endereço ao mesmo tempo. Só o contato lê o conteúdo, mas quem opera nós da DHT vê o seu IP (a opção abaixo esconde). Ligada, seu nó também atende a DHT para circuitos de outros nós. Desligada, sobram o aviso direto e as âncoras.");
                         if off.changed() {
                             self.form.use_dht = !no_dht;
                         }
                         ui.add_enabled_ui(self.form.use_dht, |ui| {
-                            ui.checkbox(&mut self.form.dht_circuit, "Falar com a DHT pelos relays dos contatos (esconde o seu IP)")
+                            ui.check(&mut self.form.dht_circuit, "Falar com a DHT pelos relays dos contatos (esconde o seu IP)")
                                 .on_hover_text("Em vez de falar com a DHT do seu IP, o pedido vai por um circuito de dois relays de contatos: o primeiro vê o seu IP mas não o pedido, o segundo vê o pedido mas não o seu IP, e a DHT só vê o IP do segundo. Precisa de ao menos dois contatos com endereço guardado; sem eles a DHT fica parada, e nunca cai para o acesso direto. Um pouco mais lento.");
                         });
                     });
@@ -96,7 +96,7 @@ impl App {
                         // Servir de âncora vem ligado: a caixa é para não servir.
                         let mut no_anchor = !self.form.anchor;
                         let off = ui
-                            .checkbox(&mut no_anchor, "Não servir de âncora para os registros de endereço dos outros")
+                            .check(&mut no_anchor, "Não servir de âncora para os registros de endereço dos outros")
                             .on_hover_text("Seu computador guarda, só em memória, o endereço cifrado de quem o usa como âncora, para os contatos dessa pessoa a acharem. Não lê o conteúdo nem forja item. Precisa de um endereço que os outros alcancem. Quem usa a sua âncora vê o IP do seu relay; o código da sua âncora aparece abaixo, para você passar a quem quiser.");
                         if off.changed() {
                             self.form.anchor = !no_anchor;

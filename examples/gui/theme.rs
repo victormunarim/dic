@@ -72,7 +72,8 @@ pub(crate) fn apply(ctx: &egui::Context) {
     v.override_text_color = Some(TEXT);
     v.panel_fill = BG;
     v.window_fill = PANEL;
-    v.window_stroke = Stroke::NONE;
+    // Contorno fino nos menus e janelas: sem ele o menu se mistura ao fundo do painel.
+    v.window_stroke = Stroke::new(1.0_f32, MUTED);
     v.extreme_bg_color = DEEP;
     v.faint_bg_color = PANEL;
     v.code_bg_color = DEEP;
@@ -91,7 +92,6 @@ pub(crate) fn apply(ctx: &egui::Context) {
     w.noninteractive.corner_radius = radius;
     w.inactive.bg_fill = GREY_BUTTON;
     w.inactive.weak_bg_fill = GREY_BUTTON;
-    w.inactive.bg_stroke = Stroke::new(1.0_f32, DARK);
     w.inactive.fg_stroke = Stroke::new(1.0_f32, TEXT);
     w.inactive.corner_radius = radius;
     w.hovered.bg_fill = Color32::from_rgb(0x35, 0x39, 0x42);
@@ -208,9 +208,43 @@ pub(crate) fn icon_button(ui: &mut Ui, enabled: bool, icon: &str, tip: &str, fil
     soft_button(ui, enabled, RichText::new(icon).size(18.0).color(Color32::WHITE), fill, vec2(44.0, 40.0)).on_hover_text(tip)
 }
 
+/// Caixa de marcar com a caixinha visível: no tema neomórfico o `checkbox` padrão some no fundo (mesma cor
+/// base, sem contorno). Aqui a caixinha fica afundada (`DEEP`) e com contorno `MUTED`.
+pub(crate) trait CheckExt {
+    fn check(&mut self, checked: &mut bool, text: impl Into<egui::WidgetText>) -> egui::Response;
+}
+
+impl CheckExt for egui::Ui {
+    fn check(&mut self, checked: &mut bool, text: impl Into<egui::WidgetText>) -> egui::Response {
+        self.scope(|ui| {
+            let w = &mut ui.visuals_mut().widgets;
+            w.inactive.bg_fill = DEEP;
+            w.inactive.bg_stroke = Stroke::new(1.5_f32, MUTED);
+            w.hovered.bg_fill = DEEP;
+            w.hovered.bg_stroke = Stroke::new(1.5_f32, TEXT);
+            ui.checkbox(checked, text)
+        })
+        .inner
+    }
+}
+
 /// Campo de texto de uma linha, alto e largo.
 pub(crate) fn field<'t>(text: &'t mut String, hint: &str) -> egui::TextEdit<'t> {
     egui::TextEdit::singleline(text).hint_text(hint).margin(Margin::symmetric(12, 10)).desired_width(f32::INFINITY)
+}
+
+/// Sinal de mais desenhado (duas barras), porque a fonte pode não ter o glifo e mostrar um quadrado.
+pub(crate) fn draw_plus(painter: &egui::Painter, center: Pos2, half: f32, color: Color32) {
+    let stroke = Stroke::new(half * 0.28, color);
+    painter.line_segment([center - vec2(half, 0.0), center + vec2(half, 0.0)], stroke);
+    painter.line_segment([center - vec2(0.0, half), center + vec2(0.0, half)], stroke);
+}
+
+/// Botão só com o sinal de mais, sem moldura. A dica diz o que ele cria.
+pub(crate) fn plus_button(ui: &mut Ui, tip: &str) -> egui::Response {
+    let (rect, reply) = ui.allocate_exact_size(vec2(34.0, 34.0), egui::Sense::click());
+    draw_plus(ui.painter(), rect.center(), 8.0, if reply.hovered() { Color32::WHITE } else { TEXT });
+    reply.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// Três pontos um acima do outro (menu de ações), desenhados: a fonte pode não ter o glifo "⋮". Quem chama
@@ -221,6 +255,56 @@ pub(crate) fn dots_button(ui: &mut Ui) -> egui::Response {
     for dy in [-6.0, 0.0, 6.0] {
         ui.painter().circle_filled(rect.center() + vec2(0.0, dy), 2.0, ink);
     }
+    reply.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Escudo desenhado (confiança): cheio e verde quando ligado, só o contorno quando desligado.
+pub(crate) fn shield_button(ui: &mut Ui, on: bool) -> egui::Response {
+    let (rect, reply) = ui.allocate_exact_size(vec2(28.0, 34.0), egui::Sense::click());
+    let c = rect.center();
+    let pts = [vec2(-7.0, -8.0), vec2(7.0, -8.0), vec2(7.0, 1.0), vec2(0.0, 9.0), vec2(-7.0, 1.0)].map(|d| c + d).to_vec();
+    if on {
+        ui.painter().add(egui::Shape::convex_polygon(pts, GREEN, Stroke::NONE));
+        // Visto no meio: o estado ligado não depende só da cor.
+        let ink = Stroke::new(1.8_f32, DEEP);
+        ui.painter().line_segment([c + vec2(-3.5, 0.0), c + vec2(-1.0, 3.0)], ink);
+        ui.painter().line_segment([c + vec2(-1.0, 3.0), c + vec2(3.5, -3.0)], ink);
+    } else {
+        let ink = if reply.hovered() { Color32::WHITE } else { MUTED };
+        ui.painter().add(egui::Shape::convex_polygon(pts, Color32::TRANSPARENT, Stroke::new(1.6_f32, ink)));
+    }
+    reply.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Lixeira desenhada (remover): tampa, alça e corpo; vermelha ao passar o mouse.
+pub(crate) fn trash_button(ui: &mut Ui) -> egui::Response {
+    let (rect, reply) = ui.allocate_exact_size(vec2(28.0, 34.0), egui::Sense::click());
+    let c = rect.center();
+    let ink = Stroke::new(1.6_f32, if reply.hovered() { RED } else { MUTED });
+    let p = ui.painter();
+    p.line_segment([c + vec2(-7.0, -5.0), c + vec2(7.0, -5.0)], ink);
+    p.line_segment([c + vec2(-2.5, -5.0), c + vec2(-2.5, -8.0)], ink);
+    p.line_segment([c + vec2(2.5, -5.0), c + vec2(2.5, -8.0)], ink);
+    p.line_segment([c + vec2(-2.5, -8.0), c + vec2(2.5, -8.0)], ink);
+    p.rect_stroke(egui::Rect::from_min_max(c + vec2(-5.0, -5.0), c + vec2(5.0, 8.0)), CornerRadius::same(2), ink, egui::StrokeKind::Middle);
+    p.line_segment([c + vec2(-1.8, -2.0), c + vec2(-1.8, 5.0)], ink);
+    p.line_segment([c + vec2(1.8, -2.0), c + vec2(1.8, 5.0)], ink);
+    reply.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Porta com seta para fora (sair), desenhada; vermelha ao passar o mouse. Quem chama decide a confirmação.
+pub(crate) fn exit_button(ui: &mut Ui) -> egui::Response {
+    let (rect, reply) = ui.allocate_exact_size(vec2(28.0, 34.0), egui::Sense::click());
+    let c = rect.center();
+    let ink = Stroke::new(1.6_f32, if reply.hovered() { RED } else { MUTED });
+    let p = ui.painter();
+    // Batente aberto à direita, para a seta sair por ali.
+    p.line_segment([c + vec2(1.0, -8.0), c + vec2(-6.0, -8.0)], ink);
+    p.line_segment([c + vec2(-6.0, -8.0), c + vec2(-6.0, 8.0)], ink);
+    p.line_segment([c + vec2(-6.0, 8.0), c + vec2(1.0, 8.0)], ink);
+    p.line_segment([c + vec2(-2.0, 0.0), c + vec2(8.0, 0.0)], ink);
+    p.line_segment([c + vec2(4.0, -4.0), c + vec2(8.0, 0.0)], ink);
+    p.line_segment([c + vec2(4.0, 4.0), c + vec2(8.0, 0.0)], ink);
     reply.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 

@@ -363,6 +363,9 @@ pub(crate) async fn run_room(mut rx: mpsc::UnboundedReceiver<RoomCmd>, me_tx: mp
     stop_sharing(&shared);
     shared.screen.reset();
     shared.audio.set_level(0.0);
+    // Primeiro "fora de chamada", depois "fora de sala": o inverso deixa a janela ver "em chamada sem sala"
+    // por um instante e piscar o ✖ de desligar uma chamada 1:1.
+    shared.in_call.store(false, Ordering::Relaxed);
     shared.room.lock_unpoisoned().clear();
     out.line("saiu da sala");
 }

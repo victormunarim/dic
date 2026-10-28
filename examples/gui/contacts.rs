@@ -6,6 +6,11 @@ use eframe::egui::{self, Color32, RichText, vec2};
 
 use crate::{conf::*, engine::*, theme::*, ui::*};
 
+/// Se o contato aparece na busca: o texto (minúsculo, não vazio ou vazio) está no nome ou no começo do código.
+fn matches_search(name: &str, key: &[u8; 32], needle: &str) -> bool {
+    needle.is_empty() || name.to_lowercase().contains(needle) || hex(key).starts_with(needle)
+}
+
 impl App {
     /// Quem se apresentou (o nó já o atende): se é novo, entra na lista e recebe de volta a apresentação desta
     /// pessoa, para ele ter o nome dela; se já era contato sem nome (foi adicionado só pelo código), ganha o nome
@@ -35,65 +40,83 @@ impl App {
         }
     }
 
+    /// Formulário de novo contato, dentro do menu do + do cabeçalho da coluna.
+    pub(crate) fn new_contact_form(&mut self, ui: &mut egui::Ui) {
+        ui.set_width(260.0);
+        note(ui, "Peça o código de contato de um amigo.");
+        ui.add(field(&mut self.form.new_code, "Código de contato"));
+        if button(ui, !self.form.new_code.trim().is_empty(), "Adicionar", BLURPLE).clicked() {
+            self.add_contact();
+            if self.error.is_empty() {
+                ui.close();
+            }
+        }
+        if !self.error.is_empty() {
+            ui.colored_label(Color32::from_rgb(0xf2, 0x7b, 0x7e), &self.error);
+        }
+    }
+
     /// Lista de contatos na coluna da esquerda (o "início", como as mensagens diretas do Discord): um por linha,
-    /// com ligar à direita e, no menu de três pontos, a confiança para a tela e remover. Embaixo, o formulário
-    /// para adicionar, recolhido.
+    /// com ligar, a confiança para a tela (escudo) e remover (lixeira) à direita. No alto, a busca.
     pub(crate) fn contacts_list(&mut self, ui: &mut egui::Ui, online: bool, in_call: bool) {
         let contacts = parse_contacts(&self.form.contacts);
+        // O texto da busca vive na memória temporária da janela: não vai para o disco nem precisa de campo em `App`.
+        let search_id = egui::Id::new("busca-contatos");
+        let mut query = ui.data_mut(|d| d.get_temp::<String>(search_id)).unwrap_or_default();
+        ui.add(field(&mut query, "🔍 Buscar contato"));
+        ui.data_mut(|d| d.insert_temp(search_id, query.clone()));
+        let needle = query.trim().to_lowercase();
         if contacts.is_empty() {
-            note(ui, "Nenhum contato ainda. Adicione o código de quem você quer ouvir.");
+            note(ui, "Nenhum contato ainda. Use o + do alto com o código de quem você quer ouvir.");
+        } else if !needle.is_empty() && !contacts.iter().any(|(n, k)| matches_search(n, k, &needle)) {
+            note(ui, "Ninguém com esse nome.");
         }
         let mut remove = None;
-        for (i, (name, key)) in contacts.iter().enumerate() {
-            ui.horizontal(|ui| {
+        for (i, (name, key)) in contacts.iter().enumerate().filter(|(_, (n, k))| matches_search(n, k, &needle)) {
+            raised_frame(ui, 12, 8, |ui| {
+              ui.set_width(ui.available_width());
+              ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 avatar(ui, name, 32.0, None);
                 // Adicionado só pelo código: o nome chega quando o contato devolve a apresentação.
                 let pending = *name == hex(key)[..8];
-                ui.add_sized([ui.available_width() - 76.0 - if pending { 22.0 } else { 0.0 }, 32.0], egui::Label::new(RichText::new(name).strong().color(TEXT)).truncate())
+                ui.add_sized([ui.available_width() - 90.0 - if pending { 22.0 } else { 0.0 }, 32.0], egui::Label::new(RichText::new(name).strong().color(TEXT)).truncate())
                     .on_hover_text(format!("{}…", &hex(key)[..16]));
                 if pending {
                     ui.label(RichText::new("❗").size(14.0).color(YELLOW)).on_hover_text("O nome do contato aparecerá assim que você e ele estiverem online ao mesmo tempo.");
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let dots = dots_button(ui);
-                    egui::Popup::menu(&dots).show(|ui| {
-                        let mut trusted = self.form.is_trusted(key);
-                        if ui
-                            .checkbox(&mut trusted, "Contato de confiança")
-                            .on_hover_text("Só vale com a \"Privacidade na transmissão da tela\" desligada (aba Vídeo): a sua tela vai direto a este contato, sem relay no meio, e ele vê o seu IP. Os outros continuam recebendo por 2 relays. Marque só quem você conhece.")
-                            .changed()
-                        {
-                            // Marcar pede confirmação do aviso; desmarcar vale na hora.
-                            if trusted {
-                                self.trust_ask = Some(*key);
-                            } else {
-                                self.set_trust(*key, false);
-                            }
-                            ui.close();
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    if trash_button(ui).on_hover_text("Remover contato").clicked() {
+                        remove = Some(i);
+                    }
+                    let trusted = self.form.is_trusted(key);
+                    let tip = if trusted {
+                        "Contato de confiança (clique para tirar). A sua tela vai direto a ele, sem relay, e ele vê o seu IP."
+                    } else {
+                        "Marcar como contato de confiança. Só vale com a \"Privacidade na transmissão da tela\" desligada (aba Vídeo): a sua tela vai direto a este contato, sem relay no meio, e ele vê o seu IP. Os outros continuam recebendo por 2 relays. Marque só quem você conhece."
+                    };
+                    if shield_button(ui, trusted).on_hover_text(tip).clicked() {
+                        // Marcar pede confirmação do aviso; desmarcar vale na hora.
+                        if trusted {
+                            self.set_trust(*key, false);
+                        } else {
+                            self.trust_ask = Some(*key);
                         }
-                        if ui.button(RichText::new("Remover contato").color(RED)).clicked() {
-                            remove = Some(i);
-                            ui.close();
-                        }
-                    });
-                    if ui.add_enabled(online && !in_call, egui::Button::new(RichText::new("📞").size(16.0)).frame(false)).on_hover_text("Ligar").on_disabled_hover_text("Fique online e sem chamada para ligar").clicked() {
+                    }
+                    // Os três ícones têm a mesma largura e ficam colados: o 📞 é texto, então sem o enchimento do botão.
+                    let call = ui.scope(|ui| {
+                        ui.spacing_mut().button_padding = vec2(0.0, 0.0);
+                        ui.add_enabled(online && !in_call, egui::Button::new(RichText::new("📞").size(16.0)).frame(false).min_size(vec2(28.0, 34.0)))
+                    }).inner;
+                    if call.on_hover_text("Ligar").on_disabled_hover_text("Fique online e sem chamada para ligar").clicked() {
                         self.dial(*key);
                     }
                 });
+              });
             });
+            ui.add_space(4.0);
         }
-        ui.add_space(4.0);
-        egui::CollapsingHeader::new(RichText::new("＋ Adicionar contato").size(14.0).color(MUTED)).id_salt("novo-contato").default_open(false).show(ui, |ui| {
-            note(ui, "Peça o código de contato de um amigo.");
-            ui.add(field(&mut self.form.new_code, "Código de contato"));
-            if button(ui, !self.form.new_code.trim().is_empty(), "Adicionar", BLURPLE).clicked() {
-                self.add_contact();
-            }
-            if !self.error.is_empty() {
-                ui.colored_label(Color32::from_rgb(0xf2, 0x7b, 0x7e), &self.error);
-            }
-        });
         if let Some(i) = remove {
             let key = contacts[i].1;
             self.form.contacts = remove_contact(&self.form.contacts, i);
@@ -187,5 +210,20 @@ impl App {
         self.form.new_code.clear();
         self.error.clear();
         self.form.save();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn search_matches_name_or_code_prefix_ignoring_case() {
+        let key = [0xab; 32];
+        assert!(matches_search("Ana Souza", &key, ""));
+        assert!(matches_search("Ana Souza", &key, "souza"));
+        assert!(matches_search("Ana", &key, "abab"));
+        assert!(!matches_search("Ana", &key, "bruno"));
+        assert!(!matches_search("Ana", &key, "baba"));
     }
 }
