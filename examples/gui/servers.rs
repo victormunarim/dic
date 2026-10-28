@@ -27,6 +27,8 @@ pub(crate) struct ServersUi {
     /// Texto do bate-papo ainda não enviado.
     pub(crate) chat_draft: String,
     pub(crate) confirm_leave: bool,
+    /// Sala cujo bate-papo está aberto: só um por vez.
+    pub(crate) chat_open: Option<clam::server::RoomId>,
     pub(crate) msg: String,
     /// Resultado que deu certo (aparece em verde).
     pub(crate) info: String,
@@ -209,18 +211,26 @@ impl App {
         if in_this_server {
             self.screens_card(ui, v);
         }
-        // Em janela larga, salas e membros lado a lado; em estreita, um sobre o outro.
-        if ui.available_width() >= 760.0 {
-            ui.columns(2, |cols| {
-                self.rooms_card(&mut cols[0], hub, v, busy);
-                self.members_card(&mut cols[1], hub, v);
-                self.invite_card(&mut cols[1], hub, v);
-            });
-        } else {
-            self.rooms_card(ui, hub, v, busy);
-            self.members_card(ui, hub, v);
-            self.invite_card(ui, hub, v);
+        self.rooms_card(ui, hub, v, busy);
+    }
+
+    /// Coluna dos membros, à direita e de ponta a ponta da janela; o convite fica recolhido embaixo.
+    pub(crate) fn members_panel(&mut self, ctx: &egui::Context, offline: bool) {
+        if self.tab != Tab::Servers || offline {
+            return;
         }
+        let Some(hub) = self.shared.servers.lock_unpoisoned().clone() else { return };
+        let Some(v) = hub.read(|s, now| s.views(now)).into_iter().find(|v| Some(v.id) == self.srv.sel) else { return };
+        egui::SidePanel::right("membros")
+            .exact_width(340.0)
+            .resizable(false)
+            .frame(egui::Frame::new().fill(DEEP).inner_margin(Margin::symmetric(14, 26)))
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    self.members_card(ui, &hub, &v);
+                    self.invite_card(ui, &hub, &v);
+                });
+            });
     }
 
     /// Salas de voz do servidor, com o bate-papo da sala em que estou.
@@ -240,6 +250,10 @@ impl App {
                             if here {
                                 if button(ui, true, "Sair", RED).clicked() {
                                     self.send(Cmd::LeaveRoom);
+                                }
+                                let open = self.srv.chat_open == Some(room.id);
+                                if button(ui, true, if open { "Fechar chat" } else { "💬 Chat" }, if open { GREY_BUTTON } else { BLURPLE }).clicked() {
+                                    self.srv.chat_open = if open { None } else { Some(room.id) };
                                 }
                             } else if button(ui, !busy, "Entrar", GREEN).clicked() {
                                 self.send(Cmd::JoinRoom(v.id, room.id));
@@ -291,7 +305,7 @@ impl App {
                         Some((Some(key), on)) => crate::engine::follow(&self.shared, key, on),
                         None => {}
                     }
-                    if here {
+                    if here && self.srv.chat_open == Some(room.id) {
                         self.chat_box(ui, hub, v, room);
                     }
                 });
@@ -369,17 +383,29 @@ impl App {
                     });
                     if manages && !m.is_me && m.role != Role::Owner {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if button(ui, true, "Remover", GREY_BUTTON).clicked()
-                                && let Err(e) = hub.try_act(|s, now| s.remove_member(&v.id, m.id, now)) {
-                                    self.srv.msg = e.to_string();
+                            // Três pontos um acima do outro, desenhados: a fonte pode não ter o glifo "⋮".
+                            let (rect, dots) = ui.allocate_exact_size(vec2(28.0, 34.0), egui::Sense::click());
+                            let ink = if dots.hovered() { Color32::WHITE } else { MUTED };
+                            for dy in [-6.0, 0.0, 6.0] {
+                                ui.painter().circle_filled(rect.center() + vec2(0.0, dy), 2.0, ink);
+                            }
+                            egui::Popup::menu(&dots.on_hover_cursor(egui::CursorIcon::PointingHand)).show(|ui| {
+                                if v.my_role == Some(Role::Owner) {
+                                    let (label, to) = if m.role == Role::Admin { ("Tirar admin", Role::Member) } else { ("Tornar admin", Role::Admin) };
+                                    if ui.button(label).clicked() {
+                                        if let Err(e) = hub.try_act(|s, now| s.set_role(&v.id, m.id, to, now)) {
+                                            self.srv.msg = e.to_string();
+                                        }
+                                        ui.close();
+                                    }
                                 }
-                            if v.my_role == Some(Role::Owner) {
-                                let (label, to) = if m.role == Role::Admin { ("Tirar admin", Role::Member) } else { ("Tornar admin", Role::Admin) };
-                                if button(ui, true, label, GREY_BUTTON).clicked()
-                                    && let Err(e) = hub.try_act(|s, now| s.set_role(&v.id, m.id, to, now)) {
+                                if ui.button(RichText::new("Remover do servidor").color(RED)).clicked() {
+                                    if let Err(e) = hub.try_act(|s, now| s.remove_member(&v.id, m.id, now)) {
                                         self.srv.msg = e.to_string();
                                     }
-                            }
+                                    ui.close();
+                                }
+                            });
                         });
                     }
                 });
@@ -391,8 +417,8 @@ impl App {
     /// Convite de um contato, compacto: recolhido até a pessoa querer convidar.
     fn invite_card(&mut self, ui: &mut egui::Ui, hub: &clam::server::net::ServerHub, v: &ServerView) {
         let contacts = parse_contacts(&self.form.contacts);
-        card(ui, "Convidar", "", |ui| {
-          egui::CollapsingHeader::new("Chamar um contato para o servidor").id_salt("convidar-aberto").default_open(false).show(ui, |ui| {
+        {
+          egui::CollapsingHeader::new(RichText::new("＋ Convidar alguém").size(14.0).color(MUTED)).id_salt("convidar-aberto").default_open(false).show(ui, |ui| {
             note(ui, "O convite chega pela rede, cifrado, e só o contato escolhido consegue abri-lo. Qualquer membro pode convidar.");
             let shown = self.srv.pick.map_or("escolha um contato".to_string(), |k| member_name(&contacts, &k));
             egui::ComboBox::from_id_salt("convidar").selected_text(shown).width(260.0).show_ui(ui, |ui| {
@@ -437,14 +463,14 @@ impl App {
                 note(ui, "Mande o texto por onde preferir; ele só abre na conta do convidado. Ele entra quando você estiver online. (Este caminho não envia nada pela rede.)");
             }
           });
-        });
+        }
     }
 
     /// Bate-papo da sala em que estou: só existe enquanto a sala tem gente, e só quem está nela o vê.
     fn chat_box(&mut self, ui: &mut egui::Ui, hub: &clam::server::net::ServerHub, v: &ServerView, room: &clam::server::RoomView) {
         let contacts = parse_contacts(&self.form.contacts);
         ui.add_space(6.0);
-        egui::ScrollArea::vertical().id_salt(("bate-papo", room.id)).max_height(150.0).stick_to_bottom(true).auto_shrink([false, true]).show(ui, |ui| {
+        egui::ScrollArea::vertical().id_salt(("bate-papo", room.id)).max_height(360.0).stick_to_bottom(true).auto_shrink([false, true]).show(ui, |ui| {
             if room.chat.is_empty() {
                 ui.label(RichText::new("Sem mensagens. A conversa some quando a sala fica vazia.").size(13.0).color(MUTED));
             }

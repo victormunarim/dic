@@ -327,6 +327,7 @@ impl eframe::App for App {
 
         self.server_rail(ctx, offline);
         self.sidebar(ctx, offline, calling, &status);
+        self.members_panel(ctx, offline);
         egui::CentralPanel::default().frame(egui::Frame::new().fill(BG).inner_margin(Margin::symmetric(36, 26))).show(ctx, |ui| {
             let (title, subtitle) = self.title();
             page_header(ui, title, &subtitle);
