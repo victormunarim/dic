@@ -32,9 +32,7 @@ impl App {
         if !in_call {
             self.dial_card(ui, offline, busy);
             card(ui, "Nenhuma chamada em andamento", "Quando você ligar ou atender, ela aparece aqui, com a tela compartilhada.", |ui| {
-                if big_button(ui, "Escolher um contato", BLURPLE).clicked() {
-                    self.tab = Tab::Contacts;
-                }
+                note(ui, "Para ligar a um contato, use o 📞 ao lado dele na lista de contatos (👤, na coluna da esquerda).");
             });
             return;
         }

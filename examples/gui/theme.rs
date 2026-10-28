@@ -213,6 +213,17 @@ pub(crate) fn field<'t>(text: &'t mut String, hint: &str) -> egui::TextEdit<'t> 
     egui::TextEdit::singleline(text).hint_text(hint).margin(Margin::symmetric(12, 10)).desired_width(f32::INFINITY)
 }
 
+/// Três pontos um acima do outro (menu de ações), desenhados: a fonte pode não ter o glifo "⋮". Quem chama
+/// abre o menu com `egui::Popup::menu(&resposta)`.
+pub(crate) fn dots_button(ui: &mut Ui) -> egui::Response {
+    let (rect, reply) = ui.allocate_exact_size(vec2(28.0, 34.0), egui::Sense::click());
+    let ink = if reply.hovered() { Color32::WHITE } else { MUTED };
+    for dy in [-6.0, 0.0, 6.0] {
+        ui.painter().circle_filled(rect.center() + vec2(0.0, dy), 2.0, ink);
+    }
+    reply.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 /// Uma explicação em letra menor e apagada.
 pub(crate) fn note(ui: &mut Ui, text: impl Into<String>) {
     ui.label(RichText::new(text.into()).size(14.0).color(MUTED));

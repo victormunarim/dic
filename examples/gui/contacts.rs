@@ -1,4 +1,4 @@
-//! Aba Contatos: lista, adicionar por código, confiança para a tela e apresentações recebidas.
+//! Contatos: lista na coluna da esquerda, adicionar por código, confiança para a tela e apresentações recebidas.
 
 use clam::sync::LockExt;
 
@@ -35,44 +35,29 @@ impl App {
         }
     }
 
-    pub(crate) fn contacts_tab(&mut self, ui: &mut egui::Ui, online: bool, in_call: bool) {
-        card(ui, "Adicionar contato", "Peça o código de contato de um amigo. Ele também aparece na sua lista, se você deixar.", |ui| {
-            let w = ui.available_width();
-            let button_w = 170.0;
-            ui.horizontal(|ui| {
-                ui.add(field(&mut self.form.new_code, "Código de contato").desired_width((w - button_w - ui.spacing().item_spacing.x).max(160.0)));
-                if button(ui, true, "Adicionar", BLURPLE).clicked() {
-                    self.add_contact();
-                }
-            });
-            if !self.error.is_empty() {
-                ui.colored_label(Color32::from_rgb(0xf2, 0x7b, 0x7e), &self.error);
-            }
-        });
-
+    /// Lista de contatos na coluna da esquerda (o "início", como as mensagens diretas do Discord): um por linha,
+    /// com ligar à direita e, no menu de três pontos, a confiança para a tela e remover. Embaixo, o formulário
+    /// para adicionar, recolhido.
+    pub(crate) fn contacts_list(&mut self, ui: &mut egui::Ui, online: bool, in_call: bool) {
         let contacts = parse_contacts(&self.form.contacts);
         if contacts.is_empty() {
-            card(ui, "Nenhum contato ainda", "", |ui| {
-                note(ui, "Adicione acima o código de contato de quem você quer ouvir.");
-            });
+            note(ui, "Nenhum contato ainda. Adicione o código de quem você quer ouvir.");
         }
         let mut remove = None;
         for (i, (name, key)) in contacts.iter().enumerate() {
-            raised_frame(ui, 14, 16, |ui| {
-                ui.set_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    crate::theme::avatar(ui, name, 48.0, None);
-                    ui.vertical(|ui| {
-                        ui.spacing_mut().item_spacing.y = 2.0;
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new(name).size(18.0).strong().color(Color32::WHITE));
-                            // Adicionado só pelo código: o nome chega quando o contato devolve a apresentação.
-                            if *name == hex(key)[..8] {
-                                ui.label(RichText::new("❗").size(15.0).color(YELLOW))
-                                    .on_hover_text("O nome do contato aparecerá assim que você e ele estiverem online ao mesmo tempo.");
-                            }
-                        });
-                        ui.label(RichText::new(&hex(key)[..16]).monospace().size(13.0).color(MUTED));
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                avatar(ui, name, 32.0, None);
+                // Adicionado só pelo código: o nome chega quando o contato devolve a apresentação.
+                let pending = *name == hex(key)[..8];
+                ui.add_sized([ui.available_width() - 76.0 - if pending { 22.0 } else { 0.0 }, 32.0], egui::Label::new(RichText::new(name).strong().color(TEXT)).truncate())
+                    .on_hover_text(format!("{}…", &hex(key)[..16]));
+                if pending {
+                    ui.label(RichText::new("❗").size(14.0).color(YELLOW)).on_hover_text("O nome do contato aparecerá assim que você e ele estiverem online ao mesmo tempo.");
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let dots = dots_button(ui);
+                    egui::Popup::menu(&dots).show(|ui| {
                         let mut trusted = self.form.is_trusted(key);
                         if ui
                             .checkbox(&mut trusted, "Contato de confiança")
@@ -85,20 +70,30 @@ impl App {
                             } else {
                                 self.set_trust(*key, false);
                             }
+                            ui.close();
                         }
-                    });
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if icon_button(ui, true, "🗑", "Remover contato", GREY_BUTTON).clicked() {
+                        if ui.button(RichText::new("Remover contato").color(RED)).clicked() {
                             remove = Some(i);
-                        }
-                        if icon_button(ui, online && !in_call, "📞", "Ligar", GREEN).clicked() {
-                            self.dial(*key);
+                            ui.close();
                         }
                     });
+                    if ui.add_enabled(online && !in_call, egui::Button::new(RichText::new("📞").size(16.0)).frame(false)).on_hover_text("Ligar").on_disabled_hover_text("Fique online e sem chamada para ligar").clicked() {
+                        self.dial(*key);
+                    }
                 });
             });
-            ui.add_space(2.0);
         }
+        ui.add_space(4.0);
+        egui::CollapsingHeader::new(RichText::new("＋ Adicionar contato").size(14.0).color(MUTED)).id_salt("novo-contato").default_open(false).show(ui, |ui| {
+            note(ui, "Peça o código de contato de um amigo.");
+            ui.add(field(&mut self.form.new_code, "Código de contato"));
+            if button(ui, !self.form.new_code.trim().is_empty(), "Adicionar", BLURPLE).clicked() {
+                self.add_contact();
+            }
+            if !self.error.is_empty() {
+                ui.colored_label(Color32::from_rgb(0xf2, 0x7b, 0x7e), &self.error);
+            }
+        });
         if let Some(i) = remove {
             let key = contacts[i].1;
             self.form.contacts = remove_contact(&self.form.contacts, i);

@@ -317,6 +317,17 @@ impl App {
                 ui.spacing_mut().item_spacing.y = 6.0;
                 // O perfil ocupa uma altura fixa no pé; a lista de salas rola no espaço que sobra.
                 const FOOTER: f32 = 74.0;
+                if self.tab == Tab::Contacts {
+                    let count = parse_contacts(&self.form.contacts).len();
+                    ui.add_space(2.0);
+                    ui.label(RichText::new("Contatos").strong().size(17.0).color(Color32::WHITE));
+                    ui.label(RichText::new(match count { 0 => "ninguém ainda".to_string(), 1 => "1 pessoa".to_string(), n => format!("{n} pessoas") }).size(13.0).color(MUTED));
+                    ui.add_space(4.0);
+                    ui.separator();
+                    ui.add_space(2.0);
+                    let height = (ui.available_height() - FOOTER).max(60.0);
+                    egui::ScrollArea::vertical().max_height(height).auto_shrink([false, false]).show(ui, |ui| self.contacts_list(ui, !offline, in_call));
+                } else {
                 match (&hub, &view) {
                     (Some(hub), Some(v)) => {
                         ui.add_space(2.0);
@@ -335,6 +346,7 @@ impl App {
                         ui.add_space(8.0);
                         note(ui, "Escolha um servidor na coluna da esquerda.");
                     }
+                }
                 }
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
                     sunken_frame(ui, 12, 8, |ui| {
@@ -455,13 +467,8 @@ impl App {
                     });
                     if manages && !m.is_me && m.role != Role::Owner {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            // Três pontos um acima do outro, desenhados: a fonte pode não ter o glifo "⋮".
-                            let (rect, dots) = ui.allocate_exact_size(vec2(28.0, 34.0), egui::Sense::click());
-                            let ink = if dots.hovered() { Color32::WHITE } else { MUTED };
-                            for dy in [-6.0, 0.0, 6.0] {
-                                ui.painter().circle_filled(rect.center() + vec2(0.0, dy), 2.0, ink);
-                            }
-                            egui::Popup::menu(&dots.on_hover_cursor(egui::CursorIcon::PointingHand)).show(|ui| {
+                            let dots = dots_button(ui);
+                            egui::Popup::menu(&dots).show(|ui| {
                                 if v.my_role == Some(Role::Owner) {
                                     let (label, to) = if m.role == Role::Admin { ("Tirar admin", Role::Member) } else { ("Tornar admin", Role::Admin) };
                                     if ui.button(label).clicked() {

@@ -181,11 +181,10 @@ impl App {
             // Engrenagem e mudo ficam juntos na ponta direita da linha (a engrenagem por último, na borda).
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let gear = egui::Button::new(RichText::new("⚙").size(19.0).color(TEXT)).frame(false).min_size(vec2(34.0, 36.0));
-                let gear = ui.add(gear).on_hover_text("Contatos, chamada, vídeo, áudio, configurações e atividade");
+                let gear = ui.add(gear).on_hover_text("Chamada, vídeo, áudio, configurações e atividade");
                 let calling_1to1 = in_call && !in_room;
                 egui::Popup::menu(&gear).show(|ui| {
                     for (tab, icon, label) in [
-                        (Tab::Contacts, "👥", "Contatos"),
                         (Tab::Call, "📞", if calling_1to1 { "Chamada ●" } else { "Chamada" }),
                         (Tab::Video, "🖥", "Vídeo"),
                         (Tab::Audio, "🎤", "Áudio"),
@@ -257,12 +256,7 @@ impl App {
 
     fn title(&self) -> (&'static str, String) {
         match self.tab {
-            Tab::Contacts => ("Contatos", format!("{} na sua lista.", match parse_contacts(&self.form.contacts).len() {
-                0 => "Ninguém".to_string(),
-                1 => "1 pessoa".to_string(),
-                n => format!("{n} pessoas"),
-            })),
-            Tab::Call => ("Chamada", "A conversa e a tela compartilhada.".into()),
+            Tab::Contacts | Tab::Call => ("Chamada", "A conversa e a tela compartilhada.".into()),
             Tab::Servers => ("Servidores", "Grupos de pessoas com salas de voz.".into()),
             Tab::Video => ("Vídeo", "Como a sua tela é transmitida.".into()),
             Tab::Audio => ("Áudio", "Dispositivos, volume e tratamento da voz.".into()),
@@ -325,8 +319,7 @@ impl eframe::App for App {
             egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
                 ui.set_max_width(ui.available_width().min(1500.0));
                 match self.tab {
-                    Tab::Contacts => self.contacts_tab(ui, !offline, calling),
-                    Tab::Call => self.call_tab(ui, offline, calling, calling && !in_room),
+                    Tab::Contacts | Tab::Call => self.call_tab(ui, offline, calling, calling && !in_room),
                     Tab::Servers => self.servers_tab(ui, offline),
                     Tab::Video => self.video_tab(ui),
                     Tab::Audio => self.audio_tab(ui, offline, calling, testing),
