@@ -171,6 +171,7 @@ pub struct RelayNode {
 }
 
 impl RelayNode {
+    #[must_use]
     pub fn new(secret: StaticSecret, cfg: RelayConfig, now_ms: u64) -> Self {
         let public = PublicKey::from(&secret).to_bytes();
         Self {
@@ -194,10 +195,12 @@ impl RelayNode {
     }
 
     /// Chave pública estática, publicada no descritor do relay.
+    #[must_use]
     pub fn public_key(&self) -> [u8; 32] {
         self.public
     }
 
+    #[must_use]
     pub fn circuit_count(&self) -> usize {
         self.circs.len()
     }
@@ -241,6 +244,10 @@ impl RelayNode {
     }
 
     /// Dados vindos do destino para o cliente do circuito `circ`.
+    ///
+    /// # Errors
+    ///
+    /// [`CircuitError::UnknownCircuit`] se `circ` não existe; [`CircuitError::Oversize`] se `payload` não cabe na célula; [`CircuitError::CounterExhausted`] quando o nonce acaba.
     pub fn stream_data(&mut self, circ: CircRef, payload: &[u8]) -> Result<Vec<Action>, CircuitError> {
         let c = self.circs.get_mut(&circ).ok_or(CircuitError::UnknownCircuit)?;
         if payload.len() > max_data(c.pos) {

@@ -149,6 +149,10 @@ impl ActiveCall {
     }
 
     /// Um quadro do microfone (o tamanho que o codec espera). `Err` = a chamada acabou.
+    ///
+    /// # Errors
+    ///
+    /// [`CallError::Closed`] quando a chamada acabou.
     pub async fn send(&self, pcm: Vec<i16>) -> Result<(), CallError> {
         self.mic.send(pcm).await.map_err(|_| CallError::Closed)
     }
@@ -346,6 +350,10 @@ fn start_call<C: Codec + Send + 'static>(
 ///
 /// `wait` limita cada espera: o circuito ficar pronto (se `client` já estiver pronto, não espera)
 /// e o aceite chegar.
+///
+/// # Errors
+///
+/// [`CallError::NoCircuit`] se o circuito não fica pronto em `wait`; [`CallError::NoAnswer`] se ninguém aceita a tempo; [`CallError::Rejected`] se o outro lado recusa; [`CallError::Media`] se o convite não pôde ser montado (chave do contato inválida).
 pub async fn call<C: Codec + Send + 'static>(
     client: CircuitClient,
     my_static: &StaticSecret,
@@ -358,6 +366,10 @@ pub async fn call<C: Codec + Send + 'static>(
 
 /// Como [`call`], mas registrada no telefone desta máquina (`link`), que passa a entregar à
 /// chamada o circuito de tela de quem está do outro lado.
+///
+/// # Errors
+///
+/// Como [`call`].
 pub async fn call_linked<C: Codec + Send + 'static>(
     mut client: CircuitClient,
     my_static: &StaticSecret,
@@ -476,6 +488,7 @@ async fn forward_extra(linked: &Option<(u64, PhoneLink)>, out: WireOut) {
 }
 
 /// Opções do cliente de circuito da tela: cover de circuito e de link no ritmo dos slots.
+#[must_use]
 pub fn screen_client_options() -> ClientOptions {
     let every = SCREEN_SLOT;
     ClientOptions { cover: Some(every), circuit_cover: Some(every), ..Default::default() }
@@ -483,12 +496,14 @@ pub fn screen_client_options() -> ClientOptions {
 
 /// Opções do cliente de circuito da tela sem cover, para quem não é de confiança: segue com os 2 saltos, só
 /// sai o que há para enviar.
+#[must_use]
 pub fn open_screen_client_options() -> ClientOptions {
     ClientOptions { cover: None, circuit_cover: None, ..Default::default() }
 }
 
 /// Opções do cliente de circuito da tela direto ao relay do contato de confiança: sem relay no meio e
 /// sem cover. Quem assiste vê o IP de quem transmite.
+#[must_use]
 pub fn direct_screen_client_options() -> ClientOptions {
     ClientOptions { cover: None, circuit_cover: None, direct: true, ..Default::default() }
 }
@@ -504,31 +519,40 @@ pub struct ScreenShare {
 
 impl ScreenShare {
     /// Entrega um quadro codificado. `Ok(false)`: descartado porque a fila encheu e falta um quadro-chave.
+    ///
+    /// # Errors
+    ///
+    /// [`MediaError::TooLarge`] se o quadro passa de [`MAX_PAYLOAD`](crate::media::packet::MAX_PAYLOAD).
     pub fn push(&self, data: &[u8], keyframe: bool) -> Result<bool, MediaError> {
         self.stream.lock_unpoisoned().push_frame(data, keyframe)
     }
 
     /// Quem assiste perdeu imagem (ou a fila encheu): force um quadro-chave no codec. Consome o pedido.
+    #[must_use]
     pub fn keyframe_wanted(&self) -> bool {
         self.stream.lock_unpoisoned().take_keyframe_request()
     }
 
+    #[must_use]
     pub fn stats(&self) -> ScreenStats {
         self.stream.lock_unpoisoned().stats()
     }
 
     /// O último relatório de perda de quem assiste, uma vez só.
+    #[must_use]
     pub fn take_report(&self) -> Option<LossReport> {
         self.stream.lock_unpoisoned().take_report()
     }
 
     /// Há quanto tempo chegou o último relatório de perda e quantos pacotes de vídeo saíram desde então;
     /// `None` se nunca chegou (quem assiste pode ser uma versão sem relatórios).
+    #[must_use]
     pub fn report_age(&self) -> Option<(Duration, u64)> {
         self.stream.lock_unpoisoned().report_age()
     }
 
     /// Fragmentos esperando saída no circuito.
+    #[must_use]
     pub fn queued(&self) -> usize {
         self.stream.lock_unpoisoned().queued()
     }
@@ -552,6 +576,10 @@ impl Drop for ScreenShare {
 /// Espera o circuito ficar pronto (até `wait`) e manda um pacote de abertura, que prende o circuito
 /// à chamada do outro lado. Depois sai um pacote por slot enquanto houver vídeo na fila; nos
 /// demais instantes o cover do circuito mantém o fluxo no mesmo ritmo.
+///
+/// # Errors
+///
+/// [`CallError::NoCircuit`] se o circuito não fica pronto em `wait`; [`CallError::Closed`] se ele fecha antes da abertura; [`CallError::Media`] se o pacote de abertura não pôde ser montado.
 pub async fn share_screen(client: CircuitClient, keys: &CallKeys, wait: Duration) -> Result<ScreenShare, CallError> {
     share_screen_slot(client, keys, wait, SCREEN_SLOT).await
 }
@@ -559,6 +587,10 @@ pub async fn share_screen(client: CircuitClient, keys: &CallKeys, wait: Duration
 /// Como [`share_screen`], com um pacote a cada `slot` ([`SCREEN_SLOT`] com cover;
 /// [`OPEN_SCREEN_SLOT`] para o cliente de [`open_screen_client_options`]). Sem cover, um relógio que atrasa
 /// (o do Windows, por exemplo) não reduz a taxa: o atraso vira crédito e sai em rajadas curtas.
+///
+/// # Errors
+///
+/// Como [`share_screen`].
 pub async fn share_screen_slot(mut client: CircuitClient, keys: &CallKeys, wait: Duration, slot: Duration) -> Result<ScreenShare, CallError> {
     let ready = client.status().await.is_some_and(|s| s.active.is_some_and(|a| a.ready));
     timeout(wait, async {
@@ -640,21 +672,29 @@ pub struct IncomingCall {
 }
 
 impl IncomingCall {
+    #[must_use]
     pub fn caller(&self) -> &PublicKey {
         self.invite.caller()
     }
 
     /// Relay de quem ligou, se o convite o trouxe (veja [`RelayHint`]): serve para ligar de volta.
     /// Não é autenticado; use só como último recurso.
+    #[must_use]
     pub fn relay_hint(&self) -> Option<&RelayHint> {
         self.invite.relay_hint()
     }
 
     /// Codec que quem ligou escolheu. Aceite com ele (veja [`CodecId::build`]); com outro, as duas pontas não se entendem.
+    #[must_use]
     pub fn codec(&self) -> CodecId {
         self.invite.codec()
     }
 
+    /// Atende a chamada com `codec` e devolve a chamada ativa.
+    ///
+    /// # Errors
+    ///
+    /// [`CallError::Media`] se o convite não abre com a chave deste telefone; [`CallError::Closed`] se o telefone parou antes de a resposta sair.
     pub async fn accept<C: Codec + Send + 'static>(self, codec: C) -> Result<ActiveCall, CallError> {
         let (frame, keys) = self.invite.accept(&self.secret)?;
         let id = self.ids.fetch_add(1, Ordering::Relaxed);
@@ -731,6 +771,10 @@ pub type Contacts = Arc<Mutex<Vec<[u8; 32]>>>;
 impl Phone {
     /// Escuta em `listen`. Só convites de `contacts` (chaves estáticas do pareamento) tocam;
     /// os outros são descartados sem resposta, para não revelar que o telefone existe.
+    ///
+    /// # Errors
+    ///
+    /// Erro de E/S ao abrir a porta `listen`.
     pub async fn bind(listen: SocketAddr, my_static: StaticSecret, contacts: Vec<[u8; 32]>) -> io::Result<Self> {
         crate::timer::fine_timers();
         let listener = TcpListener::bind(listen).await?;
@@ -772,27 +816,32 @@ impl Phone {
     }
 
     /// Para registrar neste telefone as chamadas que esta máquina faz ([`call_linked`]).
+    #[must_use]
     pub fn link(&self) -> PhoneLink {
         PhoneLink { actor: self.link_tx.clone(), ids: self.ids.clone(), hint: self.hint.clone() }
     }
 
     /// Lista viva de chaves aceitas.
+    #[must_use]
     pub fn contacts(&self) -> Contacts {
         self.contacts.clone()
     }
 
     /// Quem mais pode ligar além dos contatos: os que estão na mesma sala de voz (veja [`crate::server`]). Quem
     /// atende decide o que fazer com cada chamada; a lista só deixa o convite chegar.
+    #[must_use]
     pub fn room_peers(&self) -> Contacts {
         self.room_peers.clone()
     }
 
+    #[must_use]
     pub fn local_addr(&self) -> SocketAddr {
         self.addr
     }
 
     /// Motivo do último convite descartado em silêncio (remetente fora dos contatos, ou relógios
     /// diferentes), uma vez só. Só para diagnóstico local: o remetente não recebe resposta.
+    #[must_use]
     pub fn take_notice(&self) -> Option<String> {
         self.notice.lock_unpoisoned().take()
     }

@@ -206,6 +206,7 @@ pub struct CircuitManager {
 
 impl CircuitManager {
     /// `dest`: endereço que o último salto abre (o contato, via ponto de introdução).
+    #[must_use]
     pub fn new(cfg: ManagerConfig, dest: &str, relays: Vec<Candidate>) -> Self {
         Self {
             cfg,
@@ -238,6 +239,7 @@ impl CircuitManager {
         self.cfg.direct = direct;
     }
 
+    #[must_use]
     pub fn status(&self) -> Status {
         let info = |s: &Slot| SlotInfo {
             first: s.first.addr.clone(),
@@ -249,6 +251,7 @@ impl CircuitManager {
     }
 
     /// Chave de link do relay em `addr`, se conhecido (o transporte a usa para autenticar o link).
+    #[must_use]
     pub fn relay_key(&self, addr: &str) -> Option<[u8; 32]> {
         self.relays.iter().find(|c| c.addr == addr).map(|c| c.link_public)
     }
@@ -259,6 +262,10 @@ impl CircuitManager {
     }
 
     /// Envia um quadro de mídia pelo circuito ativo.
+    ///
+    /// # Errors
+    ///
+    /// [`SendError::Unavailable`] sem circuito ativo pronto; [`SendError::Circuit`] se a célula não pôde ser montada.
     pub fn send(&mut self, payload: &[u8]) -> Result<Vec<Out>, SendError> {
         let slot = self.active.as_mut().filter(|s| s.phase == Phase::Ready).ok_or(SendError::Unavailable)?;
         let cell = slot.circuit.send_data(payload).map_err(SendError::Circuit)?;

@@ -67,12 +67,14 @@ pub struct RelayKeys {
 }
 
 impl RelayKeys {
+    #[must_use]
     pub fn random() -> Self {
         Self { onion: StaticSecret::random_from_rng(rand_core::OsRng), link: StaticSecret::random_from_rng(rand_core::OsRng) }
     }
 }
 
 impl NodeConfig {
+    #[must_use]
     pub fn new(secret: StaticSecret, contacts: Vec<[u8; 32]>) -> Self {
         Self { secret, contacts, relay_port: DEFAULT_RELAY_PORT, public_addr: None, upnp: true, known: Vec::new(), hints: Vec::new(), relay_keys: None, history: Vec::new(), updates: true, update_retry: UPDATE_RETRY, dht: None, name: String::new(), introductions: true, anchor: false, anchors: Vec::new(), servers: None }
     }

@@ -59,6 +59,7 @@ pub struct Dialer {
 impl Dialer {
     /// Endereço de relay guardado de `peer` (da última ligação ou aviso, ou, na falta, do convite que ele
     /// mandou), se houver; é por ele que [`Dialer::dial`] tenta primeiro.
+    #[must_use]
     pub fn stored_address(&self, peer: &[u8; 32]) -> Option<String> {
         self.stored_for(peer).first().map(|r| r.addr.clone())
     }
@@ -145,12 +146,17 @@ impl Dialer {
         CircuitClient::spawn_with(CircuitManager::new(cfg, &dest_for(peer), relays), Duration::from_secs(3), options)
     }
 
+    #[must_use]
     pub fn public_key(&self) -> [u8; 32] {
         *PublicKey::from(&self.secret).as_bytes()
     }
 
     /// Liga para `peer`: acha um relay dele (o guardado, o que ele avisou, a DHT ou uma âncora) e chama por um
     /// circuito que passa pelos relays dos contatos.
+    ///
+    /// # Errors
+    ///
+    /// [`DialError::NoAddress`] se nenhum relay do contato foi achado; [`DialError::Call`] se a chamada falhou (circuito, sem resposta, recusada).
     pub async fn dial<C: Codec + Send + 'static>(&self, peer: [u8; 32], codec: C, wait: Duration) -> Result<ActiveCall, DialError> {
         let (found, tried_stored) = self.reachable_client(&peer, ClientOptions::default).await;
         let Some((client, k)) = found else { return Err(DialError::NoAddress { tried_stored }) };
@@ -161,12 +167,20 @@ impl Dialer {
 
     /// Transmite a tela da chamada `call` para `peer`, por um circuito só da tela (cover de
     /// [`SCREEN_SLOT`]). Privada: por circuito de 2 saltos, com cover.
+    ///
+    /// # Errors
+    ///
+    /// Como [`Self::dial`]: sem endereço do contato ou falha ao montar o circuito da tela.
     pub async fn share_screen(&self, peer: [u8; 32], call: &ActiveCall, wait: Duration) -> Result<ScreenShare, DialError> {
         self.share_screen_keys(peer, &call.next_share_keys(), wait).await
     }
 
     /// Como [`Self::share_screen`], com as chaves em vez da chamada (quem não tem mais a chamada em mãos
     /// guarda uma cópia de [`ActiveCall::next_share_keys`]).
+    ///
+    /// # Errors
+    ///
+    /// Como [`Self::share_screen`].
     pub async fn share_screen_keys(&self, peer: [u8; 32], keys: &CallKeys, wait: Duration) -> Result<ScreenShare, DialError> {
         self.share_screen_keys_with(peer, keys, wait, true).await
     }
@@ -185,6 +199,7 @@ impl Dialer {
     }
 
     /// Se `peer` está marcado como contato de confiança (veja [`Self::set_trusted`]).
+    #[must_use]
     pub fn is_trusted(&self, peer: &[u8; 32]) -> bool {
         self.trusted.lock_unpoisoned().contains(peer)
     }
@@ -196,6 +211,10 @@ impl Dialer {
     /// os demais segue por 2 relays, que escondem o seu IP. O relay do contato de confiança precisa ser desta
     /// versão ou mais nova. O vídeo e as chaves seguem cifrados. Quem transmite deve usar
     /// [`H264Encoder::bitrate_for`](crate::video::H264Encoder::bitrate_for) com o mesmo intervalo.
+    ///
+    /// # Errors
+    ///
+    /// Como [`Self::share_screen`]. Contato fora da confiança nunca vai direto: com `private` falso segue por 2 relays, sem falhar.
     pub async fn share_screen_keys_with(&self, peer: [u8; 32], keys: &CallKeys, wait: Duration, private: bool) -> Result<ScreenShare, DialError> {
         let (options, slot): (fn() -> ClientOptions, Duration) = match (private, self.screen_path(&peer, private)) {
             (true, _) => (screen_client_options, SCREEN_SLOT),
@@ -212,6 +231,7 @@ impl Dialer {
     /// O caminho da tela para `peer`: sempre [`PathMode::TwoHop`] com `private`; sem ele, [`PathMode::Direct`] só
     /// para contato de confiança ([`Self::set_trusted`]) e [`PathMode::TwoHop`] para os demais. Marcar alguém de
     /// confiança pressupõe o aviso de exposição do IP já confirmado.
+    #[must_use]
     pub fn screen_path(&self, peer: &[u8; 32], private: bool) -> PathMode {
         if private {
             return PathMode::TwoHop;

@@ -32,16 +32,19 @@ pub const LAYER_OVERHEAD: usize = 25;
 const RELAY_HEADER: usize = 3;
 
 /// Bytes úteis de uma célula depois de `pos` camadas retiradas.
+#[must_use]
 pub const fn link_len(pos: usize) -> usize {
     CELL_LEN - LAYER_OVERHEAD * pos
 }
 
 /// Tamanho do conteúdo (comando + dados) endereçado ao salto `pos`.
+#[must_use]
 pub const fn relay_cell_len(pos: usize) -> usize {
     link_len(pos) - LAYER_OVERHEAD
 }
 
 /// Máximo de bytes de dados que cabem em uma célula endereçada ao salto `pos`.
+#[must_use]
 pub const fn max_data(pos: usize) -> usize {
     relay_cell_len(pos) - RELAY_HEADER
 }
@@ -100,6 +103,7 @@ impl Cell {
     pub const WIRE_LEN: usize = 5 + CELL_LEN;
 
     /// Monta a célula com `content` no início e bytes aleatórios no resto.
+    #[must_use]
     pub fn with_body(circ: u32, cmd: Cmd, content: &[u8]) -> Self {
         debug_assert!(content.len() <= CELL_LEN);
         let mut body = [0u8; CELL_LEN];
@@ -108,6 +112,7 @@ impl Cell {
         Self { circ, cmd, body }
     }
 
+    #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(Self::WIRE_LEN);
         out.extend_from_slice(&self.circ.to_be_bytes());
@@ -117,6 +122,10 @@ impl Cell {
     }
 
     /// Lê o que veio do link: o tamanho é fixo e qualquer outro é protocolo violado.
+    ///
+    /// # Errors
+    ///
+    /// [`CircuitError::Protocol`] se o tamanho não é o da célula ou o comando é desconhecido.
     #[deny(clippy::indexing_slicing, clippy::unwrap_used)]
     pub fn from_bytes(buf: &[u8]) -> Result<Self, CircuitError> {
         let size = || CircuitError::Protocol("tamanho de célula inválido");
@@ -183,11 +192,16 @@ pub struct RelayCell {
 }
 
 impl RelayCell {
+    #[must_use]
     pub fn new(cmd: RelayCmd, data: Vec<u8>) -> Self {
         Self { cmd, data }
     }
 
     /// `[cmd:1][len:2][dados][zeros]` com exatamente `total` bytes.
+    ///
+    /// # Errors
+    ///
+    /// [`CircuitError::Oversize`] se o conteúdo não cabe em `total` bytes.
     pub fn encode(&self, total: usize) -> Result<Vec<u8>, CircuitError> {
         if self.data.len() + RELAY_HEADER > total {
             return Err(CircuitError::Oversize);
@@ -199,6 +213,11 @@ impl RelayCell {
         Ok(buf)
     }
 
+    /// Lê o corpo de uma célula de relay.
+    ///
+    /// # Errors
+    ///
+    /// [`CircuitError::Protocol`] se o tamanho declarado passa do que o corpo carrega ou o comando é desconhecido.
     #[deny(clippy::indexing_slicing, clippy::unwrap_used)]
     pub fn decode(buf: &[u8]) -> Result<Self, CircuitError> {
         // `RELAY_HEADER` é este cabeçalho: comando (1) e tamanho (2).

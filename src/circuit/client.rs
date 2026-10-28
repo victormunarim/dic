@@ -46,6 +46,7 @@ pub struct ClientCircuit {
 
 impl ClientCircuit {
     /// Começa o circuito com o relay A. Devolve a célula `Create` para ele.
+    #[must_use]
     pub fn create(circ: u32, relay_public: &[u8; 32]) -> (Self, Cell) {
         let hs = ClientHandshake::new(relay_public);
         let mut body = [0u8; 33];
@@ -54,11 +55,13 @@ impl ClientCircuit {
         (Self { circ, hops: Vec::new(), pending: Some(Pending::Create(hs)) }, cell)
     }
 
+    #[must_use]
     pub fn circ_id(&self) -> u32 {
         self.circ
     }
 
     /// Saltos prontos (0 a [`MAX_HOPS`]).
+    #[must_use]
     pub fn hops(&self) -> usize {
         self.hops.len()
     }
@@ -66,6 +69,10 @@ impl ClientCircuit {
     /// Pede ao último salto que se conecte a `addr` e vire o próximo salto.
     /// `relay_public` é a chave do circuito do próximo relay; `link_public`, a chave com que
     /// o salto atual autentica o link até ele (Noise NK).
+    ///
+    /// # Errors
+    ///
+    /// [`CircuitError::Protocol`] se o circuito ainda não tem salto, já espera uma resposta de extensão ou está no tamanho máximo; [`CircuitError::Oversize`] se `addr` não cabe na célula; [`CircuitError::CounterExhausted`] quando o nonce do salto acaba.
     pub fn extend(&mut self, addr: &str, relay_public: &[u8; 32], link_public: &[u8; 32]) -> Result<Cell, CircuitError> {
         if self.hops.is_empty() || self.pending.is_some() {
             return Err(CircuitError::Protocol("extend fora de hora"));
@@ -83,26 +90,47 @@ impl ClientCircuit {
     }
 
     /// Pede à saída que abra o fluxo para `dest`.
+    ///
+    /// # Errors
+    ///
+    /// [`CircuitError::Protocol`] se o circuito ainda não tem salto; [`CircuitError::Oversize`] se `dest` não cabe na célula; [`CircuitError::CounterExhausted`] quando o nonce do salto acaba.
     pub fn begin(&mut self, dest: &str) -> Result<Cell, CircuitError> {
         self.send_last(RelayCmd::Begin, dest.as_bytes().to_vec())
     }
 
     /// Envia dados à saída. Máximo: [`max_data`]`(1)` bytes com 2 saltos.
+    ///
+    /// # Errors
+    ///
+    /// Como [`Self::begin`]; [`CircuitError::Oversize`] vale para `payload` grande demais.
     pub fn send_data(&mut self, payload: &[u8]) -> Result<Cell, CircuitError> {
         self.send_last(RelayCmd::Data, payload.to_vec())
     }
 
     /// Célula de preenchimento para o salto de saída (cover de ponta a ponta).
+    ///
+    /// # Errors
+    ///
+    /// Como [`Self::begin`].
     pub fn cover(&mut self) -> Result<Cell, CircuitError> {
         self.send_last(RelayCmd::Drop, Vec::new())
     }
 
+    /// Encerra o circuito: a célula leva `Destroy` até a saída.
+    ///
+    /// # Errors
+    ///
+    /// Como [`Self::begin`].
     pub fn end(&mut self) -> Result<Cell, CircuitError> {
         self.send_last(RelayCmd::End, Vec::new())
     }
 
     /// Ping ao salto `hop`; a resposta chega como [`Event::Pong`]. Mede a
     /// latência até aquele salto e serve de sinal de vida do circuito.
+    ///
+    /// # Errors
+    ///
+    /// [`CircuitError::Protocol`] se `hop` não existe no circuito; os demais, como em [`Self::begin`].
     pub fn ping(&mut self, hop: usize, nonce: u64) -> Result<Cell, CircuitError> {
         if hop >= self.hops.len() {
             return Err(CircuitError::Protocol("salto inexistente"));
@@ -133,6 +161,10 @@ impl ClientCircuit {
     }
 
     /// Processa uma célula recebida do primeiro relay.
+    ///
+    /// # Errors
+    ///
+    /// Erro se a célula é de outro circuito, repetida, não decifra ou viola o protocolo; o circuito deve ser descartado nesses casos.
     pub fn handle_cell(&mut self, cell: Cell) -> Result<Event, CircuitError> {
         if cell.circ != self.circ {
             return Err(CircuitError::UnknownCircuit);

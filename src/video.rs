@@ -319,7 +319,7 @@ impl H264Encoder {
 
     /// Como [`Self::default_bitrate`], para um circuito que manda um pacote a cada `slot`.
     pub fn bitrate_for(slot: std::time::Duration) -> u32 {
-        (ScreenStream::capacity_bps(slot) * 9 / 10) as u32
+        u32::try_from(ScreenStream::capacity_bps(slot) * 9 / 10).unwrap_or(u32::MAX)
     }
 
     pub fn new(bitrate: u32) -> Result<Self, VideoError> {

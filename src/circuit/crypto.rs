@@ -33,11 +33,13 @@ pub struct HopKeys(HopSecrets);
 
 impl HopKeys {
     /// Lado do cliente: cifra para o relay (`fwd`), decifra a volta (`back`).
+    #[must_use]
     pub fn client_layers(&self) -> (LayerSender, LayerReceiver) {
         (LayerSender::new(self.0.fwd), LayerReceiver::new(self.0.back))
     }
 
     /// Lado do relay: decifra o que vem do cliente, cifra a volta.
+    #[must_use]
     pub fn relay_layers(&self) -> (LayerReceiver, LayerSender) {
         (LayerReceiver::new(self.0.fwd), LayerSender::new(self.0.back))
     }
@@ -71,6 +73,7 @@ pub struct ClientHandshake {
 }
 
 impl ClientHandshake {
+    #[must_use]
     pub fn new(relay_public: &[u8; 32]) -> Self {
         let secret = StaticSecret::random_from_rng(OsRng);
         let public = PublicKey::from(&secret);
@@ -78,11 +81,16 @@ impl ClientHandshake {
     }
 
     /// `X`: o que vai para o relay.
+    #[must_use]
     pub fn public(&self) -> [u8; 32] {
         self.public.to_bytes()
     }
 
     /// Conclui com `Y` e a tag do relay. Falha se o relay não possui `B`.
+    ///
+    /// # Errors
+    ///
+    /// [`CircuitError::Handshake`] se `Y` é ponto fraco ou a tag não confere (o relay não possui `B`).
     pub fn finish(self, y: &[u8; 32], tag: &[u8; 32]) -> Result<HopKeys, CircuitError> {
         let y_pub = PublicKey::from(*y);
         let ss1 = self.secret.diffie_hellman(&self.relay);
@@ -106,6 +114,10 @@ pub struct ServerReply {
 }
 
 /// Lado do relay: responde ao `X` do cliente usando a chave estática do relay.
+///
+/// # Errors
+///
+/// [`CircuitError::Handshake`] se `x` é ponto fraco (ordem baixa).
 pub fn server_handshake(relay_secret: &StaticSecret, x: &[u8; 32]) -> Result<ServerReply, CircuitError> {
     let x_pub = PublicKey::from(*x);
     let b_pub = PublicKey::from(relay_secret);
@@ -138,6 +150,11 @@ impl LayerSender {
         Self { key, counter: 0 }
     }
 
+    /// Cifra uma camada com o próximo nonce.
+    ///
+    /// # Errors
+    ///
+    /// [`CircuitError::CounterExhausted`] quando o contador de nonce acaba: o circuito precisa ser refeito.
     pub fn seal(&mut self, plaintext: &[u8]) -> Result<Vec<u8>, CircuitError> {
         if self.counter == u64::MAX {
             return Err(CircuitError::CounterExhausted);
@@ -202,6 +219,10 @@ impl LayerReceiver {
     }
 
     /// Verifica o replay, decifra e só então registra o contador.
+    ///
+    /// # Errors
+    ///
+    /// [`CircuitError::Replay`] se o contador já foi visto ou saiu da janela; [`CircuitError::Decrypt`] se a autenticação falha.
     #[deny(clippy::indexing_slicing, clippy::unwrap_used)]
     pub fn open(&mut self, data: &[u8]) -> Result<Vec<u8>, CircuitError> {
         if data.len() < 8 + 16 {

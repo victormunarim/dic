@@ -51,6 +51,7 @@ use crate::{
 };
 
 /// Nome do destino que o relay de saída mapeia para o telefone de `key`.
+#[must_use]
 pub fn dest_for(key: &[u8; 32]) -> String {
     let hex: String = key[..8].iter().map(|b| format!("{b:02x}")).collect();
     format!("{hex}:9")
@@ -65,6 +66,7 @@ pub struct RelayInfo {
 }
 
 impl RelayInfo {
+    #[must_use]
     pub fn candidate(&self) -> Candidate {
         Candidate { addr: self.addr.clone(), public: self.onion, link_public: self.link, score: 1.0 }
     }
@@ -158,6 +160,10 @@ pub struct Node {
 impl Node {
     /// Sobe relay e telefone. Recebe de quem tem o seu endereço (o código de contato direto, ou o aviso que
     /// você mandou) e liga para quem está em `known`, em `hints` ou na DHT e nas âncoras.
+    ///
+    /// # Errors
+    ///
+    /// Erro de E/S ao abrir a porta do relay ou a do telefone.
     pub async fn start(cfg: NodeConfig) -> io::Result<Self> {
         let me = PublicKey::from(&cfg.secret);
         let phone = Phone::bind("127.0.0.1:0".parse().unwrap(), cfg.secret.clone(), cfg.contacts.clone()).await?;
@@ -362,6 +368,7 @@ impl Node {
 
     /// Contatos a quem [`Node::introduce`] ainda não entregou (sem confirmação até agora), para o app guardar e
     /// chamar `introduce` de novo no próximo início.
+    #[must_use]
     pub fn pending_introductions(&self) -> Vec<[u8; 32]> {
         self.introducing.lock_unpoisoned().keys().copied().collect()
     }
@@ -369,6 +376,7 @@ impl Node {
     /// Quem adicionou esta pessoa e se apresentou desde a última chamada. Cada um já foi confirmado a quem
     /// mandou, mas nada mudou aqui: o app decide se vira contato ([`Node::add_contact`]). Fica vazio com
     /// [`NodeConfig::introductions`] desligado.
+    #[must_use]
     pub fn take_introductions(&self) -> Vec<Introduced> {
         std::mem::take(&mut *self.introduced.lock_unpoisoned())
     }
@@ -385,6 +393,7 @@ impl Node {
         self.dialer.set_trusted(*peer, false);
     }
 
+    #[must_use]
     pub fn public_key(&self) -> [u8; 32] {
         *PublicKey::from(&self.secret).as_bytes()
     }
@@ -400,12 +409,14 @@ impl Node {
     }
 
     /// Endereço do relay como foi informado ou aberto por UPnP (na falta, o local).
+    #[must_use]
     pub fn published_addr(&self) -> String {
         self.addr.lock_unpoisoned().clone()
     }
 
     /// Relay desta máquina como os outros o alcançam (endereço público ou, na falta, o da rede local), para
     /// montar o código de contato direto. `None` se não há endereço que alguém de fora use.
+    #[must_use]
     pub fn relay_info(&self) -> Option<RelayInfo> {
         self.own.lock_unpoisoned().clone()
     }
@@ -416,29 +427,34 @@ impl Node {
     }
 
     /// Aviso sobre a rede (porta aberta por UPnP, ou por que não foi possível), se houver.
+    #[must_use]
     pub fn network_note(&self) -> Option<String> {
         self.note.clone()
     }
 
     /// Últimos endereços de relay conhecidos por contato, para guardar e devolver em [`NodeConfig::known`].
+    #[must_use]
     pub fn known(&self) -> Vec<([u8; 32], RelayInfo)> {
         self.known.lock_unpoisoned().iter().map(|(k, v)| (*k, v.clone())).collect()
     }
 
     /// Relays que contatos mandaram nos convites e que ainda não foram confirmados por uma chamada, para
     /// guardar e devolver em [`NodeConfig::hints`]. Ligar de volta para quem te ligou funciona sem outro endereço.
+    #[must_use]
     pub fn hints(&self) -> Vec<([u8; 32], RelayInfo)> {
         self.hints.lock_unpoisoned().iter().map(|(k, v)| (*k, v.clone())).collect()
     }
 
     /// Endereços antigos de relay por contato, do mais novo ao mais velho (até [`HISTORY`] por contato), para
     /// guardar e devolver em [`NodeConfig::history`]. Quem mudou de endereço sem avisar ainda é achado por eles.
+    #[must_use]
     pub fn history(&self) -> Vec<([u8; 32], RelayInfo)> {
         self.history.lock_unpoisoned().iter().flat_map(|(k, v)| v.iter().map(|r| (*k, r.clone()))).collect()
     }
 
     /// Motivo de um convite descartado em silêncio (veja [`Phone::take_notice`]), aviso de que um contato
     /// mandou o endereço novo dele ou de que o endereço deste nó mudou, se houve; uma vez só.
+    #[must_use]
     pub fn take_notice(&self) -> Option<String> {
         self.phone.take_notice().or_else(|| self.update_notice.lock_unpoisoned().take())
     }
@@ -452,11 +468,19 @@ impl Node {
     }
 
     /// Liga para `peer` (veja [`Dialer::dial`]).
+    ///
+    /// # Errors
+    ///
+    /// Veja [`Dialer::dial`].
     pub async fn dial<C: Codec + Send + 'static>(&self, peer: [u8; 32], codec: C, wait: Duration) -> Result<ActiveCall, DialError> {
         self.dialer.dial(peer, codec, wait).await
     }
 
     /// Transmite a tela da chamada para `peer` (veja [`Dialer::share_screen`]).
+    ///
+    /// # Errors
+    ///
+    /// Veja [`Dialer::share_screen`].
     pub async fn share_screen(&self, peer: [u8; 32], call: &ActiveCall, wait: Duration) -> Result<ScreenShare, DialError> {
         self.dialer.share_screen(peer, call, wait).await
     }
@@ -467,11 +491,13 @@ impl Node {
     }
 
     /// Os servidores e salas desta pessoa: criar, convidar, presença, eventos. Cópia barata.
+    #[must_use]
     pub fn servers(&self) -> ServerHub {
         self.servers.clone()
     }
 
     /// Cópia barata que sabe ligar sem emprestar o `Node`: serve para discar em tarefas em segundo plano.
+    #[must_use]
     pub fn dialer(&self) -> Dialer {
         self.dialer.clone()
     }
