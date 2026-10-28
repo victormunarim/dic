@@ -7,8 +7,6 @@ pub enum PathMode {
     /// você → relay A → relay B → contato. A só vê o seu IP; B só o do contato.
     #[default]
     TwoHop,
-    /// você → relay → contato. O relay vê os dois IPs.
-    OneHop,
     /// você → contato. O contato vê o seu IP.
     Direct,
 }
@@ -18,7 +16,6 @@ impl PathMode {
     pub fn relay_count(self) -> usize {
         match self {
             PathMode::TwoHop => 2,
-            PathMode::OneHop => 1,
             PathMode::Direct => 0,
         }
     }
@@ -27,7 +24,7 @@ impl PathMode {
     pub fn voice_latency_target_ms(self) -> u32 {
         match self {
             PathMode::Direct => 150,
-            PathMode::OneHop | PathMode::TwoHop => 200,
+            PathMode::TwoHop => 200,
         }
     }
 }
@@ -94,7 +91,6 @@ mod tests {
     #[test]
     fn relay_counts_and_targets() {
         assert_eq!(PathMode::TwoHop.relay_count(), 2);
-        assert_eq!(PathMode::OneHop.relay_count(), 1);
         assert_eq!(PathMode::Direct.relay_count(), 0);
         assert_eq!(PathMode::Direct.voice_latency_target_ms(), 150);
         assert_eq!(PathMode::TwoHop.voice_latency_target_ms(), 200);

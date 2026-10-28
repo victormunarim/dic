@@ -66,7 +66,6 @@ let direto = PathRequest {
 | Modo | Relays | Alvo de voz |
 | --- | --- | --- |
 | `TwoHop` (padrão) | 2 | 200 ms |
-| `OneHop` | 1 | 200 ms |
 | `Direct` | 0 | 150 ms |
 
 ### 5. Assinar os tópicos do círculo

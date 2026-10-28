@@ -24,7 +24,7 @@ Valem para os módulos `pairing`, `presence`, `service`, `circle`, `intro` e `re
 - **Registro de presença:** contém só pontos de introdução (endereços de relays), nunca o IP. É cifrado (ChaCha20-Poly1305), assinado (ed25519) e tem sempre 668 bytes, qualquer que seja o conteúdo. O endereço entra como dado autenticado, então o registro não vale em outro endereço.
 - **Consultas falsas:** cada busca real vem misturada e embaralhada com consultas a endereços aleatórios.
 - **Círculos:** os tópicos de presença e de anúncio de call vêm do segredo do grupo. Quem não é membro não os deriva.
-- **Modos de caminho:** 2 saltos (padrão), 1 salto e direto.
+- **Modos de caminho:** 2 saltos (padrão) e direto.
 
 ## Documentação
 
