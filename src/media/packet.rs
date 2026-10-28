@@ -4,12 +4,16 @@
 //! o pacote tem o mesmo tamanho. A chave é por direção e por chamada, então o `seq` serve
 //! de nonce sem risco de reuso.
 
+// O pacote de mídia chega da rede: nada de índice nem `unwrap` que derrube o processo.
+#![deny(clippy::indexing_slicing, clippy::unwrap_used)]
+
 use chacha20poly1305::{
     ChaCha20Poly1305, Key, Nonce,
     aead::{Aead, KeyInit, Payload},
 };
 
 use super::{MediaError, keys::CallKeys};
+use crate::bytes::Reader;
 
 /// Tamanho do pacote no fio.
 pub const PACKET_LEN: usize = 200;
@@ -73,7 +77,7 @@ impl Sealer {
         let mut plain = [0u8; PLAIN_LEN];
         plain[0] = kind;
         plain[1] = frame.len() as u8;
-        plain[2..2 + frame.len()].copy_from_slice(frame);
+        plain.get_mut(2..2 + frame.len()).ok_or(MediaError::TooLarge(frame.len()))?.copy_from_slice(frame);
         let aad = seq.to_be_bytes();
         let ct = self
             .cipher
@@ -131,21 +135,20 @@ impl Opener {
     /// pacote forjado não queime números.
     pub fn open(&mut self, packet: &[u8]) -> Result<(u32, Opened), MediaError> {
         let packet: &[u8; PACKET_LEN] = packet.try_into().map_err(|_| MediaError::Size)?;
-        let seq = u32::from_be_bytes(packet[..SEQ_LEN].try_into().expect("4 bytes"));
+        let (aad, body) = packet.split_at(SEQ_LEN);
+        let seq = u32::from_be_bytes(aad.try_into().map_err(|_| MediaError::Size)?);
         if self.is_replay(seq) {
             return Err(MediaError::Replay);
         }
-        let plain = self
-            .cipher
-            .decrypt(&nonce(seq), Payload { msg: &packet[SEQ_LEN..], aad: &packet[..SEQ_LEN] })
-            .map_err(|_| MediaError::Decrypt)?;
+        let plain = self.cipher.decrypt(&nonce(seq), Payload { msg: body, aad }).map_err(|_| MediaError::Decrypt)?;
         self.mark(seq);
-        let len = plain[1] as usize;
-        if len > MAX_PAYLOAD {
+        let mut r = Reader::new(&plain);
+        let (Some(kind), Some(len)) = (r.u8(), r.u8()) else { return Err(MediaError::Malformed) };
+        if usize::from(len) > MAX_PAYLOAD {
             return Err(MediaError::Malformed);
         }
-        match plain[0] {
-            KIND_VOICE => Ok((seq, Opened::Voice(plain[2..2 + len].to_vec()))),
+        match kind {
+            KIND_VOICE => Ok((seq, Opened::Voice(r.take(len.into()).ok_or(MediaError::Malformed)?.to_vec()))),
             KIND_HANGUP => Ok((seq, Opened::Hangup)),
             _ => Err(MediaError::Malformed),
         }
@@ -153,6 +156,7 @@ impl Opener {
 }
 
 #[cfg(test)]
+#[allow(clippy::indexing_slicing, clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::media::keys::{CallKeys, Ephemeral};

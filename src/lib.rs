@@ -54,6 +54,7 @@ pub use x25519_dalek;
 
 #[cfg(feature = "audio")]
 pub mod audio;
+pub(crate) mod bytes;
 pub mod circle;
 pub mod cover;
 pub mod circuit;

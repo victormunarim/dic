@@ -26,6 +26,9 @@
 //! - Fila do emissor limitada: se o codec produz mais do que o circuito leva, os quadros
 //!   mais velhos são descartados e a fila só volta a aceitar a partir de um quadro-chave.
 
+// Os pacotes de tela vêm de quem transmite, que pode ser hostil: nada de índice nem `unwrap` que derrube o processo.
+#![deny(clippy::indexing_slicing, clippy::unwrap_used)]
+
 use std::{
     collections::{HashMap, VecDeque},
     time::{Duration, Instant},
@@ -132,6 +135,13 @@ struct Pending {
     parts: Vec<Option<Vec<u8>>>,
     /// Quando chegou o último fragmento deste quadro.
     last_at: Instant,
+}
+
+/// Copia `bytes` para `buf` a partir de `at`. Os tamanhos são fixos por construção; se não couberem, nada é escrito.
+fn put(buf: &mut [u8], at: usize, bytes: &[u8]) {
+    if let Some(dst) = buf.get_mut(at..at + bytes.len()) {
+        dst.copy_from_slice(bytes);
+    }
 }
 
 /// `a` vem antes de `b` na numeração circular de 16 bits.
@@ -298,22 +308,23 @@ impl ScreenStream {
         }
         let mut buf = [0u8; MAX_PAYLOAD];
         let mut len = HEADER;
-        buf[0] = IDLE | if self.broken { WANT_KEY } else { 0 };
+        let mut flags = IDLE | if self.broken { WANT_KEY } else { 0 };
         if let Some((lost, expected)) = window {
-            buf[0] |= REPORT;
-            buf[1] = lost;
-            buf[3..5].copy_from_slice(&expected.to_be_bytes());
+            flags |= REPORT;
+            put(&mut buf, 1, &[lost]);
+            put(&mut buf, 3, &expected.to_be_bytes());
         }
         if !nacks.is_empty() {
-            buf[0] |= NACK;
-            buf[2] = nacks.len() as u8;
+            flags |= NACK;
+            put(&mut buf, 2, &[nacks.len() as u8]);
             for (id, idx) in nacks {
-                buf[len..len + 2].copy_from_slice(&id.to_be_bytes());
-                buf[len + 2..len + 4].copy_from_slice(&idx.to_be_bytes());
+                put(&mut buf, len, &id.to_be_bytes());
+                put(&mut buf, len + 2, &idx.to_be_bytes());
                 len += 4;
             }
         }
-        Some(self.sealer.seal(&buf[..len]))
+        put(&mut buf, 0, &[flags]);
+        Some(self.sealer.seal(buf.get(..len)?))
     }
 
     /// Fecha a janela de medição se deu o tempo: fração perdida (0 a 255) e pacotes esperados.
@@ -358,7 +369,7 @@ impl ScreenStream {
                 Some(p) => {
                     // No quadro mais novo só vale o que ficou para trás de um fragmento que já chegou.
                     let upto = if id == newest { p.parts.iter().rposition(Option::is_some).unwrap_or(0) } else { p.parts.len() };
-                    out.extend((0..upto).filter(|i| p.parts[*i].is_none()).map(|i| (id, i as u16)));
+                    out.extend(p.parts.iter().take(upto).enumerate().filter(|(_, part)| part.is_none()).map(|(i, _)| (id, i as u16)));
                 }
             }
             if out.len() > before {
@@ -373,11 +384,10 @@ impl ScreenStream {
     }
 
     /// Quem transmite: põe na fila de reenvio os fragmentos que o relatório de quem assiste pediu.
-    fn schedule_retx(&mut self, frame: &[u8]) {
-        let count = frame[2] as usize;
+    fn schedule_retx(&mut self, count: u8, pairs: &[u8]) {
         let now = Instant::now();
-        for pair in frame[HEADER..].as_chunks::<4>().0.iter().take(count) {
-            let (id, idx) = (u16::from_be_bytes([pair[0], pair[1]]), u16::from_be_bytes([pair[2], pair[3]]));
+        for &[i0, i1, x0, x1] in pairs.as_chunks::<4>().0.iter().take(count.into()) {
+            let (id, idx) = (u16::from_be_bytes([i0, i1]), u16::from_be_bytes([x0, x1]));
             for sent in self.history.iter_mut().filter(|s| s.frag.1 == id && (idx == WHOLE_FRAME || s.frag.2 == idx)) {
                 if self.retx.len() >= MAX_RETX {
                     return;
@@ -394,14 +404,18 @@ impl ScreenStream {
 
     /// Entrega, em ordem, os quadros completos; desiste do que não veio no prazo.
     fn drain(&mut self) {
-        while let Some(i) = (0..self.pending.len()).fold(None, |o: Option<usize>, i| match o {
-            Some(o) if !older(self.pending[i].id, self.pending[o].id) => Some(o),
-            _ => Some(i),
-        }) {
-            let (id, key, full, last_at) = {
-                let p = &self.pending[i];
-                (p.id, p.keyframe, p.got == p.total as usize, p.last_at)
-            };
+        while let Some(i) = self
+            .pending
+            .iter()
+            .enumerate()
+            .fold(None, |o: Option<(usize, u16)>, (i, p)| match o {
+                Some((_, oldest)) if !older(p.id, oldest) => o,
+                _ => Some((i, p.id)),
+            })
+            .map(|(i, _)| i)
+        {
+            let Some(p) = self.pending.get(i) else { break };
+            let (id, key, full, last_at) = (p.id, p.keyframe, p.got == p.total as usize, p.last_at);
             let next = self.last_id.map(|l| l.wrapping_add(1));
             let in_order = key || next.is_none_or(|n| n == id);
             if full && in_order {
@@ -463,11 +477,11 @@ impl ScreenStream {
         let len = match next {
             Some((flags, id, idx, total, data)) => {
                 self.stats.packets_sent += 1;
-                buf[0] = flags | want;
-                buf[1..3].copy_from_slice(&id.to_be_bytes());
-                buf[3..5].copy_from_slice(&idx.to_be_bytes());
-                buf[5..7].copy_from_slice(&total.to_be_bytes());
-                buf[HEADER..HEADER + data.len()].copy_from_slice(&data);
+                put(&mut buf, 0, &[flags | want]);
+                put(&mut buf, 1, &id.to_be_bytes());
+                put(&mut buf, 3, &idx.to_be_bytes());
+                put(&mut buf, 5, &total.to_be_bytes());
+                put(&mut buf, HEADER, &data);
                 if fresh {
                     if self.history.len() >= HISTORY {
                         self.history.pop_front();
@@ -477,11 +491,11 @@ impl ScreenStream {
                 HEADER + data.len()
             }
             None => {
-                buf[0] = IDLE | want;
+                put(&mut buf, 0, &[IDLE | want]);
                 HEADER
             }
         };
-        self.sealer.seal(&buf[..len])
+        self.sealer.seal(buf.get(..len).ok_or(MediaError::TooLarge(len))?)
     }
 
     /// Pacote que chegou do circuito.
@@ -497,22 +511,21 @@ impl ScreenStream {
                 return Err(e);
             }
         };
-        if frame.len() < HEADER {
+        let Some((&[flags, b1, b2, b3, b4, b5, b6], body)) = frame.split_first_chunk::<HEADER>() else {
             self.stats.rejected += 1;
             return Err(MediaError::Malformed);
-        }
-        let flags = frame[0];
+        };
         if flags & WANT_KEY != 0 {
             self.peer_wants_key = true;
         }
         if flags & REPORT != 0 {
-            let packets = u16::from_be_bytes([frame[3], frame[4]]) as u32;
-            self.report_in = Some(LossReport { loss: frame[1] as f32 / 255.0, packets });
+            let packets = u32::from(u16::from_be_bytes([b3, b4]));
+            self.report_in = Some(LossReport { loss: f32::from(b1) / 255.0, packets });
             self.report_at = Some(Instant::now());
             self.sent_at_report = self.stats.packets_sent;
         }
-        if flags & NACK != 0 && frame.len() > HEADER {
-            self.schedule_retx(&frame);
+        if flags & NACK != 0 && !body.is_empty() {
+            self.schedule_retx(b2, body);
         }
         if flags & STOP != 0 {
             self.peer_stopped = true;
@@ -522,8 +535,8 @@ impl ScreenStream {
             return Ok(());
         }
         self.peer_stopped = false;
-        let id = u16::from_be_bytes([frame[1], frame[2]]);
-        let (idx, total) = (u16::from_be_bytes([frame[3], frame[4]]) as usize, u16::from_be_bytes([frame[5], frame[6]]) as usize);
+        let id = u16::from_be_bytes([b1, b2]);
+        let (idx, total) = (usize::from(u16::from_be_bytes([b3, b4])), usize::from(u16::from_be_bytes([b5, b6])));
         if total == 0 || idx >= total {
             self.stats.rejected += 1;
             return Err(MediaError::Malformed);
@@ -543,15 +556,15 @@ impl ScreenStream {
                 self.pending.len() - 1
             }
         };
-        let p = &mut self.pending[slot];
-        if p.total as usize != total {
+        let part = self.pending.get_mut(slot).filter(|p| p.total as usize == total).and_then(|p| Some((p.parts.get_mut(idx)?, &mut p.got, &mut p.last_at)));
+        let Some((part, got, last_at)) = part else {
             self.stats.rejected += 1;
             return Err(MediaError::Malformed);
-        }
-        if p.parts[idx].is_none() {
-            p.parts[idx] = Some(frame[HEADER..].to_vec());
-            p.got += 1;
-            p.last_at = Instant::now();
+        };
+        if part.is_none() {
+            *part = Some(body.to_vec());
+            *got += 1;
+            *last_at = Instant::now();
         }
         self.drain();
         Ok(())
@@ -582,6 +595,7 @@ impl ScreenStream {
 }
 
 #[cfg(test)]
+#[allow(clippy::indexing_slicing, clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::media::keys::Ephemeral;

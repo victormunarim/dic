@@ -26,6 +26,9 @@
 //! - Repetir um registro gravado só devolve ao contato um endereço que ele já teve; quem recebe descarta
 //!   registro com `seq` menor ou igual ao último que viu.
 
+// Os registros, avisos e apresentações chegam de fora e qualquer um pode ter montado o quadro: nada de índice nem `unwrap` que derrube o processo.
+#![deny(clippy::indexing_slicing, clippy::unwrap_used)]
+
 use chacha20poly1305::{
     ChaCha20Poly1305, Key, Nonce,
     aead::{Aead, KeyInit, Payload},
@@ -34,6 +37,8 @@ use hkdf::Hkdf;
 use rand_core::{OsRng, RngCore};
 use sha2::Sha256;
 use x25519_dalek::{PublicKey, StaticSecret};
+
+use crate::bytes::Reader;
 
 use super::{MediaError, packet::PACKET_LEN, signal::Frame};
 
@@ -96,13 +101,27 @@ fn seal(cipher: &ChaCha20Poly1305, tag: u8, plain: &[u8]) -> Frame {
 /// Quadro `tag ‖ head ‖ nonce ‖ AEAD(plain)`, completado com bytes aleatórios até [`PACKET_LEN`].
 fn seal_after(cipher: &ChaCha20Poly1305, tag: u8, head: &[u8], plain: &[u8]) -> Frame {
     let sealed = seal_bytes(cipher, tag, plain);
+    let prefix = [&[tag][..], head, &sealed].concat();
     let mut f = [0u8; PACKET_LEN];
-    f[0] = tag;
-    f[1..1 + head.len()].copy_from_slice(head);
-    let at = 1 + head.len();
-    f[at..at + sealed.len()].copy_from_slice(&sealed);
-    OsRng.fill_bytes(&mut f[at + sealed.len()..]);
+    OsRng.fill_bytes(&mut f);
+    // Os tamanhos são fixos por construção; se um dia passarem de `PACKET_LEN`, o quadro sai truncado e não abre.
+    if let Some(dst) = f.get_mut(..prefix.len()) {
+        dst.copy_from_slice(&prefix);
+    }
     f
+}
+
+/// `parts` emendados e completados com zeros até `N` bytes.
+fn padded<const N: usize>(parts: &[&[u8]]) -> [u8; N] {
+    let mut out = [0u8; N];
+    let mut at = 0;
+    for part in parts {
+        if let Some(dst) = out.get_mut(at..at + part.len()) {
+            dst.copy_from_slice(part);
+        }
+        at += part.len();
+    }
+    out
 }
 
 fn open(cipher: &ChaCha20Poly1305, tag: u8, frame: &[u8], plain_len: usize) -> Option<Vec<u8>> {
@@ -112,26 +131,22 @@ fn open(cipher: &ChaCha20Poly1305, tag: u8, frame: &[u8], plain_len: usize) -> O
 /// Abre o quadro `tag ‖ head (head_len bytes) ‖ nonce ‖ AEAD(plain)`.
 fn open_after(cipher: &ChaCha20Poly1305, tag: u8, head_len: usize, frame: &[u8], plain_len: usize) -> Option<Vec<u8>> {
     let frame: &Frame = frame.try_into().ok()?;
-    if frame[0] != tag {
+    let mut r = Reader::new(frame);
+    if r.u8()? != tag {
         return None;
     }
-    let at = 1 + head_len;
-    let sealed = &frame[at + NONCE_LEN..at + NONCE_LEN + plain_len + 16];
-    cipher.decrypt(Nonce::from_slice(&frame[at..at + NONCE_LEN]), Payload { msg: sealed, aad: &[tag] }).ok()
+    r.take(head_len)?;
+    let nonce = r.take(NONCE_LEN)?;
+    let sealed = r.take(plain_len + 16)?;
+    cipher.decrypt(Nonce::from_slice(nonce), Payload { msg: sealed, aad: &[tag] }).ok()
 }
 
 fn encode(record: &AddressRecord) -> Result<[u8; PLAIN_LEN], MediaError> {
     if record.addr.is_empty() || record.addr.len() > MAX_ADDR {
         return Err(MediaError::Malformed);
     }
-    let mut plain = [0u8; PLAIN_LEN];
-    plain[0] = VERSION;
-    plain[1..9].copy_from_slice(&record.seq.to_be_bytes());
-    plain[9] = record.addr.len() as u8;
-    plain[10..10 + record.addr.len()].copy_from_slice(record.addr.as_bytes());
-    plain[10 + MAX_ADDR..42 + MAX_ADDR].copy_from_slice(&record.onion);
-    plain[42 + MAX_ADDR..].copy_from_slice(&record.link);
-    Ok(plain)
+    let addr = padded::<MAX_ADDR>(&[record.addr.as_bytes()]);
+    Ok(padded(&[&[VERSION], &record.seq.to_be_bytes(), &[record.addr.len() as u8], &addr, &record.onion, &record.link]))
 }
 
 /// Quadro com o registro de `my_static` para `peer`.
@@ -156,7 +171,8 @@ pub fn open_record(my_static: &StaticSecret, peer: &PublicKey, value: &[u8]) -> 
         return None;
     }
     let cipher = cipher(my_static, peer, peer)?;
-    let plain = cipher.decrypt(Nonce::from_slice(&value[..NONCE_LEN]), Payload { msg: &value[NONCE_LEN..], aad: &[TAG_RECORD] }).ok()?;
+    let (nonce, body) = value.split_at_checked(NONCE_LEN)?;
+    let plain = cipher.decrypt(Nonce::from_slice(nonce), Payload { msg: body, aad: &[TAG_RECORD] }).ok()?;
     parse(&plain)
 }
 
@@ -216,7 +232,8 @@ pub fn open_server_record(secret: &[u8; 32], server: &[u8; 16], owner: &[u8; 32]
     if value.len() != NONCE_LEN + PLAIN_LEN + 16 {
         return None;
     }
-    let plain = server_cipher(secret, server, owner).decrypt(Nonce::from_slice(&value[..NONCE_LEN]), Payload { msg: &value[NONCE_LEN..], aad: &[TAG_SERVER_RECORD] }).ok()?;
+    let (nonce, body) = value.split_at_checked(NONCE_LEN)?;
+    let plain = server_cipher(secret, server, owner).decrypt(Nonce::from_slice(nonce), Payload { msg: body, aad: &[TAG_SERVER_RECORD] }).ok()?;
     parse(&plain)
 }
 
@@ -259,20 +276,21 @@ pub fn valid_addr(addr: &str) -> bool {
 }
 
 fn parse(plain: &[u8]) -> Option<AddressRecord> {
-    if plain.len() != PLAIN_LEN || plain[0] != VERSION {
+    if plain.len() != PLAIN_LEN {
         return None;
     }
-    let n = plain[9] as usize;
+    let mut r = Reader::new(plain);
+    if r.u8()? != VERSION {
+        return None;
+    }
+    let seq = r.u64()?;
+    let n = usize::from(r.u8()?);
     if n == 0 || n > MAX_ADDR {
         return None;
     }
-    let addr = String::from_utf8(plain[10..10 + n].to_vec()).ok().filter(|a| valid_addr(a))?;
-    Some(AddressRecord {
-        seq: u64::from_be_bytes(plain[1..9].try_into().ok()?),
-        addr,
-        onion: plain[10 + MAX_ADDR..42 + MAX_ADDR].try_into().ok()?,
-        link: plain[42 + MAX_ADDR..].try_into().ok()?,
-    })
+    let field = r.take(MAX_ADDR)?;
+    let addr = String::from_utf8(field.get(..n)?.to_vec()).ok().filter(|a| valid_addr(a))?;
+    Some(AddressRecord { seq, addr, onion: r.array()?, link: r.array()? })
 }
 
 /// Como o apresentador pode ser alcançado por quem o adiciona: o relay dele (o código dele é `chave#addr#onion#link`).
@@ -300,15 +318,9 @@ pub fn seal_intro(my_static: &StaticSecret, peer: &PublicKey, intro: &Intro) -> 
         return Err(MediaError::Malformed);
     }
     let name = clip(intro.name.trim(), MAX_NAME.min(INTRO_TEXT - addr.len()));
-    let mut plain = [0u8; INTRO_PLAIN_LEN];
-    plain[0] = VERSION;
-    plain[1..9].copy_from_slice(&intro.seq.to_be_bytes());
-    plain[10] = addr.len() as u8;
-    plain[11] = name.len() as u8;
-    plain[12..44].copy_from_slice(onion);
-    plain[44..76].copy_from_slice(link);
-    plain[INTRO_HEAD..INTRO_HEAD + addr.len()].copy_from_slice(addr.as_bytes());
-    plain[INTRO_HEAD + addr.len()..INTRO_HEAD + addr.len() + name.len()].copy_from_slice(name.as_bytes());
+    // Byte 9 é reservado (zero).
+    let plain: [u8; INTRO_PLAIN_LEN] =
+        padded(&[&[VERSION], &intro.seq.to_be_bytes(), &[0, addr.len() as u8, name.len() as u8], onion, link, addr.as_bytes(), name.as_bytes()]);
     let me = PublicKey::from(my_static);
     let cipher = cipher(my_static, peer, &me).ok_or(MediaError::BadKey)?;
     Ok(seal_after(&cipher, TAG_INTRO, me.as_bytes(), &plain))
@@ -320,34 +332,38 @@ fn clip(s: &str, max: usize) -> &str {
     while !s.is_char_boundary(end) {
         end -= 1;
     }
-    &s[..end]
+    s.get(..end).unwrap_or_default()
 }
 
 /// Abre `frame` como apresentação para `my_static`. Devolve a chave de quem apresentou (provada: só quem tem a
 /// chave secreta dela monta um quadro que abre) e o cartão. `None`: não é uma apresentação para esta chave.
 pub fn open_intro(my_static: &StaticSecret, frame: &[u8]) -> Option<([u8; 32], Intro)> {
-    if frame.len() != PACKET_LEN || frame[0] != TAG_INTRO {
+    let mut head = Reader::new(frame);
+    if frame.len() != PACKET_LEN || head.u8()? != TAG_INTRO {
         return None;
     }
-    let author: [u8; 32] = frame[1..33].try_into().ok()?;
+    let author: [u8; 32] = head.array()?;
     let owner = PublicKey::from(author);
     let cipher = cipher(my_static, &owner, &owner)?;
     let plain = open_after(&cipher, TAG_INTRO, 32, frame, INTRO_PLAIN_LEN)?;
-    if plain[0] != VERSION {
+    let mut r = Reader::new(&plain);
+    if r.u8()? != VERSION {
         return None;
     }
-    let (addr_len, name_len) = (plain[10] as usize, plain[11] as usize);
+    let seq = r.u64()?;
+    r.u8()?;
+    let (addr_len, name_len) = (usize::from(r.u8()?), usize::from(r.u8()?));
     if addr_len == 0 || addr_len > MAX_ADDR || addr_len + name_len > INTRO_TEXT {
         return None;
     }
-    let text = &plain[INTRO_HEAD..INTRO_HEAD + addr_len + name_len];
-    let addr = String::from_utf8(text[..addr_len].to_vec()).ok()?;
-    let name = String::from_utf8(text[addr_len..].to_vec()).ok().filter(|n| !n.chars().any(char::is_control))?;
+    let (onion, link) = (r.array()?, r.array()?);
+    let (addr, name) = r.take(addr_len + name_len)?.split_at_checked(addr_len)?;
+    let addr = String::from_utf8(addr.to_vec()).ok()?;
+    let name = String::from_utf8(name.to_vec()).ok().filter(|n| !n.chars().any(char::is_control))?;
     if !valid_addr(&addr) {
         return None;
     }
-    let reach = Reach { addr, onion: plain[12..44].try_into().ok()?, link: plain[44..76].try_into().ok()? };
-    Some((author, Intro { seq: u64::from_be_bytes(plain[1..9].try_into().ok()?), name, reach }))
+    Some((author, Intro { seq, name, reach: Reach { addr, onion, link } }))
 }
 
 /// Confirmação de `seq` de `my_static` para `peer`, a quem mandou a atualização.
@@ -365,6 +381,7 @@ pub fn open_ack(my_static: &StaticSecret, peer: &PublicKey, seq: u64, frame: &[u
 }
 
 #[cfg(test)]
+#[allow(clippy::indexing_slicing, clippy::unwrap_used)]
 mod tests {
     #[test]
     fn a_server_record_opens_only_with_the_servers_secret_for_that_owner() {

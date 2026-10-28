@@ -32,7 +32,10 @@
 //! Pedidos: `1 ‖ chave (32) ‖ sal (32)` (ler) e `2 ‖ chave (32) ‖ assinatura (64) ‖ seq (8) ‖ sal (32) ‖ valor` (gravar).
 //! Respostas: `1 ‖ valor` ou `1` (achou/gravou) e `0` (não achou/falhou).
 
-use crate::sync::LockExt;
+// A DHT e as âncoras entregam bytes de desconhecidos: nada de índice nem `unwrap` que derrube o processo.
+#![deny(clippy::indexing_slicing, clippy::unwrap_used)]
+
+use crate::{bytes::Reader, sync::LockExt};
 use std::{
     collections::HashMap,
     io,
@@ -149,16 +152,19 @@ impl Signed {
     }
 
     fn decode(body: &[u8]) -> Option<Self> {
-        if body.len() <= 1 + 32 + 64 + 8 + 32 || body[0] != REQ_PUT {
+        let mut r = Reader::new(body);
+        if r.u8()? != REQ_PUT {
             return None;
         }
-        Some(Self {
-            key: body[1..33].try_into().ok()?,
-            signature: body[33..97].try_into().ok()?,
-            seq: i64::from_be_bytes(body[97..105].try_into().ok()?),
-            salt: body[105..137].try_into().ok()?,
-            value: body[137..].to_vec(),
-        })
+        let (key, signature) = (r.array()?, r.array()?);
+        let seq = i64::from_be_bytes(r.array()?);
+        let salt = r.array()?;
+        // Sem valor não há o que guardar.
+        let value = r.rest();
+        if value.is_empty() {
+            return None;
+        }
+        Some(Self { key, signature, seq, salt, value: value.to_vec() })
     }
 }
 
@@ -349,7 +355,7 @@ async fn gateway_conn<S: Store>(mut stream: TcpStream, store: Arc<S>, budget: Ar
         }
         acc.extend_from_slice(&chunk);
         while acc.len() >= 2 {
-            let total = u16::from_be_bytes([acc[0], acc[1]]) as usize;
+            let total = Reader::new(&acc).u16().map_or(0, usize::from);
             if total == 0 || total > MAX_REQUEST {
                 return;
             }
@@ -377,7 +383,10 @@ async fn gateway_conn<S: Store>(mut stream: TcpStream, store: Arc<S>, budget: Ar
 async fn answer<S: Store>(store: &S, body: &[u8]) -> Vec<u8> {
     match body.first() {
         Some(&REQ_GET) if body.len() == 1 + 32 + 32 => {
-            match store.read(body[1..33].try_into().unwrap(), body[33..65].try_into().unwrap()).await {
+            let mut r = Reader::new(body);
+            r.u8();
+            let (Some(key), Some(salt)) = (r.array(), r.array()) else { return vec![0] };
+            match store.read(&key, &salt).await {
                 Some(value) => [&[1u8][..], &value].concat(),
                 None => vec![0],
             }
@@ -420,13 +429,12 @@ impl Remote {
             loop {
                 if let Event::Data(d) = self.client.next_event().await? {
                     acc.extend_from_slice(&d);
-                    if acc.len() >= 2 {
-                        let total = u16::from_be_bytes([acc[0], acc[1]]) as usize;
+                    if let Some(total) = Reader::new(&acc).u16().map(usize::from) {
                         if total == 0 || total > MAX_REPLY {
                             return None;
                         }
-                        if acc.len() >= 2 + total {
-                            return Some(acc[2..2 + total].to_vec());
+                        if let Some(reply) = acc.get(2..2 + total) {
+                            return Some(reply.to_vec());
                         }
                     }
                 }
@@ -463,6 +471,7 @@ impl Remote {
 }
 
 #[cfg(test)]
+#[allow(clippy::indexing_slicing, clippy::unwrap_used)]
 mod tests {
     use super::*;
 

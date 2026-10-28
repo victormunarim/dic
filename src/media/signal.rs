@@ -34,6 +34,9 @@
 //!   Telefone antigo não olha esses bytes e atende em G.722: ligar em outro codec exige os dois
 //!   lados novos.
 
+// `Incoming::parse` e as demais leituras do convite leem bytes que qualquer um pode ter montado: nada de índice nem `unwrap` que derrube o processo.
+#![deny(clippy::indexing_slicing, clippy::unwrap_used)]
+
 use std::net::{IpAddr, SocketAddr};
 
 use chacha20poly1305::{
@@ -252,16 +255,20 @@ impl Incoming {
         }
         let me = PublicKey::from(my_static);
         let cipher = invite_key(dh.as_bytes(), &eph, me.as_bytes());
-        let plain = cipher.decrypt(&Nonce::default(), &frame[33..HINT_AT]).map_err(|_| MediaError::Decrypt)?;
-        let caller: [u8; 32] = plain[..32].try_into().expect("32 bytes");
+        let plain = cipher.decrypt(&Nonce::default(), frame.get(33..HINT_AT).ok_or(MediaError::Size)?).map_err(|_| MediaError::Decrypt)?;
+        let (caller, proof) = plain.split_at_checked(32).ok_or(MediaError::Malformed)?;
+        let caller: [u8; 32] = caller.try_into().map_err(|_| MediaError::Malformed)?;
         let author = my_static.diffie_hellman(&PublicKey::from(caller));
-        if !author.was_contributory() || !bool::from(author_proof(author.as_bytes(), &eph, me.as_bytes()).ct_eq(&plain[32..])) {
+        if !author.was_contributory() || !bool::from(author_proof(author.as_bytes(), &eph, me.as_bytes()).ct_eq(proof)) {
             return Err(MediaError::BadKey);
         }
         // Convite de versão anterior ou sem dica: o bloco não autentica e fica `None`.
-        let hint = cipher.decrypt(&hint_nonce(), &frame[HINT_AT..HINT_AT + HINT_SEALED_LEN]).ok().and_then(|p| RelayHint::decode(&p));
+        let hint = frame.get(HINT_AT..HINT_AT + HINT_SEALED_LEN).and_then(|sealed| cipher.decrypt(&hint_nonce(), sealed).ok()).and_then(|p| RelayHint::decode(&p));
         // Sem etiqueta que confira (telefone antigo, ou o padrão): G.722.
-        let (salt, mac) = frame[TAIL_AT..TAIL_AT + TAG_SALT_LEN + TAG_MAC_LEN].split_at(TAG_SALT_LEN);
+        let (salt, mac) = frame
+            .get(TAIL_AT..TAIL_AT + TAG_SALT_LEN + TAG_MAC_LEN)
+            .and_then(|tail| tail.split_at_checked(TAG_SALT_LEN))
+            .ok_or(MediaError::Size)?;
         let codec = CodecId::ALL
             .into_iter()
             .filter(|c| *c != CodecId::default())
@@ -309,6 +316,7 @@ impl Incoming {
 }
 
 #[cfg(test)]
+#[allow(clippy::indexing_slicing, clippy::unwrap_used)]
 mod tests {
     use super::*;
     use rand_core::OsRng;

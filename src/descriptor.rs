@@ -32,12 +32,15 @@
 //! - A banda é declarada, não medida; por isso a pontuação a limita
 //!   ([`BANDWIDTH_CAP_KBPS`]).
 
+// O descritor chega da rede: nada de índice nem `unwrap` que derrube o processo.
+#![deny(clippy::indexing_slicing, clippy::unwrap_used)]
+
 use std::{collections::HashMap, net::IpAddr};
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use thiserror::Error;
 
-use crate::circuit::manager::Candidate;
+use crate::{bytes::Reader, circuit::manager::Candidate};
 
 const VERSION: u8 = 2;
 const DOMAIN: &[u8] = b"clam-relay-desc-v2";
@@ -145,25 +148,28 @@ impl RelayDescriptor {
         if buf.len() < FIXED_LEN + 64 {
             return Err(DescriptorError::Malformed);
         }
-        if buf[0] != VERSION {
-            return Err(DescriptorError::Version(buf[0]));
+        let bad = || DescriptorError::Malformed;
+        let mut r = Reader::new(buf);
+        let version = r.u8().ok_or_else(bad)?;
+        if version != VERSION {
+            return Err(DescriptorError::Version(version));
         }
-        let addr_len = buf[FIXED_LEN - 1] as usize;
-        if addr_len == 0 || addr_len > MAX_ADDR_LEN || buf.len() != FIXED_LEN + addr_len + 64 {
-            return Err(DescriptorError::Malformed);
+        let identity = r.array().ok_or_else(bad)?;
+        let onion_key = r.array().ok_or_else(bad)?;
+        let link_key = r.array().ok_or_else(bad)?;
+        let bandwidth_kbps = r.u32().ok_or_else(bad)?;
+        let issued_at = r.u64().ok_or_else(bad)?;
+        let ttl_secs = r.u32().ok_or_else(bad)?;
+        let addr_len = usize::from(r.u8().ok_or_else(bad)?);
+        if addr_len == 0 || addr_len > MAX_ADDR_LEN {
+            return Err(bad());
         }
-        let arr = |a: usize, n: usize| &buf[a..a + n];
-        let addr = std::str::from_utf8(arr(FIXED_LEN, addr_len)).map_err(|_| DescriptorError::Malformed)?;
-        Ok(Self {
-            identity: arr(1, 32).try_into().unwrap(),
-            onion_key: arr(33, 32).try_into().unwrap(),
-            link_key: arr(65, 32).try_into().unwrap(),
-            bandwidth_kbps: u32::from_be_bytes(arr(97, 4).try_into().unwrap()),
-            issued_at: u64::from_be_bytes(arr(101, 8).try_into().unwrap()),
-            ttl_secs: u32::from_be_bytes(arr(109, 4).try_into().unwrap()),
-            addr: addr.to_string(),
-            signature: arr(FIXED_LEN + addr_len, 64).try_into().unwrap(),
-        })
+        let addr = std::str::from_utf8(r.take(addr_len).ok_or_else(bad)?).map_err(|_| bad())?.to_string();
+        let signature = r.array().ok_or_else(bad)?;
+        if !r.is_empty() {
+            return Err(bad());
+        }
+        Ok(Self { identity, onion_key, link_key, bandwidth_kbps, issued_at, ttl_secs, addr, signature })
     }
 
     /// Confere assinatura e validade em `now` (segundos Unix).
@@ -359,6 +365,7 @@ impl RelayDirectory {
 }
 
 #[cfg(test)]
+#[allow(clippy::indexing_slicing, clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::circuit::max_data;
