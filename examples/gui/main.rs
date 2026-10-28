@@ -16,6 +16,10 @@
 
 mod conf;
 mod engine;
+mod call;
+mod contacts;
+mod media;
+mod settings;
 mod servers;
 mod theme;
 mod ui;
