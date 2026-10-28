@@ -255,7 +255,7 @@ impl App {
             .show(ctx, |ui| {
                 ui.spacing_mut().item_spacing.y = 6.0;
                 // O perfil ocupa uma altura fixa no pé; a lista de salas rola no espaço que sobra.
-                let footer: f32 = 74.0 + if room_bar.is_some() { 36.0 } else { 0.0 };
+                let footer: f32 = 74.0 + if room_bar.is_some() { 52.0 } else { 0.0 };
                 if self.tab == Tab::Contacts {
                     let count = parse_contacts(&self.form.contacts).len();
                     ui.add_space(2.0);
@@ -320,7 +320,12 @@ impl App {
                         sunken_frame(ui, 12, 4, |ui| {
                             ui.set_width(ui.available_width());
                             ui.horizontal(|ui| {
-                                ui.label(RichText::new(format!("🔊 {room} · {server}")).size(12.0).color(GREEN));
+                                ui.label(RichText::new("🔊").size(20.0).color(GREEN));
+                                ui.vertical(|ui| {
+                                    ui.spacing_mut().item_spacing.y = 0.0;
+                                    ui.label(RichText::new(room).strong().size(16.0).color(GREEN));
+                                    ui.label(RichText::new(server).size(12.0).color(MUTED));
+                                });
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                     let leave = egui::Button::new(RichText::new("✖").size(12.0).color(MUTED)).frame(false);
                                     if ui.add(leave).on_hover_text("Sair da sala").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
@@ -625,10 +630,14 @@ impl App {
                 });
             }
         });
-        ui.horizontal(|ui| {
-            let reply = ui.add(field(&mut self.srv.chat_draft, "Mensagem para a sala").desired_width((ui.available_width() - 90.0).max(80.0)));
+        // O botão é medido primeiro (da direita para a esquerda) e o campo ocupa só o que sobra: com largura
+        // fixa para o campo, o botão passava da borda e a coluna de membros o cobria.
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let ready = !self.srv.chat_draft.trim().is_empty();
+            let sent = button(ui, ready, "Enviar", BLURPLE).clicked();
+            let reply = ui.add(field(&mut self.srv.chat_draft, "Mensagem para a sala").desired_width(ui.available_width().max(80.0)));
             let enter = reply.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if (button(ui, !self.srv.chat_draft.trim().is_empty(), "Enviar", BLURPLE).clicked() || enter) && !self.srv.chat_draft.trim().is_empty() {
+            if (sent || enter) && !self.srv.chat_draft.trim().is_empty() {
                 let text = std::mem::take(&mut self.srv.chat_draft);
                 if let Err(e) = hub.try_act(|s, now| s.say(&v.id, &text, now)) {
                     self.srv.msg = e.to_string();
