@@ -24,6 +24,8 @@ pub(crate) struct ServersUi {
     pub(crate) join_ok: bool,
     /// Convite gerado, para copiar.
     pub(crate) invite_out: String,
+    /// Texto do bate-papo ainda não enviado.
+    pub(crate) chat_draft: String,
     pub(crate) confirm_leave: bool,
     pub(crate) msg: String,
     /// Resultado que deu certo (aparece em verde).
@@ -177,11 +179,7 @@ impl App {
     }
 
     fn server_view(&mut self, ui: &mut egui::Ui, hub: &clam::server::net::ServerHub, v: &ServerView, busy: bool) {
-        let contacts = parse_contacts(&self.form.contacts);
-        let name_of = |key: &[u8; 32], given: &str| if given.is_empty() { member_name(&contacts, key) } else { given.to_string() };
         let online = v.members.iter().filter(|m| m.online).count();
-        let manages = v.my_role.is_some_and(|r| r.manages());
-        let my_room = self.shared.room.lock_unpoisoned().at;
         card(ui, &v.name, &format!("{} membro(s), {online} online · você é {}", v.members.len(), v.my_role.map_or("convidado", role_name)), |ui| {
             if v.joining {
                 note(ui, "Aguardando o convidante responder para trazer o servidor (ele precisa estar online).");
@@ -207,6 +205,30 @@ impl App {
             });
         });
 
+        let in_this_server = self.shared.room.lock_unpoisoned().at.is_some_and(|(server, _)| server == v.id);
+        if in_this_server {
+            self.screens_card(ui, v);
+        }
+        // Em janela larga, salas e membros lado a lado; em estreita, um sobre o outro.
+        if ui.available_width() >= 760.0 {
+            ui.columns(2, |cols| {
+                self.rooms_card(&mut cols[0], hub, v, busy);
+                self.members_card(&mut cols[1], hub, v);
+                self.invite_card(&mut cols[1], hub, v);
+            });
+        } else {
+            self.rooms_card(ui, hub, v, busy);
+            self.members_card(ui, hub, v);
+            self.invite_card(ui, hub, v);
+        }
+    }
+
+    /// Salas de voz do servidor, com o bate-papo da sala em que estou.
+    fn rooms_card(&mut self, ui: &mut egui::Ui, hub: &clam::server::net::ServerHub, v: &ServerView, busy: bool) {
+        let contacts = parse_contacts(&self.form.contacts);
+        let name_of = |key: &[u8; 32], given: &str| if given.is_empty() { member_name(&contacts, key) } else { given.to_string() };
+        let manages = v.my_role.is_some_and(|r| r.manages());
+        let my_room = self.shared.room.lock_unpoisoned().at;
         card(ui, "Salas de voz", "Quem entra numa sala fala com todos que estão nela (até 8 pessoas), ligação direta entre cada par.", |ui| {
             for room in &v.rooms {
                 let here = my_room == Some((v.id, room.id));
@@ -269,6 +291,9 @@ impl App {
                         Some((Some(key), on)) => crate::engine::follow(&self.shared, key, on),
                         None => {}
                     }
+                    if here {
+                        self.chat_box(ui, hub, v, room);
+                    }
                 });
                 ui.add_space(4.0);
             }
@@ -289,7 +314,11 @@ impl App {
                 note(ui, "Para trocar de sala, saia da atual primeiro.");
             }
         });
+    }
 
+    /// Telas que estou assistindo ou transmitindo na sala em que estou.
+    fn screens_card(&mut self, ui: &mut egui::Ui, v: &ServerView) {
+        let my_room = self.shared.room.lock_unpoisoned().at;
         if my_room.is_some_and(|(server, _)| server == v.id) {
             let (sharing, note_text) = (self.shared.screen.sharing.load(Ordering::Relaxed), self.shared.screen.note.lock_unpoisoned().clone());
             let wanted = self.shared.screen.want_share.load(Ordering::Relaxed);
@@ -320,7 +349,13 @@ impl App {
                 });
             }
         }
+    }
 
+    /// Membros do servidor e, no fim, o convite (recolhido, para ocupar pouco).
+    fn members_card(&mut self, ui: &mut egui::Ui, hub: &clam::server::net::ServerHub, v: &ServerView) {
+        let contacts = parse_contacts(&self.form.contacts);
+        let name_of = |key: &[u8; 32], given: &str| if given.is_empty() { member_name(&contacts, key) } else { given.to_string() };
+        let manages = v.my_role.is_some_and(|r| r.manages());
         card(ui, "Membros", "", |ui| {
             for m in &v.members {
                 ui.horizontal(|ui| {
@@ -351,8 +386,14 @@ impl App {
                 ui.add_space(4.0);
             }
         });
+    }
 
-        card(ui, "Convidar", "Escolha um contato: o convite chega a ele pela rede, cifrado, e só ele consegue abri-lo. Qualquer membro pode convidar.", |ui| {
+    /// Convite de um contato, compacto: recolhido até a pessoa querer convidar.
+    fn invite_card(&mut self, ui: &mut egui::Ui, hub: &clam::server::net::ServerHub, v: &ServerView) {
+        let contacts = parse_contacts(&self.form.contacts);
+        card(ui, "Convidar", "", |ui| {
+          egui::CollapsingHeader::new("Chamar um contato para o servidor").id_salt("convidar-aberto").default_open(false).show(ui, |ui| {
+            note(ui, "O convite chega pela rede, cifrado, e só o contato escolhido consegue abri-lo. Qualquer membro pode convidar.");
             let shown = self.srv.pick.map_or("escolha um contato".to_string(), |k| member_name(&contacts, &k));
             egui::ComboBox::from_id_salt("convidar").selected_text(shown).width(260.0).show_ui(ui, |ui| {
                 for (name, key) in &contacts {
@@ -361,9 +402,9 @@ impl App {
                     }
                 }
             });
-            ui.checkbox(&mut self.srv.ip_ok, "Entendo que quem entrar passa a ver o meu IP quando ligarmos na mesma sala");
-            note(ui, "As chamadas de sala são diretas entre os pares (por circuito de 2 saltos), mas o relay de cada um fica conhecido pelos membros.");
+            ui.checkbox(&mut self.srv.ip_ok, "Entendo que quem entrar passa a ver o meu IP quando ligarmos na mesma sala").on_hover_text("As chamadas de sala são diretas entre os pares (por circuito de 2 saltos), mas o relay de cada um fica conhecido pelos membros.");
             let ready = self.srv.pick.is_some() && self.srv.ip_ok;
+            ui.horizontal(|ui| {
             if button(ui, ready, "Enviar convite", BLURPLE).clicked() {
                 let key = self.srv.pick.expect("botão só liga com contato escolhido");
                 match hub.try_act(|s, now| s.invite_send(&v.id, key, now)) {
@@ -387,12 +428,45 @@ impl App {
                     Err(e) => self.srv.msg = e.to_string(),
                 }
             }
+            });
             if !self.srv.invite_out.is_empty() {
                 ui.add(egui::Label::new(RichText::new(&self.srv.invite_out).monospace().size(12.0)).wrap());
                 if button(ui, true, "Copiar o convite", GREEN).clicked() {
                     ui.ctx().copy_text(self.srv.invite_out.clone());
                 }
                 note(ui, "Mande o texto por onde preferir; ele só abre na conta do convidado. Ele entra quando você estiver online. (Este caminho não envia nada pela rede.)");
+            }
+          });
+        });
+    }
+
+    /// Bate-papo da sala em que estou: só existe enquanto a sala tem gente, e só quem está nela o vê.
+    fn chat_box(&mut self, ui: &mut egui::Ui, hub: &clam::server::net::ServerHub, v: &ServerView, room: &clam::server::RoomView) {
+        let contacts = parse_contacts(&self.form.contacts);
+        ui.add_space(6.0);
+        egui::ScrollArea::vertical().id_salt(("bate-papo", room.id)).max_height(150.0).stick_to_bottom(true).auto_shrink([false, true]).show(ui, |ui| {
+            if room.chat.is_empty() {
+                ui.label(RichText::new("Sem mensagens. A conversa some quando a sala fica vazia.").size(13.0).color(MUTED));
+            }
+            for line in &room.chat {
+                let who = v.members.iter().find(|m| m.id == line.from).map_or("?".to_string(), |m| if m.name.is_empty() { member_name(&contacts, &m.key) } else { m.name.clone() });
+                let mine = v.me == line.from;
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    ui.label(RichText::new(format!("{who}:")).strong().color(if mine { GREEN } else { Color32::WHITE }));
+                    ui.label(RichText::new(&line.text).color(TEXT));
+                });
+            }
+        });
+        ui.horizontal(|ui| {
+            let reply = ui.add(field(&mut self.srv.chat_draft, "Mensagem para a sala").desired_width((ui.available_width() - 90.0).max(80.0)));
+            let enter = reply.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if (button(ui, !self.srv.chat_draft.trim().is_empty(), "Enviar", BLURPLE).clicked() || enter) && !self.srv.chat_draft.trim().is_empty() {
+                let text = std::mem::take(&mut self.srv.chat_draft);
+                if let Err(e) = hub.try_act(|s, now| s.say(&v.id, &text, now)) {
+                    self.srv.msg = e.to_string();
+                }
+                reply.request_focus();
             }
         });
     }

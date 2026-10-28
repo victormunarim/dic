@@ -36,6 +36,8 @@ pub const BUDGET: usize = PACKET_LEN - HEAD - NONCE_LEN - 16;
 pub const INVITE_CHUNK: usize = BUDGET - 7;
 /// Pedaços que um convite pode ter.
 pub const INVITE_CHUNKS: usize = 8;
+/// Bytes de uma linha de bate-papo (o tipo ocupa um byte do quadro).
+pub const MAX_CHAT: usize = BUDGET - 1;
 /// Autores que cabem num quadro de vetor.
 pub const VECTOR_PER_FRAME: usize = (BUDGET - 4) / 10;
 /// Maior endereço (`host:porta`) que o quadro de endereço leva.
@@ -75,6 +77,8 @@ pub enum Msg {
     Watch(bool),
     /// Um pedaço (`idx` de `total`) do convite `id`, que o convidante entrega ao contato sem ele precisar de outro canal.
     InviteChunk { id: [u8; 4], idx: u8, total: u8, data: Vec<u8> },
+    /// Linha do bate-papo da sala, só para quem está nela.
+    Chat(String),
 }
 
 fn cipher(me: &StaticSecret, peer: &[u8; 32], server: &ServerId) -> Option<ChaCha20Poly1305> {
@@ -159,6 +163,10 @@ pub fn encode(msg: &Msg) -> Vec<u8> {
             v.extend_from_slice(&[*idx, *total]);
             v.extend_from_slice(data);
         }
+        Msg::Chat(text) => {
+            v.push(12);
+            v.extend_from_slice(text.as_bytes());
+        }
     }
     v
 }
@@ -229,6 +237,13 @@ pub fn decode(b: &[u8]) -> Option<Msg> {
                 return None;
             }
             Msg::InviteChunk { id: [*i0, *i1, *i2, *i3], idx: *idx, total: *total, data: data.to_vec() }
+        }
+        12 if !b.is_empty() && b.len() <= MAX_CHAT => {
+            let text = std::str::from_utf8(b).ok()?;
+            if text.chars().any(char::is_control) {
+                return None;
+            }
+            Msg::Chat(text.to_string())
         }
         _ => return None,
     })
@@ -314,6 +329,8 @@ mod tests {
             Msg::Watch(true),
             Msg::Watch(false),
             Msg::InviteChunk { id: [1, 2, 3, 4], idx: 2, total: 5, data: vec![9; INVITE_CHUNK] },
+            Msg::Chat("olá".repeat(MAX_CHAT / 4)),
+            Msg::Chat("x".repeat(MAX_CHAT)),
         ]
     }
 
@@ -347,6 +364,16 @@ mod tests {
         let ((a, _), (_, pb)) = pair();
         let msg = Msg::Joined;
         assert_ne!(seal(&a, &pb, &[7; 16], &msg), seal(&a, &pb, &[7; 16], &msg));
+    }
+
+    #[test]
+    fn bad_chat_lines_are_refused() {
+        assert_eq!(decode(&[12]), None, "vazia");
+        assert_eq!(decode(&[12, 0xff, 0xfe]), None, "não é UTF-8");
+        assert_eq!(decode(&[12, b'a', b'\n']), None, "controle");
+        let mut big = vec![12];
+        big.extend(vec![b'a'; MAX_CHAT + 1]);
+        assert_eq!(decode(&big), None, "grande demais");
     }
 
     #[test]

@@ -50,6 +50,7 @@ A chave é **par a par**: `HKDF(DH(minha secreta, pública do outro), "clam/serv
 | `Ack` | "Recebi o quadro cujo nonce começa por estes 8 bytes" |
 | `InviteChunk` | Um pedaço do convite, só entre contatos (veja *Entrega do convite pela rede*) |
 | `Watch` | "Quero assistir à sua tela" / "parei" (só entre quem está na mesma sala) |
+| `Chat` | Uma linha do bate-papo da sala (texto UTF-8, até 157 B, sem caractere de controle; só entre quem está na mesma sala) |
 
 **Entrega.** O `ServerHub` (`src/server/net.rs`) junta os quadros por destinatário e manda em lote por um circuito (abre, manda, espera os `Ack`, fecha). Não se mantém circuito aberto com todos: cada um custaria cerca de 100 kbps de cobertura. Sem `Ack` a entrega é tentada de novo, e se falhar o nó procura o membro pelo registro do servidor (abaixo).
 
@@ -78,6 +79,14 @@ Malha: cada pessoa envia e recebe N-1 fluxos, cerca de 100 kbps por par e direç
 - As escolhas da aba *Vídeo* (privacidade, fluidez ou nitidez, placa de vídeo) valem aqui também.
 - As imagens aparecem em *Telas da sala*, na aba *Servidores*, e se ampliam como na chamada 1:1.
 
+## Bate-papo da sala
+
+- Cada sala tem o seu bate-papo de texto, na própria sala (abaixo de quem está nela), visível só para quem está nela. Escrever manda um `Chat` a cada pessoa da malha (um quadro de 200 B por pessoa, pelo mesmo caminho dos outros quadros de servidor); não há mensagem para quem está fora da sala.
+- Quem recebe confere que o remetente é membro e está online **na mesma sala que ele**; senão ignora. O texto é limpo na entrada (sem controle, no máximo 157 bytes por linha; o envio corta no limite).
+- **Nada vai a disco.** O histórico fica em memória, até 100 linhas por sala, e é esquecido quando a sala fica **sem ninguém** (ou é apagada), segundo a presença que cada lado enxerga. Reiniciar o programa também apaga.
+- **Limites conhecidos:** quem entra depois não vê o que foi dito antes (não há sincronização de histórico); quem sai e volta com a sala ainda ocupada mantém só o que recebeu enquanto estava dentro; não há confirmação de entrega nem ordenação entre remetentes (cada lado mostra na ordem em que as linhas chegam); a linha leva só texto. Uma versão antiga ignora o quadro `Chat` (tipo desconhecido), então quem a usa não vê a conversa, mas o resto da sala segue normal.
+- Quem observa a rede vê mais um quadro de 200 B a cada linha, dentro do circuito com cobertura; o tamanho é o mesmo dos demais quadros e o conteúdo é cifrado par a par.
+
 ## Reencontro por servidor
 
 O endereço de um membro pode mudar enquanto ele está offline. Cada membro publica, na DHT e nas âncoras, **um registro por servidor e dia**, cifrado com o `ServerSecret` e achado por `HKDF(ServerSecret, chave do membro, dia)`. Qualquer outro membro o acha sabendo só a chave do membro (`src/media/update.rs`: `server_rendezvous`, `seal_server_record`). Troca de endereço também viaja em `MyAddr`.
@@ -97,7 +106,7 @@ O endereço de um membro pode mudar enquanto ele está offline. Cada membro publ
 
 - **Convites recebidos**: cartão no alto da aba, com *Aceitar* (exige o aviso de IP) e *Recusar*.
 - **Trilho de servidores** na aba *Servidores*: avatares, *＋* para criar ou aceitar convite.
-- No servidor: cabeçalho (aparecer online, sair), **salas** com quem está nelas (aro verde de quem fala, *Entrar* / *Sair*, apagar, criar sala), **telas da sala**, **membros** (online primeiro, papel, sala em que estão, remover, tornar admin) e **convite** (escolha de um contato, aviso de IP, *Enviar convite* e, à parte, o texto para copiar).
+- No servidor: cabeçalho (aparecer online, sair), **telas da sala** (quando há), e então, **lado a lado** em janela larga (um sobre o outro em janela estreita): **salas** com quem está nelas (aro verde de quem fala, *Entrar* / *Sair*, apagar, criar sala) e, na sala em que você está, o **bate-papo**; e **membros** (online primeiro, papel, sala em que estão, remover, tornar admin) com o **convite** recolhido embaixo (escolha de um contato, aviso de IP, *Enviar convite* e, à parte, o texto para copiar).
 - Estado em disco: `~/.clam-gui.servers` (modo `0600`): segredos, registros e membros de cada servidor, regravado a cada 5 s se mudou. Sem chaveiro por servidor, para funcionar onde não há chaveiro.
 
 ## Onde está no código

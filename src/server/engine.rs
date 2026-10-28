@@ -7,7 +7,7 @@
 //! Tempo da presença: cada membro online manda `Hello` a cada [`HEARTBEAT`] segundos; quem ouve vale por
 //! [`LEASE`] segundos. Quem está offline é sondado a cada [`PROBE`] segundos.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 use ed25519_dalek::SigningKey;
 use rand_core::{OsRng, RngCore};
@@ -19,7 +19,7 @@ use super::{
     op::{Action, Op, Role},
     registry::{Insert, Registry},
     secret_commit, signing_key, valid_name,
-    wire::{self, Hello, INVITE_CHUNK, INVITE_CHUNKS, INVITE_SERVER, Msg, VECTOR_PER_FRAME},
+    wire::{self, Hello, INVITE_CHUNK, INVITE_CHUNKS, INVITE_SERVER, MAX_CHAT, Msg, VECTOR_PER_FRAME},
 };
 use crate::media::{signal::Frame, update::Reach};
 
@@ -122,6 +122,18 @@ impl Peer {
     }
 }
 
+/// Linhas que cada sala guarda; as mais antigas saem primeiro.
+const CHAT_KEEP: usize = 100;
+
+/// Uma linha do bate-papo da sala.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChatLine {
+    pub from: MemberId,
+    pub text: String,
+    /// Quando chegou (ou quando eu a mandei), no relógio do `now` que a engine recebe.
+    pub at: u64,
+}
+
 struct Server {
     id: ServerId,
     name: String,
@@ -140,6 +152,8 @@ struct Server {
     /// Estou transmitindo a tela na sala.
     sharing: bool,
     mesh: (Option<RoomId>, Vec<[u8; 32]>),
+    /// Bate-papo de cada sala, só em memória: some quando a sala fica sem ninguém.
+    chat: BTreeMap<RoomId, VecDeque<ChatLine>>,
 }
 
 impl Server {
@@ -156,6 +170,14 @@ impl Server {
         let (state, invited, joining) = (self.reg.state(), &self.invited, &self.joining);
         let keep = |id: &MemberId, p: &Peer| state.members.contains_key(id) || invited.contains_key(id) || joining.as_ref().is_some_and(|h| h.key == p.key) || p.reach.is_some() && joining.is_some();
         self.peers.retain(|id, p| keep(id, p));
+    }
+
+    fn keep_line(&mut self, room: RoomId, line: ChatLine) {
+        let lines = self.chat.entry(room).or_default();
+        lines.push_back(line);
+        while lines.len() > CHAT_KEEP {
+            lines.pop_front();
+        }
     }
 
     fn hello(&self) -> Hello {
@@ -294,6 +316,7 @@ impl Servers {
             room: None,
             sharing: false,
             mesh: (None, Vec::new()),
+            chat: BTreeMap::new(),
         };
         s.reg.make(&self.me.sk, self.me.id, Action::AddMember { key: self.me.key, vk: owner_vk }).ok_or(ServerError::Forbidden)?;
         s.member = true;
@@ -414,6 +437,7 @@ impl Servers {
             room: None,
             sharing: false,
             mesh: (None, Vec::new()),
+            chat: BTreeMap::new(),
         };
         let mut out = Output::default();
         for h in std::iter::once(&inv.inviter).chain(inv.hints.iter()) {
@@ -600,6 +624,30 @@ impl Servers {
         }
         let mut out = Output::default();
         out.send.extend(seal_to(&self.me, s, &target, &Msg::Watch(on)));
+        Ok(out)
+    }
+
+    /// Falo na sala em que estou: a linha vai a cada pessoa da sala e fica no meu histórico.
+    pub fn say(&mut self, server: &ServerId, text: &str, now: u64) -> Result<Output, ServerError> {
+        let s = self.servers.get_mut(server).ok_or(ServerError::UnknownServer)?;
+        if !s.has(&self.me.key) {
+            return Err(ServerError::NotMember);
+        }
+        let room = s.room.ok_or(ServerError::UnknownMember)?;
+        let mut text = text.trim().chars().filter(|c| !c.is_control()).collect::<String>();
+        while text.len() > MAX_CHAT {
+            text.pop();
+        }
+        let mut out = Output::default();
+        if text.is_empty() {
+            return Ok(out);
+        }
+        let (_, peers) = s.mesh_now(now);
+        for k in peers {
+            out.send.extend(seal_to(&self.me, s, &k, &Msg::Chat(text.clone())));
+        }
+        s.keep_line(room, ChatLine { from: self.me.id, text, at: now });
+        out.events.push(Event::Changed(*server));
         Ok(out)
     }
 
@@ -903,6 +951,14 @@ impl Servers {
                     out.events.push(Event::Watch { server: sid, from: key, on });
                 }
             }
+            Msg::Chat(text) => {
+                // Só quem está na minha sala fala comigo; fora dela a linha não tem onde aparecer.
+                let together = s.room.is_some() && s.peers.get(&id).is_some_and(|p| p.online(now) && p.room == s.room);
+                if let (true, true, Some(room)) = (is_member, together, s.room) {
+                    s.keep_line(room, ChatLine { from: id, text, at: now });
+                    out.events.push(Event::Changed(sid));
+                }
+            }
             Msg::Gift { epoch, secret } => {
                 // O segredo tem de reproduzir o compromisso que o `Rekey` fixou; num `Rekey` antigo (sem compromisso)
                 // só vale o que vem de quem administra.
@@ -939,6 +995,14 @@ impl Servers {
                 && !s.reg.state().rooms.contains_key(&r) {
                     s.room = None;
                 }
+            // Sala sem ninguém (ou apagada) esquece a conversa.
+            let rooms: Vec<RoomId> = s.chat.keys().copied().collect();
+            for r in rooms {
+                if !s.reg.state().rooms.contains_key(&r) || s.people_in(&r, now) == 0 {
+                    s.chat.remove(&r);
+                    out.events.push(Event::Changed(id));
+                }
+            }
             let mesh = s.mesh_now(now);
             if mesh != s.mesh {
                 out.events.push(Event::Mesh { server: id, room: mesh.0, peers: mesh.1.clone() });
@@ -980,7 +1044,7 @@ impl Servers {
         let rooms = st
             .rooms
             .iter()
-            .map(|(id, r)| RoomView { id: *id, name: r.name.clone(), creator: r.creator, people: members.iter().filter(|m| m.room == Some(*id)).map(|m| m.id).collect() })
+            .map(|(id, r)| RoomView { id: *id, name: r.name.clone(), creator: r.creator, people: members.iter().filter(|m| m.room == Some(*id)).map(|m| m.id).collect(), chat: s.chat.get(id).map(|c| c.iter().cloned().collect()).unwrap_or_default() })
             .collect();
         Some(ServerView {
             id: s.id,
@@ -1060,6 +1124,7 @@ impl Servers {
                             room: None,
                             sharing: false,
                             mesh: (None, Vec::new()),
+            chat: BTreeMap::new(),
                         })
                     })();
                     cur = parsed;
@@ -1120,6 +1185,8 @@ pub struct RoomView {
     pub creator: MemberId,
     /// Quem está na sala agora, online primeiro na ordem da lista de membros.
     pub people: Vec<MemberId>,
+    /// Conversa da sala, da mais antiga para a mais nova; vazia quando a sala esvazia.
+    pub chat: Vec<ChatLine>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

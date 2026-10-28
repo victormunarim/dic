@@ -435,3 +435,33 @@ fn an_invite_to_someone_offline_is_delivered_again_until_it_arrives() {
     net.advance(40);
     assert_eq!(net.nodes[1].pending_invites().len(), 1, "o reenvio entregou");
 }
+
+#[test]
+fn room_chat_reaches_only_the_room_and_is_forgotten_when_it_empties() {
+    let (mut net, server) = Net::group(3);
+    net.advance(2);
+    let (room, out) = net.nodes[0].create_room(&server, "Voz", net.now).unwrap();
+    net.run(0, out);
+    for i in [0, 1] {
+        let out = net.nodes[i].join_room(&server, Some(room), net.now).unwrap();
+        net.run(i, out);
+    }
+    let out = net.nodes[0].say(&server, "  oi, pessoal\n ", net.now).unwrap();
+    net.run(0, out);
+    let lines = |net: &Net, i: usize| net.view(i, &server).rooms[0].chat.iter().map(|l| (l.from, l.text.clone())).collect::<Vec<_>>();
+    assert_eq!(lines(&net, 0), vec![(net.id(0), "oi, pessoal".to_string())]);
+    assert_eq!(lines(&net, 1), vec![(net.id(0), "oi, pessoal".to_string())]);
+    assert!(lines(&net, 2).is_empty(), "quem está fora da sala não recebe");
+    // Quem está fora não consegue falar; texto vazio não manda nada.
+    assert_eq!(net.nodes[2].say(&server, "psiu", net.now).err(), Some(ServerError::UnknownMember));
+    assert!(net.nodes[0].say(&server, "   ", net.now).unwrap().is_empty());
+    // A sala só esquece a conversa quando fica sem ninguém.
+    let out = net.nodes[0].join_room(&server, None, net.now).unwrap();
+    net.run(0, out);
+    assert_eq!(lines(&net, 1).len(), 1, "ainda tem gente");
+    let out = net.nodes[1].join_room(&server, None, net.now).unwrap();
+    net.run(1, out);
+    for i in 0..3 {
+        assert!(lines(&net, i).is_empty(), "nó {i} esqueceu");
+    }
+}
