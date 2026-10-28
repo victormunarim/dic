@@ -9,7 +9,6 @@ pub(crate) const BG: Color32 = Color32::from_rgb(0x31, 0x33, 0x38);
 pub(crate) const PANEL: Color32 = Color32::from_rgb(0x2b, 0x2d, 0x31);
 /// Fundo mais fundo: campos de texto, caixas de registro, painel do usuário.
 pub(crate) const DEEP: Color32 = Color32::from_rgb(0x1e, 0x1f, 0x22);
-pub(crate) const HOVER: Color32 = Color32::from_rgb(0x35, 0x37, 0x3c);
 pub(crate) const SELECTED: Color32 = Color32::from_rgb(0x40, 0x44, 0x4b);
 pub(crate) const TEXT: Color32 = Color32::from_rgb(0xdb, 0xde, 0xe1);
 pub(crate) const MUTED: Color32 = Color32::from_rgb(0x94, 0x9b, 0xa4);
@@ -171,29 +170,6 @@ pub(crate) fn status_dot(ui: &mut Ui, color: Color32, text: &str) {
         ui.painter().circle_filled(rect.center(), 6.0, color);
         ui.label(RichText::new(text).strong().size(18.0).color(Color32::WHITE));
     });
-}
-
-/// Item da barra lateral: só o ícone, centralizado; o nome aparece ao passar o mouse. Destaque para a aba atual;
-/// `badge` põe uma bolinha no canto.
-pub(crate) fn nav_item(ui: &mut Ui, selected: bool, icon: &str, label: &str, badge: Option<Color32>) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 48.0), egui::Sense::click());
-    let fill = if selected {
-        SELECTED
-    } else if resp.hovered() {
-        HOVER
-    } else {
-        Color32::TRANSPARENT
-    };
-    let p = ui.painter();
-    p.rect_filled(rect, CornerRadius::same(10), fill);
-    let color = if selected { Color32::WHITE } else if resp.hovered() { TEXT } else { MUTED };
-    p.text(rect.center(), egui::Align2::CENTER_CENTER, icon, FontId::proportional(23.0), color);
-    if let Some(c) = badge {
-        let at = rect.right_top() + vec2(-9.0, 9.0);
-        p.circle_filled(at, 7.0, PANEL);
-        p.circle_filled(at, 5.0, c);
-    }
-    resp.on_hover_text(label).on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// Símbolo de ligar/desligar (arco aberto em cima e um traço), desenhado à mão para não depender de fonte.

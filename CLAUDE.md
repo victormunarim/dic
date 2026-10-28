@@ -61,6 +61,23 @@ Não rode `cargo fmt` (o estilo do repositório é próprio). A GUI não roda se
 - Decisão de política (quem é confiável, qual caminho) fica em um lugar (`path.rs`, `Dialer`), não espalhada em `if`s pela interface.
 - Prefira tipos pequenos e funções puras; compartilhe estado por `Arc<Mutex<..>>` só quando preciso e atrás de métodos.
 
+### Design da interface
+- Minimalista e centrado em ícones: prefira um ícone (ou os três pontos, o olho, a lixeira) a um botão com texto ou a um parágrafo na tela. Texto na tela só quando o ícone sozinho não se entende.
+- Tudo que não é óbvio ganha explicação no lugar: `on_hover_text` (title) no ícone ou botão, ou um help curto. Coisa complexa (privacidade, IP exposto, limites) explica no hover ou num bloco recolhido, não em texto fixo ocupando a tela.
+- Ações secundárias ou destrutivas vão em menu (três pontos), não em fileira de botões. O que é raro (convidar, gerar texto) fica discreto e recolhido.
+- Não dependa de glifo da fonte para ícone importante: se a fonte pode não ter, desenhe com o `painter`.
+- Aviso que protege a pessoa (perda de privacidade, IP) continua visível e exige aceite; o minimalismo não o esconde (veja Segurança).
+- Reaproveite os helpers e as cores de `examples/gui/theme.rs` (`card`, `icon_button`, `button`, `note`, `avatar`).
+
+#### Padrão estético: neomorfismo
+- O neomorfismo (soft UI) é a referência visual principal. Superfícies e controles parecem moldados do mesmo material do fundo: uma cor base única e suave, com relevo dado por **duas sombras opostas** (uma clara no canto superior esquerdo, uma escura no inferior direito), sem bordas duras nem contornos de cor.
+- Três estados, sempre os mesmos: **elevado** (card, botão em repouso: sombras para fora), **pressionado/ativo** (sombras para dentro, afundado: botão apertado, item selecionado, campo de texto) e **plano** (texto e ícone sem relevo).
+- Cantos arredondados generosos e iguais em todo o app (um só raio por categoria: card, botão, campo). Espaçamento em múltiplos de 4 px; margens internas folgadas.
+- Paleta sóbria: uma cor base de fundo, um tom de texto e **um único acento** (para ação principal, estado ativo e aro de quem fala). Vermelho só para o destrutivo e verde só para "ao vivo/ok". Nada de cores novas fora de `theme.rs`.
+- Contraste é inegociável: o neomorfismo pelo relevo sozinho costuma ficar fraco. Texto e ícone precisam de contraste legível (WCAG AA) sobre a base, e estado importante (ativo, desativado, erro, quem fala) nunca depende só da sombra: some cor do acento, ícone ou rótulo. Controle desativado fica opaco e sem relevo.
+- O relevo mora em `theme.rs` (funções como `raised`, `sunken`, que pintam as duas sombras com o `painter`), e as telas só chamam esses helpers. Não espalhe sombras e cores ad hoc pelas telas; quem muda o visual muda um lugar só. Sombra não pode custar caminho quente: nada de desenhar relevo por quadro de vídeo ou por pacote.
+- O tema atual (estilo Discord, cores chapadas) ainda não segue isto; migre por tela, começando pelos helpers de `theme.rs`, e atualize `docs/GUI.md` quando uma tela mudar.
+
 ### Documentação
 - Código, comentários, commits e docs em português do Brasil, com acentuação correta.
 - Comentário explica o porquê e o invariante, não o que a linha faz. Item público tem `///`. Siga a densidade e o estilo do arquivo vizinho.

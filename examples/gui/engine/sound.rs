@@ -142,6 +142,7 @@ impl Controls {
     pub(crate) fn echo_erle(&self) -> Option<f32> {
         Some(f32::from_bits(self.echo_erle.load(Ordering::Relaxed))).filter(|v| v.is_finite())
     }
+    #[cfg(feature = "audio")]
     pub(crate) fn set_echo_erle(&self, v: Option<f64>) {
         self.echo_erle.store(v.map_or(f32::NAN, |v| v as f32).to_bits(), Ordering::Relaxed);
     }

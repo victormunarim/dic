@@ -88,7 +88,7 @@ impl App {
                         }
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if button(ui, true, "Remover", GREY_BUTTON).clicked() {
+                        if icon_button(ui, true, "🗑", "Remover contato", GREY_BUTTON).clicked() {
                             remove = Some(i);
                         }
                         if icon_button(ui, online && !in_call, "📞", "Ligar", GREEN).clicked() {

@@ -1,4 +1,4 @@
-//! Janela (egui): barra lateral com uma aba por assunto, no estilo do Discord, e o motor por trás.
+//! Janela (egui): trilho de servidores, coluna de salas e engrenagem com as demais telas, no estilo do Discord, e o motor por trás.
 
 use clam::sync::LockExt;
 use std::{sync::{
@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 
 use crate::{conf::*, engine::*, theme::{self, *}};
 
-/// Uma aba da barra lateral.
+/// Uma tela da janela (as de fora do servidor ficam no menu da engrenagem).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Tab {
     Contacts,
@@ -142,82 +142,72 @@ impl App {
 }
 
 // ---------------------------------------------------------------------------------------------------
-// Barra lateral
+// Coluna de salas
 // ---------------------------------------------------------------------------------------------------
 
 impl App {
-    fn sidebar(&mut self, ctx: &egui::Context, offline: bool, in_call: bool, status: &str) {
-        let in_room = self.shared.room.lock_unpoisoned().at.is_some();
-        egui::SidePanel::left("abas")
-            .exact_width(76.0)
-            .resizable(false)
-            .frame(egui::Frame::new().fill(PANEL).inner_margin(Margin::symmetric(12, 14)))
-            .show(ctx, |ui| {
-                ui.spacing_mut().item_spacing.y = 6.0;
-                let items = [
-                    (Tab::Contacts, "👥", "Contatos", None),
-                    (Tab::Call, "📞", "Chamada", (in_call && !in_room).then_some(GREEN)),
-                ];
-                for (tab, icon, label, badge) in items {
-                    if nav_item(ui, self.tab == tab, icon, label, badge).clicked() {
-                        self.tab = tab;
-                    }
-                }
-                ui.add_space(6.0);
-                ui.separator();
-                ui.add_space(6.0);
-                for (tab, icon, label) in [(Tab::Video, "🖥", "Vídeo"), (Tab::Audio, "🎤", "Áudio"), (Tab::Settings, "⚙", "Configurações"), (Tab::Log, "📜", "Atividade")] {
-                    if nav_item(ui, self.tab == tab, icon, label, None).clicked() {
-                        self.tab = tab;
-                    }
-                }
-
-                ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
-                    self.user_panel(ctx, ui, offline, in_call, status);
-                });
-            });
-    }
-
-    /// Pé da barra, de baixo para cima: o avatar com o estado (clicar liga e desliga), o mudo e o desligar.
-    fn user_panel(&mut self, ctx: &egui::Context, ui: &mut egui::Ui, offline: bool, in_call: bool, status: &str) {
+    /// Pé da coluna de salas: avatar com o estado (clicar liga e desliga), mudo, engrenagem (as demais telas) e desligar.
+    pub(crate) fn user_panel(&mut self, ctx: &egui::Context, ui: &mut egui::Ui, offline: bool, in_call: bool, status: &str) {
         let (color, text) = self.connection(offline, status);
         let name = if self.form.my_name.trim().is_empty() { "Você".to_string() } else { self.form.my_name.trim().to_string() };
-        let me = theme::avatar(ui, &name, 46.0, Some(color));
-        // Em chamada não dá para ficar offline: o botão da aba Configurações também fica travado.
-        let can_toggle = offline || !in_call;
-        if can_toggle && me.hovered() {
-            ui.painter().circle_filled(me.rect.center(), me.rect.width() / 2.0, Color32::from_black_alpha(150));
-            theme::power_icon(ui, me.rect, if offline { GREEN } else { RED });
-        }
-        let tip = format!("{name}: {text}{}", if !can_toggle { "" } else if offline { "\nClique para ficar online" } else { "\nClique para ficar offline" });
-        let me = me.on_hover_text(tip);
-        if can_toggle && me.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-            if offline {
-                self.go_online(ctx);
-            } else if let Some(r) = &self.running {
-                r.stop.store(true, Ordering::Relaxed);
+        let in_room = self.shared.room.lock_unpoisoned().at.is_some();
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            let me = theme::avatar(ui, &name, 40.0, Some(color));
+            // Em chamada não dá para ficar offline: o botão da aba Configurações também fica travado.
+            let can_toggle = offline || !in_call;
+            if can_toggle && me.hovered() {
+                ui.painter().circle_filled(me.rect.center(), me.rect.width() / 2.0, Color32::from_black_alpha(150));
+                theme::power_icon(ui, me.rect, if offline { GREEN } else { RED });
             }
-        }
-        let muted = self.shared.audio.muted.load(Ordering::Relaxed);
-        let mic = egui::Button::new(RichText::new(if muted { "🔇" } else { "🎤" }).size(20.0).color(if muted { RED } else { TEXT }))
-            .frame(false)
-            .min_size(vec2(48.0, 40.0));
-        if ui.add(mic).on_hover_text(if muted { "Você está no mudo: clique para voltar a falar" } else { "Silenciar o microfone" }).clicked() {
-            self.shared.audio.muted.store(!muted, Ordering::Relaxed);
-        }
-        if in_call {
-            let in_room = self.shared.room.lock_unpoisoned().at.is_some();
-            let hang = egui::Button::new(RichText::new("✖").strong().size(18.0).color(Color32::WHITE)).fill(RED).corner_radius(CornerRadius::same(10)).min_size(vec2(48.0, 40.0));
-            if ui.add(hang).on_hover_text(if in_room { "Sair da sala" } else { "Desligar a chamada" }).clicked() {
-                if in_room {
-                    if let Some(r) = &self.running {
-                        let _ = r.cmds.send(Cmd::LeaveRoom);
-                    }
-                } else {
-                    self.shared.hangup.store(true, Ordering::Relaxed);
+            let tip = format!("{name}: {text}{}", if !can_toggle { "" } else if offline { "\nClique para ficar online" } else { "\nClique para ficar offline" });
+            let me = me.on_hover_text(tip);
+            if can_toggle && me.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                if offline {
+                    self.go_online(ctx);
+                } else if let Some(r) = &self.running {
+                    r.stop.store(true, Ordering::Relaxed);
                 }
             }
-        }
+            if in_call {
+                let hang = egui::Button::new(RichText::new("✖").strong().size(17.0).color(Color32::WHITE)).fill(RED).corner_radius(CornerRadius::same(10)).min_size(vec2(36.0, 36.0));
+                if ui.add(hang).on_hover_text(if in_room { "Sair da sala" } else { "Desligar a chamada" }).clicked() {
+                    if in_room {
+                        if let Some(r) = &self.running {
+                            let _ = r.cmds.send(Cmd::LeaveRoom);
+                        }
+                    } else {
+                        self.shared.hangup.store(true, Ordering::Relaxed);
+                    }
+                }
+            }
+            // Engrenagem e mudo ficam juntos na ponta direita da linha (a engrenagem por último, na borda).
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let gear = egui::Button::new(RichText::new("⚙").size(19.0).color(TEXT)).frame(false).min_size(vec2(34.0, 36.0));
+                let gear = ui.add(gear).on_hover_text("Contatos, chamada, vídeo, áudio, configurações e atividade");
+                let calling_1to1 = in_call && !in_room;
+                egui::Popup::menu(&gear).show(|ui| {
+                    for (tab, icon, label) in [
+                        (Tab::Contacts, "👥", "Contatos"),
+                        (Tab::Call, "📞", if calling_1to1 { "Chamada ●" } else { "Chamada" }),
+                        (Tab::Video, "🖥", "Vídeo"),
+                        (Tab::Audio, "🎤", "Áudio"),
+                        (Tab::Settings, "⚙", "Configurações"),
+                        (Tab::Log, "📜", "Atividade"),
+                    ] {
+                        if ui.selectable_label(self.tab == tab, format!("{icon}  {label}")).clicked() {
+                            self.tab = tab;
+                            ui.close();
+                        }
+                    }
+                });
+                let muted = self.shared.audio.muted.load(Ordering::Relaxed);
+                let mic = egui::Button::new(RichText::new(if muted { "🔇" } else { "🎤" }).size(19.0).color(if muted { RED } else { TEXT })).frame(false).min_size(vec2(34.0, 36.0));
+                if ui.add(mic).on_hover_text(if muted { "Você está no mudo: clique para voltar a falar" } else { "Silenciar o microfone" }).clicked() {
+                    self.shared.audio.muted.store(!muted, Ordering::Relaxed);
+                }
+            });
+        });
     }
 }
 
@@ -326,7 +316,7 @@ impl eframe::App for App {
         let status = self.shared.status.lock_unpoisoned().clone();
 
         self.server_rail(ctx, offline);
-        self.sidebar(ctx, offline, calling, &status);
+        self.rooms_panel(ctx, offline, calling, &status);
         self.members_panel(ctx, offline);
         egui::CentralPanel::default().frame(egui::Frame::new().fill(BG).inner_margin(Margin::symmetric(36, 26))).show(ctx, |ui| {
             let (title, subtitle) = self.title();
@@ -340,7 +330,7 @@ impl eframe::App for App {
                 match self.tab {
                     Tab::Contacts => self.contacts_tab(ui, !offline, calling),
                     Tab::Call => self.call_tab(ui, offline, calling, calling && !in_room),
-                    Tab::Servers => self.servers_tab(ui, offline, calling),
+                    Tab::Servers => self.servers_tab(ui, offline),
                     Tab::Video => self.video_tab(ui),
                     Tab::Audio => self.audio_tab(ui, offline, calling, testing),
                     Tab::Settings => self.settings_tab(ctx, ui, offline, calling, &status),
