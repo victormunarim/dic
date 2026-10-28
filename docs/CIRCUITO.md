@@ -443,6 +443,10 @@ Além dos testes determinísticos de `tests/fuzz.rs`, o diretório `fuzz/` tem a
 | `server_op` | `Op::decode`, `Op::verify` | sem pânico; operação aceita reproduz a entrada |
 | `server_msg` | `wire::decode`, `wire::open`, `wire::seal` | sem pânico; mensagem aceita sobrevive a codificar de novo e a ir num quadro selado |
 | `invite` | `Invite::open` com texto qualquer, com cabeçalho certo e bytes arbitrários, e com convite selado por quem convida com campos fora do formato | sem pânico; convite dentro do formato abre igual; o que abre sela de novo e abre igual |
+| `media_packet` | `Opener::open` com bytes quaisquer e pacote selado com um byte trocado | sem pânico; o selado abre igual uma vez só; o adulterado e a repetição são recusados |
+| `media_signal` | `Incoming::parse`, `Caller::answer` com bytes quaisquer e convite verdadeiro com um byte trocado | sem pânico; o convite verdadeiro abre |
+| `media_update` | `open_update`, `open_intro`, `open_ack`, `open_record`, `open_server_record` com bytes quaisquer, com a etiqueta certa e com registros selados de campos arbitrários | sem pânico; registro dentro do formato abre igual, só para o contato; confirmação de outro `seq` é recusada |
+| `media_screen` | `ScreenStream` com pacotes autênticos de carga arbitrária (fragmentos fora de ordem, duplicados, pedidos de reenvio), lixo e passos de envio | sem pânico; todo pacote que sai tem 200 B |
 
 ```sh
 cargo install cargo-fuzz

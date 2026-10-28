@@ -86,3 +86,27 @@ path = "fuzz_targets/link.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "media_packet"
+path = "fuzz_targets/media_packet.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "media_screen"
+path = "fuzz_targets/media_screen.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "media_signal"
+path = "fuzz_targets/media_signal.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "media_update"
+path = "fuzz_targets/media_update.rs"
+test = false
+doc = false
