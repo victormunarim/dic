@@ -19,6 +19,7 @@
 //! | `node` | `Node`: relay + telefone + fila de endereços; liga só com a chave do outro e o relay dele (feature `net`) |
 //! | `rendezvous` | Ponto de encontro na DHT Mainline (BEP 44) e âncoras, para reencontrar um contato que mudou de endereço (feature `net`) |
 //! | `video` | Codificação H.264 da tela: controle de taxa, qualidade e NACK (feature `video`) |
+//! | `scroll` | Mensagem de rolagem da tela: desloca a imagem em vez de recodificá-la (feature `video`) |
 //! | `hwenc` | Codificador por hardware opcional, via `gst-launch` (feature `video`, Linux) |
 //! | `capture`, `portal` | Captura da tela: X11 e GDI; portal do desktop no Wayland (features `capture`, `portal`) |
 //! | `phone` | Chamado (`Phone`) e chamador (`call`) sobre o circuito (feature `net`) |
@@ -81,6 +82,8 @@ pub mod rendezvous;
 pub mod timer;
 #[cfg(feature = "video")]
 pub mod hwenc;
+#[cfg(feature = "video")]
+pub mod scroll;
 #[cfg(feature = "video")]
 pub mod video;
 #[cfg(feature = "capture")]

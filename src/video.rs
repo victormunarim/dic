@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! ScreenSource::grab ─> H264Encoder::encode ─> ScreenShare::push ─> [circuito de tela]
-//! ScreenEvent::Frame ─> H264Decoder::decode ─> RawFrame
+//! ScreenEvent::Frame ─> ScreenDecoder::decode ─> RawFrame
 //! ```
 //!
 //! O codec trabalha em **taxa constante** dentro da capacidade do circuito de tela
@@ -17,6 +17,7 @@
 use crate::hwenc::HwEncoder;
 use crate::media::screen::{ScreenStream, FRAGMENT_PAYLOAD, MAX_FRAME, MAX_QUEUE};
 use crate::phone::{ScreenShare, SCREEN_SLOT};
+use crate::scroll;
 use openh264::decoder::Decoder;
 use openh264::encoder::{Encoder, EncoderConfig, FrameRate, FrameType, IntraFramePeriod, QpRange, RateControlMode, UsageType};
 use openh264::formats::{RgbaSliceU8, YUVBuffer, YUVSource};
@@ -242,6 +243,8 @@ const HEAVY_FRAMES: u32 = 3;
 const HEAVY: f32 = 2.0;
 /// Maior redução extra por movimento.
 const MAX_MOTION_K: usize = 3;
+/// QP fixo das faixas de rolagem: texto novo que chega rolando tem de ficar nítido de primeira.
+const STRIP_QP: f32 = 30.0;
 /// Menor fração de pixels mudados considerada na antecipação (evita dividir por zero).
 const MIN_CHANGE: f32 = 0.02;
 /// Passo, em pixels, da amostragem usada para medir quanto a imagem mudou.
@@ -263,6 +266,16 @@ pub struct EncodedFrame {
     /// Camada temporal superior: nenhum outro quadro depende dele, então pode ser largado sem quebrar
     /// a imagem (só cai a taxa de quadros). [`pump_all`] larga estes quando a fila do circuito enche.
     pub droppable: bool,
+}
+
+/// Estado de quem transmite rolagem como mensagem ([`crate::scroll`]).
+struct ScrollTx {
+    /// Último quadro (já reduzido) que quem assiste tem: de vídeo ou de rolagem.
+    prev: Option<RawFrame>,
+    /// Codificador das faixas, sempre intra, com a altura para a qual foi aberto.
+    strip: Option<(usize, Encoder)>,
+    /// O vídeo principal ficou para trás de quem assiste: o próximo quadro de vídeo tem de ser quadro-chave.
+    stale: bool,
 }
 
 /// Codificador H.264 em taxa constante.
@@ -300,6 +313,10 @@ pub struct H264Encoder {
     hw: Option<HwEncoder>,
     /// Por que o hardware foi abandonado, se foi (diagnóstico).
     pub hw_note: Option<String>,
+    /// Rolagem como mensagem, quando ligada ([`Self::set_scroll`]).
+    scroll: Option<ScrollTx>,
+    /// Rolagens enviadas no lugar de quadros de vídeo.
+    pub scrolled: u64,
     /// Quadros que o codificador recebeu e não devolveu (pulados ou grandes demais).
     pub skipped: u64,
     /// Quadros largados da camada alta porque a fila do circuito estava cheia.
@@ -350,6 +367,8 @@ impl H264Encoder {
             prev_change: 0.0,
             hw: None,
             hw_note: None,
+            scroll: None,
+            scrolled: 0,
             skipped: 0,
             layer_dropped: 0,
             held: 0,
@@ -372,6 +391,13 @@ impl H264Encoder {
             // de longe em longe; perda e quem entra pedem o seu por `WANT_KEY`.
             .intra_frame_period(IntraFramePeriod::from_num_frames((fps * 30.0) as u32));
         Encoder::with_api_config(openh264::OpenH264API::from_source(), config).map_err(codec_err)
+    }
+
+    /// Liga ou desliga a mensagem de rolagem: quando a página inteira anda na vertical, sai um deslocamento
+    /// e a faixa nova em vez de um quadro de vídeo. Só quem assiste com [`ScreenDecoder`] entende; um
+    /// [`H264Decoder`] puro falha nessas mensagens. Não vale para o codificador por hardware.
+    pub fn set_scroll(&mut self, on: bool) {
+        self.scroll = on.then(|| ScrollTx { prev: None, strip: None, stale: false });
     }
 
     /// Passa a codificar com o `element` de hardware (veja [`crate::hwenc::detect`]), ou volta ao openh264
@@ -519,7 +545,12 @@ impl H264Encoder {
             self.need_key = true;
         }
         self.size = Some(dims);
-        let want_key = force_key || self.need_key;
+        // Uma rolagem seguida de outra não precisa do quadro-chave; só o vídeo que volta depois dela.
+        let rolled = if force_key || self.need_key { None } else { self.try_scroll(&frame)? };
+        if rolled.is_some() {
+            return Ok(rolled);
+        }
+        let want_key = force_key || self.need_key || self.scroll.as_ref().is_some_and(|s| s.stale);
         if want_key {
             self.inner.force_intra_frame();
         }
@@ -563,6 +594,12 @@ impl H264Encoder {
         if key {
             self.need_key = false;
         }
+        if let Some(s) = self.scroll.as_mut() {
+            s.prev = Some(frame.into_owned());
+            if key {
+                s.stale = false;
+            }
+        }
         if want_key {
             // Quadro-chave pedido é sempre bem maior que o orçamento: não serve de medida para os seguintes.
             self.qp = qp;
@@ -574,6 +611,32 @@ impl H264Encoder {
 }
 
 impl H264Encoder {
+    /// Se a página inteira andou na vertical desde o último quadro que quem assiste tem, devolve a mensagem de
+    /// rolagem; `Ok(None)` manda o quadro pelo vídeo. Depois de uma rolagem o vídeo principal está atrás:
+    /// o próximo quadro de vídeo sai como quadro-chave (`stale`).
+    fn try_scroll(&mut self, frame: &RawFrame) -> Result<Option<EncodedFrame>, VideoError> {
+        let fps = self.fps;
+        let Some(s) = self.scroll.as_mut() else { return Ok(None) };
+        let Some(dy) = s.prev.as_ref().and_then(|prev| scroll::detect(prev, frame)) else { return Ok(None) };
+        let Some(strip) = scroll::strip(frame, dy) else { return Ok(None) };
+        if s.strip.as_ref().is_none_or(|(h, _)| *h != strip.height) {
+            s.strip = Some((strip.height, Self::open(STRIP_QP, fps)?));
+        }
+        let Some((_, enc)) = s.strip.as_mut() else { return Ok(None) };
+        enc.force_intra_frame();
+        let bits = enc.encode(&YUVBuffer::from_rgba8_source(RgbaSliceU8::new(&strip.rgba, (strip.width, strip.height)))).map_err(codec_err)?;
+        let mut data = Vec::new();
+        bits.write_vec(&mut data);
+        if data.is_empty() || data.len() > FRAME_LIMIT {
+            return Ok(None);
+        }
+        let Some(msg) = scroll::write(dy, frame.width, frame.height, &data) else { return Ok(None) };
+        s.prev = Some(frame.clone());
+        s.stale = true;
+        self.scrolled += 1;
+        Ok(Some(EncodedFrame { data: msg, keyframe: false, droppable: false }))
+    }
+
     /// Caminho do hardware: o quadro vai para o processo e volta o que já saiu (com atraso). Não há QP nem
     /// camada temporal; o que passa de [`FRAME_LIMIT`] encolhe a imagem e recomeça com quadro-chave. Se o
     /// hardware parar de responder, o openh264 assume no quadro seguinte.
@@ -655,6 +718,47 @@ impl H264Decoder {
         let mut rgba = vec![0u8; width * height * 4];
         yuv.write_rgba8(&mut rgba);
         Ok(Some(RawFrame { width, height, rgba }))
+    }
+}
+
+/// Decodificador de tela: vídeo H.264 e mensagens de rolagem ([`crate::scroll`]). Guarda a imagem atual para
+/// deslocá-la quando chega uma rolagem.
+pub struct ScreenDecoder {
+    video: H264Decoder,
+    /// Decodifica as faixas de rolagem, à parte para não mexer nas referências do vídeo.
+    strips: Option<H264Decoder>,
+    canvas: Option<RawFrame>,
+}
+
+impl ScreenDecoder {
+    pub fn new() -> Result<Self, VideoError> {
+        Ok(Self { video: H264Decoder::new()?, strips: None, canvas: None })
+    }
+
+    /// Decodifica um quadro de tela (vídeo ou rolagem). `Ok(None)`: ainda sem imagem, ou a rolagem não
+    /// se aplica à imagem que se tem (outra medida, ou nenhuma imagem ainda).
+    pub fn decode(&mut self, data: &[u8]) -> Result<Option<RawFrame>, VideoError> {
+        let Some(msg) = scroll::parse(data) else {
+            let img = self.video.decode(data)?;
+            if let Some(img) = &img {
+                self.canvas = Some(img.clone());
+            }
+            return Ok(img);
+        };
+        match &self.canvas {
+            Some(c) if (c.width, c.height) == (msg.width, msg.height) => {}
+            _ => return Ok(None),
+        }
+        if self.strips.is_none() {
+            self.strips = Some(H264Decoder::new()?);
+        }
+        let Some(strips) = self.strips.as_mut() else { return Ok(None) };
+        let Some(strip) = strips.decode(msg.strip)? else { return Ok(None) };
+        let Some(canvas) = self.canvas.as_mut() else { return Ok(None) };
+        if !scroll::apply(canvas, msg.dy, &strip) {
+            return Err(VideoError::Codec("rolagem não cabe na imagem".into()));
+        }
+        Ok(Some(canvas.clone()))
     }
 }
 
@@ -794,6 +898,87 @@ mod tests {
         let (out, src) = last.unwrap();
         let err: u64 = out.rgba.iter().zip(&src.rgba).step_by(4).map(|(a, b)| a.abs_diff(*b) as u64).sum::<u64>() / (1920 * 1080);
         assert!(err < 12, "erro médio {err} por pixel");
+    }
+
+    /// Página em que toda linha é diferente (como texto de verdade, ao contrário de [`page`]).
+    fn lines(w: usize, h: usize, off: usize) -> RawFrame {
+        let mut rgba = vec![245u8; w * h * 4];
+        for y in 0..h {
+            let sy = y + off;
+            for x in 0..w {
+                let mut v = (sy as u32).wrapping_mul(0x9E37_79B1) ^ ((x / 6) as u32).wrapping_mul(0x85EB_CA6B);
+                v = (v ^ v >> 15).wrapping_mul(0x2C1B_3C6D);
+                v ^= v >> 12;
+                if v & 7 == 0 && sy % 14 < 10 && x % 6 < 4 {
+                    rgba[(y * w + x) * 4..][..3].fill(30);
+                }
+            }
+        }
+        RawFrame::new(w, h, rgba).unwrap()
+    }
+
+    fn mean_error(a: &RawFrame, b: &RawFrame) -> u64 {
+        a.rgba.iter().zip(&b.rgba).step_by(4).map(|(x, y)| x.abs_diff(*y) as u64).sum::<u64>() / (a.width * a.height) as u64
+    }
+
+    #[test]
+    fn scrolling_goes_as_a_message_and_a_keyframe_follows_when_it_stops() {
+        let open = H264Encoder::bitrate_for(crate::phone::OPEN_SCREEN_SLOT);
+        let mut enc = H264Encoder::new(open).unwrap();
+        enc.set_scroll(true);
+        let mut dec = ScreenDecoder::new().unwrap();
+        let (w, h) = (1280, 720);
+        // O primeiro quadro-chave pode passar do limite e o codificador pede outro mais grosseiro.
+        let first = (0..6).find_map(|_| enc.encode(&lines(w, h, 0), false).unwrap()).expect("quadro-chave");
+        assert!(first.keyframe && !scroll::is_scroll(&first.data));
+        dec.decode(&first.data).unwrap().expect("imagem");
+        let mut shown = |enc: &mut H264Encoder, src: &RawFrame| -> (EncodedFrame, RawFrame) {
+            let f = enc.encode(src, false).unwrap().expect("quadro");
+            assert!(f.data.len() <= MAX_FRAME);
+            let out = dec.decode(&f.data).unwrap().expect("imagem");
+            (f, out)
+        };
+        for i in 1..=8 {
+            let src = lines(w, h, i * 90);
+            let (f, out) = shown(&mut enc, &src);
+            assert!(scroll::is_scroll(&f.data), "quadro {i}");
+            assert!(!f.keyframe && !f.droppable);
+            assert!(f.data.len() < 40_000, "quadro {i}: {} B", f.data.len());
+            assert!(mean_error(&out, &src) < 20, "quadro {i}: erro {}", mean_error(&out, &src));
+        }
+        assert_eq!(enc.scrolled, 8);
+        // Parou: a imagem do vídeo principal está atrás, então o quadro seguinte é chave e o vídeo volta.
+        let still = lines(w, h, 8 * 90);
+        let (f, out) = shown(&mut enc, &still);
+        assert!(f.keyframe && !scroll::is_scroll(&f.data));
+        assert!(mean_error(&out, &still) < 20);
+        let (f, _) = shown(&mut enc, &lines(w, h, 8 * 90));
+        assert!(!scroll::is_scroll(&f.data));
+    }
+
+    #[test]
+    fn scroll_is_off_by_default_and_for_plain_decoders() {
+        let mut enc = H264Encoder::new(H264Encoder::default_bitrate()).unwrap();
+        let mut dec = H264Decoder::new().unwrap();
+        for i in 0..4 {
+            let f = enc.encode(&lines(640, 360, i * 50), false).unwrap().expect("quadro");
+            assert!(!scroll::is_scroll(&f.data));
+            dec.decode(&f.data).unwrap();
+        }
+        assert_eq!(enc.scrolled, 0);
+    }
+
+    #[test]
+    fn a_scroll_that_does_not_fit_the_image_is_ignored_or_refused() {
+        let open = H264Encoder::bitrate_for(crate::phone::OPEN_SCREEN_SLOT);
+        let mut enc = H264Encoder::new(open).unwrap();
+        enc.set_scroll(true);
+        enc.encode(&lines(640, 360, 0), false).unwrap().unwrap();
+        let scrolled = enc.encode(&lines(640, 360, 70), false).unwrap().unwrap();
+        assert!(scroll::is_scroll(&scrolled.data));
+        let mut dec = ScreenDecoder::new().unwrap();
+        assert_eq!(dec.decode(&scrolled.data).unwrap(), None, "sem imagem ainda");
+        assert!(dec.decode(&[scroll::TAG, 0, 9, 0, 2, 0, 2, 1, 2, 3]).is_ok());
     }
 
     #[test]

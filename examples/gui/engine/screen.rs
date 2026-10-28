@@ -8,7 +8,7 @@ use clam::{
     node::Dialer,
     path::PathMode,
     phone::{OPEN_SCREEN_SLOT, SCREEN_SLOT, ScreenEvent, ScreenShare},
-    video::{H264Decoder, H264Encoder, Priority, RawFrame, ScreenSource, pump, pump_all},
+    video::{H264Encoder, Priority, RawFrame, ScreenDecoder, ScreenSource, pump, pump_all},
 };
 
 /// Estado da tela compartilhada, visto pela janela e pela chamada.
@@ -77,7 +77,7 @@ impl ScreenState {
 }
 
 /// Trata um evento de tela recebido. Devolve `false` se o decodificador quebrou e o evento foi ignorado.
-pub(crate) fn on_screen_event(state: &ScreenState, who: [u8; 32], dec: &mut Option<H264Decoder>, ev: ScreenEvent) -> bool {
+pub(crate) fn on_screen_event(state: &ScreenState, who: [u8; 32], dec: &mut Option<ScreenDecoder>, ev: ScreenEvent) -> bool {
     match ev {
         ScreenEvent::Stopped => {
             *dec = None;
@@ -92,7 +92,7 @@ pub(crate) fn on_screen_event(state: &ScreenState, who: [u8; 32], dec: &mut Opti
             state.rx[0].fetch_add(1, Ordering::Relaxed);
             let d = match dec {
                 Some(d) => d,
-                None => match H264Decoder::new() {
+                None => match ScreenDecoder::new() {
                     Ok(d) => dec.insert(d),
                     Err(_) => return false,
                 },
@@ -155,6 +155,8 @@ async fn start_capture(shared: &Arc<Shared>, out: &Sink) -> Result<(Box<dyn Scre
         Err(e) => Err(e),
     };
     let (src, mut enc) = started.map_err(|e| format!("não deu para capturar a tela ({e})"))?;
+    // Rolagem como mensagem: quem assiste precisa ser desta versão (um decodificador antigo erra nas mensagens).
+    enc.set_scroll(true);
     if st.hardware.load(Ordering::Relaxed) {
         // `detect` roda processos: fora do executor.
         match tokio::task::spawn_blocking(clam::hwenc::detect).await.ok().flatten() {
@@ -313,8 +315,8 @@ pub(crate) async fn start_room_capture(shared: Arc<Shared>, out: Sink) -> Option
                 Err(e) => *shared.screen.note.lock_unpoisoned() = format!("codec: {e}"),
             }
             *shared.screen.tx_info.lock_unpoisoned() = format!(
-                "para {} pessoas: enviados {pushed}, pulados {skipped} ({} pelo codificador, {} adiados com o circuito cheio), taxa {} kbps, QP {}, imagem 1/{}, codificar leva {:.0} ms",
-                shares.len(), enc.skipped, enc.held, enc.bitrate() / 1000, enc.qp(), enc.scale(), enc.encode_ms
+                "para {} pessoas: enviados {pushed} ({} rolagens), pulados {skipped} ({} pelo codificador, {} adiados com o circuito cheio), taxa {} kbps, QP {}, imagem 1/{}, codificar leva {:.0} ms",
+                shares.len(), enc.scrolled, enc.skipped, enc.held, enc.bitrate() / 1000, enc.qp(), enc.scale(), enc.encode_ms
             );
             next += every;
             std::thread::sleep(next.saturating_duration_since(std::time::Instant::now()));

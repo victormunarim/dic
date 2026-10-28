@@ -88,6 +88,7 @@ A tela anda num **circuito só dela**, aberto por quem transmite até o telefone
 - **Perda:** quem assiste pede de volta o que faltou (`NACK`, no pacote de preenchimento) e o emissor reenvia os últimos 660 fragmentos que guardou, à frente da fila, em pacote novo. Sem FEC. Reparo que não vem em 800 ms abandona o quadro e pede um quadro-chave.
 - **Taxa adaptativa:** a cada 0,5 s quem assiste devolve a fração perdida; o emissor aplica AIMD (`video::RateControl`).
 - **Codec:** H.264 por openh264 com controle de QP próprio, ou, opcional e só no Linux, pela placa de vídeo (`src/hwenc.rs`, via `gst-launch-1.0`).
+- **Rolagem** (`src/scroll.rs`): se a página inteira andou na vertical entre dois quadros (linhas idênticas, só deslocadas, até 512), sai uma mensagem "desloque N linhas" com a faixa nova (H.264 intra, QP 30) no lugar do quadro de vídeo; quem assiste desloca a imagem que tem e cola a faixa. Terminada a rolagem, o primeiro quadro de vídeo é quadro-chave. Não vale para o codificador por hardware.
 - **Captura:** X11, Wayland (portal `ScreenCast` + PipeWire) ou GDI no Windows.
 - **Relays:** para o modo sem privacidade o relay precisa deixar passar ≈ 520 kB/s por circuito; o padrão (800 kB/s) deixa.
 
@@ -128,6 +129,7 @@ O endereço de um relay muda (IP novo, outra porta). Para o código antigo não 
 - Sem CGNAT/porta alcançável não se recebe chamada. Não há furo de NAT.
 - Quem controla o primeiro salto e a saída do mesmo circuito liga as pontas. Como os relays são os dos próprios contatos, isso exige que ambos sejam o mesmo adversário.
 - A tela sem privacidade revela quando a imagem se mexe. Para um contato de confiança vai direto ao relay dele, sem relay no meio, e um contato de confiança com versão antiga não abre essa tela. Para quem não é de confiança segue por 2 saltos.
+- A mensagem de rolagem não é negociada: quem assiste com versão anterior erra ao decodificá-la e só se recupera no próximo quadro-chave. Só reconhece rolagem da página inteira (menu lateral fixo ou painel que rola sozinho cai no vídeo); a barra de rolagem fica errada até o quadro-chave final. `scroll::parse` ainda não tem alvo de fuzz.
 - A tela em hardware (`hwenc`) só foi testada com `x264enc` no lugar do codificador de GPU.
 
 ## Onde está cada coisa
