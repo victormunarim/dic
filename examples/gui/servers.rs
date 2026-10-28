@@ -317,9 +317,11 @@ impl App {
                     });
                     if let Some((room, server)) = &room_bar {
                         // Colada no perfil (sem o espaço entre cartões) e de uma linha só: é um estado, não uma tela.
-                        sunken_frame(ui, 12, 4, |ui| {
+                        // Mais estreita que o perfil (recuo nos lados) e com folga interna entre as pontas.
+                        egui::Frame::new().inner_margin(Margin::symmetric(10, 0)).show(ui, |ui| sunken_frame(ui, 12, 4, |ui| {
                             ui.set_width(ui.available_width());
                             ui.horizontal(|ui| {
+                                ui.add_space(8.0);
                                 ui.label(RichText::new("🔊").size(20.0).color(GREEN));
                                 ui.vertical(|ui| {
                                     ui.spacing_mut().item_spacing.y = 0.0;
@@ -331,9 +333,10 @@ impl App {
                                     if ui.add(leave).on_hover_text("Sair da sala").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                                         self.send(Cmd::LeaveRoom);
                                     }
+                                    ui.add_space(8.0);
                                 });
                             });
-                        });
+                        }));
                     }
                 });
             });
@@ -350,16 +353,31 @@ impl App {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 let title = RichText::new(format!("🔊  {}", room.name)).strong().color(if here { Color32::WHITE } else { TEXT });
-                let width = ui.available_width() - if manages { 30.0 } else { 0.0 };
+                let width = ui.available_width() - if manages { 34.0 } else { 0.0 };
                 let entry = egui::Button::new(title).fill(if here { SELECTED } else { Color32::TRANSPARENT }).min_size(vec2(width, 32.0));
                 let reply = ui.add_enabled(blocked.is_none(), entry).on_hover_text("Entrar na sala").on_disabled_hover_text(blocked.unwrap_or_default());
                 if reply.clicked() && !here {
                     self.send(Cmd::JoinRoom(v.id, room.id));
                 }
-                if manages && ui.add(egui::Button::new("🗑").frame(false)).on_hover_text("Apagar a sala").clicked()
-                    && let Err(e) = hub.try_act(|s, now| s.delete_room(&v.id, room.id, now)) {
-                        self.srv.msg = e.to_string();
+                if manages {
+                    let trash = trash_button(ui).on_hover_text("Apagar a sala");
+                    if here {
+                        // Apagar a sala em que estou dá erro, sem abrir a confirmação.
+                        if trash.clicked() {
+                            self.srv.msg = clam::server::ServerError::InRoom.to_string();
+                        }
+                    } else {
+                        // Apagar sempre pede certeza: o item vermelho do menu é a confirmação.
+                        egui::Popup::menu(&trash).show(|ui| {
+                            if ui.button(RichText::new("Confirmar exclusão").color(RED)).clicked() {
+                                if let Err(e) = hub.try_act(|s, now| s.delete_room(&v.id, room.id, now)) {
+                                    self.srv.msg = e.to_string();
+                                }
+                                ui.close();
+                            }
+                        });
                     }
+                }
             });
             let live = self.shared.room.lock_unpoisoned();
             let sharing = self.shared.screen.want_share.load(Ordering::Relaxed);
@@ -614,9 +632,9 @@ impl App {
     fn chat_box(&mut self, ui: &mut egui::Ui, hub: &clam::server::net::ServerHub, v: &ServerView, room: &clam::server::RoomView) {
         let contacts = parse_contacts(&self.form.contacts);
         ui.add_space(6.0);
-        // O conteúdo central rola, então não há "altura disponível": vai até o pé da janela, menos a linha de envio e a folga da sombra do botão (senão a rolagem a corta).
-        let room_height = (ui.clip_rect().bottom() - ui.cursor().top() - 104.0).max(160.0);
-        egui::ScrollArea::vertical().id_salt(("bate-papo", room.id)).max_height(room_height).stick_to_bottom(true).auto_shrink([false, true]).show(ui, |ui| {
+        // O conteúdo central rola, então não há "altura disponível": a lista de mensagens sempre vai até o pé da janela, menos a linha de envio e a folga da sombra do botão. Assim o campo fica embaixo e a página só rola se a janela for baixa demais; poucas mensagens não criam rolagem.
+        let room_height = (ui.clip_rect().bottom() - ui.cursor().top() - 84.0).max(160.0);
+        egui::ScrollArea::vertical().id_salt(("bate-papo", room.id)).max_height(room_height).min_scrolled_height(room_height).stick_to_bottom(true).auto_shrink([false, false]).show(ui, |ui| {
             if room.chat.is_empty() {
                 ui.label(RichText::new("Sem mensagens. A conversa some quando a sala fica vazia.").size(13.0).color(MUTED));
             }

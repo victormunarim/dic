@@ -263,6 +263,20 @@ fn any_member_creates_rooms_but_only_managers_remove_people() {
 }
 
 #[test]
+fn deleting_the_room_you_are_in_fails_until_you_leave_it() {
+    let (mut net, server) = Net::group(2);
+    net.advance(2);
+    let (room, out) = net.nodes[0].create_room(&server, "Sala", net.now).unwrap();
+    net.run(0, out);
+    let out = net.nodes[0].join_room(&server, Some(room), net.now).unwrap();
+    net.run(0, out);
+    assert_eq!(net.nodes[0].delete_room(&server, room, net.now).err(), Some(ServerError::InRoom));
+    let out = net.nodes[0].join_room(&server, None, net.now).unwrap();
+    net.run(0, out);
+    assert!(net.nodes[0].delete_room(&server, room, net.now).is_ok());
+}
+
+#[test]
 fn a_fake_gift_from_a_plain_member_does_not_replace_the_server_secret() {
     let (mut net, server) = Net::group(4);
     net.advance(2);

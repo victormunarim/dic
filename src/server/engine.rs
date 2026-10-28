@@ -502,7 +502,12 @@ impl Servers {
         Ok(self.finish(now, out))
     }
 
+    /// Apaga uma sala. Quem está nela precisa sair antes: apagar por baixo deixaria a chamada aberta numa sala que
+    /// não existe mais.
     pub fn delete_room(&mut self, server: &ServerId, room: RoomId, now: u64) -> Result<Output, ServerError> {
+        if self.servers.get(server).is_some_and(|s| s.room == Some(room)) {
+            return Err(ServerError::InRoom);
+        }
         let (_, out) = self.act(server, Action::DeleteRoom { room }, now)?;
         Ok(self.finish(now, out))
     }

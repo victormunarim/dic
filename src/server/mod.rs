@@ -99,6 +99,8 @@ pub enum ServerError {
     Full,
     #[error("sala desconhecida")]
     UnknownRoom,
+    #[error("você está nesta sala: saia dela antes de apagá-la")]
+    InRoom,
     #[error("membro desconhecido")]
     UnknownMember,
     #[error("o seu endereço ainda não é conhecido (espere o relay ficar pronto)")]
