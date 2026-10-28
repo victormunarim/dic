@@ -2,7 +2,7 @@
 
 use clam::sync::LockExt;
 
-use eframe::egui::{self, Color32, CornerRadius, Margin, RichText, vec2};
+use eframe::egui::{self, Color32, RichText, vec2};
 
 use crate::{conf::*, engine::*, theme::*, ui::*};
 
@@ -58,7 +58,7 @@ impl App {
         }
         let mut remove = None;
         for (i, (name, key)) in contacts.iter().enumerate() {
-            egui::Frame::new().fill(PANEL).corner_radius(CornerRadius::same(10)).inner_margin(Margin::symmetric(18, 14)).show(ui, |ui| {
+            raised_frame(ui, 14, 16, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
                     crate::theme::avatar(ui, name, 48.0, None);

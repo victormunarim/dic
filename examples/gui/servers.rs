@@ -80,12 +80,12 @@ impl App {
         egui::SidePanel::left("trilho")
             .exact_width(76.0)
             .resizable(false)
-            .frame(egui::Frame::new().fill(DEEP).inner_margin(Margin::symmetric(12, 14)))
+            .frame(egui::Frame::new().fill(BG).inner_margin(Margin::symmetric(12, 14)))
             .show(ctx, |ui| {
-                ui.spacing_mut().item_spacing.y = 8.0;
+                ui.spacing_mut().item_spacing.y = 14.0;
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                     let on = self.tab == Tab::Contacts;
-                    let people = server_icon(ui, "👤", if on { BLURPLE } else { PANEL }, Color32::WHITE, if on { 14 } else { 24 });
+                    let people = server_icon(ui, "👤", on.then_some(BLURPLE), Color32::WHITE);
                     if people.on_hover_text("Contatos").clicked() {
                         self.tab = Tab::Contacts;
                     }
@@ -93,7 +93,7 @@ impl App {
                     for v in &views {
                         let on = here && self.srv.sel == Some(v.id);
                         let initial = v.name.chars().next().map_or("?".to_string(), |c| c.to_uppercase().to_string());
-                        let reply = server_icon(ui, &initial, if on { BLURPLE } else { PANEL }, Color32::WHITE, if on { 14 } else { 24 });
+                        let reply = server_icon(ui, &initial, on.then_some(BLURPLE), Color32::WHITE);
                         if reply.on_hover_text(&v.name).clicked() {
                             self.tab = Tab::Servers;
                             self.srv.sel = Some(v.id);
@@ -104,7 +104,7 @@ impl App {
                         }
                     }
                     let on = here && self.srv.sel.is_none();
-                    let plus = server_icon(ui, "＋", if on { GREEN } else { PANEL }, if on { Color32::WHITE } else { GREEN }, if on { 14 } else { 24 });
+                    let plus = server_icon(ui, "＋", on.then_some(GREEN), if on { Color32::WHITE } else { GREEN });
                     if plus.on_hover_text("Criar um servidor ou entrar com um convite").clicked() {
                         self.tab = Tab::Servers;
                         self.srv.sel = None;
@@ -231,7 +231,7 @@ impl App {
         egui::SidePanel::right("membros")
             .exact_width(340.0)
             .resizable(false)
-            .frame(egui::Frame::new().fill(DEEP).inner_margin(Margin::symmetric(14, 26)))
+            .frame(egui::Frame::new().fill(BG).inner_margin(Margin::symmetric(14, 26)))
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                     self.members_card(ui, &hub, &v);
@@ -312,7 +312,7 @@ impl App {
         egui::SidePanel::left("salas")
             .exact_width(240.0)
             .resizable(false)
-            .frame(egui::Frame::new().fill(PANEL).inner_margin(Margin::symmetric(12, 14)))
+            .frame(egui::Frame::new().fill(BG).inner_margin(Margin::symmetric(12, 14)))
             .show(ctx, |ui| {
                 ui.spacing_mut().item_spacing.y = 6.0;
                 // O perfil ocupa uma altura fixa no pé; a lista de salas rola no espaço que sobra.
@@ -326,7 +326,10 @@ impl App {
                         ui.separator();
                         ui.add_space(2.0);
                         let height = (ui.available_height() - FOOTER).max(60.0);
-                        egui::ScrollArea::vertical().max_height(height).auto_shrink([false, false]).show(ui, |ui| self.room_list(ui, hub, v, my_room, in_call));
+                        egui::ScrollArea::vertical().max_height(height).auto_shrink([false, false]).show(ui, |ui| {
+                            // Folga lateral para as sombras das salas não serem cortadas pela rolagem.
+                            egui::Frame::new().inner_margin(Margin::symmetric(8, 6)).show(ui, |ui| self.room_list(ui, hub, v, my_room, in_call));
+                        });
                     }
                     _ => {
                         ui.add_space(8.0);
@@ -334,7 +337,7 @@ impl App {
                     }
                 }
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-                    egui::Frame::new().fill(DEEP).corner_radius(CornerRadius::same(10)).inner_margin(Margin::symmetric(8, 8)).show(ui, |ui| {
+                    sunken_frame(ui, 12, 8, |ui| {
                         ui.set_width(ui.available_width());
                         self.user_panel(ctx, ui, offline, in_call, status);
                     });
@@ -348,7 +351,7 @@ impl App {
         for room in &v.rooms {
             let here = my_room == Some((v.id, room.id));
             let blocked = if here { None } else if my_room.is_some() { Some("Saia da sala atual (✖) antes de trocar") } else if in_call { Some("Encerre a chamada antes de entrar numa sala") } else { None };
-            egui::Frame::new().stroke(egui::Stroke::new(1.0_f32, SELECTED)).corner_radius(CornerRadius::same(4)).inner_margin(6.0_f32).show(ui, |ui| {
+            raised_frame(ui, 12, 8, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 let title = RichText::new(format!("🔊  {}", room.name)).strong().color(if here { Color32::WHITE } else { TEXT });
@@ -574,11 +577,14 @@ impl App {
 }
 
 /// Ícone quadrado de um servidor na coluna da esquerda, com a inicial desenhada no centro exato do retângulo
-/// (o texto de um botão fica à esquerda quando a coluna é mais larga que ele).
-fn server_icon(ui: &mut egui::Ui, text: &str, fill: Color32, ink: Color32, radius: u8) -> egui::Response {
+/// (o texto de um botão fica à esquerda quando a coluna é mais larga que ele). Elevado em repouso; o
+/// selecionado (`active` traz a cor) fica afundado.
+fn server_icon(ui: &mut egui::Ui, text: &str, active: Option<Color32>, ink: Color32) -> egui::Response {
     let (rect, reply) = ui.allocate_exact_size(vec2(52.0, 52.0), egui::Sense::click());
-    let fill = if reply.hovered() && fill == PANEL { PANEL.gamma_multiply(1.4) } else { fill };
-    ui.painter().rect_filled(rect, CornerRadius::same(radius), fill);
+    match active {
+        Some(fill) => sunken(ui.painter(), rect, 18, fill),
+        None => raised(ui.painter(), rect, 18, if reply.hovered() { BG.lerp_to_gamma(Color32::WHITE, 0.06) } else { BG }, 4),
+    }
     ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, text, egui::FontId::proportional(24.0), ink);
     reply.on_hover_cursor(egui::CursorIcon::PointingHand)
 }

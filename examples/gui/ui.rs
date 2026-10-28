@@ -6,7 +6,7 @@ use std::{sync::{
     atomic::{AtomicBool, Ordering},
 }, time::Duration};
 
-use eframe::egui::{self, Color32, CornerRadius, Margin, RichText, vec2};
+use eframe::egui::{self, Color32, Margin, RichText, vec2};
 use tokio::sync::mpsc;
 
 use crate::{conf::*, engine::*, theme::{self, *}};
@@ -169,16 +169,13 @@ impl App {
                     r.stop.store(true, Ordering::Relaxed);
                 }
             }
-            if in_call {
-                let hang = egui::Button::new(RichText::new("✖").strong().size(17.0).color(Color32::WHITE)).fill(RED).corner_radius(CornerRadius::same(10)).min_size(vec2(36.0, 36.0));
-                if ui.add(hang).on_hover_text(if in_room { "Sair da sala" } else { "Desligar a chamada" }).clicked() {
-                    if in_room {
-                        if let Some(r) = &self.running {
-                            let _ = r.cmds.send(Cmd::LeaveRoom);
-                        }
-                    } else {
-                        self.shared.hangup.store(true, Ordering::Relaxed);
+            if in_call && icon_button(ui, true, "✖", if in_room { "Sair da sala" } else { "Desligar a chamada" }, RED).clicked() {
+                if in_room {
+                    if let Some(r) = &self.running {
+                        let _ = r.cmds.send(Cmd::LeaveRoom);
                     }
+                } else {
+                    self.shared.hangup.store(true, Ordering::Relaxed);
                 }
             }
             // Engrenagem e mudo ficam juntos na ponta direita da linha (a engrenagem por último, na borda).

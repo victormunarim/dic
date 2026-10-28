@@ -3,7 +3,7 @@
 use clam::sync::LockExt;
 use std::sync::atomic::Ordering;
 
-use eframe::egui::{self, Color32, CornerRadius, Margin, RichText, vec2};
+use eframe::egui::{self, Color32, Margin, RichText, vec2};
 use clam::{rand_core::OsRng, x25519_dalek::StaticSecret};
 
 use crate::{conf::*, theme::*, ui::*};
@@ -44,7 +44,7 @@ impl App {
             let relay = self.shared.relay.lock_unpoisoned().clone();
             match self.form.my_code(relay.as_ref()) {
                 Some(code) => {
-                    egui::Frame::new().fill(DEEP).corner_radius(CornerRadius::same(8)).inner_margin(Margin::same(12)).show(ui, |ui| {
+                    sunken_frame(ui, 12, 12, |ui| {
                         ui.set_width(ui.available_width());
                         ui.add(egui::Label::new(RichText::new(if code.len() > 72 { format!("{}...", &code[..72]) } else { code.clone() }).monospace()).wrap());
                     });
@@ -122,7 +122,7 @@ impl App {
     }
 
     pub(crate) fn log_tab(&mut self, ui: &mut egui::Ui) {
-        egui::Frame::new().fill(DEEP).corner_radius(CornerRadius::same(10)).inner_margin(Margin::same(14)).show(ui, |ui| {
+        sunken_frame(ui, 12, 14, |ui| {
             ui.set_width(ui.available_width());
             egui::ScrollArea::vertical().auto_shrink(false).stick_to_bottom(true).show(ui, |ui| {
                 let lines = self.log.lock_unpoisoned();

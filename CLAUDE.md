@@ -76,7 +76,7 @@ Não rode `cargo fmt` (o estilo do repositório é próprio). A GUI não roda se
 - Paleta sóbria: uma cor base de fundo, um tom de texto e **um único acento** (para ação principal, estado ativo e aro de quem fala). Vermelho só para o destrutivo e verde só para "ao vivo/ok". Nada de cores novas fora de `theme.rs`.
 - Contraste é inegociável: o neomorfismo pelo relevo sozinho costuma ficar fraco. Texto e ícone precisam de contraste legível (WCAG AA) sobre a base, e estado importante (ativo, desativado, erro, quem fala) nunca depende só da sombra: some cor do acento, ícone ou rótulo. Controle desativado fica opaco e sem relevo.
 - O relevo mora em `theme.rs` (funções como `raised`, `sunken`, que pintam as duas sombras com o `painter`), e as telas só chamam esses helpers. Não espalhe sombras e cores ad hoc pelas telas; quem muda o visual muda um lugar só. Sombra não pode custar caminho quente: nada de desenhar relevo por quadro de vídeo ou por pacote.
-- O tema atual (estilo Discord, cores chapadas) ainda não segue isto; migre por tela, começando pelos helpers de `theme.rs`, e atualize `docs/GUI.md` quando uma tela mudar.
+- Os helpers de `theme.rs` (`card`, `button`, `icon_button`, `big_button`, `raised_frame`, `sunken_frame`, `raised`, `sunken`) são neomórficos e toda a GUI usa eles (trilho, painéis, contatos, salas). Tela nova usa os helpers; não pinte `egui::Frame` com cor chapada nem sombra à mão. Itens de lista (sala, menu) ainda são botões planos do egui com fundo de seleção.
 
 ### Documentação
 - Código, comentários, commits e docs em português do Brasil, com acentuação correta.

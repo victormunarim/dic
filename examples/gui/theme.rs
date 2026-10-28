@@ -1,54 +1,106 @@
-//! Aparência: paleta escura de inspiração no Discord, tamanhos generosos e os pequenos componentes
-//! (cartão, botão grande, avatar, ponto de estado) que as abas compartilham.
+//! Aparência: neomorfismo (soft UI) escuro. Uma cor base só; o relevo vem de duas sombras opostas (uma clara
+//! no canto superior esquerdo, uma escura no inferior direito). Três estados: elevado (`raised`), afundado
+//! (`sunken`) e plano. As telas não pintam sombra: usam `card`, `button`, `icon_button`, `raised_frame` e
+//! `sunken_frame` daqui, de modo que mudar o visual é mudar este arquivo.
 
-use eframe::egui::{self, Color32, CornerRadius, FontId, Margin, RichText, Stroke, TextStyle, Ui, vec2};
+use eframe::egui::{self, Color32, CornerRadius, FontId, Margin, Pos2, Rect, RichText, Shadow, Shape, Stroke, TextStyle, Ui, vec2};
 
-/// Fundo da área de conteúdo.
-pub(crate) const BG: Color32 = Color32::from_rgb(0x31, 0x33, 0x38);
-/// Barra lateral e cartões.
-pub(crate) const PANEL: Color32 = Color32::from_rgb(0x2b, 0x2d, 0x31);
-/// Fundo mais fundo: campos de texto, caixas de registro, painel do usuário.
-pub(crate) const DEEP: Color32 = Color32::from_rgb(0x1e, 0x1f, 0x22);
-pub(crate) const SELECTED: Color32 = Color32::from_rgb(0x40, 0x44, 0x4b);
-pub(crate) const TEXT: Color32 = Color32::from_rgb(0xdb, 0xde, 0xe1);
-pub(crate) const MUTED: Color32 = Color32::from_rgb(0x94, 0x9b, 0xa4);
-pub(crate) const BLURPLE: Color32 = Color32::from_rgb(0x58, 0x65, 0xf2);
-pub(crate) const GREEN: Color32 = Color32::from_rgb(0x23, 0xa5, 0x5a);
-pub(crate) const RED: Color32 = Color32::from_rgb(0xda, 0x37, 0x3c);
+/// Cor base: fundo da área de conteúdo e das superfícies elevadas (a mesma, é o que dá o efeito).
+pub(crate) const BG: Color32 = Color32::from_rgb(0x2b, 0x2e, 0x35);
+/// Barras laterais e cartões: o mesmo material do fundo; quem separa é o relevo.
+pub(crate) const PANEL: Color32 = BG;
+/// Superfície afundada: campos de texto, caixas de registro, painel do usuário.
+pub(crate) const DEEP: Color32 = Color32::from_rgb(0x24, 0x27, 0x2d);
+/// Item selecionado/ativo (afundado, um pouco mais claro que o fundo afundado).
+pub(crate) const SELECTED: Color32 = Color32::from_rgb(0x33, 0x37, 0x40);
+/// Sombra clara (luz vinda de cima à esquerda) e sombra escura (embaixo à direita).
+const LIGHT: Color32 = Color32::from_rgb(0x38, 0x3c, 0x45);
+const DARK: Color32 = Color32::from_rgb(0x1d, 0x1f, 0x24);
+pub(crate) const TEXT: Color32 = Color32::from_rgb(0xdd, 0xe0, 0xe6);
+pub(crate) const MUTED: Color32 = Color32::from_rgb(0x9a, 0xa1, 0xad);
+/// O único acento: ação principal, estado ativo, aro de quem fala.
+pub(crate) const BLURPLE: Color32 = Color32::from_rgb(0x6a, 0x77, 0xf5);
+/// Só para "ao vivo/ok".
+pub(crate) const GREEN: Color32 = Color32::from_rgb(0x2f, 0xb0, 0x68);
+/// Só para o destrutivo.
+pub(crate) const RED: Color32 = Color32::from_rgb(0xe0, 0x4a, 0x4f);
 pub(crate) const YELLOW: Color32 = Color32::from_rgb(0xf0, 0xb2, 0x32);
-pub(crate) const GREY_BUTTON: Color32 = Color32::from_rgb(0x4e, 0x50, 0x58);
+/// Botão neutro: a própria base, elevada.
+pub(crate) const GREY_BUTTON: Color32 = BG;
+
+/// Raios de canto, um por categoria.
+const R_CARD: u8 = 18;
+const R_BUTTON: u8 = 12;
+
+/// Sombras de um relevo de `depth` px: a clara sobe para a esquerda, a escura desce para a direita.
+fn shadows(depth: i8) -> (Shadow, Shadow) {
+    let blur = (depth as u8).saturating_mul(2);
+    (
+        Shadow { offset: [-depth, -depth], blur, spread: 0, color: LIGHT },
+        Shadow { offset: [depth, depth], blur, spread: 0, color: DARK },
+    )
+}
+
+/// Pinta `rect` elevado: as duas sombras por baixo e a superfície por cima.
+pub(crate) fn raised(painter: &egui::Painter, rect: Rect, radius: u8, fill: Color32, depth: i8) {
+    let (light, dark) = shadows(depth);
+    painter.add(light.as_shape(rect, radius));
+    painter.add(dark.as_shape(rect, radius));
+    painter.rect_filled(rect, CornerRadius::same(radius), fill);
+}
+
+/// Formas de `rect` afundado: a superfície com a borda de cima/esquerda escura e a de baixo/direita clara,
+/// como se a luz batesse numa cavidade.
+fn sunken_shapes(rect: Rect, radius: u8, fill: Color32) -> Vec<Shape> {
+    let r = f32::from(radius);
+    let (w, inset) = (2.0_f32, 1.0_f32);
+    let (l, t, rt, b) = (rect.left() + inset, rect.top() + inset, rect.right() - inset, rect.bottom() - inset);
+    vec![
+        Shape::rect_filled(rect, CornerRadius::same(radius), fill),
+        Shape::line(vec![Pos2::new(l, b - r), Pos2::new(l, t + r * 0.4), Pos2::new(l + r * 0.4, t), Pos2::new(rt - r, t)], Stroke::new(w, DARK)),
+        Shape::line(vec![Pos2::new(rt, t + r), Pos2::new(rt, b - r * 0.4), Pos2::new(rt - r * 0.4, b), Pos2::new(l + r, b)], Stroke::new(w, LIGHT)),
+    ]
+}
+
+/// Pinta `rect` afundado.
+pub(crate) fn sunken(painter: &egui::Painter, rect: Rect, radius: u8, fill: Color32) {
+    painter.extend(sunken_shapes(rect, radius, fill));
+}
 
 pub(crate) fn apply(ctx: &egui::Context) {
     let mut v = egui::Visuals::dark();
     v.override_text_color = Some(TEXT);
     v.panel_fill = BG;
     v.window_fill = PANEL;
-    v.window_stroke = Stroke::new(1.0_f32, DEEP);
+    v.window_stroke = Stroke::NONE;
     v.extreme_bg_color = DEEP;
     v.faint_bg_color = PANEL;
     v.code_bg_color = DEEP;
     v.hyperlink_color = Color32::from_rgb(0x00, 0xa8, 0xfc);
     v.selection.bg_fill = BLURPLE;
     v.selection.stroke = Stroke::new(1.0_f32, Color32::WHITE);
-    v.window_corner_radius = CornerRadius::same(12);
-    v.menu_corner_radius = CornerRadius::same(8);
-    let radius = CornerRadius::same(6);
+    v.window_corner_radius = CornerRadius::same(R_CARD);
+    v.menu_corner_radius = CornerRadius::same(R_BUTTON);
+    v.window_shadow = shadows(6).1;
+    v.popup_shadow = shadows(4).1;
+    let radius = CornerRadius::same(R_BUTTON);
     let w = &mut v.widgets;
     w.noninteractive.bg_fill = PANEL;
-    w.noninteractive.bg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(0x3f, 0x41, 0x47));
+    w.noninteractive.bg_stroke = Stroke::new(1.0_f32, DARK);
     w.noninteractive.fg_stroke = Stroke::new(1.0_f32, TEXT);
     w.noninteractive.corner_radius = radius;
     w.inactive.bg_fill = GREY_BUTTON;
     w.inactive.weak_bg_fill = GREY_BUTTON;
+    w.inactive.bg_stroke = Stroke::new(1.0_f32, DARK);
     w.inactive.fg_stroke = Stroke::new(1.0_f32, TEXT);
     w.inactive.corner_radius = radius;
-    w.hovered.bg_fill = Color32::from_rgb(0x6d, 0x6f, 0x78);
-    w.hovered.weak_bg_fill = Color32::from_rgb(0x5d, 0x5f, 0x68);
+    w.hovered.bg_fill = Color32::from_rgb(0x35, 0x39, 0x42);
+    w.hovered.weak_bg_fill = Color32::from_rgb(0x35, 0x39, 0x42);
     w.hovered.bg_stroke = Stroke::NONE;
     w.hovered.fg_stroke = Stroke::new(1.5_f32, Color32::WHITE);
     w.hovered.corner_radius = radius;
     w.active.bg_fill = BLURPLE;
-    w.active.weak_bg_fill = Color32::from_rgb(0x48, 0x55, 0xdb);
+    w.active.weak_bg_fill = Color32::from_rgb(0x5a, 0x67, 0xe0);
     w.active.fg_stroke = Stroke::new(1.5_f32, Color32::WHITE);
     w.active.corner_radius = radius;
     w.open.bg_fill = SELECTED;
@@ -76,9 +128,29 @@ pub(crate) fn apply(ctx: &egui::Context) {
     });
 }
 
+/// Moldura elevada (soft UI) com o miolo em `add`. A sombra clara fica numa vaga reservada antes da moldura
+/// para ir por baixo dela; a escura é a sombra da própria moldura.
+pub(crate) fn raised_frame<R>(ui: &mut Ui, radius: u8, margin: i8, add: impl FnOnce(&mut Ui) -> R) -> egui::InnerResponse<R> {
+    let (light, dark) = shadows(5);
+    let slot = ui.painter().add(Shape::Noop);
+    let out = egui::Frame::new().fill(PANEL).corner_radius(CornerRadius::same(radius)).inner_margin(Margin::same(margin)).shadow(dark).show(ui, add);
+    ui.painter().set(slot, light.as_shape(out.response.rect, radius));
+    out
+}
+
+/// Moldura afundada, para campos e caixas de registro. O fundo vai numa vaga reservada para ficar por baixo
+/// do miolo, já que o tamanho só se conhece depois de desenhá-lo.
+pub(crate) fn sunken_frame<R>(ui: &mut Ui, radius: u8, margin: i8, add: impl FnOnce(&mut Ui) -> R) -> egui::InnerResponse<R> {
+    let slot = ui.painter().add(Shape::Noop);
+    let out = egui::Frame::new().inner_margin(Margin::same(margin)).show(ui, add);
+    ui.painter().set(slot, Shape::Vec(sunken_shapes(out.response.rect, radius, DEEP)));
+    out
+}
+
 /// Cartão da área de conteúdo: título, subtítulo opcional e o corpo, ocupando a largura da coluna.
 pub(crate) fn card(ui: &mut Ui, title: &str, subtitle: &str, add: impl FnOnce(&mut Ui)) {
-    egui::Frame::new().fill(PANEL).corner_radius(CornerRadius::same(10)).inner_margin(Margin::same(20)).show(ui, |ui| {
+    ui.add_space(4.0);
+    raised_frame(ui, R_CARD, 22, |ui| {
         ui.set_width(ui.available_width());
         ui.label(RichText::new(title).strong().size(18.0).color(Color32::WHITE));
         if !subtitle.is_empty() {
@@ -87,7 +159,7 @@ pub(crate) fn card(ui: &mut Ui, title: &str, subtitle: &str, add: impl FnOnce(&m
         ui.add_space(6.0);
         add(ui);
     });
-    ui.add_space(14.0);
+    ui.add_space(18.0);
 }
 
 /// Cabeçalho da página: título grande e uma linha de explicação.
@@ -97,31 +169,43 @@ pub(crate) fn page_header(ui: &mut Ui, title: &str, subtitle: &str) {
     ui.add_space(14.0);
 }
 
-/// Botão grande e cheio de cor (as ações principais).
-pub(crate) fn big_button(ui: &mut Ui, text: &str, fill: Color32) -> egui::Response {
-    ui.add(
-        egui::Button::new(RichText::new(text).strong().size(17.0).color(Color32::WHITE))
-            .fill(fill)
-            .corner_radius(CornerRadius::same(8))
-            .min_size(vec2(180.0, 46.0)),
-    )
+/// Botão macio: elevado em repouso, afundado ao apertar, plano e apagado quando desligado. A cor de `fill`
+/// é a da superfície (a base, para os neutros; o acento ou o semântico para ação principal e destrutiva).
+fn soft_button(ui: &mut Ui, enabled: bool, text: RichText, fill: Color32, min: egui::Vec2) -> egui::Response {
+    let galley = egui::WidgetText::from(text).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, TextStyle::Button);
+    let size = (galley.size() + ui.spacing().button_padding * 2.0).max(min);
+    let (rect, reply) = ui.allocate_exact_size(size, if enabled { egui::Sense::click() } else { egui::Sense::hover() });
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        let pressed = enabled && reply.is_pointer_button_down_on();
+        let surface = if !enabled { fill.gamma_multiply(0.55) } else if reply.hovered() && !pressed { fill.lerp_to_gamma(Color32::WHITE, 0.06) } else { fill };
+        if !enabled {
+            painter.rect_filled(rect, CornerRadius::same(R_BUTTON), surface);
+        } else if pressed {
+            sunken(painter, rect, R_BUTTON, surface.gamma_multiply(0.9));
+        } else {
+            raised(painter, rect, R_BUTTON, surface, 4);
+        }
+        let color = if enabled { galley.job.sections.first().map_or(Color32::WHITE, |s| s.format.color) } else { MUTED };
+        let at = egui::Align2::CENTER_CENTER.align_size_within_rect(galley.size(), rect).min + if pressed { vec2(0.0, 1.0) } else { egui::Vec2::ZERO };
+        painter.galley(at, galley, color);
+    }
+    reply
 }
 
-/// Botão cheio de tamanho normal, que pode ficar desligado.
+/// Botão grande e cheio de cor (as ações principais).
+pub(crate) fn big_button(ui: &mut Ui, text: &str, fill: Color32) -> egui::Response {
+    soft_button(ui, true, RichText::new(text).strong().size(17.0).color(Color32::WHITE), fill, vec2(180.0, 48.0))
+}
+
+/// Botão de tamanho normal, que pode ficar desligado.
 pub(crate) fn button(ui: &mut Ui, enabled: bool, text: &str, fill: Color32) -> egui::Response {
-    ui.add_enabled(
-        enabled,
-        egui::Button::new(RichText::new(text).strong().color(Color32::WHITE)).fill(fill).corner_radius(CornerRadius::same(6)).min_size(vec2(110.0, 38.0)),
-    )
+    soft_button(ui, enabled, RichText::new(text).strong().color(Color32::WHITE), fill, vec2(110.0, 40.0))
 }
 
 /// Botão quadrado só com ícone; o nome da ação aparece ao passar o mouse.
 pub(crate) fn icon_button(ui: &mut Ui, enabled: bool, icon: &str, tip: &str, fill: Color32) -> egui::Response {
-    ui.add_enabled(
-        enabled,
-        egui::Button::new(RichText::new(icon).size(18.0).color(Color32::WHITE)).fill(fill).corner_radius(CornerRadius::same(6)).min_size(vec2(42.0, 38.0)),
-    )
-    .on_hover_text(tip)
+    soft_button(ui, enabled, RichText::new(icon).size(18.0).color(Color32::WHITE), fill, vec2(44.0, 40.0)).on_hover_text(tip)
 }
 
 /// Campo de texto de uma linha, alto e largo.
