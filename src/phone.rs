@@ -734,7 +734,7 @@ pub struct Phone {
     updates: Option<mpsc::Receiver<AddressUpdate>>,
     introductions: Option<mpsc::Receiver<Introduction>>,
     accept_intros: Arc<AtomicBool>,
-    removals: Option<mpsc::Receiver<[u8; 32]>>,
+    removals: Option<mpsc::Receiver<([u8; 32], u64)>>,
     custody: Arc<Mutex<Custody>>,
     servers: ServerSlot,
     room_peers: Contacts,
@@ -879,10 +879,10 @@ impl Phone {
         self.accept_intros.store(on, Ordering::Relaxed);
     }
 
-    /// Fila de quem removeu esta pessoa da lista dele (a chave já provada e já tirada dos contatos deste telefone;
+    /// Fila de quem removeu esta pessoa da lista dele, com o carimbo do aviso (a chave já provada e já tirada dos contatos deste telefone;
     /// cada aviso foi confirmado a quem mandou). Só se retira uma vez. Obedece ao mesmo interruptor das apresentações
     /// ([`Phone::accept_introductions`]) e só vale de quem já é contato.
-    pub fn take_removals(&mut self) -> Option<mpsc::Receiver<[u8; 32]>> {
+    pub fn take_removals(&mut self) -> Option<mpsc::Receiver<([u8; 32], u64)>> {
         self.removals.take()
     }
 
@@ -965,7 +965,7 @@ struct ActorOut {
     updates: mpsc::Sender<AddressUpdate>,
     introductions: mpsc::Sender<Introduction>,
     accept_intros: Arc<AtomicBool>,
-    removals: mpsc::Sender<[u8; 32]>,
+    removals: mpsc::Sender<([u8; 32], u64)>,
     servers: ServerSlot,
     room_peers: Contacts,
     notice: Arc<Mutex<Option<String>>>,
@@ -1077,7 +1077,7 @@ async fn run_actor(
                             had
                         };
                         if was_contact
-                            && removals.try_send(peer).is_ok()
+                            && removals.try_send((peer, stamp)).is_ok()
                             && let Ok(ack) = update::seal_ack(&secret, &PublicKey::from(peer), stamp)
                             && let Some(w) = writers.get(&conn)
                         {

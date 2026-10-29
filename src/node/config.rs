@@ -62,6 +62,9 @@ pub struct NodeConfig {
     pub servers: Option<String>,
     /// Apresentações que contatos deixaram aqui para entregar a quem estava offline, como [`Node::custody_export`](super::Node::custody_export) escreveu.
     pub custody: Vec<String>,
+    /// Lápides das remoções (par, carimbo em ms), como [`Node::tombstones`](super::Node::tombstones) devolveu: convite com
+    /// carimbo igual ou anterior não readiciona quem a pessoa removeu.
+    pub tombstones: Vec<([u8; 32], u64)>,
     /// De quanto em quanto tempo a caixa de correio desta pessoa é lida na DHT. Padrão: 10 minutos.
     pub mail_poll: Duration,
 }
@@ -83,6 +86,6 @@ impl RelayKeys {
 impl NodeConfig {
     #[must_use]
     pub fn new(secret: StaticSecret, contacts: Vec<[u8; 32]>) -> Self {
-        Self { secret, contacts, relay_port: DEFAULT_RELAY_PORT, public_addr: None, upnp: true, known: Vec::new(), hints: Vec::new(), relay_keys: None, history: Vec::new(), updates: true, update_retry: UPDATE_RETRY, dht: None, name: String::new(), introductions: true, anchor: false, anchors: Vec::new(), servers: None, custody: Vec::new(), mail_poll: MAIL_POLL }
+        Self { secret, contacts, relay_port: DEFAULT_RELAY_PORT, public_addr: None, upnp: true, known: Vec::new(), hints: Vec::new(), relay_keys: None, history: Vec::new(), updates: true, update_retry: UPDATE_RETRY, dht: None, name: String::new(), introductions: true, anchor: false, anchors: Vec::new(), servers: None, custody: Vec::new(), tombstones: Vec::new(), mail_poll: MAIL_POLL }
     }
 }

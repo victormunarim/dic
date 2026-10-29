@@ -46,6 +46,7 @@ Tudo fica na pasta pessoal (`~` no Unix, `%USERPROFILE%` no Windows), gravado po
 | `.clam-gui.relay` | As duas chaves secretas do relay (`onion` e `link`), para o endereço que os contatos guardaram continuar valendo depois de reabrir |
 | `.clam-gui.intro` | Contatos a quem a apresentação ainda não foi confirmada (uma chave por linha) |
 | `.clam-gui.removed` | Ex-contatos a quem o aviso de remoção ainda não foi confirmado (uma chave por linha); o endereço deles segue em `.clam-gui.known` até a entrega terminar |
+| `.clam-gui.tombs` | Lápides das remoções: uma linha por contato removido (chave pública em hex e carimbo em ms), para um convite velho da caixa não readicionar quem você removeu. Só chaves públicas; modo `0600` por coerência. Some sozinho em 7 dias |
 | `.clam-gui.custody` | Apresentações que contatos deixaram com você para entregar a quem estava offline: uma linha por convite (depositante, carimbo, chave da caixa e quadro, em hex). O quadro só o destinatário abre; a chave da caixa permite gravar e ler o item na DHT, então o arquivo fica em modo `0600`. Some sozinho em 7 dias |
 | `.clam-gui.servers` | Os servidores de que você faz parte: **o segredo de cada um**, o registro de operações e os membros. Quem lê o arquivo entra nos servidores como você; ele fica em modo `0600` e não vai para o chaveiro ([SERVIDORES.md](SERVIDORES.md)) |
 

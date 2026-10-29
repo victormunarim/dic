@@ -245,6 +245,28 @@ pub(crate) fn save_custody(lines: &[String]) -> std::io::Result<()> {
     write_private(&custody_path(), &lines.iter().map(|l| format!("{l}\n")).collect::<String>())
 }
 
+/// Lápides das remoções: uma linha por par, "chave-em-hex carimbo-ms". Sem elas, um convite velho que ainda estiver na
+/// caixa da DHT readicionaria, depois de um reinício, quem a pessoa removeu.
+pub(crate) fn tombs_path() -> PathBuf {
+    conf_path().with_file_name(".clam-gui.tombs")
+}
+
+pub(crate) fn load_tombs() -> Vec<([u8; 32], u64)> {
+    let text = std::fs::read_to_string(tombs_path()).unwrap_or_default();
+    text.lines().filter_map(parse_tomb).collect()
+}
+
+fn parse_tomb(line: &str) -> Option<([u8; 32], u64)> {
+    let (key, stamp) = line.split_once(' ')?;
+    let bytes: Vec<u8> = (0..key.len()).step_by(2).map(|i| u8::from_str_radix(key.get(i..i + 2)?, 16).ok()).collect::<Option<_>>()?;
+    Some((<[u8; 32]>::try_from(bytes).ok()?, stamp.trim().parse().ok()?))
+}
+
+pub(crate) fn save_tombs(tombs: &[([u8; 32], u64)]) -> std::io::Result<()> {
+    let hex = |k: &[u8; 32]| k.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    write_private(&tombs_path(), &tombs.iter().map(|(k, s)| format!("{} {s}\n", hex(k))).collect::<String>())
+}
+
 pub(crate) fn load_servers() -> Option<String> {
     std::fs::read_to_string(servers_path()).ok()
 }

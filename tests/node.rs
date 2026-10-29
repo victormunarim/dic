@@ -882,3 +882,56 @@ async fn a_stranger_cannot_leave_an_introduction_in_custody() {
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert!(c.custody_export().is_empty());
 }
+
+/// B, que já é contato de A, responde pela caixa: A recebe a aceitação e para de insistir.
+#[tokio::test]
+async fn the_introduction_back_stops_the_first_one() {
+    use clam::rendezvous::DhtOptions;
+    let testnet = mainline::Testnet::new(5).unwrap();
+    let dht = || Some(DhtOptions { bootstrap: testnet.bootstrap.clone(), bind: Some(std::net::Ipv4Addr::LOCALHOST), circuit: false });
+    let (sa, sb, sc) = (key(), key(), key());
+    let (pa, pb, pc) = (*PublicKey::from(&sa).as_bytes(), *PublicKey::from(&sb).as_bytes(), *PublicKey::from(&sc).as_bytes());
+    let c = Node::start(NodeConfig { updates: false, dht: dht(), ..fixed(sc, free_port(), vec![pa, pb]) }).await.unwrap();
+    let mail_poll = Duration::from_millis(300);
+    let a = Node::start(NodeConfig { updates: false, dht: dht(), name: "Ana".into(), mail_poll, ..fixed(sa, free_port(), vec![pb, pc]) }).await.unwrap();
+    a.add_hint(pc, c.relay_info().unwrap());
+    a.set_trusted(pc, true);
+    // B ainda não subiu: só a caixa leva o convite.
+    a.introduce(pb);
+    until("C guarda o convite", || Some(c.custody_export()).filter(|v| !v.is_empty())).await;
+    assert_eq!(a.pending_introductions(), vec![pb]);
+
+    let b = Node::start(NodeConfig { updates: false, dht: dht(), name: "Beto".into(), mail_poll, ..fixed(sb, free_port(), vec![pa, pc]) }).await.unwrap();
+    b.add_hint(pc, c.relay_info().unwrap());
+    b.set_trusted(pc, true);
+    // B vê o convite de A (já é contato) e responde pelo mesmo caminho.
+    until("B acha o convite", || Some(b.take_introductions()).filter(|v| !v.is_empty())).await;
+    b.introduce(pa);
+    let got = until("A acha a resposta", || Some(a.take_introductions()).filter(|v| !v.is_empty())).await;
+    assert_eq!((got[0].peer, got[0].name.as_str()), (pb, "Beto"));
+    assert!(a.pending_introductions().is_empty(), "A parou de insistir");
+}
+
+/// Convite que já estava na caixa antes da remoção não readiciona o contato removido.
+#[tokio::test]
+async fn an_invitation_older_than_the_removal_is_refused() {
+    use clam::rendezvous::DhtOptions;
+    let testnet = mainline::Testnet::new(5).unwrap();
+    let dht = || Some(DhtOptions { bootstrap: testnet.bootstrap.clone(), bind: Some(std::net::Ipv4Addr::LOCALHOST), circuit: false });
+    let (sa, sb, sc) = (key(), key(), key());
+    let (pa, pb, pc) = (*PublicKey::from(&sa).as_bytes(), *PublicKey::from(&sb).as_bytes(), *PublicKey::from(&sc).as_bytes());
+    let c = Node::start(NodeConfig { updates: false, dht: dht(), ..fixed(sc, free_port(), vec![pa]) }).await.unwrap();
+    let a = Node::start(NodeConfig { updates: false, dht: dht(), name: "Ana".into(), ..fixed(sa, free_port(), vec![pb, pc]) }).await.unwrap();
+    a.add_hint(pc, c.relay_info().unwrap());
+    a.set_trusted(pc, true);
+    a.introduce(pb);
+    until("C guarda o convite", || Some(c.custody_export()).filter(|v| !v.is_empty())).await;
+    a.stop();
+
+    // B removeu A antes de ler a caixa: a lápide vem na configuração (como a GUI a guarda).
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+    let cfg = NodeConfig { updates: false, dht: dht(), mail_poll: Duration::from_millis(200), tombstones: vec![(pa, stamp)], ..fixed(sb, free_port(), vec![]) };
+    let b = Node::start(cfg).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(b.take_introductions().is_empty());
+}

@@ -31,6 +31,7 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
     cfg.anchors = parse_anchors(&form.anchors);
     cfg.servers = load_servers();
     cfg.custody = load_custody();
+    cfg.tombstones = load_tombs();
     if form.use_dht {
         cfg.dht = Some(clam::rendezvous::DhtOptions { circuit: form.dht_circuit, ..Default::default() });
         if form.dht_circuit {
@@ -76,6 +77,7 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
     *shared.servers.lock_unpoisoned() = Some(hub.clone());
     let mut servers_saved = hub.read(|s, _| s.export());
     let mut custody_saved = node.custody_export();
+    let mut tombs_saved = sorted(node.tombstones());
     let mut servers_check = tokio::time::Instant::now();
     // A sala de voz em que estou: o canal da tarefa e quem está na malha (esses são atendidos sem tocar).
     let mut room: Option<(mpsc::UnboundedSender<RoomCmd>, clam::server::ServerId)> = None;
@@ -335,6 +337,10 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
             saver.sync(&book_of(&node), &out);
             save_pending_if_changed(&node, &mut pending_saved, &out);
             save_removals_if_changed(&node, &mut removals_saved, &out);
+            let tombs = sorted(node.tombstones());
+            if tombs != tombs_saved && save_tombs(&tombs).is_ok() {
+                tombs_saved = tombs;
+            }
             let held = node.custody_export();
             if held != custody_saved {
                 match save_custody(&held) {
@@ -346,6 +352,7 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
     }
     saver.sync(&book_of(&node), &out);
     let _ = save_custody(&node.custody_export());
+    let _ = save_tombs(&node.tombstones());
     let _ = save_servers(&hub.read(|s, _| s.export()));
     if let Some((tx, _)) = room.take() {
         let _ = tx.send(RoomCmd::Leave);
@@ -441,6 +448,12 @@ impl KnownSaver {
             }
         }
     }
+}
+
+/// Ordem estável para comparar o que mudou desde a última gravação (o mapa do nó não tem ordem).
+fn sorted(mut tombs: Vec<([u8; 32], u64)>) -> Vec<([u8; 32], u64)> {
+    tombs.sort_unstable();
+    tombs
 }
 
 #[cfg(test)]

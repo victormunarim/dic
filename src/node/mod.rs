@@ -19,7 +19,7 @@ mod util;
 
 pub use config::{DEFAULT_RELAY_PORT, NodeConfig, RelayKeys, UPDATE_RETRY};
 pub use dialer::{DialError, Dialer};
-use mail::{mail_keeper, mail_reader};
+use mail::{Inbox, mail_keeper, mail_reader};
 use publish::{outbox, rendezvous_publisher, server_publisher};
 use reach::{Reachability, own_relay, relay_hint, track_address, watch_address};
 use util::{push_note, unix_millis};
@@ -150,10 +150,9 @@ pub struct Node {
     name: String,
     /// Espera inicial entre tentativas de entrega (veja [`NodeConfig::update_retry`]).
     retry: Duration,
-    /// Apresentações recebidas que o app ainda não retirou ([`Node::take_introductions`]).
-    introduced: Arc<Mutex<Vec<Introduced>>>,
-    /// Apresentações em entrega: por contato, a tarefa que insiste até a confirmação ([`Node::introduce`]).
-    introducing: Arc<Mutex<HashMap<[u8; 32], JoinHandle<()>>>>,
+    /// Apresentações recebidas que o app ainda não retirou ([`Node::take_introductions`]), as nossas em entrega por contato
+    /// ([`Node::introduce`]) e as lápides das remoções.
+    inbox: Inbox,
     /// Avisos de remoção em entrega: por ex-contato, a tarefa que insiste até a confirmação ([`Node::retire`]).
     retiring: Arc<Mutex<HashMap<[u8; 32], JoinHandle<()>>>>,
     /// Quem removeu esta pessoa e já foi tirado dos contatos do telefone ([`Node::take_removals`]).
@@ -224,7 +223,7 @@ impl Node {
     }
 
     async fn finish(cfg: NodeConfig, mut phone: Phone, relay: RelayServer, onion: [u8; 32], dht: Services) -> io::Result<Self> {
-        let NodeConfig { secret, public_addr, upnp, known, hints, history, updates, update_retry, dht: dht_options, name, introductions, anchors, servers: saved_servers, custody: saved_custody, mail_poll, .. } = cfg;
+        let NodeConfig { secret, public_addr, upnp, known, hints, history, updates, update_retry, dht: dht_options, name, introductions, anchors, servers: saved_servers, custody: saved_custody, mail_poll, tombstones, .. } = cfg;
         let known: Known = Arc::new(Mutex::new(known.into_iter().collect()));
         let hints: Known = Arc::new(Mutex::new(hints.into_iter().collect()));
         // A lista guarda do mais novo ao mais velho de cada contato; ao reler, a ordem se mantém.
@@ -297,30 +296,32 @@ impl Node {
         if publishes {
             background.push(tokio::spawn(server_publisher(dialer.clone(), server_hub.clone(), current.clone())));
         }
-        let introduced: Arc<Mutex<Vec<Introduced>>> = Arc::default();
+        let inbox = Inbox::default();
+        for (peer, stamp) in tombstones {
+            inbox.bury(peer, stamp);
+        }
         if publishes {
             *phone.custody().lock_unpoisoned() = Custody::import(saved_custody.iter().map(String::as_str), unix_millis() as u64);
             background.push(tokio::spawn(mail_keeper(dialer.clone(), phone.custody())));
             if introductions {
-                background.push(tokio::spawn(mail_reader(dialer.clone(), phone.contacts(), introduced.clone(), mail_poll)));
+                background.push(tokio::spawn(mail_reader(dialer.clone(), inbox.clone(), mail_poll)));
             }
         }
         if let Some(mut rx) = phone.take_introductions() {
-            let introduced = introduced.clone();
+            let inbox = inbox.clone();
             background.push(tokio::spawn(async move {
                 while let Some(Introduction { peer, intro }) = rx.recv().await {
-                    let mut queue = introduced.lock_unpoisoned();
-                    // Quem se apresenta de novo (a confirmação se perdeu) não entra duas vezes na fila.
-                    queue.retain(|i| i.peer != peer);
-                    queue.push(Introduced { peer, name: intro.name, reach: intro.reach });
+                    inbox.receive(peer, intro);
                 }
             }));
         }
         let removed: Arc<Mutex<Vec<[u8; 32]>>> = Arc::default();
         if let Some(mut rx) = phone.take_removals() {
             let removed = removed.clone();
+            let inbox = inbox.clone();
             background.push(tokio::spawn(async move {
-                while let Some(peer) = rx.recv().await {
+                while let Some((peer, stamp)) = rx.recv().await {
+                    inbox.bury(peer, stamp);
                     let mut queue = removed.lock_unpoisoned();
                     if !queue.contains(&peer) {
                         queue.push(peer);
@@ -328,7 +329,7 @@ impl Node {
                 }
             }));
         }
-        Ok(Self { secret, name, retry: update_retry, phone, _relay: relay, renew, reach, note, dialer, known, hints, history, own, update_notice, background, addr: addr_now, introduced, introducing: Arc::default(), retiring: Arc::default(), removed, servers: server_hub })
+        Ok(Self { secret, name, retry: update_retry, phone, _relay: relay, renew, reach, note, dialer, known, hints, history, own, update_notice, background, addr: addr_now, inbox, retiring: Arc::default(), removed, servers: server_hub })
     }
 
     /// Aceita convites de `keys` além dos contatos.
@@ -363,11 +364,11 @@ impl Node {
     /// Insiste com espera crescente até a confirmação ou `UPDATE_GIVE_UP` (3 dias); o endereço dele vem do código que se
     /// tem, da DHT ou das âncoras. Chamar de novo para o mesmo contato não duplica a entrega.
     pub fn introduce(&self, peer: [u8; 32]) {
-        let mut tasks = self.introducing.lock_unpoisoned();
+        let mut tasks = self.inbox.introducing.lock_unpoisoned();
         if tasks.contains_key(&peer) {
             return;
         }
-        let (dialer, own, contacts, name, tasks_done, retry) = (self.dialer.clone(), self.own.clone(), self.phone.contacts(), self.name.clone(), self.introducing.clone(), self.retry);
+        let (dialer, own, contacts, name, tasks_done, retry) = (self.dialer.clone(), self.own.clone(), self.phone.contacts(), self.name.clone(), self.inbox.introducing.clone(), self.retry);
         tasks.insert(
             peer,
             tokio::spawn(async move {
@@ -411,7 +412,7 @@ impl Node {
     /// chamar `introduce` de novo no próximo início.
     #[must_use]
     pub fn pending_introductions(&self) -> Vec<[u8; 32]> {
-        self.introducing.lock_unpoisoned().keys().copied().collect()
+        self.inbox.introducing.lock_unpoisoned().keys().copied().collect()
     }
 
     /// Quem adicionou esta pessoa e se apresentou desde a última chamada. Cada um já foi confirmado a quem
@@ -419,7 +420,7 @@ impl Node {
     /// [`NodeConfig::introductions`] desligado.
     #[must_use]
     pub fn take_introductions(&self) -> Vec<Introduced> {
-        std::mem::take(&mut *self.introduced.lock_unpoisoned())
+        std::mem::take(&mut *self.inbox.introduced.lock_unpoisoned())
     }
 
     /// Remove o contato `peer` e avisa a ele (cifrado, só ele abre) para que o tire da lista dele também. Deixa de
@@ -427,9 +428,11 @@ impl Node {
     /// endereço guardado só some quando a entrega termina. Para só esquecer, sem avisar, use [`Node::forget`].
     /// Adicionar o contato de novo ([`Node::add_contact`]) cancela o aviso.
     pub fn retire(&self, peer: [u8; 32]) {
-        if let Some(task) = self.introducing.lock_unpoisoned().remove(&peer) {
+        if let Some(task) = self.inbox.introducing.lock_unpoisoned().remove(&peer) {
             task.abort();
         }
+        // Lápide: convite que já estava na caixa antes desta remoção não readiciona o contato.
+        self.inbox.bury(peer, unix_millis() as u64);
         self.phone.contacts().lock_unpoisoned().retain(|k| *k != peer);
         self.dialer.set_trusted(peer, false);
         self.phone.custody().lock_unpoisoned().drop_from(&peer);
@@ -473,9 +476,15 @@ impl Node {
         std::mem::take(&mut *self.removed.lock_unpoisoned())
     }
 
+    /// Lápides das remoções (par, carimbo em ms) para o app guardar e devolver em [`NodeConfig::tombstones`].
+    #[must_use]
+    pub fn tombstones(&self) -> Vec<([u8; 32], u64)> {
+        self.inbox.tombs()
+    }
+
     /// Contato removido: deixa de ser atendido e some o endereço dele guardado (`known` e `hints`).
     pub fn forget(&self, peer: &[u8; 32]) {
-        if let Some(task) = self.introducing.lock_unpoisoned().remove(peer) {
+        if let Some(task) = self.inbox.introducing.lock_unpoisoned().remove(peer) {
             task.abort();
         }
         self.phone.contacts().lock_unpoisoned().retain(|k| k != peer);
@@ -604,7 +613,7 @@ impl Drop for Node {
         if let Some(t) = &self.renew {
             t.abort();
         }
-        for t in self.introducing.lock_unpoisoned().values().chain(self.retiring.lock_unpoisoned().values()) {
+        for t in self.inbox.introducing.lock_unpoisoned().values().chain(self.retiring.lock_unpoisoned().values()) {
             t.abort();
         }
         for t in &self.background {
