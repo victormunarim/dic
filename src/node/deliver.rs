@@ -62,16 +62,27 @@ impl Dialer {
     /// Entrega a apresentação `intro` a `peer` e espera a confirmação cifrada. O endereço dele vem do código que
     /// se tem (o guardado ou a dica), da DHT ou das âncoras. `true`: ele abriu e confirmou.
     pub(super) async fn deliver_intro(&self, peer: [u8; 32], intro: &Intro, wait: Duration) -> bool {
+        let Ok(frame) = update::seal_intro(&self.secret, &PublicKey::from(peer), intro) else { return false };
+        self.deliver_confirmed(peer, &frame, intro.seq, wait).await
+    }
+
+    /// Avisa `peer` de que esta pessoa o removeu (carimbo `stamp`, milissegundos Unix) e espera a confirmação.
+    pub(super) async fn deliver_removal(&self, peer: [u8; 32], stamp: u64, wait: Duration) -> bool {
+        let Ok(frame) = update::seal_removal(&self.secret, &PublicKey::from(peer), stamp) else { return false };
+        self.deliver_confirmed(peer, &frame, stamp, wait).await
+    }
+
+    /// Manda `frame` a `peer` e espera o ack cifrado de `seq`.
+    async fn deliver_confirmed(&self, peer: [u8; 32], frame: &crate::media::signal::Frame, seq: u64, wait: Duration) -> bool {
         let pk = PublicKey::from(peer);
-        let Ok(frame) = update::seal_intro(&self.secret, &pk, intro) else { return false };
         let (found, _) = self.reachable_client(&peer, ClientOptions::default).await;
         let Some((mut client, used)) = found else { return false };
         let acked = ready_within(&client, wait).await
-            && client.send(&frame).await.is_ok()
+            && client.send(frame).await.is_ok()
             && tokio::time::timeout(wait, async {
                 loop {
                     match client.next_event().await {
-                        Some(Event::Data(d)) if update::open_ack(&self.secret, &pk, intro.seq, &d) => return true,
+                        Some(Event::Data(d)) if update::open_ack(&self.secret, &pk, seq, &d) => return true,
                         Some(_) => {}
                         None => return false,
                     }

@@ -290,6 +290,12 @@ impl App {
 }
 
 impl eframe::App for App {
+    /// Fundo da janela atrás dos painéis: com o padrão (preto), uma fresta de 1 px entre dois painéis, por
+    /// arredondamento de escala fracionária (comum no Linux), aparecia como uma linha preta.
+    fn clear_color(&self, _: &egui::Visuals) -> [f32; 4] {
+        BG.to_normalized_gamma_f32()
+    }
+
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         let began = std::time::Instant::now();
         let watching = !self.shared.screen.images.lock_unpoisoned().is_empty();
@@ -309,6 +315,7 @@ impl eframe::App for App {
             *self.shared.relay.lock_unpoisoned() = None;
         }
         self.absorb_introductions();
+        self.absorb_removals();
         self.update_screen_textures(ctx);
         self.zoom_window(ctx);
         self.trust_window(ctx);

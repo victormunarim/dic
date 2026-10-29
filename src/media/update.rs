@@ -23,6 +23,10 @@
 //!   tem como tentar chave por chave), e o conteúdo vai cifrado com `DH(apresentador, destinatário)`: só
 //!   quem tem a chave secreta da identidade que se diz autora consegue formar um quadro que abre. O
 //!   destinatário confirma com o mesmo ack (tag 5) sobre o `seq` da apresentação ([`seal_intro`], [`open_intro`]).
+//! - A **remoção** (tag 10) é o aviso de "removi você": quem tira um contato avisa o outro, que o tira também.
+//!   Mesmo formato da apresentação (autor em claro, conteúdo cifrado com `DH`), com um carimbo de tempo no lugar
+//!   do cartão; o ack (tag 5) repete o carimbo. Quem recebe só aceita carimbo dentro de [`REMOVAL_WINDOW_MS`],
+//!   para que um quadro gravado não apague, dias depois, um contato readicionado ([`seal_removal`], [`open_removal`]).
 //! - Repetir um registro gravado só devolve ao contato um endereço que ele já teve; quem recebe descarta
 //!   registro com `seq` menor ou igual ao último que viu.
 
@@ -45,6 +49,10 @@ use super::{MediaError, packet::PACKET_LEN, signal::Frame};
 pub const TAG_UPDATE: u8 = 4;
 pub const TAG_ACK: u8 = 5;
 pub const TAG_INTRO: u8 = 7;
+pub const TAG_REMOVAL: u8 = 10;
+/// Diferença máxima, em ms, entre o carimbo da remoção e o relógio de quem recebe (1 h): cobre relógios tortos e
+/// limita o que um quadro gravado pode fazer depois.
+pub const REMOVAL_WINDOW_MS: u64 = 3_600_000;
 /// Só separa o domínio da cifra do registro guardado na DHT (entra como dado associado, não vai a nenhum quadro).
 const TAG_RECORD: u8 = 6;
 /// Tamanho máximo do endereço (`host:porta`) no registro, o que cabe no quadro.
@@ -366,6 +374,33 @@ pub fn open_intro(my_static: &StaticSecret, frame: &[u8]) -> Option<([u8; 32], I
     Some((author, Intro { seq, name, reach: Reach { addr, onion, link } }))
 }
 
+/// Quadro de remoção de `my_static` para `peer`, com o carimbo `stamp_ms` (milissegundos Unix de agora).
+pub fn seal_removal(my_static: &StaticSecret, peer: &PublicKey, stamp_ms: u64) -> Result<Frame, MediaError> {
+    let me = PublicKey::from(my_static);
+    let cipher = cipher(my_static, peer, &me).ok_or(MediaError::BadKey)?;
+    let plain: [u8; 9] = padded(&[&[VERSION], &stamp_ms.to_be_bytes()]);
+    Ok(seal_after(&cipher, TAG_REMOVAL, me.as_bytes(), &plain))
+}
+
+/// Abre `frame` como remoção para `my_static`. Devolve a chave de quem removeu (provada) e o carimbo. `None`: não
+/// é remoção para esta chave, ou o carimbo está a mais de [`REMOVAL_WINDOW_MS`] de `now_ms`.
+pub fn open_removal(my_static: &StaticSecret, frame: &[u8], now_ms: u64) -> Option<([u8; 32], u64)> {
+    let mut head = Reader::new(frame);
+    if frame.len() != PACKET_LEN || head.u8()? != TAG_REMOVAL {
+        return None;
+    }
+    let author: [u8; 32] = head.array()?;
+    let owner = PublicKey::from(author);
+    let cipher = cipher(my_static, &owner, &owner)?;
+    let plain = open_after(&cipher, TAG_REMOVAL, 32, frame, 9)?;
+    let mut r = Reader::new(&plain);
+    if r.u8()? != VERSION {
+        return None;
+    }
+    let stamp = r.u64()?;
+    (stamp.abs_diff(now_ms) <= REMOVAL_WINDOW_MS).then_some((author, stamp))
+}
+
 /// Confirmação de `seq` de `my_static` para `peer`, a quem mandou a atualização.
 pub fn seal_ack(my_static: &StaticSecret, peer: &PublicKey, seq: u64) -> Result<Frame, MediaError> {
     let me = PublicKey::from(my_static);
@@ -599,5 +634,39 @@ mod tests {
         }
         let r = AddressRecord { addr: "x".repeat(MAX_ADDR), ..record(1) };
         assert!(seal_update(&a, &pb, &r).is_ok());
+    }
+
+    #[test]
+    fn the_removal_proves_who_sent_it_and_is_fresh() {
+        let (a, b) = ids();
+        let (a_pk, b_pk) = (PublicKey::from(&a), PublicKey::from(&b));
+        let frame = seal_removal(&a, &b_pk, 10_000_000).unwrap();
+        assert_eq!(frame.len(), PACKET_LEN);
+        assert_eq!(open_removal(&b, &frame, 10_000_000), Some((a_pk.to_bytes(), 10_000_000)));
+        assert_eq!(open_removal(&b, &frame, 10_000_000 + REMOVAL_WINDOW_MS), Some((a_pk.to_bytes(), 10_000_000)));
+        assert_eq!(open_removal(&b, &frame, 10_000_000 + REMOVAL_WINDOW_MS + 1), None, "quadro velho");
+        assert_eq!(open_removal(&b, &frame, 10_000_000 - REMOVAL_WINDOW_MS - 1), None, "quadro do futuro");
+        let (c, _) = ids();
+        assert_eq!(open_removal(&c, &frame, 10_000_000), None, "só o destinatário abre");
+        assert_eq!(open_intro(&b, &frame), None);
+    }
+
+    #[test]
+    fn the_removal_cannot_be_forged_with_someone_elses_key() {
+        let (a, b) = ids();
+        let (c, _) = ids();
+        let mut frame = seal_removal(&c, &PublicKey::from(&b), 5).unwrap();
+        // Troca o autor por `a`: a chave do par muda e a autenticação falha.
+        frame[1..33].copy_from_slice(PublicKey::from(&a).as_bytes());
+        assert_eq!(open_removal(&b, &frame, 5), None);
+    }
+
+    #[test]
+    fn the_ack_of_a_removal_confirms_its_stamp() {
+        let (a, b) = ids();
+        let (a_pk, b_pk) = (PublicKey::from(&a), PublicKey::from(&b));
+        let ack = seal_ack(&b, &a_pk, 77).unwrap();
+        assert!(open_ack(&a, &b_pk, 77, &ack));
+        assert!(!open_ack(&a, &b_pk, 78, &ack));
     }
 }

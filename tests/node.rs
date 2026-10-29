@@ -640,6 +640,79 @@ async fn forgetting_a_contact_cancels_its_introduction() {
     assert!(a.pending_introductions().is_empty());
 }
 
+/// A remove B: B (que tem A como contato) é avisado, tira A dos contatos do telefone e a entrega encerra no ack.
+#[tokio::test]
+async fn retiring_a_contact_removes_it_on_the_other_side() {
+    let (sa, sb) = (key(), key());
+    let (pa, pb) = (*PublicKey::from(&sa).as_bytes(), *PublicKey::from(&sb).as_bytes());
+    let a = Node::start(NodeConfig { updates: false, ..fixed(sa, free_port(), vec![pb]) }).await.unwrap();
+    let b = Node::start(NodeConfig { updates: false, ..fixed(sb, free_port(), vec![pa]) }).await.unwrap();
+    a.add_hint(pb, b.relay_info().unwrap());
+    a.retire(pb);
+    assert_eq!(a.pending_removals(), vec![pb]);
+
+    let got = until("B recebe a remoção", || Some(b.take_removals()).filter(|v| !v.is_empty())).await;
+    assert_eq!(got, vec![pa]);
+    until("A recebe o ack", || a.pending_removals().is_empty().then_some(())).await;
+}
+
+/// Quem não é contato não apaga ninguém: o aviso de um desconhecido é descartado sem resposta e fica pendente.
+#[tokio::test]
+async fn a_removal_from_a_stranger_is_ignored() {
+    let (sa, sb) = (key(), key());
+    let pb = *PublicKey::from(&sb).as_bytes();
+    let a = Node::start(NodeConfig { updates: false, ..fixed(sa, free_port(), vec![pb]) }).await.unwrap();
+    let b = Node::start(NodeConfig { updates: false, ..fixed(sb, free_port(), vec![]) }).await.unwrap();
+    a.add_hint(pb, b.relay_info().unwrap());
+    a.retire(pb);
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(b.take_removals().is_empty());
+    assert_eq!(a.pending_removals(), vec![pb]);
+}
+
+/// Com o interruptor desligado, a remoção é descartada e o contato continua atendido.
+#[tokio::test]
+async fn removals_are_ignored_when_switched_off() {
+    let (sa, sb) = (key(), key());
+    let (pa, pb) = (*PublicKey::from(&sa).as_bytes(), *PublicKey::from(&sb).as_bytes());
+    let a = Node::start(NodeConfig { updates: false, ..fixed(sa, free_port(), vec![pb]) }).await.unwrap();
+    let b = Node::start(NodeConfig { updates: false, introductions: false, ..fixed(sb, free_port(), vec![pa]) }).await.unwrap();
+    a.add_hint(pb, b.relay_info().unwrap());
+    a.retire(pb);
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(b.take_removals().is_empty());
+    assert_eq!(a.pending_removals(), vec![pb]);
+}
+
+/// B ainda não está no ar quando A o remove: o aviso insiste e chega quando ele sobe.
+#[tokio::test]
+async fn the_removal_waits_for_the_contact_to_come_online() {
+    let (sa, sb) = (key(), key());
+    let (pa, pb) = (*PublicKey::from(&sa).as_bytes(), *PublicKey::from(&sb).as_bytes());
+    let a = Node::start(NodeConfig { updates: false, ..fixed(sa, free_port(), vec![pb]) }).await.unwrap();
+    a.retire(pb);
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(a.pending_removals(), vec![pb], "sem ack, segue pendente");
+
+    let b = Node::start(NodeConfig { updates: false, ..fixed(sb, free_port(), vec![pa]) }).await.unwrap();
+    a.add_hint(pb, b.relay_info().unwrap());
+    let got = until("B recebe a remoção", || Some(b.take_removals()).filter(|v| !v.is_empty())).await;
+    assert_eq!(got, vec![pa]);
+    until("A recebe o ack", || a.pending_removals().is_empty().then_some(())).await;
+}
+
+/// Adicionar de novo o contato removido cancela o aviso que ainda estava pendente.
+#[tokio::test]
+async fn adding_the_contact_again_cancels_the_removal() {
+    let (sa, sb) = (key(), key());
+    let pb = *PublicKey::from(&sb).as_bytes();
+    let a = Node::start(NodeConfig { updates: false, ..fixed(sa, free_port(), vec![pb]) }).await.unwrap();
+    a.retire(pb);
+    assert_eq!(a.pending_removals(), vec![pb]);
+    a.add_contact(pb, None);
+    assert!(a.pending_removals().is_empty());
+}
+
 /// A e B mudaram de endereço e não têm DHT: uma âncora (nó R) guarda o registro de A e B o acha por ela.
 #[tokio::test]
 async fn an_anchor_lets_two_moved_contacts_find_each_other() {

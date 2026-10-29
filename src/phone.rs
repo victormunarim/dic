@@ -733,6 +733,7 @@ pub struct Phone {
     updates: Option<mpsc::Receiver<AddressUpdate>>,
     introductions: Option<mpsc::Receiver<Introduction>>,
     accept_intros: Arc<AtomicBool>,
+    removals: Option<mpsc::Receiver<[u8; 32]>>,
     servers: ServerSlot,
     room_peers: Contacts,
     tasks: Vec<JoinHandle<()>>,
@@ -753,6 +754,10 @@ const SERVER_PER_MINUTE: usize = 3000;
 pub struct Introduction {
     pub peer: [u8; 32],
     pub intro: Intro,
+}
+
+fn unix_millis() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
 }
 
 /// Apresentações aceitas por minuto, de todos juntos; passando disto, o excesso é descartado sem resposta.
@@ -808,11 +813,12 @@ impl Phone {
         let (upd_tx, upd_rx) = mpsc::channel(64);
         let (intro_tx, intro_rx) = mpsc::channel(64);
         let accept_intros = Arc::new(AtomicBool::new(true));
+        let (removal_tx, removal_rx) = mpsc::channel(64);
         let servers = ServerSlot::default();
         let room_peers = Contacts::default();
-        let out = ActorOut { incoming: inc_tx, updates: upd_tx, introductions: intro_tx, accept_intros: accept_intros.clone(), servers: servers.clone(), room_peers: room_peers.clone(), notice: notice.clone() };
+        let out = ActorOut { incoming: inc_tx, updates: upd_tx, introductions: intro_tx, accept_intros: accept_intros.clone(), removals: removal_tx, servers: servers.clone(), room_peers: room_peers.clone(), notice: notice.clone() };
         let actor = tokio::spawn(run_actor(actor_rx, actor_tx.clone(), out, my_static, contacts.clone(), ids.clone()));
-        Ok(Self { addr, incoming: inc_rx, notice, contacts, ids, link_tx: actor_tx, hint: Arc::default(), updates: Some(upd_rx), introductions: Some(intro_rx), accept_intros, servers, room_peers, tasks: vec![accept, actor] })
+        Ok(Self { addr, incoming: inc_rx, notice, contacts, ids, link_tx: actor_tx, hint: Arc::default(), updates: Some(upd_rx), introductions: Some(intro_rx), accept_intros, removals: Some(removal_rx), servers, room_peers, tasks: vec![accept, actor] })
     }
 
     /// Para registrar neste telefone as chamadas que esta máquina faz ([`call_linked`]).
@@ -862,6 +868,13 @@ impl Phone {
     /// resposta, como faz com qualquer outro quadro de estranho.
     pub fn accept_introductions(&self, on: bool) {
         self.accept_intros.store(on, Ordering::Relaxed);
+    }
+
+    /// Fila de quem removeu esta pessoa da lista dele (a chave já provada e já tirada dos contatos deste telefone;
+    /// cada aviso foi confirmado a quem mandou). Só se retira uma vez. Obedece ao mesmo interruptor das apresentações
+    /// ([`Phone::accept_introductions`]) e só vale de quem já é contato.
+    pub fn take_removals(&mut self) -> Option<mpsc::Receiver<[u8; 32]>> {
+        self.removals.take()
     }
 
     /// Passa a atender os quadros de servidor com `handler` (veja [`ServerHandler`]).
@@ -942,6 +955,7 @@ struct ActorOut {
     updates: mpsc::Sender<AddressUpdate>,
     introductions: mpsc::Sender<Introduction>,
     accept_intros: Arc<AtomicBool>,
+    removals: mpsc::Sender<[u8; 32]>,
     servers: ServerSlot,
     room_peers: Contacts,
     notice: Arc<Mutex<Option<String>>>,
@@ -955,7 +969,7 @@ async fn run_actor(
     contacts: Contacts,
     ids: Arc<AtomicU64>,
 ) {
-    let ActorOut { incoming, updates, introductions, accept_intros, servers, room_peers, notice } = out;
+    let ActorOut { incoming, updates, introductions, accept_intros, removals, servers, room_peers, notice } = out;
     let mut intro_window: (Instant, usize) = (Instant::now(), 0);
     let mut server_window: (Instant, usize) = (Instant::now(), 0);
     let mut writers: HashMap<u64, mpsc::Sender<Vec<u8>>> = HashMap::new();
@@ -1031,6 +1045,30 @@ async fn run_actor(
                         if intro_window.1 <= INTRO_PER_MINUTE
                             && introductions.try_send(Introduction { peer, intro: intro.clone() }).is_ok()
                             && let Ok(ack) = update::seal_ack(&secret, &PublicKey::from(peer), intro.seq)
+                            && let Some(w) = writers.get(&conn)
+                        {
+                            let _ = w.try_send(ack.to_vec());
+                        }
+                        continue;
+                    }
+                    // Remoção de um contato: só vale de quem já é contato; tira da lista, confirma e entrega ao nó.
+                    if accept_intros.load(Ordering::Relaxed)
+                        && let Some((peer, stamp)) = update::open_removal(&secret, &data, unix_millis())
+                    {
+                        if intro_window.0.elapsed() >= Duration::from_secs(60) {
+                            intro_window = (Instant::now(), 0);
+                        }
+                        intro_window.1 += 1;
+                        let within = intro_window.1 <= INTRO_PER_MINUTE;
+                        let was_contact = within && {
+                            let mut list = contacts.lock_unpoisoned();
+                            let had = list.contains(&peer);
+                            list.retain(|k| *k != peer);
+                            had
+                        };
+                        if was_contact
+                            && removals.try_send(peer).is_ok()
+                            && let Ok(ack) = update::seal_ack(&secret, &PublicKey::from(peer), stamp)
                             && let Some(w) = writers.get(&conn)
                         {
                             let _ = w.try_send(ack.to_vec());

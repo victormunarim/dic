@@ -62,8 +62,8 @@ pub(crate) enum Cmd {
     Dial([u8; 32], Option<clam::node::RelayInfo>),
     /// Contato novo (e o relay do código dele, se veio um código direto): atender e guardar o endereço.
     Contact([u8; 32], Option<clam::node::RelayInfo>),
-    /// Contato removido: parar de atender e esquecer o endereço guardado.
-    Forget([u8; 32]),
+    /// Contato removido pela pessoa: esquece e avisa o outro lado para ele também tirar (`Node::retire`).
+    Retire([u8; 32]),
     /// Marca (ou desmarca) o contato como de confiança: a tela sem privacidade vai direto só para ele.
     Trust([u8; 32], bool),
     /// Liga o microfone ao alto-falante para a pessoa conferir som e nível.
@@ -99,6 +99,8 @@ pub(crate) struct Shared {
     pub(crate) relay: Mutex<Option<clam::node::RelayInfo>>,
     /// Quem adicionou esta pessoa e se apresentou; a janela põe cada um na lista de contatos.
     pub(crate) introduced: Mutex<Vec<clam::node::Introduced>>,
+    /// Quem removeu esta pessoa; o nó já o esqueceu e a janela o tira da lista de contatos.
+    pub(crate) removed: Mutex<Vec<[u8; 32]>>,
     /// Os servidores desta pessoa; vazio offline.
     pub(crate) servers: Mutex<Option<clam::server::net::ServerHub>>,
     /// Sala de voz em que está e quem fala.

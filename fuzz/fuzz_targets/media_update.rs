@@ -1,11 +1,11 @@
 #![no_main]
-//! Atualização de endereço, apresentação, confirmação e itens da DHT: os `open_*` nunca entram em pânico
+//! Atualização de endereço, apresentação, remoção, confirmação e itens da DHT: os `open_*` nunca entram em pânico
 //! com bytes quaisquer, e o que o dono sela abre igual para o contato (e só para ele).
 
 use arbitrary::Arbitrary;
 use clam::{
     media::update::{
-        AddressRecord, Intro, Reach, open_ack, open_intro, open_record, open_server_record, open_update, seal_ack, seal_intro, seal_record,
+        AddressRecord, Intro, Reach, open_ack, open_intro, open_record, open_removal, open_server_record, open_update, seal_ack, seal_intro, seal_record, seal_removal,
         seal_server_record, seal_update, valid_addr,
     },
     x25519_dalek::{PublicKey, StaticSecret},
@@ -38,6 +38,7 @@ fuzz_target!(|input: Input| {
         Input::Raw(data) => {
             let _ = open_update(&me, [peer_pk.to_bytes()], &data);
             let _ = open_intro(&me, &data);
+            let _ = open_removal(&me, &data, 1);
             let _ = open_ack(&me, &peer_pk, 1, &data);
             let _ = open_record(&me, &peer_pk, &data);
             let _ = open_server_record(&[3; 32], &[4; 16], &peer_pk.to_bytes(), &data);
@@ -49,6 +50,7 @@ fuzz_target!(|input: Input| {
             frame.resize(200, 0);
             let _ = open_update(&me, [peer_pk.to_bytes()], &frame);
             let _ = open_intro(&me, &frame);
+            let _ = open_removal(&me, &frame, 1);
             let _ = open_ack(&me, &peer_pk, 1, &frame);
         }
         Input::Sealed(f) => {
@@ -82,6 +84,10 @@ fuzz_target!(|input: Input| {
                     assert!(valid_addr(&got.reach.addr) && !got.name.chars().any(char::is_control));
                     assert_eq!(got.seq, intro.seq);
                 }
+            }
+            if let Ok(frame) = seal_removal(&peer, &me_pk, f.seq) {
+                assert_eq!(open_removal(&me, &frame, f.seq), Some((peer_pk.to_bytes(), f.seq)));
+                assert_eq!(open_removal(&[9u8; 32].into(), &frame, f.seq), None, "só o destinatário abre");
             }
             let ack = seal_ack(&peer, &me_pk, f.seq).expect("ack sela");
             assert!(open_ack(&me, &peer_pk, f.seq, &ack));

@@ -308,6 +308,36 @@ pub(crate) fn exit_button(ui: &mut Ui) -> egui::Response {
     reply.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
+/// Círculo com um xis (sair da sala), desenhado: simples e legível em tamanho pequeno. Vermelho ao passar o
+/// mouse; quem chama decide o que acontece ao clicar.
+pub(crate) fn hangup_button(ui: &mut Ui) -> egui::Response {
+    let (rect, reply) = ui.allocate_exact_size(vec2(32.0, 34.0), egui::Sense::click());
+    let c = rect.center();
+    let ink = Stroke::new(1.8_f32, if reply.hovered() { RED } else { MUTED });
+    let p = ui.painter();
+    p.circle_stroke(c, 9.0, ink);
+    p.line_segment([c + vec2(-3.5, -3.5), c + vec2(3.5, 3.5)], ink);
+    p.line_segment([c + vec2(-3.5, 3.5), c + vec2(3.5, -3.5)], ink);
+    reply.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Monitor desenhado (compartilhar a tela): vermelho e preenchido enquanto transmite, cinza em repouso.
+pub(crate) fn screen_button(ui: &mut Ui, sharing: bool) -> egui::Response {
+    let (rect, reply) = ui.allocate_exact_size(vec2(32.0, 34.0), egui::Sense::click());
+    let c = rect.center();
+    let color = if sharing { RED } else if reply.hovered() { Color32::WHITE } else { MUTED };
+    let ink = Stroke::new(1.7_f32, color);
+    let p = ui.painter();
+    let screen = egui::Rect::from_center_size(c + vec2(0.0, -2.0), vec2(20.0, 14.0));
+    p.rect_stroke(screen, CornerRadius::same(2), ink, egui::StrokeKind::Middle);
+    if sharing {
+        p.rect_filled(screen.shrink(3.5), CornerRadius::same(1), color);
+    }
+    p.line_segment([c + vec2(0.0, 5.0), c + vec2(0.0, 9.0)], ink);
+    p.line_segment([c + vec2(-5.0, 9.0), c + vec2(5.0, 9.0)], ink);
+    reply.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 /// Uma explicação em letra menor e apagada.
 pub(crate) fn note(ui: &mut Ui, text: impl Into<String>) {
     ui.label(RichText::new(text.into()).size(14.0).color(MUTED));

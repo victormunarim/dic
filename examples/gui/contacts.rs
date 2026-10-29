@@ -40,6 +40,22 @@ impl App {
         }
     }
 
+    /// Quem removeu esta pessoa (o nó já o esqueceu): sai da lista e perde a confiança. Sem aviso de volta, senão as
+    /// duas pontas ficariam se avisando.
+    pub(crate) fn absorb_removals(&mut self) {
+        let removed: Vec<[u8; 32]> = std::mem::take(&mut *self.shared.removed.lock_unpoisoned());
+        if removed.is_empty() {
+            return;
+        }
+        for key in removed {
+            while let Some(i) = parse_contacts(&self.form.contacts).iter().position(|(_, k)| *k == key) {
+                self.form.contacts = remove_contact(&self.form.contacts, i);
+            }
+            self.form.set_trusted(key, false);
+        }
+        self.form.save();
+    }
+
     /// Formulário de novo contato, dentro do menu do + do cabeçalho da coluna.
     pub(crate) fn new_contact_form(&mut self, ui: &mut egui::Ui) {
         ui.set_width(260.0);
@@ -124,13 +140,15 @@ impl App {
             if !parse_contacts(&self.form.contacts).iter().any(|(_, k)| *k == key) {
                 // A confiança não volta sozinha se o contato for adicionado de novo.
                 self.form.set_trusted(key, false);
+                // O outro lado é avisado e também tira esta pessoa da lista dele. Offline, o aviso fica na fila
+                // (`.clam-gui.removed`) e o endereço dele continua guardado até a entrega no próximo início.
                 match &self.running {
                     Some(r) => {
-                        let _ = r.cmds.send(Cmd::Forget(key));
+                        let _ = r.cmds.send(Cmd::Retire(key));
                     }
                     None => {
-                        if let Err(e) = forget_known(&key).and_then(|()| mark_pending(key, false)) {
-                            self.error = format!("não deu para tirar o endereço do contato de {}: {e}", known_path().display());
+                        if let Err(e) = mark_pending(key, false).and_then(|()| mark_removal(key, true)) {
+                            self.error = format!("não deu para guardar a remoção do contato em {}: {e}", removals_path().display());
                         }
                     }
                 }
@@ -197,7 +215,7 @@ impl App {
                 }
                 (None, relay) => {
                     // Com o nó parado: o endereço entra como dica e a apresentação fica na fila do próximo início.
-                    if let Err(e) = relay.map_or(Ok(()), |r| remember_hint(key, r)).and_then(|()| mark_pending(key, true)) {
+                    if let Err(e) = relay.map_or(Ok(()), |r| remember_hint(key, r)).and_then(|()| mark_pending(key, true)).and_then(|()| mark_removal(key, false)) {
                         self.error = format!("não deu para guardar o contato em {}: {e}", known_path().display());
                     }
                 }

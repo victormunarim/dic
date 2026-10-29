@@ -53,7 +53,16 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
             node.introduce(*key);
         }
     }
+    // Avisos de remoção que ficaram sem confirmação (só de quem não voltou a ser contato).
+    for key in load_removals() {
+        if contacts.iter().any(|(_, k)| *k == key) {
+            continue;
+        }
+        node.retire(key);
+    }
     let mut pending_saved = pending_now(&node);
+    let mut removals_saved = node.pending_removals();
+    removals_saved.sort();
     let dialer = node.dialer();
     // Só vale quem ainda é contato (o `Form` já descarta o resto).
     for key in form.trusted_keys() {
@@ -184,12 +193,14 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
                     // A pessoa adicionada também passa a ter este contato (veja `Node::introduce`).
                     node.introduce(key);
                     save_pending_if_changed(&node, &mut pending_saved, &out);
+                    save_removals_if_changed(&node, &mut removals_saved, &out);
                     saver.sync(&book_of(&node), &out);
                 }
                 Some(Cmd::Trust(key, on)) => dialer.set_trusted(key, on),
-                Some(Cmd::Forget(key)) => {
-                    node.forget(&key);
+                Some(Cmd::Retire(key)) => {
+                    node.retire(key);
                     save_pending_if_changed(&node, &mut pending_saved, &out);
+                    save_removals_if_changed(&node, &mut removals_saved, &out);
                     saver.sync(&book_of(&node), &out);
                 }
                 Some(Cmd::JoinRoom(server, room_id)) => {
@@ -306,11 +317,22 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
             shared.introduced.lock_unpoisoned().extend(introduced);
             saver.sync(&book_of(&node), &out);
         }
+        let removed = node.take_removals();
+        if !removed.is_empty() {
+            for key in &removed {
+                node.forget(key);
+                out.line(format!("{} ({}) removeu você: saiu dos seus contatos", member_name(&contacts, key), &hex(key)[..8]));
+            }
+            shared.removed.lock_unpoisoned().extend(removed);
+            save_pending_if_changed(&node, &mut pending_saved, &out);
+            saver.sync(&book_of(&node), &out);
+        }
         // Os endereços mudam sozinhos (renovação na DHT, convites): grava quando mudam, não só
         // depois de uma ligação, para um fechamento brusco não perder o que foi aprendido.
         if saver.due() {
             saver.sync(&book_of(&node), &out);
             save_pending_if_changed(&node, &mut pending_saved, &out);
+            save_removals_if_changed(&node, &mut removals_saved, &out);
         }
     }
     saver.sync(&book_of(&node), &out);
@@ -343,6 +365,19 @@ fn save_pending_if_changed(node: &Node, saved: &mut Vec<[u8; 32]>, out: &Sink) {
     }
     if let Err(e) = save_pending(&now) {
         out.line(format!("não consegui gravar as apresentações pendentes em {}: {e}", pending_path().display()));
+    }
+    *saved = now;
+}
+
+/// Grava `.clam-gui.removed` quando a fila de avisos de remoção pendentes mudou.
+fn save_removals_if_changed(node: &Node, saved: &mut Vec<[u8; 32]>, out: &Sink) {
+    let mut now = node.pending_removals();
+    now.sort();
+    if now == *saved {
+        return;
+    }
+    if let Err(e) = save_removals(&now) {
+        out.line(format!("não consegui gravar as remoções pendentes em {}: {e}", removals_path().display()));
     }
     *saved = now;
 }

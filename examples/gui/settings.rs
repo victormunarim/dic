@@ -71,8 +71,8 @@ impl App {
                     });
                     card(ui, "Seu nome", "Aparece na lista de contatos de quem você adiciona.", |ui| {
                         ui.add(field(&mut self.form.my_name, "seu nome").char_limit(clam::media::update::MAX_NAME));
-                        ui.check(&mut self.form.intros, "Aceitar quem me adiciona como contato")
-                            .on_hover_text("Quando alguém adiciona o seu código, ele manda uma apresentação cifrada e passa a aparecer na sua lista, para os dois se ligarem. Desligado, só entra na lista quem você adicionar. Só aceita de quem já tem o seu endereço; no máximo 20 por minuto.");
+                        ui.check(&mut self.form.intros, "Aceitar adições e remoções de contatos")
+                            .on_hover_text("Quando alguém adiciona o seu código, ele manda uma apresentação cifrada e passa a aparecer na sua lista, para os dois se ligarem. Quando alguém te remove, ele avisa e sai da sua lista também (só vale de quem já é seu contato). Desligado, só entra na lista quem você adicionar e ninguém te tira da lista. Só aceita de quem já tem o seu endereço; no máximo 20 por minuto.");
                     });
                     card(ui, "Endereço", "Só se o IP que os outros enxergam não serve, como atrás de NAT: ip:porta (a porta precisa estar aberta no roteador; pode ser um nome).", |ui| {
                         ui.add(field(&mut self.form.public_addr, "ip:porta"));

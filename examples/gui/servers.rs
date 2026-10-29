@@ -79,12 +79,14 @@ impl App {
         }
         let here = self.tab == Tab::Servers;
         egui::SidePanel::left("trilho")
+            // Sem a linha de separação do painel: no tema neomórfico a divisão é só o relevo.
+            .show_separator_line(false)
             .exact_width(76.0)
             .resizable(false)
             .frame(egui::Frame::new().fill(BG).inner_margin(Margin::symmetric(12, 14)))
             .show(ctx, |ui| {
                 ui.spacing_mut().item_spacing.y = 14.0;
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                egui::ScrollArea::vertical().scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).auto_shrink([false, false]).show(ui, |ui| {
                     let on = self.tab == Tab::Contacts;
                     let people = server_icon(ui, "👤", on.then_some(BLURPLE), Color32::WHITE);
                     if people.on_hover_text("Contatos").clicked() {
@@ -201,6 +203,7 @@ impl App {
         let Some(hub) = self.shared.servers.lock_unpoisoned().clone() else { return };
         let Some(v) = hub.read(|s, now| s.views(now)).into_iter().find(|v| Some(v.id) == self.srv.sel) else { return };
         egui::SidePanel::right("membros")
+            .show_separator_line(false)
             .exact_width(340.0)
             .resizable(false)
             .frame(egui::Frame::new().fill(BG).inner_margin(Margin::symmetric(14, 26)))
@@ -249,13 +252,14 @@ impl App {
             Some((name, sv.name))
         });
         egui::SidePanel::left("salas")
+            .show_separator_line(false)
             .exact_width(300.0)
             .resizable(false)
             .frame(egui::Frame::new().fill(BG).inner_margin(Margin::symmetric(12, 14)))
             .show(ctx, |ui| {
                 ui.spacing_mut().item_spacing.y = 6.0;
                 // O perfil ocupa uma altura fixa no pé; a lista de salas rola no espaço que sobra.
-                let footer: f32 = 74.0 + if room_bar.is_some() { 52.0 } else { 0.0 };
+                let footer: f32 = 74.0 + if room_bar.is_some() { 76.0 } else { 0.0 };
                 if self.tab == Tab::Contacts {
                     let count = parse_contacts(&self.form.contacts).len();
                     ui.add_space(2.0);
@@ -271,13 +275,11 @@ impl App {
                             egui::Popup::menu(&plus).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| self.new_contact_form(ui));
                         });
                     });
-                    ui.add_space(4.0);
-                    ui.separator();
-                    ui.add_space(2.0);
+                    ui.add_space(8.0);
                     let height = (ui.available_height() - footer).max(60.0);
-                    egui::ScrollArea::vertical().max_height(height).auto_shrink([false, false]).show(ui, |ui| {
-                        // Folga lateral para as sombras dos contatos não serem cortadas pela rolagem.
-                        egui::Frame::new().inner_margin(Margin::symmetric(8, 6)).show(ui, |ui| self.contacts_list(ui, !offline, in_call));
+                    egui::ScrollArea::vertical().scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).max_height(height).auto_shrink([false, false]).show(ui, |ui| {
+                        // Folga lateral e vertical maior que a sombra (5 px + 10 de desfoque pela metade): cortada pela rolagem, a sombra escura virava uma linha reta no limite da coluna.
+                        egui::Frame::new().inner_margin(Margin::symmetric(16, 10)).show(ui, |ui| self.contacts_list(ui, !offline, in_call));
                     });
                 } else {
                 match (&hub, &view) {
@@ -294,13 +296,11 @@ impl App {
                                 egui::Popup::menu(&exit).show(|ui| self.server_menu(ui, hub, v));
                             });
                         });
-                        ui.add_space(4.0);
-                        ui.separator();
-                        ui.add_space(2.0);
+                        ui.add_space(8.0);
                         let height = (ui.available_height() - footer).max(60.0);
-                        egui::ScrollArea::vertical().max_height(height).auto_shrink([false, false]).show(ui, |ui| {
+                        egui::ScrollArea::vertical().scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).max_height(height).auto_shrink([false, false]).show(ui, |ui| {
                             // Folga lateral para as sombras das salas não serem cortadas pela rolagem.
-                            egui::Frame::new().inner_margin(Margin::symmetric(8, 6)).show(ui, |ui| self.room_list(ui, hub, v, my_room, in_call));
+                            egui::Frame::new().inner_margin(Margin::symmetric(16, 10)).show(ui, |ui| self.room_list(ui, hub, v, my_room, in_call));
                         });
                     }
                     _ => {
@@ -316,24 +316,29 @@ impl App {
                         self.user_panel(ctx, ui, offline, in_call, status);
                     });
                     if let Some((room, server)) = &room_bar {
-                        // Colada no perfil (sem o espaço entre cartões) e de uma linha só: é um estado, não uma tela.
-                        // Mais estreita que o perfil (recuo nos lados) e com folga interna entre as pontas.
-                        egui::Frame::new().inner_margin(Margin::symmetric(10, 0)).show(ui, |ui| sunken_frame(ui, 12, 4, |ui| {
+                        // Mais estreita que o perfil (recuo nos lados), com folga interna e o compartilhar tela ao lado do sair.
+                        let sharing = self.shared.screen.want_share.load(Ordering::Relaxed);
+                        egui::Frame::new().inner_margin(Margin::symmetric(6, 0)).show(ui, |ui| sunken_frame(ui, 12, 10, |ui| {
                             ui.set_width(ui.available_width());
                             ui.horizontal(|ui| {
-                                ui.add_space(8.0);
-                                ui.label(RichText::new("🔊").size(20.0).color(GREEN));
+                                ui.spacing_mut().item_spacing.x = 10.0;
+                                ui.add_space(6.0);
+                                ui.label(RichText::new("🔊").size(24.0).color(GREEN));
                                 ui.vertical(|ui| {
-                                    ui.spacing_mut().item_spacing.y = 0.0;
-                                    ui.label(RichText::new(room).strong().size(16.0).color(GREEN));
-                                    ui.label(RichText::new(server).size(12.0).color(MUTED));
+                                    ui.spacing_mut().item_spacing.y = 2.0;
+                                    ui.label(RichText::new(room).strong().size(17.0).color(GREEN));
+                                    ui.label(RichText::new(server).size(13.0).color(MUTED));
                                 });
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    let leave = egui::Button::new(RichText::new("✖").size(12.0).color(MUTED)).frame(false);
-                                    if ui.add(leave).on_hover_text("Sair da sala").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                                    ui.spacing_mut().item_spacing.x = 4.0;
+                                    ui.add_space(6.0);
+                                    if hangup_button(ui).on_hover_text("Sair da sala").clicked() {
                                         self.send(Cmd::LeaveRoom);
                                     }
-                                    ui.add_space(8.0);
+                                    let tip = if sharing { "Parar de compartilhar a tela" } else { "Compartilhar a minha tela" };
+                                    if screen_button(ui, sharing).on_hover_text(tip).clicked() {
+                                        self.send(Cmd::RoomShare(!sharing));
+                                    }
                                 });
                             });
                         }));
@@ -345,16 +350,16 @@ impl App {
     fn room_list(&mut self, ui: &mut egui::Ui, hub: &clam::server::net::ServerHub, v: &ServerView, my_room: Option<(ServerId, clam::server::RoomId)>, in_call: bool) {
         let contacts = parse_contacts(&self.form.contacts);
         let manages = v.my_role.is_some_and(|r| r.manages());
-        let mut action: Option<(Option<[u8; 32]>, bool)> = None;
+        let mut action: Option<([u8; 32], bool)> = None;
         for room in &v.rooms {
             let here = my_room == Some((v.id, room.id));
-            let blocked = if here { None } else if my_room.is_some() { Some("Saia da sala atual (✖ no pé da coluna) antes de trocar") } else if in_call { Some("Encerre a chamada antes de entrar numa sala") } else { None };
+            let blocked = if here { None } else if my_room.is_some() { Some("Saia da sala atual (ícone de sair no pé da coluna) antes de trocar") } else if in_call { Some("Encerre a chamada antes de entrar numa sala") } else { None };
             raised_frame(ui, 12, 8, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 let title = RichText::new(format!("🔊  {}", room.name)).strong().color(if here { Color32::WHITE } else { TEXT });
                 let width = ui.available_width() - if manages { 34.0 } else { 0.0 };
-                let entry = egui::Button::new(title).fill(if here { SELECTED } else { Color32::TRANSPARENT }).min_size(vec2(width, 32.0));
+                let entry = egui::Button::new((title, egui::Atom::grow())).fill(if here { SELECTED } else { Color32::TRANSPARENT }).min_size(vec2(width, 32.0));
                 let reply = ui.add_enabled(blocked.is_none(), entry).on_hover_text("Entrar na sala").on_disabled_hover_text(blocked.unwrap_or_default());
                 if reply.clicked() && !here {
                     self.send(Cmd::JoinRoom(v.id, room.id));
@@ -380,7 +385,6 @@ impl App {
                 }
             });
             let live = self.shared.room.lock_unpoisoned();
-            let sharing = self.shared.screen.want_share.load(Ordering::Relaxed);
             for id in &room.people {
                 let Some(m) = v.members.iter().find(|m| m.id == *id) else { continue };
                 let speaking = live.speaking(&m.key);
@@ -395,20 +399,16 @@ impl App {
                         ui.painter().rect_filled(rect, CornerRadius::same(2), RED);
                         tip.on_hover_text("transmitindo a tela");
                     }
-                    // Compartilhar/assistir tela só valem na sala em que estou.
+                    // Assistir à tela só vale na sala em que estou.
                     if here {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             // Mesma folga da borda que o avatar tem à esquerda (26 menos o enchimento do botão).
                             ui.add_space(22.0);
-                            if m.is_me {
-                                let (icon, tip) = if sharing { ("⏹", "Parar de compartilhar") } else { ("🖥", "Compartilhar tela") };
-                                if ui.add(egui::Button::new(RichText::new(icon).color(if sharing { RED } else { TEXT })).frame(false)).on_hover_text(tip).clicked() {
-                                    action = Some((None, !sharing));
-                                }
-                            } else if m.sharing {
+                            // Compartilhar a própria tela fica na subseção da sala, acima do perfil.
+                            if !m.is_me && m.sharing {
                                 let on = live.watching.contains(&m.key);
                                 if ui.add(egui::Button::new(RichText::new(if on { "🚫" } else { "👁" }).color(GREEN)).frame(false)).on_hover_text(if on { "Parar de assistir" } else { "Assistir à tela" }).clicked() {
-                                    action = Some((Some(m.key), !on));
+                                    action = Some((m.key, !on));
                                 }
                             }
                         });
@@ -416,10 +416,8 @@ impl App {
                 });
             }
             drop(live);
-            match action {
-                Some((None, on)) => self.send(Cmd::RoomShare(on)),
-                Some((Some(key), on)) => crate::engine::follow(&self.shared, key, on),
-                None => {}
+            if let Some((key, on)) = action {
+                crate::engine::follow(&self.shared, key, on);
             }
             });
             ui.add_space(8.0);
@@ -650,7 +648,8 @@ impl App {
         });
         // O botão é medido primeiro (da direita para a esquerda) e o campo ocupa só o que sobra: com largura
         // fixa para o campo, o botão passava da borda e a coluna de membros o cobria.
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        // Altura fixa: `with_layout` ocuparia toda a altura que sobra e criaria rolagem na página.
+        ui.allocate_ui_with_layout(vec2(ui.available_width(), 36.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let ready = !self.srv.chat_draft.trim().is_empty();
             let sent = button(ui, ready, "Enviar", BLURPLE).clicked();
             let reply = ui.add(field(&mut self.srv.chat_draft, "Mensagem para a sala").desired_width(ui.available_width().max(80.0)));

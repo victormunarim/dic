@@ -151,6 +151,10 @@ pub struct Node {
     introduced: Arc<Mutex<Vec<Introduced>>>,
     /// Apresentações em entrega: por contato, a tarefa que insiste até a confirmação ([`Node::introduce`]).
     introducing: Arc<Mutex<HashMap<[u8; 32], JoinHandle<()>>>>,
+    /// Avisos de remoção em entrega: por ex-contato, a tarefa que insiste até a confirmação ([`Node::retire`]).
+    retiring: Arc<Mutex<HashMap<[u8; 32], JoinHandle<()>>>>,
+    /// Quem removeu esta pessoa e já foi tirado dos contatos do telefone ([`Node::take_removals`]).
+    removed: Arc<Mutex<Vec<[u8; 32]>>>,
     /// Os servidores desta pessoa (veja [`Node::servers`]).
     servers: ServerHub,
     /// Tarefas de fundo: a que aplica os avisos de endereço dos contatos e a fila de saída dos nossos.
@@ -302,7 +306,19 @@ impl Node {
                 }
             }));
         }
-        Ok(Self { secret, name, retry: update_retry, phone, _relay: relay, renew, reach, note, dialer, known, hints, history, own, update_notice, background, addr: addr_now, introduced, introducing: Arc::default(), servers: server_hub })
+        let removed: Arc<Mutex<Vec<[u8; 32]>>> = Arc::default();
+        if let Some(mut rx) = phone.take_removals() {
+            let removed = removed.clone();
+            background.push(tokio::spawn(async move {
+                while let Some(peer) = rx.recv().await {
+                    let mut queue = removed.lock_unpoisoned();
+                    if !queue.contains(&peer) {
+                        queue.push(peer);
+                    }
+                }
+            }));
+        }
+        Ok(Self { secret, name, retry: update_retry, phone, _relay: relay, renew, reach, note, dialer, known, hints, history, own, update_notice, background, addr: addr_now, introduced, introducing: Arc::default(), retiring: Arc::default(), removed, servers: server_hub })
     }
 
     /// Aceita convites de `keys` além dos contatos.
@@ -323,6 +339,9 @@ impl Node {
 
     /// Novo contato: passa a ser atendido e, se o código dele trouxe o relay, esse é o primeiro endereço para ligar a ele.
     pub fn add_contact(&self, peer: [u8; 32], relay: Option<RelayInfo>) {
+        if let Some(task) = self.retiring.lock_unpoisoned().remove(&peer) {
+            task.abort();
+        }
         self.allow(&[peer]);
         if let Some(r) = relay {
             self.add_hint(peer, r);
@@ -379,6 +398,56 @@ impl Node {
     #[must_use]
     pub fn take_introductions(&self) -> Vec<Introduced> {
         std::mem::take(&mut *self.introduced.lock_unpoisoned())
+    }
+
+    /// Remove o contato `peer` e avisa a ele (cifrado, só ele abre) para que o tire da lista dele também. Deixa de
+    /// atender a chave na hora; o aviso insiste com espera crescente até a confirmação ou `UPDATE_GIVE_UP`, e o
+    /// endereço guardado só some quando a entrega termina. Para só esquecer, sem avisar, use [`Node::forget`].
+    /// Adicionar o contato de novo ([`Node::add_contact`]) cancela o aviso.
+    pub fn retire(&self, peer: [u8; 32]) {
+        if let Some(task) = self.introducing.lock_unpoisoned().remove(&peer) {
+            task.abort();
+        }
+        self.phone.contacts().lock_unpoisoned().retain(|k| *k != peer);
+        self.dialer.set_trusted(peer, false);
+        let mut tasks = self.retiring.lock_unpoisoned();
+        if tasks.contains_key(&peer) {
+            return;
+        }
+        let (node_dialer, known, hints, history, tasks_done, retry) = (self.dialer.clone(), self.known.clone(), self.hints.clone(), self.history.clone(), self.retiring.clone(), self.retry);
+        tasks.insert(
+            peer,
+            tokio::spawn(async move {
+                let (mut wait, give_up) = (retry, Instant::now() + UPDATE_GIVE_UP);
+                loop {
+                    // Carimbo novo a cada tentativa: quem recebe só aceita o recente.
+                    if node_dialer.deliver_removal(peer, unix_millis() as u64, INTRO_ACK_WAIT).await || Instant::now() >= give_up {
+                        break;
+                    }
+                    tokio::time::sleep(wait).await;
+                    wait = (wait * 2).min(UPDATE_MAX_WAIT);
+                }
+                known.lock_unpoisoned().remove(&peer);
+                hints.lock_unpoisoned().remove(&peer);
+                history.lock_unpoisoned().remove(&peer);
+                tasks_done.lock_unpoisoned().remove(&peer);
+            }),
+        );
+    }
+
+    /// Ex-contatos a quem [`Node::retire`] ainda não entregou o aviso, para o app guardar e chamar `retire` de novo no
+    /// próximo início.
+    #[must_use]
+    pub fn pending_removals(&self) -> Vec<[u8; 32]> {
+        self.retiring.lock_unpoisoned().keys().copied().collect()
+    }
+
+    /// Quem removeu esta pessoa desde a última chamada. Cada um já foi tirado dos contatos do telefone e confirmado
+    /// a quem avisou; o app tira da lista dele ([`Node::forget`], sem avisar de volta). Só vale de quem era contato.
+    /// Fica vazio com [`NodeConfig::introductions`] desligado.
+    #[must_use]
+    pub fn take_removals(&self) -> Vec<[u8; 32]> {
+        std::mem::take(&mut *self.removed.lock_unpoisoned())
     }
 
     /// Contato removido: deixa de ser atendido e some o endereço dele guardado (`known` e `hints`).
@@ -511,7 +580,7 @@ impl Drop for Node {
         if let Some(t) = &self.renew {
             t.abort();
         }
-        for t in self.introducing.lock_unpoisoned().values() {
+        for t in self.introducing.lock_unpoisoned().values().chain(self.retiring.lock_unpoisoned().values()) {
             t.abort();
         }
         for t in &self.background {

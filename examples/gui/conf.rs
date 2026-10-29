@@ -299,15 +299,6 @@ fn format_known(book: &Book) -> String {
     all.collect()
 }
 
-/// Contato removido com o nó parado: tira os endereços dele de `.clam-gui.known`.
-pub(crate) fn forget_known(key: &[u8; 32]) -> std::io::Result<()> {
-    let mut book = load_known();
-    for list in [&mut book.known, &mut book.hints, &mut book.history] {
-        list.retain(|(k, _)| k != key);
-    }
-    save_known(&book)
-}
-
 /// Contato adicionado com o nó parado: o relay do código direto dele entra em `.clam-gui.known` como dica.
 pub(crate) fn remember_hint(key: [u8; 32], relay: clam::node::RelayInfo) -> std::io::Result<()> {
     let mut book = load_known();
@@ -322,15 +313,47 @@ pub(crate) fn pending_path() -> PathBuf {
     conf_path().with_file_name(".clam-gui.intro")
 }
 
-pub(crate) fn load_pending() -> Vec<[u8; 32]> {
-    std::fs::read_to_string(pending_path()).unwrap_or_default().lines().filter_map(|l| unhex(l.trim()).ok()).collect()
+fn load_keys(path: &std::path::Path) -> Vec<[u8; 32]> {
+    std::fs::read_to_string(path).unwrap_or_default().lines().filter_map(|l| unhex(l.trim()).ok()).collect()
 }
 
-pub(crate) fn save_pending(keys: &[[u8; 32]]) -> std::io::Result<()> {
+fn save_keys(path: &std::path::Path, keys: &[[u8; 32]]) -> std::io::Result<()> {
     let mut keys = keys.to_vec();
     keys.sort();
     keys.dedup();
-    write_private(&pending_path(), &keys.iter().map(|k| format!("{}\n", hex(k))).collect::<String>())
+    write_private(path, &keys.iter().map(|k| format!("{}\n", hex(k))).collect::<String>())
+}
+
+pub(crate) fn load_pending() -> Vec<[u8; 32]> {
+    load_keys(&pending_path())
+}
+
+pub(crate) fn save_pending(keys: &[[u8; 32]]) -> std::io::Result<()> {
+    save_keys(&pending_path(), keys)
+}
+
+/// Ex-contatos a quem o aviso de remoção ainda não foi confirmado (mesmo formato de `.clam-gui.intro`). O endereço
+/// deles continua em `.clam-gui.known` até a entrega terminar, para o nó achá-los no próximo início.
+pub(crate) fn removals_path() -> PathBuf {
+    conf_path().with_file_name(".clam-gui.removed")
+}
+
+pub(crate) fn load_removals() -> Vec<[u8; 32]> {
+    load_keys(&removals_path())
+}
+
+pub(crate) fn save_removals(keys: &[[u8; 32]]) -> std::io::Result<()> {
+    save_keys(&removals_path(), keys)
+}
+
+/// Contato removido com o nó parado: o aviso entra na fila do próximo início; adicionado de novo, sai dela.
+pub(crate) fn mark_removal(key: [u8; 32], pending: bool) -> std::io::Result<()> {
+    let mut keys = load_removals();
+    keys.retain(|k| *k != key);
+    if pending {
+        keys.push(key);
+    }
+    save_removals(&keys)
 }
 
 /// Contato adicionado ou removido com o nó parado: a apresentação entra na fila do próximo início, ou sai dela.
