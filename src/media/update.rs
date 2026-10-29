@@ -455,6 +455,16 @@ pub fn mail_slot(mail: &[u8]) -> usize {
     Sha256::digest(mail).first().map_or(0, |b| usize::from(*b) % MAIL_SLOTS)
 }
 
+/// Quem assinou o quadro de apresentação `frame` (a chave vem em claro, sem abrir). `None`: não é um quadro de apresentação.
+/// Serve ao guardião para saber se quem deixou o quadro é o próprio autor (depósito original) ou um guardião que repassou.
+pub fn intro_author(frame: &[u8]) -> Option<[u8; 32]> {
+    let mut head = Reader::new(frame);
+    if frame.len() != PACKET_LEN || head.u8()? != TAG_INTRO {
+        return None;
+    }
+    head.array()
+}
+
 /// Abre `value`, lido da caixa de `my_static`, como apresentação ainda dentro do prazo. `None`: não é uma
 /// apresentação para esta chave, ou o carimbo dela passa de [`MAIL_TTL_MS`] ou está mais de uma hora no futuro.
 pub fn open_mail(my_static: &StaticSecret, value: &[u8], now_ms: u64) -> Option<([u8; 32], Intro)> {
@@ -654,6 +664,17 @@ mod tests {
 
     fn intro(seq: u64) -> Intro {
         Intro { seq, name: "Ana".into(), reach: Reach { addr: "203.0.113.7:4001".into(), onion: [3; 32], link: [4; 32] } }
+    }
+
+    #[test]
+    fn the_author_of_an_introduction_shows_without_opening_it() {
+        let (a, b) = ids();
+        let frame = seal_intro(&a, &PublicKey::from(&b), &intro(3)).unwrap();
+        assert_eq!(intro_author(&frame), Some(*PublicKey::from(&a).as_bytes()));
+        assert_eq!(intro_author(&frame[..PACKET_LEN - 1]), None);
+        let mut other = frame;
+        other[0] = TAG_CUSTODY;
+        assert_eq!(intro_author(&other), None);
     }
 
     #[test]

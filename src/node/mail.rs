@@ -65,6 +65,15 @@ impl Inbox {
 /// Quantos contatos de confiança guardam a mesma apresentação.
 pub(super) const KEEPERS: usize = 10;
 
+/// Para quantos de seus contatos de confiança o guardião repassa o que recebeu direto do autor.
+pub(super) const FORWARDS: usize = 3;
+
+/// Estado do repasse de uma apresentação: quem já confirmou e quando tentar de novo.
+type Passed = (HashSet<[u8; 32]>, Instant);
+
+/// Entre tentativas de repasse: o vizinho pode não ter este guardião como contato e nunca confirmar.
+const FORWARD_RETRY: Duration = Duration::from_secs(300);
+
 /// Quanto esperar o guardião confirmar os dois pedaços.
 const CUSTODY_ACK_WAIT: Duration = Duration::from_secs(8);
 
@@ -123,10 +132,12 @@ impl Dialer {
 
 /// O guardião: regrava na DHT, a cada hora e quando o dia vira, o que contatos deixaram aqui. Também descarta o
 /// que passou do prazo.
-pub(super) async fn mail_keeper(dialer: Dialer, custody: Arc<Mutex<Custody>>) {
+pub(super) async fn mail_keeper(dialer: Dialer, custody: Arc<Mutex<Custody>>, contacts: phone::Contacts) {
     // Por apresentação guardada: o dia gravado e quando gravar de novo.
     let mut state: HashMap<([u8; 32], u64), (u64, Instant)> = HashMap::new();
     let mut put_seq = 0i64;
+    // Repasse (um salto): por apresentação, quem já confirmou e quando tentar de novo.
+    let mut passed: HashMap<([u8; 32], u64), Passed> = HashMap::new();
     loop {
         let now = unix_millis() as u64;
         let held = {
@@ -135,6 +146,7 @@ pub(super) async fn mail_keeper(dialer: Dialer, custody: Arc<Mutex<Custody>>) {
             c.held(now)
         };
         state.retain(|k, _| held.iter().any(|h| (h.from, h.id) == *k));
+        passed.retain(|k, _| held.iter().any(|h| (h.from, h.id) == *k));
         let day = unix_secs() / 86400;
         let due: Vec<_> = held.iter().filter(|h| state.get(&(h.from, h.id)).is_none_or(|(d, at)| *d != day || Instant::now() >= *at)).collect();
         for h in due {
@@ -142,6 +154,18 @@ pub(super) async fn mail_keeper(dialer: Dialer, custody: Arc<Mutex<Custody>>) {
             put_seq = (unix_millis() as i64).max(put_seq + 1);
             let ok = dialer.put_mail(&h.master, &h.mail, put_seq).await;
             state.insert((h.from, h.id), (day, Instant::now() + if ok { REPUBLISH } else { RETRY }));
+        }
+        // Repasse: só o que veio direto do autor, para não passar de um salto (o guardião de segunda mão vê `from` ≠ autor).
+        for h in held.iter().filter(|h| update::intro_author(&h.mail) == Some(h.from)) {
+            let entry = passed.entry((h.from, h.id)).or_insert_with(|| (HashSet::new(), Instant::now()));
+            if entry.0.len() >= FORWARDS || Instant::now() < entry.1 {
+                continue;
+            }
+            let list: Vec<[u8; 32]> = contacts.lock_unpoisoned().clone();
+            let todo: Vec<[u8; 32]> = list.into_iter().filter(|k| *k != h.from && dialer.is_trusted(k) && !entry.0.contains(k)).take(FORWARDS - entry.0.len()).collect();
+            let done = futures::future::join_all(todo.iter().map(|k| dialer.deliver_custody(*k, h.id, &h.master, &h.mail))).await;
+            entry.0.extend(todo.into_iter().zip(done).filter(|(_, ok)| *ok).map(|(k, _)| k));
+            entry.1 = Instant::now() + FORWARD_RETRY;
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }

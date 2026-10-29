@@ -935,3 +935,32 @@ async fn an_invitation_older_than_the_removal_is_refused() {
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert!(b.take_introductions().is_empty());
 }
+
+/// O guardião repassa a custódia a um contato de confiança dele, que a guarda; esse segundo não repassa adiante.
+#[tokio::test]
+async fn the_keeper_passes_the_custody_one_hop_only() {
+    use clam::rendezvous::DhtOptions;
+    let testnet = mainline::Testnet::new(5).unwrap();
+    let dht = || Some(DhtOptions { bootstrap: testnet.bootstrap.clone(), bind: Some(std::net::Ipv4Addr::LOCALHOST), circuit: false });
+    let (sa, sb, sc, sd, se) = (key(), key(), key(), key(), key());
+    let (pa, pb, pc, pd, pe) = (*PublicKey::from(&sa).as_bytes(), *PublicKey::from(&sb).as_bytes(), *PublicKey::from(&sc).as_bytes(), *PublicKey::from(&sd).as_bytes(), *PublicKey::from(&se).as_bytes());
+    let e = Node::start(NodeConfig { updates: false, dht: dht(), ..fixed(se, free_port(), vec![pd]) }).await.unwrap();
+    let d = Node::start(NodeConfig { updates: false, dht: dht(), ..fixed(sd, free_port(), vec![pc, pe]) }).await.unwrap();
+    let c = Node::start(NodeConfig { updates: false, dht: dht(), ..fixed(sc, free_port(), vec![pa, pd]) }).await.unwrap();
+    let a = Node::start(NodeConfig { updates: false, dht: dht(), name: "Ana".into(), ..fixed(sa, free_port(), vec![pb, pc]) }).await.unwrap();
+    d.add_hint(pe, e.relay_info().unwrap());
+    d.set_trusted(pe, true);
+    c.add_hint(pd, d.relay_info().unwrap());
+    c.set_trusted(pd, true);
+    a.add_hint(pc, c.relay_info().unwrap());
+    a.set_trusted(pc, true);
+    a.introduce(pb);
+
+    until("C guarda", || Some(c.custody_export()).filter(|v| !v.is_empty())).await;
+    let held = until("D guarda o repasse", || Some(d.custody_export()).filter(|v| !v.is_empty())).await;
+    assert_eq!(held.len(), 1);
+    assert!(!held[0].contains("Ana"), "D guarda bytes cifrados");
+    // Dá ao guardião D várias passadas (o laço roda a cada segundo) antes de conferir que E nada recebeu.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(e.custody_export().is_empty(), "o repasse para em um salto");
+}
