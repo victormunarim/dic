@@ -416,6 +416,48 @@ fn an_invite_reaches_a_contact_over_the_network_and_is_accepted_there() {
 }
 
 #[test]
+fn an_invite_found_in_the_mailbox_becomes_pending_only_if_from_a_contact_and_for_me() {
+    let mut net = Net::new(3);
+    let (server, out) = net.nodes[0].create("Amigos", net.now).unwrap();
+    net.run(0, out);
+    net.down.insert(1);
+    let (key, now) = (net.key(1), net.now);
+    let out = net.nodes[0].invite_send(&server, key, now).unwrap();
+    net.run(0, out);
+    let mail = net.nodes[0].invite_mail(&key, net.now);
+    assert_eq!(mail.len(), 1);
+    let (sid, stamp, raw) = &mail[0];
+    assert_eq!((*sid, *stamp), (server, 1000 * 1000), "o carimbo é o começo da entrega, em ms");
+    let (contacts, none) = ([net.key(0), net.key(2)], [net.key(2)]);
+    assert!(net.nodes[1].receive_mail_invite(raw, &none).events.is_empty(), "quem convidou não é contato");
+    assert!(net.nodes[2].receive_mail_invite(raw, &contacts).events.is_empty(), "o convite é de outra pessoa");
+    assert!(net.nodes[1].receive_mail_invite(&raw[..raw.len() - 1], &contacts).events.is_empty(), "adulterado");
+    assert!(net.nodes[1].pending_invites().is_empty());
+    let out = net.nodes[1].receive_mail_invite(raw, &contacts);
+    assert!(out.events.iter().any(|e| matches!(e, Event::Invitation { .. })));
+    let pending = net.nodes[1].pending_invites();
+    assert_eq!((pending.len(), pending[0].from), (1, net.key(0)));
+    assert!(net.nodes[1].receive_mail_invite(raw, &contacts).events.is_empty(), "o mesmo convite não avisa de novo");
+    let (_, out) = net.nodes[1].accept(&pending[0].text, net.now).unwrap();
+    net.down.remove(&1);
+    net.run(1, out);
+    net.advance(2);
+    assert_eq!(net.view(1, &server).members.len(), 2, "o convite da caixa entra no servidor como o de quadros");
+}
+
+#[test]
+fn an_invite_that_arrived_has_no_more_mail_to_leave() {
+    let mut net = Net::new(2);
+    let (server, out) = net.nodes[0].create("Amigos", net.now).unwrap();
+    net.run(0, out);
+    let (key, now) = (net.key(1), net.now);
+    let out = net.nodes[0].invite_send(&server, key, now).unwrap();
+    net.run(0, out);
+    let other = [9u8; 32];
+    assert!(net.nodes[0].invite_mail(&other, net.now).is_empty(), "só há convite para quem foi convidado");
+}
+
+#[test]
 fn an_invite_from_a_stranger_is_ignored_and_a_declined_one_does_not_come_back() {
     let mut net = Net::new(2);
     let (server, out) = net.nodes[0].create("Amigos", net.now).unwrap();

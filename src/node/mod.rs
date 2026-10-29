@@ -304,7 +304,7 @@ impl Node {
             *phone.custody().lock_unpoisoned() = Custody::import(saved_custody.iter().map(String::as_str), unix_millis() as u64);
             background.push(tokio::spawn(mail_keeper(dialer.clone(), phone.custody(), phone.contacts())));
             if introductions {
-                background.push(tokio::spawn(mail_reader(dialer.clone(), inbox.clone(), mail_poll)));
+                background.push(tokio::spawn(mail_reader(dialer.clone(), inbox.clone(), mail_poll, { let hub = server_hub.clone(); move |raw| hub.receive_mail_invite(raw) })));
             }
         }
         if let Some(mut rx) = phone.take_introductions() {

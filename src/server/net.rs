@@ -16,14 +16,14 @@ use tokio::{sync::mpsc, task::JoinHandle};
 use x25519_dalek::StaticSecret;
 
 use super::{
-    ServerError,
+    ServerError, ServerId,
     engine::{Event, Outbound, Output, Servers},
     wire::INVITE_SERVER,
 };
 use crate::{
     media::{signal::Frame, update::Reach},
     node::{Dialer, RelayInfo},
-    phone::{Phone, ServerHandler},
+    phone::{self, Phone, ServerHandler},
 };
 
 /// Quanto se espera pelas confirmações de um lote.
@@ -34,6 +34,12 @@ const PARALLEL: usize = 6;
 const BACKLOG: usize = 64;
 /// Intervalo mínimo entre duas buscas do endereço do mesmo membro.
 const SEARCH_EVERY: Duration = Duration::from_secs(120);
+/// Entre duas gravações do mesmo convite na DHT (o guardião regrava depois, de hora em hora).
+const BOX_REPUT: Duration = Duration::from_secs(3600);
+/// Entre duas tentativas de deixar o convite com guardiões que ainda não confirmaram.
+const BOX_RETRY: Duration = Duration::from_secs(300);
+/// Esquece o estado do depósito de um convite que não é tentado há tanto tempo (a entrega já acabou).
+const BOX_FORGET: Duration = Duration::from_secs(2 * 24 * 3600);
 /// Eventos que esperam a janela; passando disto, os mais velhos caem.
 const EVENTS: usize = 512;
 /// Quadros que esperam o laço de entrega; passando disto, os novos caem (como o que passa de `BACKLOG`).
@@ -55,6 +61,17 @@ struct Inner {
     tasks: Mutex<Vec<JoinHandle<()>>>,
     /// Quando se procurou cada membro na DHT e nas âncoras pela última vez.
     searched: Mutex<HashMap<[u8; 32], Instant>>,
+    contacts: phone::Contacts,
+    /// Convites deixados na caixa de correio do convidado: quem já guarda e quando gravar/tentar de novo.
+    boxed: Mutex<HashMap<([u8; 32], ServerId), Boxed>>,
+}
+
+/// Estado do depósito de um convite na caixa de correio (veja `node::mail`).
+#[derive(Default)]
+struct Boxed {
+    kept: HashSet<[u8; 32]>,
+    put_at: Option<Instant>,
+    try_at: Option<Instant>,
 }
 
 impl Inner {
@@ -92,7 +109,7 @@ impl ServerHub {
     pub fn start(servers: Servers, dialer: Dialer, phone: &Phone, own: Arc<Mutex<Option<RelayInfo>>>) -> Self {
         let contacts = phone.contacts();
         let (send, queue) = mpsc::channel(QUEUE);
-        let inner = Arc::new(Inner { servers: Mutex::new(servers), send, events: Mutex::default(), dialer, tasks: Mutex::default(), searched: Mutex::default() });
+        let inner = Arc::new(Inner { servers: Mutex::new(servers), send, events: Mutex::default(), dialer, tasks: Mutex::default(), searched: Mutex::default(), contacts: contacts.clone(), boxed: Mutex::default() });
         let handler: ServerHandler = {
             let inner = inner.clone();
             Arc::new(move |frame: &[u8]| {
@@ -106,6 +123,14 @@ impl ServerHub {
         let tasks = vec![tokio::spawn(deliver_loop(inner.clone(), queue)), tokio::spawn(clock(inner.clone(), own))];
         *inner.tasks.lock_unpoisoned() = tasks;
         Self { inner }
+    }
+
+    /// Um convite achado na caixa de correio (veja [`crate::node`]): vira convite pendente se for de um contato e para
+    /// este nó.
+    pub fn receive_mail_invite(&self, raw: &[u8]) {
+        let known: Vec<[u8; 32]> = self.inner.contacts.lock_unpoisoned().clone();
+        let out = self.inner.servers.lock_unpoisoned().receive_mail_invite(raw, &known);
+        self.inner.dispatch(out);
     }
 
     /// Muda o estado e manda o que a mudança pede.
@@ -250,8 +275,13 @@ async fn deliver(inner: &Inner, peer: [u8; 32], batch: Vec<Outbound>) {
         ok
     };
     let confirmed = inner.dialer.deliver_batch(peer, &frames, acked, ACK_WAIT, !invites.is_empty()).await;
-    if !invites.is_empty() && invites.iter().all(|i| got.lock_unpoisoned().contains(i)) {
-        inner.servers.lock_unpoisoned().invite_delivered(&peer, now());
+    if !invites.is_empty() {
+        if invites.iter().all(|i| got.lock_unpoisoned().contains(i)) {
+            inner.servers.lock_unpoisoned().invite_delivered(&peer, now());
+            inner.boxed.lock_unpoisoned().retain(|(who, _), _| *who != peer);
+        } else {
+            leave_in_mailbox(inner, peer).await;
+        }
     }
     if confirmed > 0 {
         return;
@@ -265,5 +295,31 @@ async fn deliver(inner: &Inner, peer: [u8; 32], batch: Vec<Outbound>) {
     };
     if due && inner.dialer.find_member(&peer, &shared).await {
         inner.dialer.deliver_batch(peer, &frames, acked, ACK_WAIT, false).await;
+    }
+}
+
+/// O convidado não confirmou os quadros: deixa o convite na caixa de correio dele e com contatos de confiança
+/// (a DHT é gravada de hora em hora; os guardiões, de cinco em cinco minutos até todos confirmarem).
+async fn leave_in_mailbox(inner: &Inner, peer: [u8; 32]) {
+    let items = inner.servers.lock_unpoisoned().invite_mail(&peer, now());
+    for (sid, id, raw) in items {
+        let (mut kept, put) = {
+            let mut boxed = inner.boxed.lock_unpoisoned();
+            boxed.retain(|_, b| b.try_at.is_some_and(|t| t.elapsed() < BOX_FORGET));
+            let b = boxed.entry((peer, sid)).or_default();
+            if b.try_at.is_some_and(|t| Instant::now() < t) {
+                continue;
+            }
+            let put = b.put_at.is_none_or(|t| t.elapsed() >= BOX_REPUT);
+            b.try_at = Some(Instant::now() + BOX_RETRY);
+            if put {
+                b.put_at = Some(Instant::now());
+            }
+            (b.kept.clone(), put)
+        };
+        inner.dialer.leave_invite_mail(peer, id, &raw, put, &inner.contacts, &mut kept).await;
+        if let Some(b) = inner.boxed.lock_unpoisoned().get_mut(&(peer, sid)) {
+            b.kept = kept;
+        }
     }
 }

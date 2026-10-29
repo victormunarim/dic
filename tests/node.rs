@@ -849,6 +849,34 @@ async fn an_offline_contact_finds_the_introduction_in_its_mailbox() {
     assert_eq!((got[0].peer, got[0].name.as_str()), (pa, "Ana"));
 }
 
+/// Convite de servidor para quem está offline: A convida B, que nunca esteve no ar; C é contato de confiança de A.
+/// A deixa o convite com C e na caixa de B; A sai e B acha o convite sozinho.
+#[tokio::test]
+async fn an_offline_contact_finds_the_server_invite_in_its_mailbox() {
+    use clam::rendezvous::DhtOptions;
+    let testnet = mainline::Testnet::new(5).unwrap();
+    let dht = || Some(DhtOptions { bootstrap: testnet.bootstrap.clone(), bind: Some(std::net::Ipv4Addr::LOCALHOST), circuit: false });
+    let (sa, sb, sc) = (key(), key(), key());
+    let (pa, pb, pc) = (*PublicKey::from(&sa).as_bytes(), *PublicKey::from(&sb).as_bytes(), *PublicKey::from(&sc).as_bytes());
+    let c = Node::start(NodeConfig { updates: false, dht: dht(), ..fixed(sc, free_port(), vec![pa]) }).await.unwrap();
+    let a = Node::start(NodeConfig { updates: false, dht: dht(), name: "Ana".into(), ..fixed(sa, free_port(), vec![pb, pc]) }).await.unwrap();
+    a.add_hint(pc, c.relay_info().unwrap());
+    a.set_trusted(pc, true);
+    let hub = a.servers();
+    let server = hub.try_run(|s, now| s.create("Amigos", now)).unwrap();
+    // O endereço do nó só chega ao motor no primeiro tique do relógio.
+    until("convite enviado", || hub.try_act(|s, now| s.invite_send(&server, pb, now)).ok()).await;
+
+    let held = until("C guarda o convite", || Some(c.custody_export()).filter(|v| !v.is_empty())).await;
+    assert_eq!(held.len(), 1);
+    assert!(!held[0].contains("Amigos"), "C guarda bytes cifrados");
+
+    a.stop();
+    let b = Node::start(NodeConfig { updates: false, dht: dht(), mail_poll: Duration::from_millis(300), ..fixed(sb, free_port(), vec![pa]) }).await.unwrap();
+    let got = until("B acha o convite na caixa", || Some(b.servers().read(|s, _| s.pending_invites())).filter(|v| !v.is_empty())).await;
+    assert_eq!((got[0].name.as_str(), got[0].from, got[0].server), ("Amigos", pa, server));
+}
+
 /// Quem não é de confiança não guarda convite.
 #[tokio::test]
 async fn an_untrusted_contact_is_not_asked_to_keep_the_introduction() {

@@ -5,7 +5,7 @@
 use arbitrary::Arbitrary;
 use clam::{
     media::update::{
-        AddressRecord, CUSTODY_DATA, CUSTODY_PARTS, Intro, MAIL_SLOTS, Reach, join_custody, seal_custody, mail_slot, mailbox_master, mailbox_target, open_ack, open_custody, open_intro, open_mail, open_record, open_removal, open_server_record, open_update, seal_ack, seal_intro, seal_record, seal_removal,
+        AddressRecord, CUSTODY_DATA, Intro, MAIL_SLOTS, Reach, invite_mail_item, join_custody, mail_author, mail_item, open_mail_item, seal_custody, mail_slot, mailbox_master, mailbox_target, open_ack, open_custody, open_intro, open_mail, open_record, open_removal, open_server_record, open_update, seal_ack, seal_intro, seal_record, seal_removal,
         seal_server_record, seal_update, valid_addr,
     },
     x25519_dalek::{PublicKey, StaticSecret},
@@ -40,6 +40,10 @@ fuzz_target!(|input: Input| {
             let _ = open_intro(&me, &data);
             let _ = open_custody(&me, &data);
             let _ = open_mail(&me, &data, 1);
+            let _ = open_mail_item(&me, &data, 1);
+            let _ = (mail_item(&data), mail_author(&data));
+            let chunks: Vec<[u8; CUSTODY_DATA]> = data.chunks_exact(CUSTODY_DATA).filter_map(|c| c.try_into().ok()).collect();
+            let _ = join_custody(&chunks);
             let _ = open_removal(&me, &data, 1);
             let _ = open_ack(&me, &peer_pk, 1, &data);
             let _ = open_record(&me, &peer_pk, &data);
@@ -54,6 +58,7 @@ fuzz_target!(|input: Input| {
             let _ = open_intro(&me, &frame);
             let _ = open_custody(&me, &frame);
             let _ = open_mail(&me, &frame, 1);
+            let _ = open_mail_item(&me, &frame, 1);
             let _ = open_removal(&me, &frame, 1);
             let _ = open_ack(&me, &peer_pk, 1, &frame);
         }
@@ -98,14 +103,28 @@ fuzz_target!(|input: Input| {
                 assert_eq!(mailbox_target(&master, f.seq, 0), mailbox_target(&master, f.seq, 0));
                 assert!(mail_slot(&mail) < MAIL_SLOTS);
                 if let Ok(frames) = seal_custody(&peer, &me_pk, f.seq, &master, &mail) {
-                    let mut parts = [[0u8; CUSTODY_DATA]; CUSTODY_PARTS];
+                    let mut parts = vec![[0u8; CUSTODY_DATA]; frames.len()];
                     for (frame, slot) in frames.iter().zip(parts.iter_mut()) {
                         let (from, part) = open_custody(&me, frame).expect("custódia abre");
                         assert_eq!((from, part.id), (peer_pk.to_bytes(), f.seq));
                         *slot = part.data;
                     }
-                    assert_eq!(join_custody(&parts), Some((master, mail)));
+                    assert_eq!(join_custody(&parts), Some((master, mail.to_vec())));
                 }
+            }
+            // Convite de servidor na caixa: de 80 a 997 bytes, em até CUSTODY_MAX_PARTS quadros.
+            let len = 80 + (f.seq % 918) as usize;
+            let raw = [&[1u8; 16][..], &peer_pk.to_bytes(), &vec![f.seq as u8; len - 48]].concat();
+            if let Some(item) = invite_mail_item(&raw) {
+                let master = mailbox_master(&me_pk.to_bytes());
+                assert!(mail_slot(&item) < MAIL_SLOTS);
+                assert_eq!(mail_author(&item), Some(peer_pk.to_bytes()));
+                let frames = seal_custody(&peer, &me_pk, f.seq, &master, &item).expect("convite sela");
+                let mut parts = vec![[0u8; CUSTODY_DATA]; frames.len()];
+                for (frame, slot) in frames.iter().zip(parts.iter_mut()) {
+                    *slot = open_custody(&me, frame).expect("custódia abre").1.data;
+                }
+                assert_eq!(join_custody(&parts), Some((master, item)));
             }
             let ack = seal_ack(&peer, &me_pk, f.seq).expect("ack sela");
             assert!(open_ack(&me, &peer_pk, f.seq, &ack));

@@ -58,13 +58,19 @@ pub const TAG_ACK: u8 = 5;
 pub const TAG_INTRO: u8 = 7;
 pub const TAG_REMOVAL: u8 = 10;
 pub const TAG_CUSTODY: u8 = 11;
+/// Etiqueta do convite de servidor na caixa de correio (não é um quadro de rede: só abre o item da DHT e a custódia).
+pub const TAG_MAIL_INVITE: u8 = 12;
 /// Quanto tempo uma apresentação na caixa de correio vale, a contar do carimbo dela (7 dias).
 pub const MAIL_TTL_MS: u64 = 7 * 24 * 3_600_000;
 /// Itens da caixa de um dia: quem grava escolhe um pelo hash do quadro, e quem lê consulta todos. Mais de um evita
 /// que duas apresentações para a mesma pessoa se atropelem no mesmo item da DHT.
 pub const MAIL_SLOTS: usize = 4;
-/// Pedaços da custódia (veja [`seal_custody`]).
+/// Pedaços da custódia de uma apresentação (chave da caixa + quadro de 200 bytes): veja [`seal_custody`].
 pub const CUSTODY_PARTS: usize = 2;
+/// Tamanho máximo de um item da caixa na DHT (o teto de um valor BEP44).
+pub const MAIL_MAX: usize = 1000;
+/// Pedaços da custódia de um convite de servidor: 32 B da chave da caixa e até [`MAIL_MAX`] B de item cabem em 8.
+pub const CUSTODY_MAX_PARTS: usize = 8;
 const CUSTODY_PLAIN_LEN: usize = PACKET_LEN - 1 - 32 - NONCE_LEN - 16;
 /// Dados de cada pedaço da custódia: o que sobra do quadro depois de versão, `id` e índice.
 pub const CUSTODY_DATA: usize = CUSTODY_PLAIN_LEN - 1 - 8 - 1;
@@ -424,6 +430,8 @@ pub fn open_removal(my_static: &StaticSecret, frame: &[u8], now_ms: u64) -> Opti
 pub struct CustodyPart {
     pub id: u64,
     pub idx: u8,
+    /// Quantos pedaços tem o depósito (de 1 a [`CUSTODY_MAX_PARTS`]).
+    pub total: u8,
     pub data: [u8; CUSTODY_DATA],
 }
 
@@ -465,6 +473,71 @@ pub fn intro_author(frame: &[u8]) -> Option<[u8; 32]> {
     head.array()
 }
 
+/// O item da caixa para um convite de servidor: etiqueta, tamanho e o convite cru (cifrado só para o convidado, com
+/// servidor, autor e convidado em claro no começo). `None` se passa de [`MAIL_MAX`] ou não tem o começo.
+pub fn invite_mail_item(raw: &[u8]) -> Option<Vec<u8>> {
+    if raw.len() < INVITE_AUTHOR_AT + 32 || raw.len() + 3 > MAIL_MAX {
+        return None;
+    }
+    let len = u16::try_from(raw.len()).ok()?;
+    Some([&[TAG_MAIL_INVITE][..], &len.to_be_bytes(), raw].concat())
+}
+
+/// O começo do convite cru de servidor: 16 B do servidor e depois a chave de quem convidou (veja `server::invite`).
+const INVITE_AUTHOR_AT: usize = 16;
+
+/// Quanto do começo de `bytes` é um item de caixa: 200 B de apresentação ou o convite com o tamanho. `None`: nenhum
+/// dos dois (inclui o que passa de [`MAIL_MAX`]). Sobra (o enchimento do último pedaço de custódia) fica de fora.
+pub fn mail_item(bytes: &[u8]) -> Option<&[u8]> {
+    let len = match *bytes.first()? {
+        TAG_INTRO => PACKET_LEN,
+        TAG_MAIL_INVITE => {
+            let mut r = Reader::new(bytes.get(1..)?);
+            let raw = usize::from(r.u16()?);
+            if raw < INVITE_AUTHOR_AT + 32 {
+                return None;
+            }
+            raw.checked_add(3)?
+        }
+        _ => return None,
+    };
+    if len > MAIL_MAX {
+        return None;
+    }
+    bytes.get(..len)
+}
+
+/// Quem assinou o item de caixa (a chave vem em claro): o autor da apresentação ou quem convidou.
+pub fn mail_author(item: &[u8]) -> Option<[u8; 32]> {
+    match *item.first()? {
+        TAG_INTRO => intro_author(item),
+        TAG_MAIL_INVITE => item.get(3 + INVITE_AUTHOR_AT..3 + INVITE_AUTHOR_AT + 32)?.try_into().ok(),
+        _ => None,
+    }
+}
+
+/// O que se acha na caixa de uma pessoa.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MailItem {
+    /// Apresentação de contato: quem a fez e o cartão.
+    Intro([u8; 32], Intro),
+    /// Convite de servidor cru (para `Invite::open`; o prazo é o da custódia, o item não leva carimbo).
+    Invite(Vec<u8>),
+}
+
+/// Abre `value`, lido da caixa de `my_static`. Apresentação: como [`open_mail`]. Convite de servidor: só confere o
+/// formato do item; abri-lo é com `server::invite::Invite::open`, que sabe se é para esta chave.
+pub fn open_mail_item(my_static: &StaticSecret, value: &[u8], now_ms: u64) -> Option<MailItem> {
+    match *value.first()? {
+        TAG_INTRO => open_mail(my_static, value, now_ms).map(|(a, i)| MailItem::Intro(a, i)),
+        TAG_MAIL_INVITE => {
+            let item = mail_item(value).filter(|i| i.len() == value.len())?;
+            item.get(3..).map(|raw| MailItem::Invite(raw.to_vec()))
+        }
+        _ => None,
+    }
+}
+
 /// Abre `value`, lido da caixa de `my_static`, como apresentação ainda dentro do prazo. `None`: não é uma
 /// apresentação para esta chave, ou o carimbo dela passa de [`MAIL_TTL_MS`] ou está mais de uma hora no futuro.
 pub fn open_mail(my_static: &StaticSecret, value: &[u8], now_ms: u64) -> Option<([u8; 32], Intro)> {
@@ -473,19 +546,28 @@ pub fn open_mail(my_static: &StaticSecret, value: &[u8], now_ms: u64) -> Option<
     fresh.then_some((author, intro))
 }
 
-/// Os dois quadros com que `my_static` deixa com `peer` (o guardião) a apresentação `mail` (um quadro de
-/// [`seal_intro`]) e a chave da caixa do destinatário. `id` é o `seq` da apresentação.
-pub fn seal_custody(my_static: &StaticSecret, peer: &PublicKey, id: u64, master: &[u8; 32], mail: &Frame) -> Result<[Frame; CUSTODY_PARTS], MediaError> {
+/// Os quadros com que `my_static` deixa com `peer` (o guardião) o item de caixa `item` (veja [`mail_item`]) e a chave
+/// da caixa do destinatário. `id` é o carimbo (ms): o `seq` da apresentação, ou a hora do convite. Uma apresentação
+/// (232 B) leva [`CUSTODY_PARTS`] quadros; um convite, até [`CUSTODY_MAX_PARTS`].
+pub fn seal_custody(my_static: &StaticSecret, peer: &PublicKey, id: u64, master: &[u8; 32], item: &[u8]) -> Result<Vec<Frame>, MediaError> {
     let me = PublicKey::from(my_static);
     let cipher = cipher(my_static, peer, &me).ok_or(MediaError::BadKey)?;
-    let payload = [&master[..], &mail[..]].concat();
-    let mut frames = [[0u8; PACKET_LEN]; CUSTODY_PARTS];
-    for (idx, (frame, chunk)) in frames.iter_mut().zip(payload.chunks(CUSTODY_DATA)).enumerate() {
-        let data = padded::<CUSTODY_DATA>(&[chunk]);
-        let plain: [u8; CUSTODY_PLAIN_LEN] = padded(&[&[VERSION], &id.to_be_bytes(), &[idx as u8], &data]);
-        *frame = seal_after(&cipher, TAG_CUSTODY, me.as_bytes(), &plain);
+    if mail_item(item).is_none_or(|i| i.len() != item.len()) {
+        return Err(MediaError::Malformed);
     }
-    Ok(frames)
+    let payload = [&master[..], item].concat();
+    let total = payload.len().div_ceil(CUSTODY_DATA);
+    // Dois pedaços é o formato da primeira versão (o campo vale 0): quem só conhece esse continua a ler as apresentações.
+    let code = if total == CUSTODY_PARTS { 0 } else { total as u8 };
+    Ok(payload
+        .chunks(CUSTODY_DATA)
+        .enumerate()
+        .map(|(idx, chunk)| {
+            let data = padded::<CUSTODY_DATA>(&[chunk]);
+            let plain: [u8; CUSTODY_PLAIN_LEN] = padded(&[&[VERSION], &id.to_be_bytes(), &[code << 4 | idx as u8], &data]);
+            seal_after(&cipher, TAG_CUSTODY, me.as_bytes(), &plain)
+        })
+        .collect())
 }
 
 /// Abre `frame` como pedaço de custódia para `my_static`. Devolve a chave de quem deixou (provada, como na
@@ -503,20 +585,23 @@ pub fn open_custody(my_static: &StaticSecret, frame: &[u8]) -> Option<([u8; 32],
     if r.u8()? != VERSION {
         return None;
     }
-    let (id, idx) = (r.u64()?, r.u8()?);
-    if usize::from(idx) >= CUSTODY_PARTS {
+    let (id, at) = (r.u64()?, r.u8()?);
+    let (code, idx) = (at >> 4, at & 0x0f);
+    let total = if code == 0 { CUSTODY_PARTS as u8 } else { code };
+    if usize::from(total) > CUSTODY_MAX_PARTS || idx >= total {
         return None;
     }
-    Some((author, CustodyPart { id, idx, data: r.array()? }))
+    Some((author, CustodyPart { id, idx, total, data: r.array()? }))
 }
 
-/// Junta os pedaços (em ordem) e devolve a chave da caixa e o quadro da apresentação.
-pub fn join_custody(parts: &[[u8; CUSTODY_DATA]; CUSTODY_PARTS]) -> Option<([u8; 32], Frame)> {
+/// Junta os pedaços (em ordem) e devolve a chave da caixa e o item de caixa. `None`: faltou pedaço ou o que sobrou não
+/// é um item.
+pub fn join_custody(parts: &[[u8; CUSTODY_DATA]]) -> Option<([u8; 32], Vec<u8>)> {
     let all: Vec<u8> = parts.iter().flatten().copied().collect();
     let mut r = Reader::new(&all);
     let master = r.array()?;
-    let mail: Frame = r.array()?;
-    Some((master, mail))
+    let item = mail_item(all.get(32..)?)?.to_vec();
+    Some((master, item))
 }
 
 /// Confirmação de `seq` de `my_static` para `peer`, a quem mandou a atualização.
@@ -799,6 +884,43 @@ mod tests {
         assert!(!open_ack(&a, &b_pk, 78, &ack));
     }
 
+    fn invite_raw(len: usize, author: [u8; 32]) -> Vec<u8> {
+        [&[7u8; 16][..], &author, &vec![9u8; len - 48]].concat()
+    }
+
+    #[test]
+    fn a_server_invite_travels_in_many_custody_parts_and_comes_back_whole() {
+        let (a, keeper) = ids();
+        let author = *PublicKey::from(&a).as_bytes();
+        let master = [5u8; 32];
+        for len in [80, 300, 700, MAIL_MAX - 3] {
+            let item = invite_mail_item(&invite_raw(len, author)).unwrap();
+            let frames = seal_custody(&a, &PublicKey::from(&keeper), 9, &master, &item).unwrap();
+            assert_eq!(frames.len(), (32 + item.len()).div_ceil(CUSTODY_DATA));
+            let mut parts = vec![[0u8; CUSTODY_DATA]; frames.len()];
+            for (frame, slot) in frames.iter().zip(parts.iter_mut()) {
+                let (_, part) = open_custody(&keeper, frame).unwrap();
+                assert_eq!((part.id, usize::from(part.total)), (9, frames.len()));
+                *slot = part.data;
+            }
+            assert_eq!(join_custody(&parts), Some((master, item.clone())), "len {len}");
+            assert_eq!(mail_author(&item), Some(author));
+            assert!(matches!(open_mail_item(&keeper, &item, 0), Some(MailItem::Invite(raw)) if raw == invite_raw(len, author)));
+        }
+        assert!(join_custody(&[[0u8; CUSTODY_DATA]]).is_none(), "faltou pedaço");
+    }
+
+    #[test]
+    fn the_invite_item_has_limits() {
+        assert!(invite_mail_item(&invite_raw(MAIL_MAX - 2, [1; 32])).is_none(), "passa do valor da DHT");
+        assert!(invite_mail_item(&[0u8; 20]).is_none(), "sem o começo");
+        let item = invite_mail_item(&invite_raw(100, [1; 32])).unwrap();
+        assert!(mail_item(&item[..item.len() - 1]).is_none(), "cortado");
+        assert_eq!(mail_item(&[item.clone(), vec![0; 40]].concat()), Some(&item[..]), "enchimento fica de fora");
+        assert!(mail_item(&[3, 0, 0]).is_none());
+        assert!(mail_author(&[TAG_MAIL_INVITE, 0]).is_none());
+    }
+
     #[test]
     fn the_custody_carries_the_mail_to_the_keeper_who_cannot_read_it() {
         let (a, keeper) = ids();
@@ -815,7 +937,7 @@ mod tests {
             *slot = part.data;
             assert!(open_custody(&b, frame).is_none(), "só o guardião abre");
         }
-        assert_eq!(join_custody(&parts), Some((master, mail)));
+        assert_eq!(join_custody(&parts), Some((master, mail.to_vec())));
         assert!(open_intro(&keeper, &mail).is_none(), "o guardião não lê a apresentação");
         let mut bad = frames[0];
         bad[100] ^= 1;

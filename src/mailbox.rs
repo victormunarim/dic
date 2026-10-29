@@ -1,37 +1,34 @@
 //! Custódia da caixa de correio: o que um contato de confiança guarda para entregar uma apresentação a quem
-//! estava offline (veja `docs/ENCONTRO.md`). É *sans-IO*: quem chama entrega os pedaços recebidos e o relógio.
+//! estava offline: uma apresentação ou um convite de servidor (veja `docs/ENCONTRO.md` e `docs/SERVIDORES.md`). É *sans-IO*: quem chama entrega os pedaços recebidos e o relógio.
 //!
 //! O guardião só tem bytes que não abre: o quadro da apresentação é fechado para o destinatário, e a chave da caixa
 //! só leva ao lugar onde o quadro fica na DHT, não à chave do destinatário. Por isso a custódia tem cotas: um contato
 //! de confiança malicioso não pode encher a memória de quem guarda.
 #![deny(clippy::indexing_slicing, clippy::unwrap_used)]
 
-use crate::media::{
-    signal::Frame,
-    update::{CUSTODY_DATA, CUSTODY_PARTS, CustodyPart, MAIL_TTL_MS, TAG_INTRO, join_custody},
-};
+use crate::media::update::{CUSTODY_DATA, CustodyPart, MAIL_TTL_MS, join_custody, mail_item};
 
-/// Quantas apresentações cada contato pode deixar guardadas.
+/// Quantos itens (apresentações ou convites) cada contato pode deixar guardados.
 pub const PER_DEPOSITOR: usize = 8;
-/// Quantas apresentações no total.
+/// Quantos itens no total.
 pub const MAX_HELD: usize = 64;
 /// Depósitos pela metade (falta um pedaço) ao mesmo tempo.
 pub const MAX_PARTIAL: usize = 16;
 
-/// Uma apresentação guardada: de quem veio, o carimbo dela (`id`), a chave da caixa e o quadro.
+/// Um item guardado: de quem veio, o carimbo dele (`id`), a chave da caixa e o item (veja `update::mail_item`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Held {
     pub from: [u8; 32],
     pub id: u64,
     pub master: [u8; 32],
-    pub mail: Frame,
+    pub mail: Vec<u8>,
 }
 
 #[derive(Clone, Debug)]
 struct Partial {
     from: [u8; 32],
     id: u64,
-    parts: [Option<[u8; CUSTODY_DATA]>; CUSTODY_PARTS],
+    parts: Vec<Option<[u8; CUSTODY_DATA]>>,
 }
 
 /// As apresentações que este nó guarda por conta de contatos.
@@ -52,7 +49,7 @@ impl Custody {
     }
 
     /// Recebe um pedaço de `from`. `true`: o pedaço ficou (ou já estava) e o depositante deve receber o ack;
-    /// `false`: recusado (fora do prazo, cota cheia ou conteúdo que não é uma apresentação).
+    /// `false`: recusado (fora do prazo, cota cheia ou conteúdo que não é um item de caixa).
     pub fn accept(&mut self, from: [u8; 32], part: &CustodyPart, now_ms: u64) -> bool {
         self.expire(now_ms);
         if !fresh(part.id, now_ms) {
@@ -68,11 +65,13 @@ impl Custody {
                 if self.partial.len() >= MAX_PARTIAL || self.full(&from) {
                     return false;
                 }
-                self.partial.push(Partial { from, id: part.id, parts: [None; CUSTODY_PARTS] });
+                self.partial.push(Partial { from, id: part.id, parts: vec![None; usize::from(part.total)] });
                 self.partial.len() - 1
             }
         };
-        let Some(slot) = self.partial.get_mut(at).and_then(|p| p.parts.get_mut(idx)) else {
+        // Pedaços do mesmo depósito que discordam no total: o depósito inteiro é descartado.
+        let Some(slot) = self.partial.get_mut(at).filter(|p| p.parts.len() == usize::from(part.total)).and_then(|p| p.parts.get_mut(idx)) else {
+            self.partial.swap_remove(at);
             return false;
         };
         *slot = Some(part.data);
@@ -80,11 +79,8 @@ impl Custody {
             return true;
         };
         self.partial.swap_remove(at);
-        let Ok(parts) = <[[u8; CUSTODY_DATA]; CUSTODY_PARTS]>::try_from(done) else {
-            return false;
-        };
-        match join_custody(&parts) {
-            Some((master, mail)) if mail.first() == Some(&TAG_INTRO) => {
+        match join_custody(&done) {
+            Some((master, mail)) => {
                 self.held.push(Held { from, id: part.id, master, mail });
                 true
             }
@@ -115,7 +111,7 @@ impl Custody {
         self.held.iter().filter(|h| fresh(h.id, now_ms)).cloned().collect()
     }
 
-    /// Texto para salvar em disco, uma apresentação por linha: `depositante id chave quadro` (hexadecimal).
+    /// Texto para salvar em disco, um item por linha: `depositante id chave quadro` (hexadecimal).
     pub fn export(&self) -> Vec<String> {
         self.held.iter().map(|h| format!("{} {:x} {} {}", hex(&h.from), h.id, hex(&h.master), hex(&h.mail))).collect()
     }
@@ -127,8 +123,8 @@ impl Custody {
             let mut f = line.split_whitespace();
             let (Some(from), Some(id), Some(master), Some(mail)) = (f.next(), f.next(), f.next(), f.next()) else { continue };
             let (Some(from), Ok(id), Some(master), Some(mail)) = (unhex(from), u64::from_str_radix(id, 16), unhex(master), unhex(mail)) else { continue };
-            let (Ok(from), Ok(master), Ok(mail)) = (<[u8; 32]>::try_from(from), <[u8; 32]>::try_from(master), Frame::try_from(mail)) else { continue };
-            if fresh(id, now_ms) && mail.first() == Some(&TAG_INTRO) && !out.full(&from) {
+            let (Ok(from), Ok(master), Ok(mail)) = (<[u8; 32]>::try_from(from), <[u8; 32]>::try_from(master), Ok::<_, ()>(mail)) else { continue };
+            if fresh(id, now_ms) && mail_item(&mail).is_some_and(|i| i.len() == mail.len()) && !out.full(&from) {
                 out.held.push(Held { from, id, master, mail });
             }
         }
@@ -211,6 +207,32 @@ mod tests {
         assert!(c.accept([2; 32], &p[0], NOW), "outro contato ainda cabe");
         c.drop_from(&from);
         assert!(c.accept(from, &p[0], NOW));
+    }
+
+    #[test]
+    fn keeps_a_server_invite_in_many_parts_and_refuses_inconsistent_totals() {
+        use crate::media::update::{invite_mail_item, open_custody as open};
+        let (a, keeper) = (StaticSecret::random_from_rng(OsRng), StaticSecret::random_from_rng(OsRng));
+        let author = *PublicKey::from(&a).as_bytes();
+        let item = invite_mail_item(&[[7u8; 16].as_slice(), &author, &[9u8; 600]].concat()).unwrap();
+        let frames = seal_custody(&a, &PublicKey::from(&keeper), NOW, &[1; 32], &item).unwrap();
+        let got: Vec<_> = frames.iter().map(|f| open(&keeper, f).unwrap().1).collect();
+        assert!(got.len() > 2);
+        let mut c = Custody::new();
+        for part in got.iter().rev() {
+            assert!(c.accept(author, part, NOW));
+        }
+        let held = c.held(NOW);
+        assert_eq!((held.len(), &held[0].mail), (1, &item));
+        let back = Custody::import(c.export().iter().map(String::as_str), NOW);
+        assert_eq!(back.held(NOW), held, "o item grande sobrevive ao disco");
+        // Pedaço do mesmo depósito com outro total: descarta o depósito.
+        let mut c = Custody::new();
+        assert!(c.accept(author, &got[0], NOW));
+        let mut odd = got[1].clone();
+        odd.total -= 1;
+        assert!(!c.accept(author, &odd, NOW));
+        assert!(c.held(NOW).is_empty());
     }
 
     #[test]

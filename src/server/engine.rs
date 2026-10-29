@@ -357,6 +357,19 @@ impl Servers {
             .collect()
     }
 
+    /// Os convites ainda em entrega a `peer`, crus, com o carimbo (ms) de quando começaram: o que se deixa na caixa
+    /// de correio dele quando os quadros não chegam.
+    pub fn invite_mail(&mut self, peer: &[u8; 32], now: u64) -> Vec<(ServerId, u64, Vec<u8>)> {
+        let id = member_id(peer);
+        let due: Vec<(ServerId, u64)> = self.deliveries.iter().filter(|((_, who), _)| *who == id).map(|((sid, _), d)| (*sid, d.first)).collect();
+        due.into_iter()
+            .filter_map(|(sid, first)| {
+                let raw = self.invite(&sid, *peer, now).ok()?.strip_prefix(PREFIX).and_then(unhex)?;
+                Some((sid, first.saturating_mul(1000), raw))
+            })
+            .collect()
+    }
+
     /// Todos os quadros de convite para `peer` foram confirmados: passa a lembrá-lo só de vez em quando.
     pub fn invite_delivered(&mut self, peer: &[u8; 32], now: u64) {
         let id = member_id(peer);
@@ -821,7 +834,22 @@ impl Servers {
             return out;
         }
         let raw: Vec<u8> = self.assembling.remove(at).1.into_iter().flatten().flatten().collect();
-        let text = format!("{PREFIX}{}", hex(&raw));
+        self.accept_invite(from, &raw)
+    }
+
+    /// Convite achado na caixa de correio: `raw` cru, de um contato (o autor vem em claro no começo).
+    pub fn receive_mail_invite(&mut self, raw: &[u8], contacts: &[[u8; 32]]) -> Output {
+        let from = raw.get(16..48).and_then(|k| <[u8; 32]>::try_from(k).ok()).filter(|k| contacts.contains(k));
+        match from {
+            Some(from) => self.accept_invite(from, raw),
+            None => Output::default(),
+        }
+    }
+
+    /// Abre o convite `raw` de `from` e, se vale, o põe na lista de pendentes.
+    fn accept_invite(&mut self, from: [u8; 32], raw: &[u8]) -> Output {
+        let mut out = Output::default();
+        let text = format!("{PREFIX}{}", hex(raw));
         let Ok(inv) = Invite::open(&text, &self.me.secret) else { return out };
         if inv.inviter.key != from || self.servers.contains_key(&inv.server) || self.declined.contains(&inv.server) {
             return out;
@@ -1085,10 +1113,10 @@ impl Servers {
                 t.push_str(&format!("convite|{}\n", hex(k)));
             }
             for ((sid, who), d) in &self.deliveries {
-                if *sid == s.id {
-                    if let Some(k) = s.invited.get(who) {
-                        t.push_str(&format!("entrega|{}|{}|{}\n", hex(k), d.first, d.next));
-                    }
+                if *sid == s.id
+                    && let Some(k) = s.invited.get(who)
+                {
+                    t.push_str(&format!("entrega|{}|{}|{}\n", hex(k), d.first, d.next));
                 }
             }
             for p in s.peers.values() {
