@@ -19,14 +19,14 @@ mod util;
 
 pub use config::{DEFAULT_RELAY_PORT, NodeConfig, RelayKeys, UPDATE_RETRY};
 pub use dialer::{DialError, Dialer};
-use mail::{Inbox, mail_keeper, mail_reader};
+use mail::{Inbox, Introducer, mail_keeper, mail_reader};
 use publish::{outbox, rendezvous_publisher, server_publisher};
 use reach::{Reachability, own_relay, relay_hint, track_address, watch_address};
 use util::{push_note, unix_millis};
 
 use crate::sync::LockExt;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     io,
     net::SocketAddr,
     sync::{Arc, Mutex},
@@ -45,7 +45,7 @@ use crate::{
     upnp,
     media::{
         codec::Codec,
-        update::{self, AddressRecord, Intro},
+        update::{self, AddressRecord},
     },
     phone::{ActiveCall, IncomingCall, Introduction, Phone, ScreenShare},
     server::net::{ServerHub, restore},
@@ -302,9 +302,9 @@ impl Node {
         }
         if publishes {
             *phone.custody().lock_unpoisoned() = Custody::import(saved_custody.iter().map(String::as_str), unix_millis() as u64);
-            background.push(tokio::spawn(mail_keeper(dialer.clone(), phone.custody(), phone.contacts())));
+            background.push(tokio::spawn(mail_keeper(dialer.clone(), phone.custody(), phone.contacts(), mail_poll)));
             if introductions {
-                background.push(tokio::spawn(mail_reader(dialer.clone(), inbox.clone(), mail_poll, { let hub = server_hub.clone(); move |raw| hub.receive_mail_invite(raw) })));
+                background.push(tokio::spawn(mail_reader(dialer.clone(), inbox.clone(), Introducer { dialer: dialer.clone(), own: own.clone(), contacts: phone.contacts(), name: name.clone(), tasks: inbox.introducing.clone(), retry: update_retry }, mail_poll, { let hub = server_hub.clone(); move |raw| hub.receive_mail_invite(raw) })));
             }
         }
         if let Some(mut rx) = phone.take_introductions() {
@@ -330,6 +330,12 @@ impl Node {
             }));
         }
         Ok(Self { secret, name, retry: update_retry, phone, _relay: relay, renew, reach, note, dialer, known, hints, history, own, update_notice, background, addr: addr_now, inbox, retiring: Arc::default(), removed, servers: server_hub })
+    }
+
+    /// Se `peer` está entre os contatos atendidos agora.
+    #[must_use]
+    pub fn is_contact(&self, peer: &[u8; 32]) -> bool {
+        self.phone.contacts().lock_unpoisoned().contains(peer)
     }
 
     /// Aceita convites de `keys` além dos contatos.
@@ -364,41 +370,11 @@ impl Node {
     /// Insiste com espera crescente até a confirmação ou `UPDATE_GIVE_UP` (3 dias); o endereço dele vem do código que se
     /// tem, da DHT ou das âncoras. Chamar de novo para o mesmo contato não duplica a entrega.
     pub fn introduce(&self, peer: [u8; 32]) {
-        let mut tasks = self.inbox.introducing.lock_unpoisoned();
-        if tasks.contains_key(&peer) {
-            return;
-        }
-        let (dialer, own, contacts, name, tasks_done, retry) = (self.dialer.clone(), self.own.clone(), self.phone.contacts(), self.name.clone(), self.inbox.introducing.clone(), self.retry);
-        tasks.insert(
-            peer,
-            tokio::spawn(async move {
-                let (mut wait, give_up) = (retry, Instant::now() + UPDATE_GIVE_UP);
-                let seq = unix_millis() as u64;
-                let mut kept: HashSet<[u8; 32]> = HashSet::new();
-                loop {
-                    if !contacts.lock_unpoisoned().contains(&peer) {
-                        break;
-                    }
-                    // O relay é o de agora (pode ter mudado entre as tentativas); sem endereço que alguém de fora use, espera.
-                    let reach = own.lock_unpoisoned().clone().map(|r| update::Reach { addr: r.addr, onion: r.onion, link: r.link });
-                    if let Some(reach) = reach {
-                        let intro = Intro { seq, name: name.clone(), reach };
-                        if dialer.deliver_intro(peer, &intro, INTRO_ACK_WAIT).await {
-                            break;
-                        }
-                        // Sem resposta direta: deixa o convite na caixa dele e com contatos de confiança, que o entregam
-                        // quando ele voltar (veja `mail`).
-                        dialer.leave_mail(peer, &intro, &contacts, &mut kept).await;
-                    }
-                    if Instant::now() >= give_up {
-                        break;
-                    }
-                    tokio::time::sleep(wait).await;
-                    wait = (wait * 2).min(UPDATE_MAX_WAIT);
-                }
-                tasks_done.lock_unpoisoned().remove(&peer);
-            }),
-        );
+        self.introducer().start(peer, None);
+    }
+
+    fn introducer(&self) -> Introducer {
+        Introducer { dialer: self.dialer.clone(), own: self.own.clone(), contacts: self.phone.contacts(), name: self.name.clone(), tasks: self.inbox.introducing.clone(), retry: self.retry }
     }
 
     /// As apresentações que contatos deixaram aqui para quem estava offline, para o app guardar em disco e passar de

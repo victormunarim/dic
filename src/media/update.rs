@@ -34,6 +34,9 @@
 //!   é um hash da chave do destinatário: o guardião a usa para derivar, a cada dia, onde gravar o quadro na
 //!   DHT ([`mailbox_target`]) e o grava de hora em hora, mas não volta dela à chave do destinatário. O destinatário
 //!   calcula os mesmos alvos, lê e abre com [`open_mail`]. Nada disso vai a um servidor.
+//! - A **resposta** à apresentação achada na caixa segue dois caminhos independentes: contatos de confiança de quem
+//!   responde (a mesma custódia, com a caixa do autor) e o *buraco de resposta* do item ([`reply_master`]), onde todo
+//!   guardião que ainda segura o item lê e regrava a resposta na caixa do autor.
 //! - Repetir um registro gravado só devolve ao contato um endereço que ele já teve; quem recebe descarta
 //!   registro com `seq` menor ou igual ao último que viu.
 
@@ -455,6 +458,17 @@ pub fn mailbox_target(master: &[u8; 32], period: u64, slot: usize) -> ([u8; 32],
         out
     };
     (derive(b"clam/caixa/assina/v1"), derive(b"clam/caixa/sal/v1"))
+}
+
+/// Chave do *buraco de resposta* do item `item` (o que foi lido da caixa de quem responde, ou guardado em custódia): um hash do
+/// próprio item. Quem tem o item calcula onde, a cada dia, a resposta é deixada ([`mailbox_target`] com esta chave): o destinatário
+/// grava lá e todo guardião que segura o item lê, sem que o destinatário precise saber quem são os guardiões nem ser
+/// contato deles. O lugar não prova nada (qualquer um com o item o calcula): a resposta é fechada para o autor e só ele a abre.
+pub fn reply_master(item: &[u8]) -> [u8; 32] {
+    use sha2::Digest;
+    let mut out = [0u8; 32];
+    Hkdf::<Sha256>::new(None, &Sha256::digest(item)).expand(b"clam/caixa/resposta/v1", &mut out).expect("32 bytes é válido");
+    out
 }
 
 /// Qual item da caixa leva este quadro: o mesmo quadro cai sempre no mesmo item (os guardiões gravam o mesmo valor).

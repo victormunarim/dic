@@ -315,8 +315,15 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
         if !introduced.is_empty() {
             for i in &introduced {
                 let r = &i.reach;
+                // Quem já era contato e se apresenta é a aceitação do convite que esta pessoa deixou (pela caixa, se estava offline).
+                let accepted = node.is_contact(&i.peer);
                 node.add_contact(i.peer, Some(clam::node::RelayInfo { addr: r.addr.clone(), onion: r.onion, link: r.link }));
-                out.line(format!("{} ({}) adicionou você e se apresentou: já está nos seus contatos", if i.name.is_empty() { "alguém" } else { &i.name }, &hex(&i.peer)[..8]));
+                let who = if i.name.is_empty() { "alguém" } else { &i.name };
+                if accepted {
+                    out.line(format!("{who} ({}) aceitou o seu convite", &hex(&i.peer)[..8]));
+                } else {
+                    out.line(format!("{who} ({}) adicionou você e se apresentou: já está nos seus contatos", &hex(&i.peer)[..8]));
+                }
             }
             shared.introduced.lock_unpoisoned().extend(introduced);
             saver.sync(&book_of(&node), &out);

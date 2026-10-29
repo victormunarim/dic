@@ -849,6 +849,40 @@ async fn an_offline_contact_finds_the_introduction_in_its_mailbox() {
     assert_eq!((got[0].peer, got[0].name.as_str()), (pa, "Ana"));
 }
 
+/// A aceitação volta por dois caminhos independentes. A convida B (offline) e deixa o convite com C, guardião. A sai do ar.
+/// B sobe, acha o convite e responde: grava na caixa de A e no buraco de resposta do convite, de onde C a recolhe sozinho
+/// (B nem sabe quem é C). B sai; A volta depois e acha a resposta.
+#[tokio::test]
+async fn the_acceptance_comes_back_through_the_keeper_of_the_invite() {
+    use clam::rendezvous::DhtOptions;
+    let testnet = mainline::Testnet::new(5).unwrap();
+    let dht = || Some(DhtOptions { bootstrap: testnet.bootstrap.clone(), bind: Some(std::net::Ipv4Addr::LOCALHOST), circuit: false });
+    let (sa, sb, sc) = (key(), key(), key());
+    let (pa, pb, pc) = (*PublicKey::from(&sa).as_bytes(), *PublicKey::from(&sb).as_bytes(), *PublicKey::from(&sc).as_bytes());
+    let poll = Duration::from_millis(300);
+    let c = Node::start(NodeConfig { updates: false, dht: dht(), mail_poll: poll, ..fixed(sc, free_port(), vec![pa]) }).await.unwrap();
+    let a = Node::start(NodeConfig { updates: false, dht: dht(), name: "Ana".into(), ..fixed(sa.clone(), free_port(), vec![pb, pc]) }).await.unwrap();
+    a.add_hint(pc, c.relay_info().unwrap());
+    a.set_trusted(pc, true);
+    a.introduce(pb);
+    until("C guarda o convite", || Some(c.custody_export()).filter(|v| !v.is_empty())).await;
+    a.stop();
+
+    let b = Node::start(NodeConfig { updates: false, dht: dht(), name: "Beto".into(), mail_poll: poll, ..fixed(sb, free_port(), vec![]) }).await.unwrap();
+    let got = until("B acha o convite", || Some(b.take_introductions()).filter(|v| !v.is_empty())).await;
+    let r = &got[0].reach;
+    b.add_contact(pa, Some(clam::node::RelayInfo { addr: r.addr.clone(), onion: r.onion, link: r.link }));
+    // C recolhe a resposta do buraco: passa a segurar o convite e a resposta.
+    let held = until("C recolhe a resposta", || Some(c.custody_export()).filter(|v| v.len() == 2)).await;
+    assert!(held.iter().all(|l| !l.contains("Beto")), "C guarda bytes cifrados");
+    b.stop();
+
+    // A volta: B e a caixa de B estão fora, só C (que regrava a resposta) e a DHT existem.
+    let a = Node::start(NodeConfig { updates: false, dht: dht(), mail_poll: poll, ..fixed(sa, free_port(), vec![pb, pc]) }).await.unwrap();
+    let back = until("A acha a resposta", || Some(a.take_introductions()).filter(|v| !v.is_empty())).await;
+    assert_eq!((back[0].peer, back[0].name.as_str()), (pb, "Beto"));
+}
+
 /// Convite de servidor para quem está offline: A convida B, que nunca esteve no ar; C é contato de confiança de A.
 /// A deixa o convite com C e na caixa de B; A sai e B acha o convite sozinho.
 #[tokio::test]

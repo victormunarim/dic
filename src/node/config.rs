@@ -65,7 +65,8 @@ pub struct NodeConfig {
     /// Lápides das remoções (par, carimbo em ms), como [`Node::tombstones`](super::Node::tombstones) devolveu: convite com
     /// carimbo igual ou anterior não readiciona quem a pessoa removeu.
     pub tombstones: Vec<([u8; 32], u64)>,
-    /// De quanto em quanto tempo a caixa de correio desta pessoa é lida na DHT. Padrão: 10 minutos.
+    /// De quanto em quanto tempo a caixa de correio desta pessoa é lida na DHT e o guardião olha o buraco de resposta
+    /// de cada apresentação que segura. Padrão: 10 minutos.
     pub mail_poll: Duration,
 }
 

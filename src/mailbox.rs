@@ -6,12 +6,15 @@
 //! de confiança malicioso não pode encher a memória de quem guarda.
 #![deny(clippy::indexing_slicing, clippy::unwrap_used)]
 
-use crate::media::update::{CUSTODY_DATA, CustodyPart, MAIL_TTL_MS, join_custody, mail_item};
+use crate::media::update::{CUSTODY_DATA, CustodyPart, MAIL_TTL_MS, TAG_INTRO, join_custody, mail_item};
 
 /// Quantos itens (apresentações ou convites) cada contato pode deixar guardados.
 pub const PER_DEPOSITOR: usize = 8;
 /// Quantos itens no total.
 pub const MAX_HELD: usize = 64;
+/// Quantas respostas (veja [`Custody::accept_reply`]) um item guardado aceita: o buraco é aberto, e o limite impede que alguém
+/// que conheça o item o encha de lixo e tire a resposta verdadeira do lugar.
+pub const REPLIES_PER_ITEM: u64 = 2;
 /// Depósitos pela metade (falta um pedaço) ao mesmo tempo.
 pub const MAX_PARTIAL: usize = 16;
 
@@ -86,6 +89,21 @@ impl Custody {
             }
             _ => false,
         }
+    }
+
+    /// Guarda `mail`, a resposta a um item de `from` com carimbo `base`, para regravar na caixa `master` (a do autor do item).
+    /// `false`: já estava, não é uma apresentação inteira, o item de origem já tem [`REPLIES_PER_ITEM`] respostas, passou do
+    /// prazo ou a cota de `from` está cheia. A resposta vale e some junto do item de origem (usa o carimbo dele).
+    pub fn accept_reply(&mut self, from: [u8; 32], base: u64, master: [u8; 32], mail: &[u8], now_ms: u64) -> bool {
+        self.expire(now_ms);
+        let whole = mail_item(mail).is_some_and(|i| i.len() == mail.len()) && mail.first() == Some(&TAG_INTRO);
+        if !whole || !fresh(base, now_ms) || self.held.iter().any(|h| h.master == master && h.mail == mail) || self.full(&from) {
+            return false;
+        }
+        let taken = |id: u64| self.held.iter().any(|h| h.from == from && h.id == id);
+        let Some(id) = (1..=REPLIES_PER_ITEM).map(|n| base.wrapping_add(n)).find(|id| !taken(*id)) else { return false };
+        self.held.push(Held { from, id, master, mail: mail.to_vec() });
+        true
     }
 
     fn full(&self, from: &[u8; 32]) -> bool {
@@ -232,6 +250,36 @@ mod tests {
         let mut odd = got[1].clone();
         odd.total -= 1;
         assert!(!c.accept(author, &odd, NOW));
+        assert!(c.held(NOW).is_empty());
+    }
+
+    #[test]
+    fn keeps_at_most_two_distinct_replies_per_item_and_not_twice() {
+        let (mut c, from, master) = (Custody::new(), [1u8; 32], [9u8; 32]);
+        let mail = |n: u8| {
+            let (a, b) = (StaticSecret::random_from_rng(OsRng), StaticSecret::random_from_rng(OsRng));
+            seal_intro(&a, &PublicKey::from(&b), &Intro { seq: u64::from(n), name: "Bia".into(), reach: Reach { addr: "203.0.113.8:4001".into(), onion: [5; 32], link: [6; 32] } }).unwrap()
+        };
+        let (m1, m2, m3) = (mail(1), mail(2), mail(3));
+        assert!(c.accept_reply(from, NOW, master, &m1, NOW));
+        assert!(!c.accept_reply(from, NOW, master, &m1, NOW), "a mesma resposta não entra duas vezes");
+        assert!(c.accept_reply(from, NOW, master, &m2, NOW));
+        assert!(!c.accept_reply(from, NOW, master, &m3, NOW), "o item já tem duas respostas");
+        assert_eq!(c.held(NOW).len(), 2);
+        assert!(c.held(NOW).iter().all(|h| h.master == master && h.id != NOW));
+        assert!(!c.accept_reply(from, NOW, master, &m3[..100], NOW), "quadro incompleto");
+        assert!(!c.accept_reply([2; 32], NOW - MAIL_TTL_MS - 1, master, &m3, NOW), "vencido");
+    }
+
+    #[test]
+    fn a_reply_goes_away_with_its_depositor() {
+        let (mut c, from) = (Custody::new(), [1u8; 32]);
+        let (a, b) = (StaticSecret::random_from_rng(OsRng), StaticSecret::random_from_rng(OsRng));
+        let mail = seal_intro(&a, &PublicKey::from(&b), &Intro { seq: 1, name: "Bia".into(), reach: Reach { addr: "203.0.113.8:4001".into(), onion: [5; 32], link: [6; 32] } }).unwrap();
+        assert!(c.accept_reply(from, NOW, [9; 32], &mail, NOW));
+        let back = Custody::import(c.export().iter().map(String::as_str), NOW);
+        assert_eq!(back.held(NOW), c.held(NOW), "a resposta sobrevive ao disco");
+        c.drop_from(&from);
         assert!(c.held(NOW).is_empty());
     }
 

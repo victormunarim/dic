@@ -4,8 +4,9 @@
 
 use arbitrary::Arbitrary;
 use clam::{
+    mailbox::Custody,
     media::update::{
-        AddressRecord, CUSTODY_DATA, Intro, MAIL_SLOTS, Reach, invite_mail_item, join_custody, mail_author, mail_item, open_mail_item, seal_custody, mail_slot, mailbox_master, mailbox_target, open_ack, open_custody, open_intro, open_mail, open_record, open_removal, open_server_record, open_update, seal_ack, seal_intro, seal_record, seal_removal,
+        AddressRecord, CUSTODY_DATA, Intro, MAIL_SLOTS, Reach, invite_mail_item, join_custody, mail_author, mail_item, open_mail_item, seal_custody, mail_slot, mailbox_master, mailbox_target, reply_master, open_ack, open_custody, open_intro, open_mail, open_record, open_removal, open_server_record, open_update, seal_ack, seal_intro, seal_record, seal_removal,
         seal_server_record, seal_update, valid_addr,
     },
     x25519_dalek::{PublicKey, StaticSecret},
@@ -42,6 +43,9 @@ fuzz_target!(|input: Input| {
             let _ = open_mail(&me, &data, 1);
             let _ = open_mail_item(&me, &data, 1);
             let _ = (mail_item(&data), mail_author(&data));
+            // Resposta achada no buraco de um item: o guardião só a guarda se for uma apresentação inteira; o buraco é determinístico.
+            assert_eq!(reply_master(&data), reply_master(&data));
+            let _ = Custody::new().accept_reply([5; 32], 10, [6; 32], &data, 10);
             let chunks: Vec<[u8; CUSTODY_DATA]> = data.chunks_exact(CUSTODY_DATA).filter_map(|c| c.try_into().ok()).collect();
             let _ = join_custody(&chunks);
             let _ = open_removal(&me, &data, 1);

@@ -18,7 +18,7 @@ use crate::{
 };
 use super::dialer::Dialer;
 use super::util::{unix_millis, unix_secs};
-use super::Introduced;
+use super::{INTRO_ACK_WAIT, Introduced, RelayInfo, UPDATE_GIVE_UP, UPDATE_MAX_WAIT};
 
 /// Onde chega o que outros mandam sobre contatos (apresentação direta ou da caixa): a fila para o app, as
 /// apresentações nossas ainda em entrega e as lápides das remoções.
@@ -59,6 +59,64 @@ impl Inbox {
         queue.retain(|i| i.peer != peer);
         queue.push(Introduced { peer, name: intro.name, reach: intro.reach });
         true
+    }
+}
+
+/// Quem entrega a apresentação desta pessoa a `peer`: direto, e sem resposta na caixa dele e com contatos de confiança.
+/// Serve a [`Node::introduce`](super::Node::introduce) (quem adiciona) e à resposta de quem achou um convite na caixa
+/// ([`mail_reader`]), que por isso não depende de um `&Node`.
+#[derive(Clone)]
+pub(super) struct Introducer {
+    pub(super) dialer: Dialer,
+    pub(super) own: Arc<Mutex<Option<RelayInfo>>>,
+    pub(super) contacts: phone::Contacts,
+    pub(super) name: String,
+    pub(super) tasks: Arc<Mutex<HashMap<[u8; 32], tokio::task::JoinHandle<()>>>>,
+    pub(super) retry: Duration,
+}
+
+impl Introducer {
+    /// Começa a entrega a `peer` (não duplica uma em andamento). `reply_to`: o item da caixa que está sendo respondido;
+    /// além da caixa de `peer` e dos contatos de confiança, a resposta vai ao buraco de resposta dele
+    /// ([`update::reply_master`]), onde os guardiões do convite a pegam e a regravam. Uma resposta dura até a entrega
+    /// confirmar, o prazo vencer ou `retire`/`forget` a cancelar: ela não exige `peer` já estar nos contatos (a
+    /// aplicação o adiciona logo depois de [`Node::take_introductions`](super::Node::take_introductions)).
+    pub(super) fn start(&self, peer: [u8; 32], reply_to: Option<Vec<u8>>) {
+        let mut tasks = self.tasks.lock_unpoisoned();
+        if tasks.contains_key(&peer) {
+            return;
+        }
+        let Self { dialer, own, contacts, name, tasks: done, retry } = self.clone();
+        tasks.insert(
+            peer,
+            tokio::spawn(async move {
+                let (mut wait, give_up) = (retry, Instant::now() + UPDATE_GIVE_UP);
+                let seq = unix_millis() as u64;
+                let mut kept: HashSet<[u8; 32]> = HashSet::new();
+                loop {
+                    if reply_to.is_none() && !contacts.lock_unpoisoned().contains(&peer) {
+                        break;
+                    }
+                    // O relay é o de agora (pode ter mudado entre as tentativas); sem endereço que alguém de fora use, espera.
+                    let reach = own.lock_unpoisoned().clone().map(|r| update::Reach { addr: r.addr, onion: r.onion, link: r.link });
+                    if let Some(reach) = reach {
+                        let intro = Intro { seq, name: name.clone(), reach };
+                        if dialer.deliver_intro(peer, &intro, INTRO_ACK_WAIT).await {
+                            break;
+                        }
+                        // Sem resposta direta: deixa o convite na caixa dele e com contatos de confiança, que o entregam
+                        // quando ele voltar (veja `mail`).
+                        dialer.leave_mail(peer, &intro, &contacts, &mut kept, reply_to.as_deref()).await;
+                    }
+                    if Instant::now() >= give_up {
+                        break;
+                    }
+                    tokio::time::sleep(wait).await;
+                    wait = (wait * 2).min(UPDATE_MAX_WAIT);
+                }
+                done.lock_unpoisoned().remove(&peer);
+            }),
+        );
     }
 }
 
@@ -104,9 +162,34 @@ impl Dialer {
 
     /// Deposita a apresentação `intro` para `peer` (que está offline): grava na caixa dele e deixa com até
     /// [`KEEPERS`] contatos de confiança. `kept` guarda quem já confirmou, para não repetir a cada tentativa.
-    pub(super) async fn leave_mail(&self, peer: [u8; 32], intro: &Intro, contacts: &phone::Contacts, kept: &mut HashSet<[u8; 32]>) {
+    /// `reply_to`: o item que esta apresentação responde (veja [`Introducer::start`]); grava também no buraco de resposta dele.
+    pub(super) async fn leave_mail(&self, peer: [u8; 32], intro: &Intro, contacts: &phone::Contacts, kept: &mut HashSet<[u8; 32]>, reply_to: Option<&[u8]>) {
         let Ok(mail) = update::seal_intro(&self.secret, &PublicKey::from(peer), intro) else { return };
+        if let Some(item) = reply_to {
+            self.put_reply(item, &mail).await;
+        }
         self.leave_item(peer, intro.seq, &mail, true, contacts, kept).await;
+    }
+
+    /// Grava `mail`, a resposta ao item `item`, no buraco de resposta de `item`, hoje e na DHT e nas âncoras.
+    async fn put_reply(&self, item: &[u8], mail: &[u8]) -> bool {
+        let (seed, salt) = update::mailbox_target(&update::reply_master(item), unix_secs() / 86400, update::mail_slot(mail));
+        let signed = rendezvous::sign(&seed, &salt, mail, unix_millis() as i64);
+        self.store_put(&[signed]).await.first().copied().unwrap_or(false)
+    }
+
+    /// As respostas que alguém deixou no buraco de resposta de `item` (ontem, hoje e amanhã, como na caixa) e que são
+    /// apresentações inteiras. O guardião não as abre: só o autor de `item` abre.
+    async fn read_replies(&self, item: &[u8]) -> Vec<Vec<u8>> {
+        let master = update::reply_master(item);
+        let today = unix_secs() / 86400;
+        let targets: Vec<([u8; 32], [u8; 32])> = [today.saturating_sub(1), today, today + 1]
+            .into_iter()
+            .flat_map(|period| (0..MAIL_SLOTS).map(move |slot| (period, slot)))
+            .map(|(period, slot)| update::mailbox_target(&master, period, slot))
+            .map(|(seed, salt)| (rendezvous::public_key(&seed), salt))
+            .collect();
+        self.lookup_values(&targets, &[0u8; 32]).await
     }
 
     /// Deposita o convite de servidor `raw` (veja `server::invite`) para `peer`, como [`leave_mail`](Self::leave_mail).
@@ -129,7 +212,7 @@ impl Dialer {
 
     /// O que alguém deixou na caixa desta pessoa (ontem, hoje e amanhã: o relógio de um dos dois pode estar errado) e
     /// ainda vale: apresentações e convites de servidor.
-    pub(super) async fn read_mail(&self) -> Vec<MailItem> {
+    pub(super) async fn read_mail(&self) -> Vec<(Vec<u8>, MailItem)> {
         let master = update::mailbox_master(PublicKey::from(&self.secret).as_bytes());
         let today = unix_secs() / 86400;
         let targets: Vec<([u8; 32], [u8; 32])> = [today.saturating_sub(1), today, today + 1]
@@ -139,18 +222,22 @@ impl Dialer {
             .map(|(seed, salt)| (rendezvous::public_key(&seed), salt))
             .collect();
         let now = unix_millis() as u64;
-        self.lookup_values(&targets, &[0u8; 32]).await.iter().filter_map(|v| update::open_mail_item(&self.secret, v, now)).collect()
+        self.lookup_values(&targets, &[0u8; 32]).await.into_iter().filter_map(|v| update::open_mail_item(&self.secret, &v, now).map(|item| (v, item))).collect()
     }
 }
 
 /// O guardião: regrava na DHT, a cada hora e quando o dia vira, o que contatos deixaram aqui. Também descarta o
-/// que passou do prazo.
-pub(super) async fn mail_keeper(dialer: Dialer, custody: Arc<Mutex<Custody>>, contacts: phone::Contacts) {
+/// que passou do prazo e recolhe as respostas que o destinatário deixou no buraco de cada apresentação segurada (elas
+/// passam a ser regravadas na caixa do autor, mesmo que o destinatário e os contatos dele saiam do ar). `reply_poll`: de
+/// quanto em quanto tempo olhar o buraco de cada apresentação segurada ([`NodeConfig::mail_poll`](super::NodeConfig::mail_poll)).
+pub(super) async fn mail_keeper(dialer: Dialer, custody: Arc<Mutex<Custody>>, contacts: phone::Contacts, reply_poll: Duration) {
     // Por apresentação guardada: o dia gravado e quando gravar de novo.
     let mut state: HashMap<([u8; 32], u64), (u64, Instant)> = HashMap::new();
     let mut put_seq = 0i64;
     // Repasse (um salto): por apresentação, quem já confirmou e quando tentar de novo.
     let mut passed: HashMap<([u8; 32], u64), Passed> = HashMap::new();
+    // Por apresentação guardada: quando olhar o buraco de resposta de novo.
+    let mut replies: HashMap<([u8; 32], u64), Instant> = HashMap::new();
     loop {
         let now = unix_millis() as u64;
         let held = {
@@ -160,6 +247,18 @@ pub(super) async fn mail_keeper(dialer: Dialer, custody: Arc<Mutex<Custody>>, co
         };
         state.retain(|k, _| held.iter().any(|h| (h.from, h.id) == *k));
         passed.retain(|k, _| held.iter().any(|h| (h.from, h.id) == *k));
+        replies.retain(|k, _| held.iter().any(|h| (h.from, h.id) == *k));
+        let polls: Vec<_> = held.iter().filter(|h| h.mail.first() == Some(&update::TAG_INTRO) && replies.get(&(h.from, h.id)).is_none_or(|at| Instant::now() >= *at)).collect();
+        for h in polls {
+            replies.insert((h.from, h.id), Instant::now() + reply_poll);
+            // A resposta é para o autor do item, que é quem tem a caixa; o guardião a regrava lá.
+            let Some(author) = update::mail_author(&h.mail) else { continue };
+            let master = update::mailbox_master(&author);
+            for reply in dialer.read_replies(&h.mail).await {
+                custody.lock_unpoisoned().accept_reply(h.from, h.id, master, &reply, unix_millis() as u64);
+            }
+        }
+        let held = custody.lock_unpoisoned().held(unix_millis() as u64);
         let day = unix_secs() / 86400;
         let due: Vec<_> = held.iter().filter(|h| state.get(&(h.from, h.id)).is_none_or(|(d, at)| *d != day || Instant::now() >= *at)).collect();
         for h in due {
@@ -187,18 +286,23 @@ pub(super) async fn mail_keeper(dialer: Dialer, custody: Arc<Mutex<Custody>>, co
 /// O destinatário: lê a própria caixa logo depois de abrir e a cada `poll`. O que acha vira apresentação recebida,
 /// como a que chega pelo telefone (vale também de quem já é contato: é a aceitação de volta). Convite de servidor vai
 /// para `invites` (que confere o autor e o destinatário).
-pub(super) async fn mail_reader(dialer: Dialer, inbox: Inbox, poll: Duration, invites: impl Fn(&[u8])) {
+pub(super) async fn mail_reader(dialer: Dialer, inbox: Inbox, introducer: Introducer, poll: Duration, invites: impl Fn(&[u8])) {
     let mut seen: HashSet<([u8; 32], u64)> = HashSet::new();
     let mut seen_invites: HashSet<Vec<u8>> = HashSet::new();
     let mut waits = FIRST_READS.into_iter().map(|d| d.min(poll)).chain(std::iter::repeat(poll));
     loop {
         tokio::time::sleep(waits.next().unwrap_or(poll)).await;
-        for item in dialer.read_mail().await {
+        for (raw, item) in dialer.read_mail().await {
             match item {
                 // Quem já é contato também vale: é a aceitação de volta de quem recebeu o nosso convite.
                 MailItem::Intro(peer, intro) => {
                     if seen.insert((peer, intro.seq)) {
-                        inbox.receive(peer, intro);
+                        let known = introducer.contacts.lock_unpoisoned().contains(&peer);
+                        // Quem ainda não era contato e foi aceito: responde, para o autor saber que o convite chegou (se
+                        // já era, esta é a resposta dele, ou os dois se adicionaram: não há o que responder).
+                        if inbox.receive(peer, intro) && !known {
+                            introducer.start(peer, Some(raw));
+                        }
                     }
                 }
                 MailItem::Invite(raw) => {
