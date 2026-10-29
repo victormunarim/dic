@@ -1344,4 +1344,54 @@ mod tests {
         assert!(RawFrame::new(10, 10, vec![0; 10]).is_err());
         assert!(RawFrame::new(1, 10, vec![0; 40]).is_err());
     }
+
+    /// Medição (não é teste): o que acontece depois que a rolagem para. Mostra, quadro a quadro, tamanho, QP,
+    /// escala, tipo, erro contra a fonte e o atraso de entrega num circuito de `slot`.
+    /// `cargo test --features video --lib -- --ignored --nocapture after_scroll`
+    #[test]
+    #[ignore]
+    fn after_scroll_timeline() {
+        for (label, slot, prio) in [("privado 2 ms", SCREEN_SLOT, Priority::Smoothness), ("aberto 0,5 ms", crate::phone::OPEN_SCREEN_SLOT, Priority::Smoothness), ("aberto 0,5 ms nitidez", crate::phone::OPEN_SCREEN_SLOT, Priority::Sharpness)] {
+            let bitrate = H264Encoder::bitrate_for(slot);
+            let mut enc = H264Encoder::with_priority(bitrate, prio).unwrap();
+            enc.set_scroll(true);
+            let mut dec = ScreenDecoder::new().unwrap();
+            let (w, h) = (1280, 720);
+            let fps = prio.fps(bitrate);
+            let dt = 1.0 / fps;
+            let cap = ScreenStream::capacity_bps(slot) as f32 / 8.0;
+            println!("\n== {label}: {bitrate} bps, {fps} fps, circuito {:.0} kB/s", cap / 1000.0);
+            let mut queue = 0.0f32; // bytes na fila do circuito
+            let mut t = 0.0f32;
+            let mut off = 0usize;
+            let run = |enc: &mut H264Encoder, dec: &mut ScreenDecoder, off: usize, tag: &str, t: &mut f32, queue: &mut f32| {
+                let src = lines(w, h, off);
+                let t0 = std::time::Instant::now();
+                let r = enc.encode(&src, false).unwrap();
+                let ms = t0.elapsed().as_secs_f32() * 1000.0;
+                *queue = (*queue - cap * dt).max(0.0);
+                match r {
+                    Some(f) => {
+                        *queue += f.data.len() as f32;
+                        let delay = *queue / cap * 1000.0;
+                        let err = dec.decode(&f.data).unwrap().map_or(-1, |o| mean_error(&o, &src) as i64);
+                        let kind = if scroll::is_scroll(&f.data) { "rolagem" } else if f.keyframe { "CHAVE" } else { "vídeo" };
+                        println!("{tag} t={:5.2}s {kind:8} {:6} B  qp {:2} k {} enc {ms:4.1} ms  entrega +{delay:5.0} ms  erro {err}", *t, f.data.len(), enc.qp(), enc.scale());
+                    }
+                    None => println!("{tag} t={:5.2}s (pulado)    qp {:2} k {} enc {ms:4.1} ms", *t, enc.qp(), enc.scale()),
+                }
+                *t += dt;
+            };
+            for _ in 0..8 {
+                run(&mut enc, &mut dec, 0, "parada ", &mut t, &mut queue);
+            }
+            for _ in 0..6 {
+                off += 90;
+                run(&mut enc, &mut dec, off, "rolando", &mut t, &mut queue);
+            }
+            for _ in 0..(fps as usize * 5) {
+                run(&mut enc, &mut dec, off, "parou  ", &mut t, &mut queue);
+            }
+        }
+    }
 }
