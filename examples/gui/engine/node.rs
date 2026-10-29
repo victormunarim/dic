@@ -30,6 +30,7 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
     cfg.anchor = form.anchor;
     cfg.anchors = parse_anchors(&form.anchors);
     cfg.servers = load_servers();
+    cfg.custody = load_custody();
     if form.use_dht {
         cfg.dht = Some(clam::rendezvous::DhtOptions { circuit: form.dht_circuit, ..Default::default() });
         if form.dht_circuit {
@@ -74,6 +75,7 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
     }
     *shared.servers.lock_unpoisoned() = Some(hub.clone());
     let mut servers_saved = hub.read(|s, _| s.export());
+    let mut custody_saved = node.custody_export();
     let mut servers_check = tokio::time::Instant::now();
     // A sala de voz em que estou: o canal da tarefa e quem está na malha (esses são atendidos sem tocar).
     let mut room: Option<(mpsc::UnboundedSender<RoomCmd>, clam::server::ServerId)> = None;
@@ -333,9 +335,17 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
             saver.sync(&book_of(&node), &out);
             save_pending_if_changed(&node, &mut pending_saved, &out);
             save_removals_if_changed(&node, &mut removals_saved, &out);
+            let held = node.custody_export();
+            if held != custody_saved {
+                match save_custody(&held) {
+                    Ok(()) => custody_saved = held,
+                    Err(e) => out.line(format!("não consegui gravar as apresentações em custódia em {}: {e}", custody_path().display())),
+                }
+            }
         }
     }
     saver.sync(&book_of(&node), &out);
+    let _ = save_custody(&node.custody_export());
     let _ = save_servers(&hub.read(|s, _| s.export()));
     if let Some((tx, _)) = room.take() {
         let _ = tx.send(RoomCmd::Leave);

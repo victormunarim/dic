@@ -27,6 +27,13 @@
 //!   Mesmo formato da apresentação (autor em claro, conteúdo cifrado com `DH`), com um carimbo de tempo no lugar
 //!   do cartão; o ack (tag 5) repete o carimbo. Quem recebe só aceita carimbo dentro de [`REMOVAL_WINDOW_MS`],
 //!   para que um quadro gravado não apague, dias depois, um contato readicionado ([`seal_removal`], [`open_removal`]).
+//! - A **caixa de correio** (tags 11 e o valor na DHT) deixa a apresentação chegar a quem está offline sem que
+//!   ninguém no meio saiba quem é o destinatário. Quem se apresenta entrega o quadro da apresentação, fechado só
+//!   para o destinatário, a até 10 contatos de confiança (*custódia*: dois quadros de 200 bytes cifrados com
+//!   `DH(autor, guardião)`, com o quadro da apresentação e uma *chave de caixa*, [`mailbox_master`]). A chave de caixa
+//!   é um hash da chave do destinatário: o guardião a usa para derivar, a cada dia, onde gravar o quadro na
+//!   DHT ([`mailbox_target`]) e o grava de hora em hora, mas não volta dela à chave do destinatário. O destinatário
+//!   calcula os mesmos alvos, lê e abre com [`open_mail`]. Nada disso vai a um servidor.
 //! - Repetir um registro gravado só devolve ao contato um endereço que ele já teve; quem recebe descarta
 //!   registro com `seq` menor ou igual ao último que viu.
 
@@ -50,6 +57,17 @@ pub const TAG_UPDATE: u8 = 4;
 pub const TAG_ACK: u8 = 5;
 pub const TAG_INTRO: u8 = 7;
 pub const TAG_REMOVAL: u8 = 10;
+pub const TAG_CUSTODY: u8 = 11;
+/// Quanto tempo uma apresentação na caixa de correio vale, a contar do carimbo dela (7 dias).
+pub const MAIL_TTL_MS: u64 = 7 * 24 * 3_600_000;
+/// Itens da caixa de um dia: quem grava escolhe um pelo hash do quadro, e quem lê consulta todos. Mais de um evita
+/// que duas apresentações para a mesma pessoa se atropelem no mesmo item da DHT.
+pub const MAIL_SLOTS: usize = 4;
+/// Pedaços da custódia (veja [`seal_custody`]).
+pub const CUSTODY_PARTS: usize = 2;
+const CUSTODY_PLAIN_LEN: usize = PACKET_LEN - 1 - 32 - NONCE_LEN - 16;
+/// Dados de cada pedaço da custódia: o que sobra do quadro depois de versão, `id` e índice.
+pub const CUSTODY_DATA: usize = CUSTODY_PLAIN_LEN - 1 - 8 - 1;
 /// Diferença máxima, em ms, entre o carimbo da remoção e o relógio de quem recebe (1 h): cobre relógios tortos e
 /// limita o que um quadro gravado pode fazer depois.
 pub const REMOVAL_WINDOW_MS: u64 = 3_600_000;
@@ -401,6 +419,96 @@ pub fn open_removal(my_static: &StaticSecret, frame: &[u8], now_ms: u64) -> Opti
     (stamp.abs_diff(now_ms) <= REMOVAL_WINDOW_MS).then_some((author, stamp))
 }
 
+/// Um pedaço da custódia: o `id` (o `seq` da apresentação) liga os pedaços do mesmo depósito.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CustodyPart {
+    pub id: u64,
+    pub idx: u8,
+    pub data: [u8; CUSTODY_DATA],
+}
+
+/// Chave da caixa de `recipient`: um hash da chave pública dele. Quem a tem calcula onde a caixa fica a cada dia
+/// ([`mailbox_target`]), mas não volta dela à chave; quem sabe a chave de `recipient` a calcula também.
+pub fn mailbox_master(recipient: &[u8; 32]) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    Hkdf::<Sha256>::new(None, recipient).expand(b"clam/caixa/mestre/v1", &mut out).expect("32 bytes é válido");
+    out
+}
+
+/// Onde a caixa guarda o item `slot` no dia `period`: semente da chave de assinatura e sal. Muda a cada dia e a cada
+/// item; qualquer um com a chave da caixa assina, e só o destinatário abre o que está lá.
+pub fn mailbox_target(master: &[u8; 32], period: u64, slot: usize) -> ([u8; 32], [u8; 32]) {
+    let derive = |label: &[u8]| {
+        let mut info = label.to_vec();
+        info.extend_from_slice(&period.to_be_bytes());
+        info.extend_from_slice(&(slot as u64).to_be_bytes());
+        let mut out = [0u8; 32];
+        Hkdf::<Sha256>::new(None, master).expand(&info, &mut out).expect("32 bytes é válido");
+        out
+    };
+    (derive(b"clam/caixa/assina/v1"), derive(b"clam/caixa/sal/v1"))
+}
+
+/// Qual item da caixa leva este quadro: o mesmo quadro cai sempre no mesmo item (os guardiões gravam o mesmo valor).
+pub fn mail_slot(mail: &[u8]) -> usize {
+    use sha2::Digest;
+    Sha256::digest(mail).first().map_or(0, |b| usize::from(*b) % MAIL_SLOTS)
+}
+
+/// Abre `value`, lido da caixa de `my_static`, como apresentação ainda dentro do prazo. `None`: não é uma
+/// apresentação para esta chave, ou o carimbo dela passa de [`MAIL_TTL_MS`] ou está mais de uma hora no futuro.
+pub fn open_mail(my_static: &StaticSecret, value: &[u8], now_ms: u64) -> Option<([u8; 32], Intro)> {
+    let (author, intro) = open_intro(my_static, value)?;
+    let fresh = intro.seq <= now_ms.saturating_add(REMOVAL_WINDOW_MS) && now_ms.saturating_sub(intro.seq) <= MAIL_TTL_MS;
+    fresh.then_some((author, intro))
+}
+
+/// Os dois quadros com que `my_static` deixa com `peer` (o guardião) a apresentação `mail` (um quadro de
+/// [`seal_intro`]) e a chave da caixa do destinatário. `id` é o `seq` da apresentação.
+pub fn seal_custody(my_static: &StaticSecret, peer: &PublicKey, id: u64, master: &[u8; 32], mail: &Frame) -> Result<[Frame; CUSTODY_PARTS], MediaError> {
+    let me = PublicKey::from(my_static);
+    let cipher = cipher(my_static, peer, &me).ok_or(MediaError::BadKey)?;
+    let payload = [&master[..], &mail[..]].concat();
+    let mut frames = [[0u8; PACKET_LEN]; CUSTODY_PARTS];
+    for (idx, (frame, chunk)) in frames.iter_mut().zip(payload.chunks(CUSTODY_DATA)).enumerate() {
+        let data = padded::<CUSTODY_DATA>(&[chunk]);
+        let plain: [u8; CUSTODY_PLAIN_LEN] = padded(&[&[VERSION], &id.to_be_bytes(), &[idx as u8], &data]);
+        *frame = seal_after(&cipher, TAG_CUSTODY, me.as_bytes(), &plain);
+    }
+    Ok(frames)
+}
+
+/// Abre `frame` como pedaço de custódia para `my_static`. Devolve a chave de quem deixou (provada, como na
+/// apresentação) e o pedaço. `None`: não é uma custódia para esta chave.
+pub fn open_custody(my_static: &StaticSecret, frame: &[u8]) -> Option<([u8; 32], CustodyPart)> {
+    let mut head = Reader::new(frame);
+    if frame.len() != PACKET_LEN || head.u8()? != TAG_CUSTODY {
+        return None;
+    }
+    let author: [u8; 32] = head.array()?;
+    let owner = PublicKey::from(author);
+    let cipher = cipher(my_static, &owner, &owner)?;
+    let plain = open_after(&cipher, TAG_CUSTODY, 32, frame, CUSTODY_PLAIN_LEN)?;
+    let mut r = Reader::new(&plain);
+    if r.u8()? != VERSION {
+        return None;
+    }
+    let (id, idx) = (r.u64()?, r.u8()?);
+    if usize::from(idx) >= CUSTODY_PARTS {
+        return None;
+    }
+    Some((author, CustodyPart { id, idx, data: r.array()? }))
+}
+
+/// Junta os pedaços (em ordem) e devolve a chave da caixa e o quadro da apresentação.
+pub fn join_custody(parts: &[[u8; CUSTODY_DATA]; CUSTODY_PARTS]) -> Option<([u8; 32], Frame)> {
+    let all: Vec<u8> = parts.iter().flatten().copied().collect();
+    let mut r = Reader::new(&all);
+    let master = r.array()?;
+    let mail: Frame = r.array()?;
+    Some((master, mail))
+}
+
 /// Confirmação de `seq` de `my_static` para `peer`, a quem mandou a atualização.
 pub fn seal_ack(my_static: &StaticSecret, peer: &PublicKey, seq: u64) -> Result<Frame, MediaError> {
     let me = PublicKey::from(my_static);
@@ -668,5 +776,50 @@ mod tests {
         let ack = seal_ack(&b, &a_pk, 77).unwrap();
         assert!(open_ack(&a, &b_pk, 77, &ack));
         assert!(!open_ack(&a, &b_pk, 78, &ack));
+    }
+
+    #[test]
+    fn the_custody_carries_the_mail_to_the_keeper_who_cannot_read_it() {
+        let (a, keeper) = ids();
+        let b = StaticSecret::random_from_rng(OsRng);
+        let (pk, pb) = (PublicKey::from(&keeper), PublicKey::from(&b));
+        let mail = seal_intro(&a, &pb, &intro(5)).unwrap();
+        let master = mailbox_master(pb.as_bytes());
+        let frames = seal_custody(&a, &pk, 5, &master, &mail).unwrap();
+        let mut parts = [[0u8; CUSTODY_DATA]; CUSTODY_PARTS];
+        for (frame, slot) in frames.iter().zip(parts.iter_mut()) {
+            assert_eq!(frame.len(), PACKET_LEN);
+            let (author, part) = open_custody(&keeper, frame).unwrap();
+            assert_eq!((author, part.id), (*PublicKey::from(&a).as_bytes(), 5));
+            *slot = part.data;
+            assert!(open_custody(&b, frame).is_none(), "só o guardião abre");
+        }
+        assert_eq!(join_custody(&parts), Some((master, mail)));
+        assert!(open_intro(&keeper, &mail).is_none(), "o guardião não lê a apresentação");
+        let mut bad = frames[0];
+        bad[100] ^= 1;
+        assert!(open_custody(&keeper, &bad).is_none());
+    }
+
+    #[test]
+    fn the_mailbox_moves_every_day_and_slot_and_only_the_recipient_opens_it() {
+        let (a, b) = ids();
+        let pb = PublicKey::from(&b);
+        let master = mailbox_master(pb.as_bytes());
+        assert_ne!(master, mailbox_master(PublicKey::from(&a).as_bytes()));
+        let base = mailbox_target(&master, 10, 0);
+        assert_eq!(base, mailbox_target(&master, 10, 0));
+        assert_ne!(base, mailbox_target(&master, 11, 0));
+        assert_ne!(base, mailbox_target(&master, 10, 1));
+        assert_ne!(base.0, base.1);
+        let mail = seal_intro(&a, &pb, &intro(1_000_000)).unwrap();
+        assert!(mail_slot(&mail) < MAIL_SLOTS);
+        assert_eq!(mail_slot(&mail), mail_slot(&mail));
+        assert!(open_mail(&b, &mail, 1_000_000).is_some());
+        assert!(open_mail(&a, &mail, 1_000_000).is_none(), "outra chave");
+        assert!(open_mail(&b, &mail, 1_000_000 + MAIL_TTL_MS).is_some());
+        assert!(open_mail(&b, &mail, 1_000_001 + MAIL_TTL_MS).is_none(), "passou de uma semana");
+        let future = seal_intro(&a, &pb, &intro(10_000_000 + REMOVAL_WINDOW_MS + 1)).unwrap();
+        assert!(open_mail(&b, &future, 10_000_000).is_none(), "carimbo no futuro");
     }
 }

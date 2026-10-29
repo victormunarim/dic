@@ -24,6 +24,7 @@
 //! [`ScreenEvent`] em [`ActiveCall::next_screen`]. A chamada que ligou também precisa estar
 //! registrada no telefone da própria máquina ([`PhoneLink`]) para receber esse circuito.
 
+use crate::mailbox::Custody;
 use crate::sync::LockExt;
 use std::{
     collections::HashMap,
@@ -734,6 +735,7 @@ pub struct Phone {
     introductions: Option<mpsc::Receiver<Introduction>>,
     accept_intros: Arc<AtomicBool>,
     removals: Option<mpsc::Receiver<[u8; 32]>>,
+    custody: Arc<Mutex<Custody>>,
     servers: ServerSlot,
     room_peers: Contacts,
     tasks: Vec<JoinHandle<()>>,
@@ -816,15 +818,22 @@ impl Phone {
         let (removal_tx, removal_rx) = mpsc::channel(64);
         let servers = ServerSlot::default();
         let room_peers = Contacts::default();
-        let out = ActorOut { incoming: inc_tx, updates: upd_tx, introductions: intro_tx, accept_intros: accept_intros.clone(), removals: removal_tx, servers: servers.clone(), room_peers: room_peers.clone(), notice: notice.clone() };
+        let custody = Arc::new(Mutex::new(Custody::new()));
+        let out = ActorOut { custody: custody.clone(), incoming: inc_tx, updates: upd_tx, introductions: intro_tx, accept_intros: accept_intros.clone(), removals: removal_tx, servers: servers.clone(), room_peers: room_peers.clone(), notice: notice.clone() };
         let actor = tokio::spawn(run_actor(actor_rx, actor_tx.clone(), out, my_static, contacts.clone(), ids.clone()));
-        Ok(Self { addr, incoming: inc_rx, notice, contacts, ids, link_tx: actor_tx, hint: Arc::default(), updates: Some(upd_rx), introductions: Some(intro_rx), accept_intros, removals: Some(removal_rx), servers, room_peers, tasks: vec![accept, actor] })
+        Ok(Self { addr, incoming: inc_rx, notice, contacts, ids, link_tx: actor_tx, hint: Arc::default(), updates: Some(upd_rx), introductions: Some(intro_rx), accept_intros, removals: Some(removal_rx), custody, servers, room_peers, tasks: vec![accept, actor] })
     }
 
     /// Para registrar neste telefone as chamadas que esta máquina faz ([`call_linked`]).
     #[must_use]
     pub fn link(&self) -> PhoneLink {
         PhoneLink { actor: self.link_tx.clone(), ids: self.ids.clone(), hint: self.hint.clone() }
+    }
+
+    /// A custódia: apresentações que contatos deixaram aqui para entregar a quem estava offline.
+    #[must_use]
+    pub fn custody(&self) -> Arc<Mutex<Custody>> {
+        self.custody.clone()
     }
 
     /// Lista viva de chaves aceitas.
@@ -951,6 +960,7 @@ impl SeenInvites {
 
 /// Para onde o telefone entrega o que recebe: convites, avisos de endereço e o motivo do último descarte.
 struct ActorOut {
+    custody: Arc<Mutex<Custody>>,
     incoming: mpsc::Sender<IncomingCall>,
     updates: mpsc::Sender<AddressUpdate>,
     introductions: mpsc::Sender<Introduction>,
@@ -969,7 +979,7 @@ async fn run_actor(
     contacts: Contacts,
     ids: Arc<AtomicU64>,
 ) {
-    let ActorOut { incoming, updates, introductions, accept_intros, removals, servers, room_peers, notice } = out;
+    let ActorOut { custody, incoming, updates, introductions, accept_intros, removals, servers, room_peers, notice } = out;
     let mut intro_window: (Instant, usize) = (Instant::now(), 0);
     let mut server_window: (Instant, usize) = (Instant::now(), 0);
     let mut writers: HashMap<u64, mpsc::Sender<Vec<u8>>> = HashMap::new();
@@ -1069,6 +1079,25 @@ async fn run_actor(
                         if was_contact
                             && removals.try_send(peer).is_ok()
                             && let Ok(ack) = update::seal_ack(&secret, &PublicKey::from(peer), stamp)
+                            && let Some(w) = writers.get(&conn)
+                        {
+                            let _ = w.try_send(ack.to_vec());
+                        }
+                        continue;
+                    }
+                    // Custódia: um contato deixa aqui uma apresentação para entregar a quem está offline. Só de
+                    // contato; as cotas de `Custody` limitam o quanto cada um ocupa. O ack leva `id + índice`.
+                    if accept_intros.load(Ordering::Relaxed)
+                        && let Some((peer, part)) = update::open_custody(&secret, &data)
+                    {
+                        if intro_window.0.elapsed() >= Duration::from_secs(60) {
+                            intro_window = (Instant::now(), 0);
+                        }
+                        intro_window.1 += 1;
+                        if intro_window.1 <= INTRO_PER_MINUTE
+                            && contacts.lock_unpoisoned().contains(&peer)
+                            && custody.lock_unpoisoned().accept(peer, &part, unix_millis())
+                            && let Ok(ack) = update::seal_ack(&secret, &PublicKey::from(peer), part.id.wrapping_add(u64::from(part.idx)))
                             && let Some(w) = writers.get(&conn)
                         {
                             let _ = w.try_send(ack.to_vec());

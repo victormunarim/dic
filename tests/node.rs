@@ -822,3 +822,63 @@ async fn trust_is_per_person_and_dies_with_the_contact() {
     a.set_trusted(pc, false);
     assert_eq!(d.screen_path(&pc, false), PathMode::TwoHop);
 }
+
+/// A, C e B: A adiciona B, que nunca esteve no ar; C é contato de confiança de A. A deixa o convite com C e na caixa
+/// de B na DHT; B sobe depois, sem A, e acha o convite.
+#[tokio::test]
+async fn an_offline_contact_finds_the_introduction_in_its_mailbox() {
+    use clam::rendezvous::DhtOptions;
+    let testnet = mainline::Testnet::new(5).unwrap();
+    let dht = || Some(DhtOptions { bootstrap: testnet.bootstrap.clone(), bind: Some(std::net::Ipv4Addr::LOCALHOST), circuit: false });
+    let (sa, sb, sc) = (key(), key(), key());
+    let (pa, pb, pc) = (*PublicKey::from(&sa).as_bytes(), *PublicKey::from(&sb).as_bytes(), *PublicKey::from(&sc).as_bytes());
+    let c = Node::start(NodeConfig { updates: false, dht: dht(), ..fixed(sc, free_port(), vec![pa]) }).await.unwrap();
+    let a = Node::start(NodeConfig { updates: false, dht: dht(), name: "Ana".into(), ..fixed(sa, free_port(), vec![pb, pc]) }).await.unwrap();
+    a.add_hint(pc, c.relay_info().unwrap());
+    a.set_trusted(pc, true);
+    a.introduce(pb);
+
+    let held = until("C guarda o convite", || Some(c.custody_export()).filter(|v| !v.is_empty())).await;
+    assert_eq!(held.len(), 1);
+    assert!(!held[0].contains("Ana"), "C guarda bytes cifrados");
+
+    // A sai do ar: o convite não depende mais dela.
+    a.stop();
+    let b = Node::start(NodeConfig { updates: false, dht: dht(), mail_poll: Duration::from_millis(300), ..fixed(sb, free_port(), vec![]) }).await.unwrap();
+    let got = until("B acha o convite na caixa", || Some(b.take_introductions()).filter(|v| !v.is_empty())).await;
+    assert_eq!((got[0].peer, got[0].name.as_str()), (pa, "Ana"));
+}
+
+/// Quem não é de confiança não guarda convite.
+#[tokio::test]
+async fn an_untrusted_contact_is_not_asked_to_keep_the_introduction() {
+    use clam::rendezvous::DhtOptions;
+    let testnet = mainline::Testnet::new(5).unwrap();
+    let dht = || Some(DhtOptions { bootstrap: testnet.bootstrap.clone(), bind: Some(std::net::Ipv4Addr::LOCALHOST), circuit: false });
+    let (sa, sb, sc) = (key(), key(), key());
+    let (pa, pb, pc) = (*PublicKey::from(&sa).as_bytes(), *PublicKey::from(&sb).as_bytes(), *PublicKey::from(&sc).as_bytes());
+    let c = Node::start(NodeConfig { updates: false, dht: dht(), ..fixed(sc, free_port(), vec![pa]) }).await.unwrap();
+    let a = Node::start(NodeConfig { updates: false, dht: dht(), ..fixed(sa, free_port(), vec![pb, pc]) }).await.unwrap();
+    a.add_hint(pc, c.relay_info().unwrap());
+    a.introduce(pb);
+    // Dá tempo de A tentar mais de uma vez (a espera é de 200 ms); só então confere que nada chegou.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(c.custody_export().is_empty());
+}
+
+/// Um estranho (fora da lista de C) não ocupa a custódia dele.
+#[tokio::test]
+async fn a_stranger_cannot_leave_an_introduction_in_custody() {
+    use clam::rendezvous::DhtOptions;
+    let testnet = mainline::Testnet::new(5).unwrap();
+    let dht = || Some(DhtOptions { bootstrap: testnet.bootstrap.clone(), bind: Some(std::net::Ipv4Addr::LOCALHOST), circuit: false });
+    let (sa, sb, sc) = (key(), key(), key());
+    let (pb, pc) = (*PublicKey::from(&sb).as_bytes(), *PublicKey::from(&sc).as_bytes());
+    let c = Node::start(NodeConfig { updates: false, dht: dht(), ..fixed(sc, free_port(), vec![]) }).await.unwrap();
+    let a = Node::start(NodeConfig { updates: false, dht: dht(), ..fixed(sa, free_port(), vec![pb, pc]) }).await.unwrap();
+    a.add_hint(pc, c.relay_info().unwrap());
+    a.set_trusted(pc, true);
+    a.introduce(pb);
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(c.custody_export().is_empty());
+}

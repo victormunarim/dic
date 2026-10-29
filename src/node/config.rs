@@ -12,6 +12,9 @@ use super::{RelayInfo};
 /// Porta de relay preferida; se estiver ocupada, o sistema escolhe outra.
 pub const DEFAULT_RELAY_PORT: u16 = 4001;
 
+/// De quanto em quanto tempo a caixa de correio é lida (veja [`NodeConfig::mail_poll`]).
+pub const MAIL_POLL: Duration = Duration::from_secs(600);
+
 /// Espera inicial entre as tentativas de entregar o endereço novo a um contato (dobra a cada falha, até 2 h).
 pub const UPDATE_RETRY: Duration = Duration::from_secs(30);
 
@@ -57,6 +60,10 @@ pub struct NodeConfig {
     pub anchors: Vec<RelayInfo>,
     /// Estado dos servidores guardado por [`crate::server::Servers::export`]; `None`: nenhum servidor.
     pub servers: Option<String>,
+    /// Apresentações que contatos deixaram aqui para entregar a quem estava offline, como [`Node::custody_export`](super::Node::custody_export) escreveu.
+    pub custody: Vec<String>,
+    /// De quanto em quanto tempo a caixa de correio desta pessoa é lida na DHT. Padrão: 10 minutos.
+    pub mail_poll: Duration,
 }
 
 /// Segredos do relay do nó: o do circuito (`onion`) e o do link (Noise NK).
@@ -76,6 +83,6 @@ impl RelayKeys {
 impl NodeConfig {
     #[must_use]
     pub fn new(secret: StaticSecret, contacts: Vec<[u8; 32]>) -> Self {
-        Self { secret, contacts, relay_port: DEFAULT_RELAY_PORT, public_addr: None, upnp: true, known: Vec::new(), hints: Vec::new(), relay_keys: None, history: Vec::new(), updates: true, update_retry: UPDATE_RETRY, dht: None, name: String::new(), introductions: true, anchor: false, anchors: Vec::new(), servers: None }
+        Self { secret, contacts, relay_port: DEFAULT_RELAY_PORT, public_addr: None, upnp: true, known: Vec::new(), hints: Vec::new(), relay_keys: None, history: Vec::new(), updates: true, update_retry: UPDATE_RETRY, dht: None, name: String::new(), introductions: true, anchor: false, anchors: Vec::new(), servers: None, custody: Vec::new(), mail_poll: MAIL_POLL }
     }
 }

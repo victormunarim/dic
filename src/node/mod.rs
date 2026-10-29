@@ -12,19 +12,21 @@ mod config;
 mod deliver;
 mod dialer;
 mod lookup;
+mod mail;
 mod publish;
 mod reach;
 mod util;
 
 pub use config::{DEFAULT_RELAY_PORT, NodeConfig, RelayKeys, UPDATE_RETRY};
 pub use dialer::{DialError, Dialer};
+use mail::{mail_keeper, mail_reader};
 use publish::{outbox, rendezvous_publisher, server_publisher};
 use reach::{Reachability, own_relay, relay_hint, track_address, watch_address};
 use util::{push_note, unix_millis};
 
 use crate::sync::LockExt;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io,
     net::SocketAddr,
     sync::{Arc, Mutex},
@@ -35,6 +37,7 @@ use tokio::task::JoinHandle;
 use x25519_dalek::{PublicKey, StaticSecret};
 
 use crate::{
+    mailbox::Custody,
     circuit::{
         manager::Candidate,
         relay::{RelayConfig, RelayNode},
@@ -221,7 +224,7 @@ impl Node {
     }
 
     async fn finish(cfg: NodeConfig, mut phone: Phone, relay: RelayServer, onion: [u8; 32], dht: Services) -> io::Result<Self> {
-        let NodeConfig { secret, public_addr, upnp, known, hints, history, updates, update_retry, dht: dht_options, name, introductions, anchors, servers: saved_servers, .. } = cfg;
+        let NodeConfig { secret, public_addr, upnp, known, hints, history, updates, update_retry, dht: dht_options, name, introductions, anchors, servers: saved_servers, custody: saved_custody, mail_poll, .. } = cfg;
         let known: Known = Arc::new(Mutex::new(known.into_iter().collect()));
         let hints: Known = Arc::new(Mutex::new(hints.into_iter().collect()));
         // A lista guarda do mais novo ao mais velho de cada contato; ao reler, a ordem se mantém.
@@ -295,6 +298,13 @@ impl Node {
             background.push(tokio::spawn(server_publisher(dialer.clone(), server_hub.clone(), current.clone())));
         }
         let introduced: Arc<Mutex<Vec<Introduced>>> = Arc::default();
+        if publishes {
+            *phone.custody().lock_unpoisoned() = Custody::import(saved_custody.iter().map(String::as_str), unix_millis() as u64);
+            background.push(tokio::spawn(mail_keeper(dialer.clone(), phone.custody())));
+            if introductions {
+                background.push(tokio::spawn(mail_reader(dialer.clone(), phone.contacts(), introduced.clone(), mail_poll)));
+            }
+        }
         if let Some(mut rx) = phone.take_introductions() {
             let introduced = introduced.clone();
             background.push(tokio::spawn(async move {
@@ -363,16 +373,21 @@ impl Node {
             tokio::spawn(async move {
                 let (mut wait, give_up) = (retry, Instant::now() + UPDATE_GIVE_UP);
                 let seq = unix_millis() as u64;
+                let mut kept: HashSet<[u8; 32]> = HashSet::new();
                 loop {
                     if !contacts.lock_unpoisoned().contains(&peer) {
                         break;
                     }
                     // O relay é o de agora (pode ter mudado entre as tentativas); sem endereço que alguém de fora use, espera.
                     let reach = own.lock_unpoisoned().clone().map(|r| update::Reach { addr: r.addr, onion: r.onion, link: r.link });
-                    if let Some(reach) = reach
-                        && dialer.deliver_intro(peer, &Intro { seq, name: name.clone(), reach }, INTRO_ACK_WAIT).await
-                    {
-                        break;
+                    if let Some(reach) = reach {
+                        let intro = Intro { seq, name: name.clone(), reach };
+                        if dialer.deliver_intro(peer, &intro, INTRO_ACK_WAIT).await {
+                            break;
+                        }
+                        // Sem resposta direta: deixa o convite na caixa dele e com contatos de confiança, que o entregam
+                        // quando ele voltar (veja `mail`).
+                        dialer.leave_mail(peer, &intro, &contacts, &mut kept).await;
                     }
                     if Instant::now() >= give_up {
                         break;
@@ -383,6 +398,13 @@ impl Node {
                 tasks_done.lock_unpoisoned().remove(&peer);
             }),
         );
+    }
+
+    /// As apresentações que contatos deixaram aqui para quem estava offline, para o app guardar em disco e passar de
+    /// volta em [`NodeConfig::custody`] no próximo início. Cada linha é opaca (hexadecimal).
+    #[must_use]
+    pub fn custody_export(&self) -> Vec<String> {
+        self.phone.custody().lock_unpoisoned().export()
     }
 
     /// Contatos a quem [`Node::introduce`] ainda não entregou (sem confirmação até agora), para o app guardar e
@@ -410,6 +432,7 @@ impl Node {
         }
         self.phone.contacts().lock_unpoisoned().retain(|k| *k != peer);
         self.dialer.set_trusted(peer, false);
+        self.phone.custody().lock_unpoisoned().drop_from(&peer);
         let mut tasks = self.retiring.lock_unpoisoned();
         if tasks.contains_key(&peer) {
             return;
@@ -456,6 +479,7 @@ impl Node {
             task.abort();
         }
         self.phone.contacts().lock_unpoisoned().retain(|k| k != peer);
+        self.phone.custody().lock_unpoisoned().drop_from(peer);
         self.known.lock_unpoisoned().remove(peer);
         self.hints.lock_unpoisoned().remove(peer);
         self.history.lock_unpoisoned().remove(peer);

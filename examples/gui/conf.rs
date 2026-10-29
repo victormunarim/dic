@@ -231,6 +231,20 @@ pub(crate) fn servers_path() -> PathBuf {
     conf_path().with_file_name(".clam-gui.servers")
 }
 
+/// Apresentações que contatos deixaram com esta pessoa para entregar a quem estava offline (veja `clam::mailbox`):
+/// quadros cifrados e a chave da caixa de quem as espera. Uma por linha, opaco, para um fechamento não perdê-las.
+pub(crate) fn custody_path() -> PathBuf {
+    conf_path().with_file_name(".clam-gui.custody")
+}
+
+pub(crate) fn load_custody() -> Vec<String> {
+    std::fs::read_to_string(custody_path()).unwrap_or_default().lines().map(str::to_string).collect()
+}
+
+pub(crate) fn save_custody(lines: &[String]) -> std::io::Result<()> {
+    write_private(&custody_path(), &lines.iter().map(|l| format!("{l}\n")).collect::<String>())
+}
+
 pub(crate) fn load_servers() -> Option<String> {
     std::fs::read_to_string(servers_path()).ok()
 }

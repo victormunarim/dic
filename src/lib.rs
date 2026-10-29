@@ -63,6 +63,7 @@ pub mod descriptor;
 #[cfg(feature = "net")]
 pub mod discovery;
 pub mod intro;
+pub mod mailbox;
 pub mod media;
 #[cfg(feature = "net")]
 pub mod link;

@@ -181,7 +181,7 @@ impl Dialer {
     }
 
     /// Valores guardados nos `targets` `(chave, sal)` da DHT e das âncoras, sem passar pelos relays de `excluded`.
-    async fn lookup_values(&self, targets: &[([u8; 32], [u8; 32])], excluded: &[u8; 32]) -> Vec<Vec<u8>> {
+    pub(super) async fn lookup_values(&self, targets: &[([u8; 32], [u8; 32])], excluded: &[u8; 32]) -> Vec<Vec<u8>> {
         if self.dht.is_none() && self.anchors.is_empty() {
             return Vec::new();
         }
