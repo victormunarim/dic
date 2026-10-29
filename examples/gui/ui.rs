@@ -197,10 +197,7 @@ impl App {
                     r.stop.store(true, Ordering::Relaxed);
                 }
             }
-            // Sair da sala fica na subseção "Sala conectada" acima deste painel; aqui só o desligar de uma chamada 1:1.
-            if in_call && !in_room && icon_button(ui, true, "✖", "Desligar a chamada", RED).clicked() {
-                self.shared.hangup.store(true, Ordering::Relaxed);
-            }
+            // Sair da sala e desligar a chamada 1:1 ficam na subseção acima deste painel.
             // Engrenagem e mudo ficam juntos na ponta direita da linha (a engrenagem por último, na borda).
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let gear = egui::Button::new(RichText::new("⚙").size(19.0).color(TEXT)).frame(false).min_size(vec2(34.0, 36.0));

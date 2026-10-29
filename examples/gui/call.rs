@@ -48,7 +48,7 @@ impl App {
                 if icon_button(ui, true, if muted { "🔇" } else { "🎤" }, if muted { "Tirar do mudo" } else { "Silenciar" }, if muted { RED } else { GREY_BUTTON }).clicked() {
                     self.shared.audio.muted.store(!muted, Ordering::Relaxed);
                 }
-                if icon_button(ui, true, "✖", "Desligar a chamada", RED).clicked() {
+                if hangup_button(ui).on_hover_text("Desligar a chamada").clicked() {
                     self.shared.hangup.store(true, Ordering::Relaxed);
                 }
             });

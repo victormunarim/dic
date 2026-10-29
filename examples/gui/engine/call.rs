@@ -188,6 +188,7 @@ pub(crate) async fn talk(mut c: ActiveCall, hz: f64, stop: Arc<AtomicBool>, out:
 /// `redial`: se a conexão cair, pede para religar a esse contato (só quem discou religa).
 pub(crate) fn start_talk(c: ActiveCall, hz: f64, shared: &Arc<Shared>, out: &Sink, form: &Form, redial: Option<Redial>, peer: Peer) {
     let sound = open_sound(form.use_audio, form, out);
+    *shared.peer.lock_unpoisoned() = Some(peer.key);
     let (shared, out) = (shared.clone(), out.clone());
     // `talk` olha este sinalizador local; um vigia o liga quando a janela pede para desligar.
     let stop = Arc::new(AtomicBool::new(false));
@@ -215,6 +216,7 @@ pub(crate) fn start_talk(c: ActiveCall, hz: f64, shared: &Arc<Shared>, out: &Sin
         if end == End::Lost && !shared.hangup.load(Ordering::Relaxed) {
             out.line("conexão perdida; aguardando o outro lado religar");
         }
+        *shared.peer.lock_unpoisoned() = None;
         shared.in_call.store(false, Ordering::Relaxed);
     });
 }

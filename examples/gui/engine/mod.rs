@@ -83,6 +83,8 @@ pub(crate) struct Shared {
     pub(crate) in_call: AtomicBool,
     /// Pedido de desligar a chamada atual.
     pub(crate) hangup: AtomicBool,
+    /// Com quem é a chamada 1:1 em andamento (vazio fora de chamada).
+    pub(crate) peer: Mutex<Option<[u8; 32]>>,
     /// Qualidade da linha na chamada atual (vazio fora de chamada).
     pub(crate) link: Mutex<String>,
     /// Tela: o que a pessoa pediu, o que está rodando e o que chegou do outro lado.

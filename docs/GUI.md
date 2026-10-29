@@ -85,3 +85,7 @@ Limites: o `seq` é a hora em ms: relógio que volta mais que o intervalo entre 
 ## Queda de rede no meio da chamada
 
 Se nada chega por 8 s (a rede caiu ou mudou de Wi-Fi), a GUI dá a chamada como perdida. Quem discou tenta religar sozinho, até 5 vezes, com 3 s entre as tentativas, e a janela mostra "religando (n/5)". "Desligar" cancela. Se o outro lado desligou de propósito (`ActiveCall::peer_hung_up()`), ninguém religa; quem recebeu a chamada espera a nova ligação de quem discou.
+
+## Chamada 1:1 acima do perfil
+
+Em chamada 1:1 (fora de sala), a mesma subseção da sala aparece acima do perfil: 📞 com o nome do contato e a qualidade da linha, o monitor que compartilha a sua tela e o círculo vermelho que desliga. Não existe mais o botão vermelho grande no perfil; o desligar do cartão "Em chamada" é o mesmo círculo da sala.

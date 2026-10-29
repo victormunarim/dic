@@ -251,6 +251,8 @@ impl App {
             let name = sv.rooms.iter().find(|r| r.id == rid)?.name.clone();
             Some((name, sv.name))
         });
+        // Chamada 1:1 (fora de sala): com quem é.
+        let call_bar = (in_call && room_bar.is_none() && my_room.is_none()).then(|| self.shared.peer.lock_unpoisoned().map(|k| member_name(&self.form.names(), &k))).flatten();
         egui::SidePanel::left("salas")
             .show_separator_line(false)
             .exact_width(300.0)
@@ -259,7 +261,7 @@ impl App {
             .show(ctx, |ui| {
                 ui.spacing_mut().item_spacing.y = 6.0;
                 // O perfil ocupa uma altura fixa no pé; a lista de salas rola no espaço que sobra.
-                let footer: f32 = 74.0 + if room_bar.is_some() { 76.0 } else { 0.0 };
+                let footer: f32 = 74.0 + if room_bar.is_some() || call_bar.is_some() { 76.0 } else { 0.0 };
                 if self.tab == Tab::Contacts {
                     let count = parse_contacts(&self.form.contacts).len();
                     ui.add_space(2.0);
@@ -315,36 +317,57 @@ impl App {
                         ui.set_width(ui.available_width());
                         self.user_panel(ctx, ui, offline, in_call, status);
                     });
+                    // A sala e a chamada 1:1 têm a mesma subseção: ícone, nome, compartilhar a tela e desligar.
                     if let Some((room, server)) = &room_bar {
-                        // Mais estreita que o perfil (recuo nos lados), com folga interna e o compartilhar tela ao lado do sair.
-                        let sharing = self.shared.screen.want_share.load(Ordering::Relaxed);
-                        egui::Frame::new().inner_margin(Margin::symmetric(6, 0)).show(ui, |ui| sunken_frame(ui, 12, 10, |ui| {
-                            ui.set_width(ui.available_width());
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = 10.0;
-                                ui.add_space(6.0);
-                                ui.label(RichText::new("🔊").size(24.0).color(GREEN));
-                                ui.vertical(|ui| {
-                                    ui.spacing_mut().item_spacing.y = 2.0;
-                                    ui.label(RichText::new(room).strong().size(17.0).color(GREEN));
-                                    ui.label(RichText::new(server).size(13.0).color(MUTED));
-                                });
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    ui.spacing_mut().item_spacing.x = 4.0;
-                                    ui.add_space(6.0);
-                                    if hangup_button(ui).on_hover_text("Sair da sala").clicked() {
-                                        self.send(Cmd::LeaveRoom);
-                                    }
-                                    let tip = if sharing { "Parar de compartilhar a tela" } else { "Compartilhar a minha tela" };
-                                    if screen_button(ui, sharing).on_hover_text(tip).clicked() {
-                                        self.send(Cmd::RoomShare(!sharing));
-                                    }
-                                });
-                            });
-                        }));
+                        match self.session_bar(ui, "🔊", room, server, "Sair da sala") {
+                            Bar::Share(on) => self.send(Cmd::RoomShare(on)),
+                            Bar::Leave => self.send(Cmd::LeaveRoom),
+                            Bar::None => {}
+                        }
+                    } else if let Some(who) = call_bar {
+                        let link = self.shared.link.lock_unpoisoned().clone();
+                        let sub = if link.is_empty() { "Chamada".to_string() } else { link };
+                        match self.session_bar(ui, "📞", &who, &sub, "Desligar a chamada") {
+                            Bar::Share(on) => self.shared.screen.want_share.store(on, Ordering::Relaxed),
+                            Bar::Leave => self.shared.hangup.store(true, Ordering::Relaxed),
+                            Bar::None => {}
+                        }
                     }
                 });
             });
+    }
+
+    /// Subseção acima do perfil (sala ou chamada 1:1): `glyph`, `title` e `sub` à esquerda; à direita, compartilhar a
+    /// tela e desligar. Devolve o que a pessoa clicou.
+    fn session_bar(&mut self, ui: &mut egui::Ui, glyph: &str, title: &str, sub: &str, leave_tip: &str) -> Bar {
+        let sharing = self.shared.screen.want_share.load(Ordering::Relaxed);
+        let mut out = Bar::None;
+        // Mais estreita que o perfil (recuo nos lados), com folga interna.
+        egui::Frame::new().inner_margin(Margin::symmetric(6, 0)).show(ui, |ui| sunken_frame(ui, 12, 10, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
+                ui.add_space(6.0);
+                ui.label(RichText::new(glyph).size(24.0).color(GREEN));
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    ui.label(RichText::new(title).strong().size(17.0).color(GREEN));
+                    ui.label(RichText::new(sub).size(13.0).color(MUTED));
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    ui.add_space(6.0);
+                    if hangup_button(ui).on_hover_text(leave_tip).clicked() {
+                        out = Bar::Leave;
+                    }
+                    let tip = if sharing { "Parar de compartilhar a tela" } else { "Compartilhar a minha tela" };
+                    if screen_button(ui, sharing).on_hover_text(tip).clicked() {
+                        out = Bar::Share(!sharing);
+                    }
+                });
+            });
+        }));
+        out
     }
 
     fn room_list(&mut self, ui: &mut egui::Ui, hub: &clam::server::net::ServerHub, v: &ServerView, my_room: Option<(ServerId, clam::server::RoomId)>, in_call: bool) {
@@ -683,4 +706,11 @@ fn server_icon(ui: &mut egui::Ui, text: &str, active: Option<Color32>, ink: Colo
         ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, text, egui::FontId::proportional(24.0), ink);
     }
     reply.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// O que a pessoa fez na subseção da sala ou da chamada.
+enum Bar {
+    None,
+    Share(bool),
+    Leave,
 }
