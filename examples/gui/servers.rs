@@ -79,8 +79,8 @@ impl App {
         }
         let here = self.tab == Tab::Servers;
         egui::SidePanel::left("trilho")
-            // Sem a linha de separação do painel: no tema neomórfico a divisão é só o relevo.
-            .show_separator_line(false)
+            // Linha cinza discreta (`DIVIDER`, via `noninteractive.bg_stroke`) entre as seções.
+            .show_separator_line(true)
             .exact_width(76.0)
             .resizable(false)
             .frame(egui::Frame::new().fill(BG).inner_margin(Margin::symmetric(12, 14)))
@@ -203,7 +203,7 @@ impl App {
         let Some(hub) = self.shared.servers.lock_unpoisoned().clone() else { return };
         let Some(v) = hub.read(|s, now| s.views(now)).into_iter().find(|v| Some(v.id) == self.srv.sel) else { return };
         egui::SidePanel::right("membros")
-            .show_separator_line(false)
+            .show_separator_line(true)
             .exact_width(340.0)
             .resizable(false)
             .frame(egui::Frame::new().fill(BG).inner_margin(Margin::symmetric(14, 26)))
@@ -254,7 +254,7 @@ impl App {
         // Chamada 1:1 (fora de sala): com quem é.
         let call_bar = (in_call && room_bar.is_none() && my_room.is_none()).then(|| self.shared.peer.lock_unpoisoned().map(|k| member_name(&self.form.names(), &k))).flatten();
         egui::SidePanel::left("salas")
-            .show_separator_line(false)
+            .show_separator_line(true)
             .exact_width(300.0)
             .resizable(false)
             .frame(egui::Frame::new().fill(BG).inner_margin(Margin::symmetric(12, 14)))

@@ -16,6 +16,8 @@ pub(crate) const SELECTED: Color32 = Color32::from_rgb(0x33, 0x37, 0x40);
 /// Sombra clara (luz vinda de cima à esquerda) e sombra escura (embaixo à direita).
 const LIGHT: Color32 = Color32::from_rgb(0x38, 0x3c, 0x45);
 const DARK: Color32 = Color32::from_rgb(0x1d, 0x1f, 0x24);
+/// Linha fina e discreta entre as seções da janela (trilho, salas, centro, membros).
+pub(crate) const DIVIDER: Color32 = Color32::from_rgb(0x4a, 0x4f, 0x5a);
 pub(crate) const TEXT: Color32 = Color32::from_rgb(0xdd, 0xe0, 0xe6);
 pub(crate) const MUTED: Color32 = Color32::from_rgb(0x9a, 0xa1, 0xad);
 /// O único acento: ação principal, estado ativo, aro de quem fala.
@@ -87,7 +89,7 @@ pub(crate) fn apply(ctx: &egui::Context) {
     let radius = CornerRadius::same(R_BUTTON);
     let w = &mut v.widgets;
     w.noninteractive.bg_fill = PANEL;
-    w.noninteractive.bg_stroke = Stroke::new(1.0_f32, DARK);
+    w.noninteractive.bg_stroke = Stroke::new(1.0_f32, DIVIDER);
     w.noninteractive.fg_stroke = Stroke::new(1.0_f32, TEXT);
     w.noninteractive.corner_radius = radius;
     w.inactive.bg_fill = GREY_BUTTON;

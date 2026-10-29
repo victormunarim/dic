@@ -89,3 +89,5 @@ Se nada chega por 8 s (a rede caiu ou mudou de Wi-Fi), a GUI dá a chamada como 
 ## Chamada 1:1 acima do perfil
 
 Em chamada 1:1 (fora de sala), a mesma subseção da sala aparece acima do perfil: 📞 com o nome do contato e a qualidade da linha, o monitor que compartilha a sua tela e o círculo vermelho que desliga. Não existe mais o botão vermelho grande no perfil; o desligar do cartão "Em chamada" é o mesmo círculo da sala.
+
+As seções da janela (trilho, salas, centro, membros) são separadas por uma linha vertical fina e cinza (`DIVIDER` em `theme.rs`), além do relevo.
