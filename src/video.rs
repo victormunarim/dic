@@ -243,6 +243,11 @@ const HEAVY_FRAMES: u32 = 3;
 const HEAVY: f32 = 2.0;
 /// Maior redução extra por movimento.
 const MAX_MOTION_K: usize = 3;
+/// Troca de página: mais que esta fração da amostra mudou e não foi rolagem (texto em fundo claro mexe poucos pixels).
+const PAGE_CHANGE: f32 = 0.08;
+/// Se o quadro-chave de tamanho cheio ocupa a taxa por mais que isto, em segundos, a troca de página sai em
+/// meia resolução (um quarto dos pixels): legível bem antes, e a resolução cheia volta com a tela calma.
+const PAGE_KEY_SECONDS: f32 = 0.4;
 /// QP fixo das faixas de rolagem: texto novo que chega rolando tem de ficar nítido de primeira.
 const STRIP_QP: f32 = 30.0;
 /// Menor fração de pixels mudados considerada na antecipação (evita dividir por zero).
@@ -317,6 +322,8 @@ pub struct H264Encoder {
     /// menos bits por quadro, mais quadros por segundo. Volta a 1 depois de 1 s (`fps` quadros) de imagem parada.
     motion_k: usize,
     heavy: u32,
+    /// Tamanho do último quadro-chave em resolução cheia: estima o que a próxima troca de página custa.
+    key_bytes: f32,
     calm: u32,
     /// Amostra (RGB de alguns pixels) do último quadro codificado e a fração que mudou em relação ao anterior.
     sample: Vec<u8>,
@@ -378,6 +385,7 @@ impl H264Encoder {
             floor: QP_MIN,
             motion_k: 1,
             heavy: 0,
+            key_bytes: 0.0,
             calm: 0,
             sample: Vec::new(),
             prev_change: 0.0,
@@ -559,7 +567,8 @@ impl H264Encoder {
         let frame = frame.even().ok_or(VideoError::Size(frame.width, frame.height))?;
         let dims = (frame.width, frame.height);
         // O H.264 do openh264 fixa a resolução na abertura: tela nova, codificador novo.
-        if self.size.is_some_and(|s| s != dims) {
+        let resized = self.size.is_some_and(|s| s != dims);
+        if resized {
             self.inner = Self::open(self.qp, self.fps)?;
             self.applied_qp = self.qp;
             self.layered = false;
@@ -583,6 +592,11 @@ impl H264Encoder {
             self.inner.force_intra_frame();
         }
         let changed = self.measure_change(&frame);
+        if changed > PAGE_CHANGE && !resized && self.scale() == 1 && self.key_bytes > PAGE_KEY_SECONDS * self.target * self.fps {
+            self.motion_k = 2;
+            self.calm = 0;
+            return self.encode_inner(&frame, force_key);
+        }
         let qp = self.plan_qp(changed, want_key).round();
         let yuv = YUVBuffer::from_rgba8_source(RgbaSliceU8::new(&frame.rgba, dims));
         if !self.layered {
@@ -621,6 +635,9 @@ impl H264Encoder {
         }
         if key {
             self.need_key = false;
+            if self.scale() == 1 {
+                self.key_bytes = data.len() as f32;
+            }
         }
         if let Some(s) = self.scroll.as_mut() {
             s.prev = Some(frame.into_owned());
@@ -1205,6 +1222,30 @@ mod tests {
         assert!(enc.debt == 0.0, "a dívida não zerou");
         enc.encode(&still, false).unwrap();
         assert!(enc.qp < qp, "com o balde vazio o refino volta");
+    }
+
+    #[test]
+    fn a_page_switch_goes_out_at_half_resolution_when_the_key_is_dear_and_full_size_returns_when_calm() {
+        let (w, h) = (1280, 720);
+        for (slot, half) in [(SCREEN_SLOT, true), (crate::phone::OPEN_SCREEN_SLOT, false)] {
+            let mut enc = H264Encoder::new(H264Encoder::bitrate_for(slot)).unwrap();
+            let mut dec = ScreenDecoder::new().unwrap();
+            let a = lines(w, h, 0);
+            let first = (0..6).find_map(|_| enc.encode(&a, false).unwrap()).expect("quadro-chave");
+            dec.decode(&first.data).unwrap();
+            let switched = lines(w, h, 5000);
+            let f = enc.encode(&switched, false).unwrap().expect("quadro");
+            assert_eq!(enc.scale() == 2, half, "{slot:?}");
+            if half {
+                assert!(f.keyframe && f.data.len() < 12_000, "{} B", f.data.len());
+                assert_eq!(dec.decode(&f.data).unwrap().map(|o| (o.width, o.height)), Some((w / 2, h / 2)));
+                // A tela calma devolve a resolução cheia, sem voltar a reduzir por causa da própria troca de medida.
+                for _ in 0..(enc.fps() as usize * 3) {
+                    enc.encode(&switched, false).unwrap();
+                }
+                assert_eq!(enc.scale(), 1);
+            }
+        }
     }
 
     #[test]
