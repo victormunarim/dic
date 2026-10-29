@@ -552,6 +552,12 @@ impl ScreenShare {
         self.stream.lock_unpoisoned().report_age()
     }
 
+    /// Quem assiste anunciou que entende as mensagens de rolagem ([`crate::scroll`])?
+    #[must_use]
+    pub fn peer_rolls(&self) -> bool {
+        self.stream.lock_unpoisoned().peer_rolls()
+    }
+
     /// Fragmentos esperando saída no circuito.
     #[must_use]
     pub fn queued(&self) -> usize {

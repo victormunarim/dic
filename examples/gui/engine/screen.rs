@@ -155,7 +155,7 @@ async fn start_capture(shared: &Arc<Shared>, out: &Sink) -> Result<(Box<dyn Scre
         Err(e) => Err(e),
     };
     let (src, mut enc) = started.map_err(|e| format!("não deu para capturar a tela ({e})"))?;
-    // Rolagem como mensagem: quem assiste precisa ser desta versão (um decodificador antigo erra nas mensagens).
+    // Rolagem como mensagem: `pump_all` só a usa quando todos os espectadores anunciaram que a entendem.
     enc.set_scroll(true);
     if st.hardware.load(Ordering::Relaxed) {
         // `detect` roda processos: fora do executor.

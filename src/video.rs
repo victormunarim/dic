@@ -335,6 +335,9 @@ pub struct H264Encoder {
     pub hw_note: Option<String>,
     /// Rolagem como mensagem, quando ligada ([`Self::set_scroll`]).
     scroll: Option<ScrollTx>,
+    /// Todos os espectadores anunciaram que entendem as mensagens de rolagem ([`pump_all`] decide). Sem isso
+    /// o quadro vai como vídeo puro, que qualquer decodificador lê.
+    peers_roll: bool,
     /// Rolagens enviadas no lugar de quadros de vídeo.
     pub scrolled: u64,
     /// Bandas mandadas no lugar do quadro-chave que a rolagem pediria.
@@ -394,6 +397,7 @@ impl H264Encoder {
             hw: None,
             hw_note: None,
             scroll: None,
+            peers_roll: true,
             scrolled: 0,
             patched: 0,
             regions: 0,
@@ -579,11 +583,11 @@ impl H264Encoder {
         }
         self.size = Some(dims);
         // Uma rolagem seguida de outra não precisa do quadro-chave; só o vídeo que volta depois dela.
-        let rolled = if force_key || self.need_key { None } else { self.try_scroll(&frame)? };
+        let rolled = if force_key || self.need_key || !self.peers_roll { None } else { self.try_scroll(&frame)? };
         if rolled.is_some() {
             return Ok(rolled);
         }
-        if !(force_key || self.need_key) {
+        if !(force_key || self.need_key) && self.peers_roll {
             match self.try_patch(&frame)? {
                 Patched::Sent(f) => return Ok(Some(f)),
                 Patched::Same => return Ok(None),
@@ -900,6 +904,8 @@ pub fn pump(source: &mut dyn ScreenSource, encoder: &mut H264Encoder, share: &Sc
 /// `force_key` pede quadro-chave (por exemplo, entrou um espectador). Devolve para quantos o quadro seguiu.
 pub fn pump_all(source: &mut dyn ScreenSource, encoder: &mut H264Encoder, shares: &[&ScreenShare], force_key: bool) -> Result<usize, VideoError> {
     // Todos precisam ser consultados: `any` pararia no primeiro e deixaria pedidos pendentes.
+    // Mensagem de rolagem só para quem avisou que entende: um espectador antigo erraria na decodificação.
+    encoder.peers_roll = !shares.is_empty() && shares.iter().all(|s| s.peer_rolls());
     let wanted = shares.iter().fold(force_key, |w, s| s.keyframe_wanted() | w);
     // A taxa segue o pior espectador. Sem relatório novo, relatórios que sumiram com vídeo saindo cortam a taxa.
     match shares.iter().filter_map(|s| s.take_report()).map(|r| r.loss).reduce(f32::max) {
@@ -1047,6 +1053,24 @@ mod tests {
 
     fn mean_error(a: &RawFrame, b: &RawFrame) -> u64 {
         a.rgba.iter().zip(&b.rgba).step_by(4).map(|(x, y)| x.abs_diff(*y) as u64).sum::<u64>() / (a.width * a.height) as u64
+    }
+
+    #[test]
+    fn without_a_viewer_that_announced_it_scrolling_goes_as_plain_video() {
+        let open = H264Encoder::bitrate_for(crate::phone::OPEN_SCREEN_SLOT);
+        let mut enc = H264Encoder::new(open).unwrap();
+        enc.set_scroll(true);
+        enc.peers_roll = false;
+        let mut old = H264Decoder::new().unwrap();
+        let (w, h) = (1280, 720);
+        let first = (0..6).find_map(|_| enc.encode(&lines(w, h, 0), false).unwrap()).expect("quadro-chave");
+        old.decode(&first.data).unwrap().expect("imagem");
+        for i in 1..=4 {
+            let Some(f) = enc.encode(&lines(w, h, i * 90), false).unwrap() else { continue };
+            assert!(!scroll::is_scroll(&f.data) && !scroll::is_patch(&f.data) && !scroll::is_region(&f.data), "quadro {i}");
+            old.decode(&f.data).unwrap();
+        }
+        assert_eq!((enc.scrolled, enc.patched, enc.regions), (0, 0, 0));
     }
 
     /// Janela de 1280x720: menu à esquerda (240 px), título (40) e rodapé (40) fixos; o miolo rola `off`.

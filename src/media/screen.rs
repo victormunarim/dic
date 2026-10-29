@@ -23,6 +23,9 @@
 //! - Perda no caminho: quem assiste conta as lacunas no número de sequência dos pacotes que chegam e,
 //!   a cada meio segundo, devolve a fração perdida (flag `REPORT`, em pacote de preenchimento). O
 //!   emissor lê o relatório em [`take_report`](ScreenStream::take_report) e ajusta a taxa do codec.
+//! - Mensagens de rolagem: quem assiste com esta versão marca todo pacote de preenchimento com a flag `ROLL`
+//!   ([`peer_rolls`](ScreenStream::peer_rolls) no emissor). Sem a marca (receptor antigo, ou ainda sem relatório) o
+//!   emissor manda só vídeo H.264 puro, que qualquer decodificador lê.
 //! - Fila do emissor limitada: se o codec produz mais do que o circuito leva, os quadros
 //!   mais velhos são descartados e a fila só volta a aceitar a partir de um quadro-chave.
 
@@ -81,6 +84,8 @@ const STOP: u8 = 8;
 const REPORT: u8 = 16;
 /// Pacote de preenchimento com pedido de fragmentos (veja o topo do módulo).
 const NACK: u8 = 32;
+/// Em pacote de preenchimento: quem assiste entende as mensagens de rolagem (`crate::scroll`).
+const ROLL: u8 = 64;
 
 /// Janela de medição da perda, entre dois relatórios.
 const REPORT_EVERY: Duration = Duration::from_millis(500);
@@ -167,6 +172,8 @@ pub struct ScreenStream {
     /// Faltou quadro: descarta até chegar um quadro-chave.
     broken: bool,
     peer_wants_key: bool,
+    /// O par anunciou que entende mensagens de rolagem.
+    peer_rolls: bool,
     /// Quadros já pedidos de volta e quando (receptor).
     asked: HashMap<u16, Instant>,
     patience: Duration,
@@ -202,6 +209,7 @@ impl ScreenStream {
             last_id: None,
             broken: false,
             peer_wants_key: false,
+            peer_rolls: false,
             asked: HashMap::new(),
             patience: PATIENCE,
             last_key: None,
@@ -308,7 +316,7 @@ impl ScreenStream {
         }
         let mut buf = [0u8; MAX_PAYLOAD];
         let mut len = HEADER;
-        let mut flags = IDLE | if self.broken { WANT_KEY } else { 0 };
+        let mut flags = IDLE | ROLL | if self.broken { WANT_KEY } else { 0 };
         if let Some((lost, expected)) = window {
             flags |= REPORT;
             put(&mut buf, 1, &[lost]);
@@ -446,6 +454,13 @@ impl ScreenStream {
     }
 
     /// Quem transmite: o último relatório que chegou, uma vez só.
+    /// Quem assiste já anunciou que entende mensagens de rolagem? `false` até o primeiro relatório dele, e
+    /// para sempre se for uma versão antiga.
+    #[must_use]
+    pub fn peer_rolls(&self) -> bool {
+        self.peer_rolls
+    }
+
     pub fn take_report(&mut self) -> Option<LossReport> {
         self.report_in.take()
     }
@@ -468,7 +483,7 @@ impl ScreenStream {
 
     /// O pacote do próximo slot: fragmento da fila ou preenchimento. Sempre 200 B.
     pub fn next_packet(&mut self) -> Result<[u8; PACKET_LEN], MediaError> {
-        let want = if self.broken { WANT_KEY } else { 0 };
+        let want = ROLL | if self.broken { WANT_KEY } else { 0 };
         let mut buf = [0u8; MAX_PAYLOAD];
         let (next, fresh) = match self.retx.pop_front() {
             Some(f) => (Some(f), false),
@@ -517,6 +532,9 @@ impl ScreenStream {
         };
         if flags & WANT_KEY != 0 {
             self.peer_wants_key = true;
+        }
+        if flags & ROLL != 0 {
+            self.peer_rolls = true;
         }
         if flags & REPORT != 0 {
             let packets = u32::from(u16::from_be_bytes([b3, b4]));
@@ -684,6 +702,21 @@ mod tests {
             b.receive(&p).unwrap();
         }
         assert_eq!(b.poll_frame().unwrap().data, f);
+    }
+
+    #[test]
+    fn the_sender_learns_that_the_viewer_understands_scroll_messages() {
+        let (mut a, mut b) = pair();
+        assert!(!a.peer_rolls(), "sem relatório ainda não se sabe");
+        // Um par antigo não marca nada: o pacote dele não leva a flag `ROLL`.
+        let mut old = [0u8; MAX_PAYLOAD];
+        old[0] = IDLE;
+        let p = b.sealer.seal(old.get(..HEADER).unwrap()).unwrap();
+        a.receive(&p).unwrap();
+        assert!(!a.peer_rolls());
+        // Esta versão marca todo pacote, de preenchimento ou de vídeo.
+        a.receive(&b.next_packet().unwrap()).unwrap();
+        assert!(a.peer_rolls());
     }
 
     #[test]
