@@ -21,6 +21,13 @@
 //! ```
 //!
 //! A banda cola as `linhas` primeiras linhas da faixa decodificada a partir da linha `y` da imagem.
+//!
+//! Janela que rola dentro da tela (menu lateral, barra de título e rodapé fixos) não é rolagem da página
+//! inteira. Aí vale a **rolagem de região** ([`detect_region`]): só um retângulo desloca, o resto fica.
+//!
+//! ```text
+//! tag (1) ‖ deslocamento i16 (2) ‖ x (2) ‖ y (2) ‖ largura (2) ‖ altura (2) ‖ largura da imagem (2) ‖ altura da imagem (2) ‖ faixa
+//! ```
 
 // `parse` lê bytes de quem transmite, que pode ser hostil: nada de índice nem `unwrap` que derrube o processo.
 #![deny(clippy::indexing_slicing, clippy::unwrap_used)]
@@ -37,6 +44,17 @@ const HEAD: usize = 1 + 2 + 2 + 2;
 /// Primeiro byte de uma banda (linhas que mudaram depois de uma rolagem).
 pub const PATCH_TAG: u8 = 0xA6;
 const PATCH_HEAD: usize = 1 + 2 + 2 + 2 + 2;
+/// Primeiro byte de uma rolagem de região.
+pub const REGION_TAG: u8 = 0xA7;
+const REGION_HEAD: usize = 1 + 2 + 4 * 2 + 2 * 2;
+/// A imagem é cortada em tantas colunas para achar o retângulo que rola.
+const BANDS: usize = 16;
+/// Linhas seguidas sem coincidir (cursor, destaque) que ainda não cortam a região.
+const ROW_GAP: usize = 16;
+/// Quantas linhas, no máximo, a ponta de uma região procura além da última prova de movimento.
+const EDGE_SEARCH: usize = 64;
+/// Fração mínima da imagem que a região precisa cobrir.
+const MIN_AREA: f32 = 0.15;
 /// Uma banda só vale se tem no máximo esta fração da altura; acima disso o quadro-chave sai mais barato.
 const MAX_PATCH: f32 = 0.25;
 /// Linhas menores que isso não valem a conta.
@@ -72,6 +90,27 @@ pub struct Patch<'a> {
     pub rows: usize,
     pub width: usize,
     pub height: usize,
+    pub strip: &'a [u8],
+}
+
+/// Retângulo da imagem, em pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Rect {
+    pub x: usize,
+    pub y: usize,
+    pub w: usize,
+    pub h: usize,
+}
+
+/// Rolagem de região lida da rede.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Region<'a> {
+    pub rect: Rect,
+    /// Como em [`Message::dy`].
+    pub dy: i32,
+    pub width: usize,
+    pub height: usize,
+    /// Faixa H.264 com as linhas novas no topo, com a largura do retângulo.
     pub strip: &'a [u8],
 }
 
@@ -122,6 +161,49 @@ pub fn parse(data: &[u8]) -> Option<Message<'_>> {
         return None;
     }
     Some(Message { dy, width, height, strip: b })
+}
+
+/// `data` é uma rolagem de região?
+#[must_use]
+pub fn is_region(data: &[u8]) -> bool {
+    data.first() == Some(&REGION_TAG)
+}
+
+/// Monta uma rolagem de região. `None` se algum campo não cabe ou o retângulo não comporta o deslocamento.
+#[must_use]
+pub fn write_region(rect: Rect, dy: i32, width: usize, height: usize, strip: &[u8]) -> Option<Vec<u8>> {
+    let n = dy.unsigned_abs() as usize;
+    if dy == 0 || n > MAX_SHIFT || n >= rect.h || rect.w == 0 || rect.x.checked_add(rect.w)? > width || rect.y.checked_add(rect.h)? > height {
+        return None;
+    }
+    let mut out = Vec::with_capacity(REGION_HEAD + strip.len());
+    out.push(REGION_TAG);
+    out.extend_from_slice(&i16::try_from(dy).ok()?.to_be_bytes());
+    for v in [rect.x, rect.y, rect.w, rect.h, width, height] {
+        out.extend_from_slice(&u16::try_from(v).ok()?.to_be_bytes());
+    }
+    out.extend_from_slice(strip);
+    Some(out)
+}
+
+/// Lê uma rolagem de região; `None` se `data` não é uma ou está malformada.
+#[must_use]
+pub fn parse_region(data: &[u8]) -> Option<Region<'_>> {
+    let mut b = data;
+    if take::<1>(&mut b)? != [REGION_TAG] {
+        return None;
+    }
+    let dy = i32::from(i16::from_be_bytes(take(&mut b)?));
+    let mut v = [0usize; 6];
+    for slot in &mut v {
+        *slot = usize::from(u16::from_be_bytes(take(&mut b)?));
+    }
+    let [x, y, w, h, width, height] = v;
+    let n = dy.unsigned_abs() as usize;
+    if dy == 0 || n > MAX_SHIFT || n >= h || w == 0 || x + w > width || y + h > height || b.is_empty() {
+        return None;
+    }
+    Some(Region { rect: Rect { x, y, w, h }, dy, width, height, strip: b })
 }
 
 /// Monta uma banda. `None` se algum campo não cabe ou a banda é vazia.
@@ -183,6 +265,13 @@ pub fn detect(prev: &RawFrame, cur: &RawFrame) -> Option<i32> {
         return None;
     }
     let (hp, hc) = (hashes(prev), hashes(cur));
+    let dy = vote(&hp, &hc)?;
+    let (overlap, same) = overlap_same(&hp, &hc, dy)?;
+    (overlap as f32 >= cur.height as f32 * MIN_OVERLAP && same as f32 >= overlap as f32 * MIN_MATCH).then_some(dy)
+}
+
+/// Deslocamento em que mais linhas únicas de `hp` reaparecem em `hc`, se votos bastam.
+fn vote(hp: &[u64], hc: &[u64]) -> Option<i32> {
     // Só linhas que aparecem uma vez no quadro anterior dizem de onde vieram (linhas em branco se repetem).
     let mut seen: HashMap<u64, (usize, u32)> = HashMap::new();
     for (i, h) in hp.iter().enumerate() {
@@ -198,10 +287,12 @@ pub fn detect(prev: &RawFrame, cur: &RawFrame) -> Option<i32> {
         }
     }
     let (&dy, &n) = votes.iter().max_by_key(|(d, v)| (**v, std::cmp::Reverse(d.unsigned_abs())))?;
-    if n < MIN_VOTES {
-        return None;
-    }
-    let height = i32::try_from(cur.height).ok()?;
+    (n >= MIN_VOTES).then_some(dy)
+}
+
+/// Linhas de `hc` que ainda têm par em `hp` com o deslocamento `dy`, e quantas coincidem.
+fn overlap_same(hp: &[u64], hc: &[u64], dy: i32) -> Option<(u32, u32)> {
+    let height = i32::try_from(hc.len()).ok()?;
     let (mut overlap, mut same) = (0u32, 0u32);
     for (y, h) in hc.iter().enumerate() {
         let py = i32::try_from(y).ok()? + dy;
@@ -213,7 +304,191 @@ pub fn detect(prev: &RawFrame, cur: &RawFrame) -> Option<i32> {
             same += 1;
         }
     }
-    (overlap as f32 >= cur.height as f32 * MIN_OVERLAP && same as f32 >= overlap as f32 * MIN_MATCH).then_some(dy)
+    Some((overlap, same))
+}
+
+/// Resumo das linhas de `frame` só nas colunas `x0..x1`.
+fn hashes_cols(frame: &RawFrame, x0: usize, x1: usize) -> Vec<u64> {
+    let stride = (frame.width * 4).max(4);
+    frame.rgba.chunks_exact(stride).map(|row| row_hash_all(row.get(x0 * 4..x1 * 4).unwrap_or(&[]))).collect()
+}
+
+/// Como [`row_hash`], mas sem cortar a ponta: o recorte já é o que importa.
+fn row_hash_all(row: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let (words, rest) = row.as_chunks::<8>();
+    for w in words {
+        h = (h ^ u64::from_le_bytes(*w)).wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(29);
+    }
+    for &b in rest {
+        h = (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01B3);
+    }
+    h
+}
+
+/// Retângulo que andou na vertical de `prev` para `cur` enquanto o resto da imagem ficou (janela que rola
+/// com menu lateral, barra de título e rodapé fixos), e quanto andou. Só vale se a página inteira não rolou
+/// ([`detect`] falhou) e o retângulo cobre ao menos [`MIN_AREA`] da imagem.
+#[must_use]
+pub fn detect_region(prev: &RawFrame, cur: &RawFrame) -> Option<(Rect, i32)> {
+    if (prev.width, prev.height) != (cur.width, cur.height) || cur.height < MIN_HEIGHT || cur.width < BANDS || cur.rgba.len() != prev.rgba.len() {
+        return None;
+    }
+    let edge = |b: usize| cur.width * b / BANDS;
+    let cols: Vec<(Vec<u64>, Vec<u64>)> = (0..BANDS).map(|b| (hashes_cols(prev, edge(b), edge(b + 1)), hashes_cols(cur, edge(b), edge(b + 1)))).collect();
+    // O deslocamento é o que mais colunas escolhem.
+    let mut tally: HashMap<i32, u32> = HashMap::new();
+    for (hp, hc) in &cols {
+        if let Some(d) = vote(hp, hc) {
+            *tally.entry(d).or_default() += 1;
+        }
+    }
+    let (&dy, _) = tally.iter().max_by_key(|(d, n)| (**n, std::cmp::Reverse(d.unsigned_abs())))?;
+    // Colunas que andaram junto: votam em `dy`, ou são lisas (as linhas coincidem quase todas).
+    let ok: Vec<(bool, bool)> = cols
+        .iter()
+        .map(|(hp, hc)| {
+            let Some((overlap, same)) = overlap_same(hp, hc, dy) else { return (false, false) };
+            let voted = vote(hp, hc) == Some(dy);
+            let fits = overlap > 0 && same as f32 >= overlap as f32 * if voted { MIN_MATCH } else { 0.95 };
+            (fits, fits && voted)
+        })
+        .collect();
+    let (mut best, mut start) = ((0usize, 0usize), 0usize);
+    let mut voters = false;
+    for b in 0..=BANDS {
+        match ok.get(b) {
+            Some(&(true, v)) => voters |= v,
+            _ => {
+                if voters && b - start > best.1 - best.0 {
+                    best = (start, b);
+                }
+                start = b + 1;
+                voters = false;
+            }
+        }
+    }
+    let (x0, x1) = (edge(best.0), edge(best.1));
+    if best.1 <= best.0 || x1 <= x0 {
+        return None;
+    }
+    // Extensão vertical. Só linha única do quadro anterior prova movimento: linha em branco coincide em
+    // qualquer deslocamento e engoliria o menu e o rodapé fixos. As pontas não avançam por linhas em branco:
+    // sem prova, uma margem em branco fica como estava (igual nos dois quadros) em vez de arriscar mover o
+    // que é fixo.
+    let (hp, hc) = (hashes_cols(prev, x0, x1), hashes_cols(cur, x0, x1));
+    let mut count: HashMap<u64, u32> = HashMap::new();
+    for h in &hp {
+        *count.entry(*h).or_default() += 1;
+    }
+    let unique = |y: usize| hp.get(y).is_some_and(|h| count.get(h) == Some(&1));
+    let height = i32::try_from(cur.height).ok()?;
+    let moved = |y: usize| {
+        let py = i32::try_from(y).unwrap_or(i32::MAX).saturating_add(dy);
+        py >= 0 && py < height && usize::try_from(py).is_ok_and(|py| unique(py) && hp.get(py) == hc.get(y))
+    };
+    let mut clusters: Vec<(usize, usize, usize)> = Vec::new();
+    for y in (0..cur.height).filter(|&y| moved(y)) {
+        match clusters.last_mut() {
+            Some(c) if y - c.1 <= ROW_GAP => {
+                c.1 = y;
+                c.2 += 1;
+            }
+            _ => clusters.push((y, y, 1)),
+        }
+    }
+    let &(a, b, n) = clusters.iter().max_by_key(|c| c.2)?;
+    let shift = dy.unsigned_abs() as usize;
+    let (mut top, mut bottom) = if dy > 0 { (a, b + 1 + shift) } else { (a.checked_sub(shift)?, b + 1) };
+    // Linha única que não saiu do lugar: é do que fica fixo, e as pontas do retângulo não passam dela.
+    let fixed = |y: usize| unique(y) && hp.get(y) == hc.get(y);
+    let low = (top.saturating_sub(EDGE_SEARCH)..top).rev().take_while(|&y| !fixed(y)).last().unwrap_or(top);
+    let high = (bottom..(bottom + EDGE_SEARCH).min(cur.height)).take_while(|&y| !fixed(y)).last().map_or(bottom, |y| y + 1);
+    // Entre a última prova de movimento e a primeira linha fixa só há linhas em branco, que não dizem de que
+    // lado da borda estão: fica a ponta em que a imagem prevista erra menos linhas.
+    let miss = |top: usize, bottom: usize| -> usize {
+        (0..cur.height)
+            .filter(|&y| {
+                let pred = if y < top || y >= bottom {
+                    hp.get(y)
+                } else if dy > 0 && y + shift < bottom {
+                    hp.get(y + shift)
+                } else if dy < 0 && y >= top + shift {
+                    hp.get(y - shift)
+                } else {
+                    hc.get(y)
+                };
+                pred != hc.get(y)
+            })
+            .count()
+    };
+    let mut best = miss(top, bottom);
+    for b2 in bottom + 1..=high {
+        let m = miss(top, b2);
+        if m < best {
+            (best, bottom) = (m, b2);
+        }
+    }
+    for t2 in (low..top).rev() {
+        let m = miss(t2, bottom);
+        if m < best {
+            (best, top) = (m, t2);
+        }
+    }
+    let rect = Rect { x: x0, y: top, w: x1 - x0, h: bottom.checked_sub(top)? };
+    let area = (rect.w * rect.h) as f32 / (cur.width * cur.height) as f32;
+    (n as u32 >= MIN_VOTES && bottom <= cur.height && rect.h >= MIN_HEIGHT && shift < rect.h && area >= MIN_AREA).then_some((rect, dy))
+}
+
+/// A faixa de `cur` que a rolagem de `rect` por `dy` descobriu: as `|dy|` linhas novas do retângulo.
+#[must_use]
+pub fn strip_region(cur: &RawFrame, rect: Rect, dy: i32) -> Option<RawFrame> {
+    let n = dy.unsigned_abs() as usize;
+    let stride = cur.width * 4;
+    if n == 0 || n > MAX_SHIFT || n >= rect.h || cur.rgba.len() != stride * cur.height || rect.x.checked_add(rect.w)? > cur.width || rect.y.checked_add(rect.h)? > cur.height {
+        return None;
+    }
+    let first = if dy > 0 { rect.y + rect.h - n } else { rect.y };
+    let mut rows = Vec::with_capacity(n * rect.w * 4);
+    for y in first..first + n {
+        rows.extend_from_slice(cur.rgba.get(y * stride + rect.x * 4..y * stride + (rect.x + rect.w) * 4)?);
+    }
+    padded(rect.w, &rows, n)
+}
+
+/// Desloca o retângulo de `canvas` por `dy` e cola as `|dy|` primeiras linhas de `strip` na ponta descoberta.
+/// `false` (e `canvas` intacto) se as medidas não batem.
+pub fn apply_region(canvas: &mut RawFrame, rect: Rect, dy: i32, strip: &RawFrame) -> bool {
+    let n = dy.unsigned_abs() as usize;
+    let stride = canvas.width * 4;
+    let (Some(x_end), Some(y_end)) = (rect.x.checked_add(rect.w), rect.y.checked_add(rect.h)) else { return false };
+    if n == 0 || n >= rect.h || rect.w == 0 || x_end > canvas.width || y_end > canvas.height || strip.width != rect.w || strip.height < n || canvas.rgba.len() != stride * canvas.height {
+        return false;
+    }
+    let (row_bytes, x_off) = (rect.w * 4, rect.x * 4);
+    let Some(new) = strip.rgba.get(..n * row_bytes) else { return false };
+    let moved = rect.h - n;
+    let copy = |canvas: &mut RawFrame, from: usize, to: usize| {
+        canvas.rgba.copy_within(from * stride + x_off..from * stride + x_off + row_bytes, to * stride + x_off);
+    };
+    if dy > 0 {
+        for r in 0..moved {
+            copy(canvas, rect.y + r + n, rect.y + r);
+        }
+    } else {
+        for r in (0..moved).rev() {
+            copy(canvas, rect.y + r, rect.y + r + n);
+        }
+    }
+    let first = if dy > 0 { rect.y + moved } else { rect.y };
+    for (i, src) in new.chunks_exact(row_bytes).enumerate() {
+        let at = (first + i) * stride + x_off;
+        match canvas.rgba.get_mut(at..at + row_bytes) {
+            Some(dst) => dst.copy_from_slice(src),
+            None => return false,
+        }
+    }
+    true
 }
 
 /// A faixa de `cur` que a rolagem `dy` descobriu, com altura arredondada para cima (potência de dois) repetindo
@@ -422,5 +697,67 @@ mod tests {
         }
         assert!(parse_patch(&[PATCH_TAG, 0, 9, 0, 3, 0, 4, 0, 10, 1]).is_none(), "passa da altura");
         assert!(parse(&msg).is_none() && parse_patch(&[TAG, 0, 0, 0, 1, 0, 1, 0, 1, 9]).is_none());
+    }
+
+    /// Janela 320x240: menu fixo (x < 80), título (y < 24) e rodapé (y >= 216) fixos; o miolo rola `off`.
+    fn window(off: usize) -> RawFrame {
+        let fixed = page(320, 240, 7000);
+        let moving = page(320, 240, off);
+        let mut f = fixed.clone();
+        for y in 24..216 {
+            for x in 80..320 {
+                let i = (y * 320 + x) * 4;
+                f.rgba[i..i + 4].copy_from_slice(&moving.rgba[i..i + 4]);
+            }
+        }
+        f
+    }
+
+    #[test]
+    fn a_window_scrolling_inside_fixed_chrome_is_a_region() {
+        let a = window(100);
+        assert_eq!(detect(&a, &window(130)), None, "a página inteira não rolou");
+        for dy in [30i32, -25, 1, -1] {
+            let b = window((100 + dy) as usize);
+            let (rect, got) = detect_region(&a, &b).unwrap_or_else(|| panic!("dy {dy}"));
+            assert_eq!(got, dy);
+            assert!(rect.x >= 64 && rect.x <= 96 && rect.x + rect.w == 320, "{rect:?}");
+            assert_eq!((rect.y, rect.y + rect.h), (24, 216), "{rect:?}");
+            let mut canvas = a.clone();
+            let s = strip_region(&b, rect, dy).unwrap();
+            assert!(apply_region(&mut canvas, rect, dy, &s));
+            // Fora do retângulo nada muda; dentro, é a página rolada (o recorte pode ter engolido parte do menu).
+            assert_eq!(canvas, b, "dy {dy}");
+        }
+        assert_eq!(detect_region(&a, &a), None, "imagem parada");
+        assert_eq!(detect_region(&a, &window(100 + 5000)), None, "outro conteúdo");
+    }
+
+    #[test]
+    fn region_apply_refuses_what_does_not_fit() {
+        let mut canvas = page(320, 200, 0);
+        let before = canvas.clone();
+        let rect = Rect { x: 100, y: 20, w: 100, h: 100 };
+        assert!(!apply_region(&mut canvas, rect, 0, &page(100, 32, 0)));
+        assert!(!apply_region(&mut canvas, rect, 10, &page(90, 32, 0)), "largura");
+        assert!(!apply_region(&mut canvas, rect, 40, &page(100, 32, 0)), "faixa baixa demais");
+        assert!(!apply_region(&mut canvas, Rect { x: 300, ..rect }, 10, &page(100, 32, 0)), "fora da imagem");
+        assert!(!apply_region(&mut canvas, rect, 100, &page(100, 128, 0)), "o retângulo todo");
+        assert_eq!(canvas, before);
+    }
+
+    #[test]
+    fn region_messages_round_trip_and_malformed_ones_are_refused() {
+        let rect = Rect { x: 80, y: 24, w: 240, h: 192 };
+        let m = write_region(rect, -25, 320, 240, &[1, 2, 3]).unwrap();
+        assert!(is_region(&m) && !is_scroll(&m) && !is_patch(&m));
+        assert_eq!(parse_region(&m), Some(Region { rect, dy: -25, width: 320, height: 240, strip: &[1, 2, 3] }));
+        assert!(write_region(rect, 0, 320, 240, &[1]).is_none());
+        assert!(write_region(rect, 192, 320, 240, &[1]).is_none(), "deslocamento do tamanho do retângulo");
+        assert!(write_region(Rect { x: 200, ..rect }, 5, 320, 240, &[1]).is_none(), "fora da imagem");
+        for cut in 0..m.len().min(REGION_HEAD + 1) {
+            assert!(parse_region(&m[..cut]).is_none(), "cortada em {cut}");
+        }
+        assert!(parse_region(&[0xA5, 0, 1]).is_none());
     }
 }

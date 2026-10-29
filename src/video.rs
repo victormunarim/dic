@@ -286,8 +286,8 @@ enum Patched {
 struct ScrollTx {
     /// Último quadro (já reduzido) que quem assiste tem: de vídeo ou de rolagem.
     prev: Option<RawFrame>,
-    /// Codificador das faixas, sempre intra, com a altura para a qual foi aberto.
-    strip: Option<(usize, Encoder)>,
+    /// Codificador das faixas, sempre intra, com a medida `(largura, altura)` para a qual foi aberto.
+    strip: Option<((usize, usize), Encoder)>,
     /// O vídeo principal ficou para trás de quem assiste: o próximo quadro de vídeo tem de ser quadro-chave.
     stale: bool,
 }
@@ -339,6 +339,8 @@ pub struct H264Encoder {
     pub scrolled: u64,
     /// Bandas mandadas no lugar do quadro-chave que a rolagem pediria.
     pub patched: u64,
+    /// Rolagens de região (janela dentro da tela) enviadas no lugar de quadros de vídeo.
+    pub regions: u64,
     /// Quadros que o codificador recebeu e não devolveu (pulados ou grandes demais).
     pub skipped: u64,
     /// Quadros largados da camada alta porque a fila do circuito estava cheia.
@@ -394,6 +396,7 @@ impl H264Encoder {
             scroll: None,
             scrolled: 0,
             patched: 0,
+            regions: 0,
             skipped: 0,
             layer_dropped: 0,
             held: 0,
@@ -662,7 +665,8 @@ impl H264Encoder {
     fn try_scroll(&mut self, frame: &RawFrame) -> Result<Option<EncodedFrame>, VideoError> {
         let fps = self.fps;
         let Some(s) = self.scroll.as_mut() else { return Ok(None) };
-        let Some(dy) = s.prev.as_ref().and_then(|prev| scroll::detect(prev, frame)) else { return Ok(None) };
+        let Some(prev) = s.prev.as_ref() else { return Ok(None) };
+        let Some(dy) = scroll::detect(prev, frame) else { return self.try_region(frame) };
         let Some(strip) = scroll::strip(frame, dy) else { return Ok(None) };
         let Some(data) = Self::encode_strip(s, fps, &strip)? else { return Ok(None) };
         let Some(msg) = scroll::write(dy, frame.width, frame.height, &data) else { return Ok(None) };
@@ -675,6 +679,30 @@ impl H264Encoder {
     /// Depois de uma rolagem o vídeo principal está atrás de quem assiste. Se só uma faixa de linhas mudou
     /// (barra de rolagem, cursor, um botão), manda essa banda em vez do quadro-chave inteiro; `Ok(None)` com
     /// `skip` verdadeiro: nada mudou, não há o que mandar. Mudança grande volta ao quadro-chave.
+    /// Janela que rola dentro da tela (menu, título e rodapé fixos): só o retângulo desloca. Quem assiste
+    /// fica com a imagem prevista, que pode diferir do quadro fora do retângulo; se essa diferença é grande
+    /// demais para uma banda, não vale a mensagem e o quadro vai como vídeo.
+    fn try_region(&mut self, frame: &RawFrame) -> Result<Option<EncodedFrame>, VideoError> {
+        let fps = self.fps;
+        let Some(s) = self.scroll.as_mut() else { return Ok(None) };
+        let Some(prev) = s.prev.as_ref() else { return Ok(None) };
+        let Some((rect, dy)) = scroll::detect_region(prev, frame) else { return Ok(None) };
+        let Some(strip) = scroll::strip_region(frame, rect, dy) else { return Ok(None) };
+        let mut predicted = prev.clone();
+        if !scroll::apply_region(&mut predicted, rect, dy, &strip) {
+            return Ok(None);
+        }
+        if predicted != *frame && scroll::changed_rows(&predicted, frame).is_none() {
+            return Ok(None);
+        }
+        let Some(data) = Self::encode_strip(s, fps, &strip)? else { return Ok(None) };
+        let Some(msg) = scroll::write_region(rect, dy, frame.width, frame.height, &data) else { return Ok(None) };
+        s.prev = Some(predicted);
+        s.stale = true;
+        self.regions += 1;
+        Ok(Some(EncodedFrame { data: msg, keyframe: false, droppable: false }))
+    }
+
     fn try_patch(&mut self, frame: &RawFrame) -> Result<Patched, VideoError> {
         let fps = self.fps;
         let Some(s) = self.scroll.as_mut().filter(|s| s.stale) else { return Ok(Patched::No) };
@@ -693,8 +721,9 @@ impl H264Encoder {
 
     /// Codifica `strip` no codificador de faixas (sempre intra); `None` se vazia ou grande demais.
     fn encode_strip(s: &mut ScrollTx, fps: f32, strip: &RawFrame) -> Result<Option<Vec<u8>>, VideoError> {
-        if s.strip.as_ref().is_none_or(|(h, _)| *h != strip.height) {
-            s.strip = Some((strip.height, Self::open(STRIP_QP, fps)?));
+        let size = (strip.width, strip.height);
+        if s.strip.as_ref().is_none_or(|(k, _)| *k != size) {
+            s.strip = Some((size, Self::open(STRIP_QP, fps)?));
         }
         let Some((_, enc)) = s.strip.as_mut() else { return Ok(None) };
         enc.force_intra_frame();
@@ -818,6 +847,22 @@ impl ScreenDecoder {
             let Some(canvas) = self.canvas.as_mut() else { return Ok(None) };
             if !scroll::apply_patch(canvas, p.y, p.rows, &strip) {
                 return Err(VideoError::Codec("banda não cabe na imagem".into()));
+            }
+            return Ok(Some(canvas.clone()));
+        }
+        if let Some(r) = scroll::parse_region(data) {
+            match &self.canvas {
+                Some(c) if (c.width, c.height) == (r.width, r.height) => {}
+                _ => return Ok(None),
+            }
+            if self.strips.is_none() {
+                self.strips = Some(H264Decoder::new()?);
+            }
+            let Some(strips) = self.strips.as_mut() else { return Ok(None) };
+            let Some(strip) = strips.decode(r.strip)? else { return Ok(None) };
+            let Some(canvas) = self.canvas.as_mut() else { return Ok(None) };
+            if !scroll::apply_region(canvas, r.rect, r.dy, &strip) {
+                return Err(VideoError::Codec("rolagem de região não cabe na imagem".into()));
             }
             return Ok(Some(canvas.clone()));
         }
@@ -1002,6 +1047,38 @@ mod tests {
 
     fn mean_error(a: &RawFrame, b: &RawFrame) -> u64 {
         a.rgba.iter().zip(&b.rgba).step_by(4).map(|(x, y)| x.abs_diff(*y) as u64).sum::<u64>() / (a.width * a.height) as u64
+    }
+
+    /// Janela de 1280x720: menu à esquerda (240 px), título (40) e rodapé (40) fixos; o miolo rola `off`.
+    fn window(off: usize) -> RawFrame {
+        let (w, h) = (1280, 720);
+        let (fixed, moving) = (lines(w, h, 9_999), lines(w, h, off));
+        let mut f = fixed.clone();
+        for y in 40..h - 40 {
+            f.rgba[(y * w + 240) * 4..(y * w + w) * 4].copy_from_slice(&moving.rgba[(y * w + 240) * 4..(y * w + w) * 4]);
+        }
+        f
+    }
+
+    #[test]
+    fn a_window_scrolling_inside_fixed_chrome_goes_as_a_region() {
+        let open = H264Encoder::bitrate_for(crate::phone::OPEN_SCREEN_SLOT);
+        let mut enc = H264Encoder::new(open).unwrap();
+        enc.set_scroll(true);
+        let mut dec = ScreenDecoder::new().unwrap();
+        let first = (0..6).find_map(|_| enc.encode(&window(0), false).unwrap()).expect("quadro-chave");
+        dec.decode(&first.data).unwrap().expect("imagem");
+        for i in 1..=4 {
+            let src = window(i * 90);
+            let f = enc.encode(&src, false).unwrap().expect("quadro");
+            assert!(scroll::is_region(&f.data), "quadro {i}");
+            assert!(f.data.len() < 40_000, "quadro {i}: {} B", f.data.len());
+            let out = dec.decode(&f.data).unwrap().expect("imagem");
+            assert!(mean_error(&out, &src) < 20, "quadro {i}: erro {}", mean_error(&out, &src));
+        }
+        assert_eq!((enc.regions, enc.scrolled), (4, 0));
+        // O menu e o rodapé nunca foram retransmitidos: parar não pede quadro-chave.
+        assert!(enc.encode(&window(4 * 90), false).unwrap().is_none());
     }
 
     #[test]
@@ -1536,6 +1613,45 @@ mod tests {
             for _ in 0..(fps as usize * 5) {
                 run(&mut enc, &mut dec, off + 5000, "trocou ", &mut t, &mut queue);
             }
+        }
+    }
+
+    /// Medição (não é teste): custo de CPU por quadro em 1080p com conteúdo em movimento, por etapa.
+    /// `cargo test --release --features video --lib -- --ignored --nocapture encode_cost`
+    #[test]
+    #[ignore]
+    fn encode_cost() {
+        let (w, h) = (1920, 1080);
+        for (label, step, scrolling) in [("parado", 0, false), ("10 px sem rolagem", 10, false), ("40 px sem rolagem", 40, false), ("40 px com rolagem", 40, true)] {
+            let bitrate = H264Encoder::bitrate_for(crate::phone::OPEN_SCREEN_SLOT);
+            let mut enc = H264Encoder::new(bitrate).unwrap();
+            enc.set_scroll(scrolling);
+            let frames: Vec<RawFrame> = (0..40).map(|i| lines(w, h, i * step)).collect();
+            let (mut total, mut bytes, mut n) = (0.0f32, 0usize, 0);
+            for f in &frames {
+                let t0 = std::time::Instant::now();
+                let r = enc.encode(f, false).unwrap();
+                total += t0.elapsed().as_secs_f32() * 1000.0;
+                if let Some(r) = r {
+                    bytes += r.data.len();
+                    n += 1;
+                }
+            }
+            let yuv = {
+                let t0 = std::time::Instant::now();
+                for f in frames.iter().take(20) {
+                    let _ = std::hint::black_box(YUVBuffer::from_rgba8_source(RgbaSliceU8::new(&f.rgba, (w, h))));
+                }
+                t0.elapsed().as_secs_f32() * 1000.0 / 20.0
+            };
+            let det = {
+                let t0 = std::time::Instant::now();
+                for p in frames.windows(2).take(20) {
+                    std::hint::black_box(scroll::detect(&p[0], &p[1]));
+                }
+                t0.elapsed().as_secs_f32() * 1000.0 / 20.0
+            };
+            println!("{label:20} média {:5.1} ms/quadro, {:6} B/quadro enviado ({n} de 40), conversão YUV {yuv:.1} ms, detect {det:.1} ms", total / 40.0, bytes / n.max(1));
         }
     }
 }
