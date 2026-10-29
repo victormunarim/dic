@@ -451,6 +451,65 @@ fn an_invite_to_someone_offline_is_delivered_again_until_it_arrives() {
 }
 
 #[test]
+fn the_delivery_of_an_invite_survives_the_inviter_restarting() {
+    let mut net = Net::new(2);
+    let (server, out) = net.nodes[0].create("Amigos", net.now).unwrap();
+    net.run(0, out);
+    net.down.insert(1);
+    let (key, now) = (net.key(1), net.now);
+    let out = net.nodes[0].invite_send(&server, key, now).unwrap();
+    net.run(0, out);
+    // Quem convidou fecha e abre de novo: o reenvio continua de onde parou.
+    let saved = net.nodes[0].export();
+    net.nodes[0] = Servers::import(net.secrets[0].clone(), &saved);
+    let reach = Reach { addr: "n0.exemplo:4001".into(), onion: [0; 32], link: [100; 32] };
+    let out = net.nodes[0].set_reach(Some(reach), 2, net.now);
+    net.run(0, out);
+    net.down.remove(&1);
+    assert!(net.nodes[1].pending_invites().is_empty());
+    net.advance(70);
+    assert_eq!(net.nodes[1].pending_invites().len(), 1, "o reenvio sobreviveu ao reinício");
+}
+
+#[test]
+fn a_received_invite_survives_the_invitee_restarting() {
+    let mut net = Net::new(2);
+    let (server, out) = net.nodes[0].create("Amigos", net.now).unwrap();
+    net.run(0, out);
+    let (key, now) = (net.key(1), net.now);
+    let out = net.nodes[0].invite_send(&server, key, now).unwrap();
+    net.run(0, out);
+    let before = net.nodes[1].pending_invites();
+    assert_eq!(before.len(), 1);
+    let saved = net.nodes[1].export();
+    net.nodes[1] = Servers::import(net.secrets[1].clone(), &saved);
+    assert_eq!(net.nodes[1].pending_invites(), before);
+    let reach = Reach { addr: "n1.exemplo:4001".into(), onion: [1; 32], link: [101; 32] };
+    let out = net.nodes[1].set_reach(Some(reach), 2, net.now);
+    net.run(1, out);
+    let (_, out) = net.nodes[1].accept(&before[0].text, net.now).unwrap();
+    net.run(1, out);
+    net.advance(2);
+    assert!(net.nodes[1].pending_invites().is_empty());
+    assert_eq!(net.view(1, &server).members.len(), 2);
+}
+
+#[test]
+fn a_saved_invite_that_is_not_for_me_or_from_someone_else_is_dropped() {
+    let mut net = Net::new(3);
+    let (server, out) = net.nodes[0].create("Amigos", net.now).unwrap();
+    net.run(0, out);
+    let (key, now) = (net.key(1), net.now);
+    let out = net.nodes[0].invite_send(&server, key, now).unwrap();
+    net.run(0, out);
+    let saved = net.nodes[1].export();
+    // Outra identidade não abre o texto; um remetente trocado não confere.
+    assert!(Servers::import(net.secrets[2].clone(), &saved).pending_invites().is_empty());
+    let forged = saved.replace(&net.key(0).iter().map(|b| format!("{b:02x}")).collect::<String>(), &"00".repeat(32));
+    assert!(Servers::import(net.secrets[1].clone(), &forged).pending_invites().is_empty());
+}
+
+#[test]
 fn room_chat_reaches_only_the_room_and_is_forgotten_when_it_empties() {
     let (mut net, server) = Net::group(3);
     net.advance(2);

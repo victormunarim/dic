@@ -1084,11 +1084,21 @@ impl Servers {
             for k in s.invited.values() {
                 t.push_str(&format!("convite|{}\n", hex(k)));
             }
+            for ((sid, who), d) in &self.deliveries {
+                if *sid == s.id {
+                    if let Some(k) = s.invited.get(who) {
+                        t.push_str(&format!("entrega|{}|{}|{}\n", hex(k), d.first, d.next));
+                    }
+                }
+            }
             for p in s.peers.values() {
                 if let Some((seq, r)) = &p.reach {
                     t.push_str(&format!("par|{}|{}|{}|{}|{}\n", hex(&p.key), seq, hex(r.addr.as_bytes()), hex(&r.onion), hex(&r.link)));
                 }
             }
+        }
+        for p in self.pending.values() {
+            t.push_str(&format!("pendente|{}|{}|{}\n", hex(&p.server), hex(&p.from), p.text));
         }
         t
     }
@@ -1144,6 +1154,26 @@ impl Servers {
                         s.invited.insert(member_id(&k), k);
                     }
                 }
+                ["entrega", key, first, next] => {
+                    if let (Some(s), Some(k), Ok(first), Ok(next)) = (cur.as_ref(), unhex(key).and_then(|b| <[u8; 32]>::try_from(b).ok()), first.parse::<u64>(), next.parse::<u64>()) {
+                        // Só vale para quem ainda consta como convidado; `next` é reposto no tick.
+                        if s.invited.contains_key(&member_id(&k)) {
+                            me.deliveries.insert((s.id, member_id(&k)), Delivery { first, next });
+                        }
+                    }
+                }
+                ["pendente", server, from, text] => {
+                    let parsed = (|| {
+                        let server: ServerId = unhex(server)?.try_into().ok()?;
+                        let from: [u8; 32] = unhex(from)?.try_into().ok()?;
+                        // O texto só abre com a minha chave e a de quem convidou: confere já, para lixo não ficar na lista.
+                        let inv = Invite::open(text, &me.me.secret).ok().filter(|i| i.inviter.key == from && i.server == server)?;
+                        Some(PendingInvite { server, name: inv.name, from, text: (*text).to_string() })
+                    })();
+                    if let Some(p) = parsed.filter(|_| me.pending.len() < INVITES_KEPT) {
+                        me.pending.insert(p.server, p);
+                    }
+                }
                 ["par", key, seq, addr, onion, link] => {
                     if let (Some(s), Some(k), Ok(seq), Some(r)) = (cur.as_mut(), unhex(key).and_then(|b| <[u8; 32]>::try_from(b).ok()), seq.parse::<u64>(), reach_of(addr, onion, link)) {
                         s.peer(k).reach = Some((seq, r));
@@ -1165,6 +1195,9 @@ impl Servers {
             s.sync_peers(&me.me);
             me.servers.insert(s.id, s);
         }
+        // Convite de servidor em que já entrei não fica pendente.
+        let joined: Vec<ServerId> = me.servers.keys().copied().collect();
+        me.pending.retain(|id, _| !joined.contains(id));
         me
     }
 }
