@@ -70,6 +70,7 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
     for key in form.trusted_keys() {
         dialer.set_trusted(key, true);
     }
+    tokio::spawn(probe_contacts(dialer.clone(), shared.clone(), stop.clone()));
     let hub = node.servers();
     if !form.my_name.trim().is_empty() {
         hub.run(|s, now| s.set_name(form.my_name.trim(), now));
@@ -468,6 +469,35 @@ impl KnownSaver {
 fn sorted(mut tombs: Vec<([u8; 32], u64)>) -> Vec<([u8; 32], u64)> {
     tombs.sort_unstable();
     tombs
+}
+
+/// Quanto vale uma sondagem de presença antes de repetir.
+const PROBE_EVERY: Duration = Duration::from_secs(60);
+
+/// Sonda os contatos da lista, um por vez (cada sondagem monta um circuito), do mais antigo ao mais novo; o
+/// resultado vai a `Shared::presence` e a lista de contatos bloqueia o 📞 de quem não responde. Contato em
+/// chamada conta como online sem sondar.
+async fn probe_contacts(dialer: clam::node::Dialer, shared: Arc<Shared>, stop: Arc<AtomicBool>) {
+    let mut checked: std::collections::HashMap<[u8; 32], tokio::time::Instant> = Default::default();
+    while !stop.load(Ordering::Relaxed) {
+        let watch = shared.watch.lock_unpoisoned().clone();
+        let now = tokio::time::Instant::now();
+        let busy = *shared.peer.lock_unpoisoned();
+        let due = watch.iter().filter(|k| checked.get(*k).is_none_or(|t| now.duration_since(*t) >= PROBE_EVERY)).min_by_key(|k| checked.get(*k).copied());
+        match due {
+            Some(key) if Some(*key) == busy => {
+                checked.insert(*key, now);
+                shared.presence.lock_unpoisoned().insert(*key, true);
+            }
+            Some(key) => {
+                let up = dialer.is_online(key).await;
+                checked.insert(*key, tokio::time::Instant::now());
+                shared.presence.lock_unpoisoned().insert(*key, up);
+            }
+            None => tokio::time::sleep(Duration::from_secs(1)).await,
+        }
+        checked.retain(|k, _| watch.contains(k));
+    }
 }
 
 #[cfg(test)]

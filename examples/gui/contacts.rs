@@ -72,17 +72,23 @@ impl App {
         }
     }
 
-    /// Contatos que os servidores do usuário mostram offline. Não há presença direta por contato (isso exigiria
-    /// consultar a rede a cada um); quem não está em nenhum servidor em comum fica de fora e pode ser chamado.
-    fn offline_contacts(&self) -> std::collections::HashSet<[u8; 32]> {
-        let Some(hub) = self.shared.servers.lock_unpoisoned().clone() else { return Default::default() };
-        let mut seen = std::collections::HashMap::<[u8; 32], bool>::new();
-        for v in hub.read(|s, now| s.views(now)) {
-            for m in v.members.iter().filter(|m| !m.is_me) {
-                *seen.entry(m.key).or_insert(false) |= m.online;
+    /// Contatos online agora: a sondagem do nó (`Shared::presence`) ou um servidor em comum que os mostra online.
+    /// Quem ainda não foi sondado não está na lista, e o 📞 espera o resultado.
+    fn online_contacts(&self, contacts: &[(String, [u8; 32])]) -> std::collections::HashSet<[u8; 32]> {
+        let keys: Vec<[u8; 32]> = contacts.iter().map(|(_, k)| *k).collect();
+        {
+            let mut watch = self.shared.watch.lock_unpoisoned();
+            if *watch != keys {
+                *watch = keys;
             }
         }
-        seen.into_iter().filter(|(_, on)| !on).map(|(k, _)| k).collect()
+        let mut up: std::collections::HashSet<[u8; 32]> = self.shared.presence.lock_unpoisoned().iter().filter(|(_, on)| **on).map(|(k, _)| *k).collect();
+        if let Some(hub) = self.shared.servers.lock_unpoisoned().clone() {
+            for v in hub.read(|s, now| s.views(now)) {
+                up.extend(v.members.iter().filter(|m| !m.is_me && m.online).map(|m| m.key));
+            }
+        }
+        up
     }
 
     /// Lista de contatos na coluna da esquerda (o "início", como as mensagens diretas do Discord): um por linha,
@@ -100,7 +106,8 @@ impl App {
         } else if !needle.is_empty() && !contacts.iter().any(|(n, k)| matches_search(n, k, &needle)) {
             note(ui, "Ninguém com esse nome.");
         }
-        let offline_keys = self.offline_contacts();
+        let online_keys = self.online_contacts(&contacts);
+        let probed = self.shared.presence.lock_unpoisoned().clone();
         let ringing = *self.shared.ringing.lock_unpoisoned();
         let mut remove = None;
         for (i, (name, key)) in contacts.iter().enumerate().filter(|(_, (n, k))| matches_search(n, k, &needle)) {
@@ -138,13 +145,12 @@ impl App {
                     // Os três ícones têm a mesma largura e ficam colados: o 📞 é texto, então sem o enchimento do botão.
                     let call = ui.scope(|ui| {
                         ui.spacing_mut().button_padding = vec2(0.0, 0.0);
-                        let away = offline_keys.contains(key);
-                        ui.add_enabled(online && !in_call && !away, egui::Button::new(RichText::new("📞").size(16.0)).frame(false).min_size(vec2(28.0, 34.0)))
+                        ui.add_enabled(online && !in_call && online_keys.contains(key), egui::Button::new(RichText::new("📞").size(16.0)).frame(false).min_size(vec2(28.0, 34.0)))
                     }).inner;
                     let off_tip = if ringing == Some(*key) {
                         "Chamando…"
                     } else if online && !in_call {
-                        "Este contato está offline nos seus servidores"
+                        if probed.contains_key(key) { "Contato offline" } else { "Verificando se o contato está online…" }
                     } else {
                         "Fique online e sem chamada para ligar"
                     };

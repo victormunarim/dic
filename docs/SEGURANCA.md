@@ -31,6 +31,8 @@ Garantias e limites, limitações conhecidas e chaveiro.
 
 ## Limitações
 
+A GUI sonda a presença dos contatos (`Dialer::is_online`): a cada 60 s, um por vez, monta um circuito de 2 saltos até o relay de cada contato e o larga sem chamar, para bloquear o 📞 de quem está offline. Isso aumenta o que um observador vê: tráfego periódico de circuitos e consultas à DHT para as chaves dos contatos (o mesmo que uma ligação mostra, mas contínuo), e o relay do contato vê as sondagens chegarem (só o último salto, sem saber de quem). Os 2 saltos e o cover valem como na chamada; o custo é banda e tempo de CPU proporcionais ao número de contatos.
+
 Ainda **não** existem: TLS/QUIC e travessia de NAT (não há furo de NAT: quem não tem porta alcançável não recebe chamadas), chamadas em grupo com cifra de grupo (MLS; as salas de voz são uma malha de chamadas 1:1, [SERVIDORES.md](SERVIDORES.md)) e relays que não sejam os dos próprios contatos (o aplicativo não usa a descoberta por GossipSub nem a reputação; elas são camada de biblioteca).
 A DHT é pública: um nó armazenador pode sobrescrever um registro com lixo (`open` rejeita lixo, mas ele esconde o registro bom até a próxima publicação; o dono republica a cada hora), e quem opera nós vê o IP de quem lê e de quem grava, a menos que a pessoa use a opção de falar com a DHT pelos relays dos contatos.
 `PathMode` só modela e valida o modo; a chamada do aplicativo é sempre o circuito de 2 saltos (o primeiro salto é o relay de quem liga, então o contato vê o IP dele).

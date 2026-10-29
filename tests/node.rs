@@ -96,6 +96,23 @@ async fn dial_without_an_address_says_so() {
     assert!(matches!(err, DialError::NoAddress { tried_stored: false }), "{err}");
 }
 
+/// Sondar um contato diz se o relay dele está de pé, sem ligar nem deixar endereço guardado.
+#[tokio::test]
+async fn probing_tells_whether_the_contact_is_online() {
+    let (sa, sb) = (key(), key());
+    let (pa, pb) = (*PublicKey::from(&sa).as_bytes(), *PublicKey::from(&sb).as_bytes());
+    let b = Node::start(quiet(sb, free_port(), vec![pa])).await.unwrap();
+    let a = Node::start(quiet(sa, free_port(), vec![pb])).await.unwrap();
+    let dialer = a.dialer();
+    assert!(!dialer.is_online(&pb).await, "sem endereço");
+    a.add_hint(pb, b.relay_info().unwrap());
+    assert!(dialer.is_online(&pb).await, "relay de pé");
+    b.stop();
+    let dead = *PublicKey::from(&key()).as_bytes();
+    a.add_hint(dead, RelayInfo { addr: "127.0.0.1:1".into(), onion: [7; 32], link: [8; 32] });
+    assert!(!dialer.is_online(&dead).await, "relay morto");
+}
+
 /// Duas pessoas, só o código de contato direto: liga e conversa nos dois sentidos.
 #[tokio::test]
 async fn two_nodes_talk_with_the_direct_code() {

@@ -85,6 +85,10 @@ pub(crate) struct Shared {
     pub(crate) hangup: AtomicBool,
     /// Com quem é a chamada 1:1 em andamento (vazio fora de chamada).
     pub(crate) peer: Mutex<Option<[u8; 32]>>,
+    /// Contatos que a janela quer saber se estão online (a lista de contatos) e o último resultado da sondagem
+    /// (`true` = relay de pé). Ausente = ainda não sondado.
+    pub(crate) watch: Mutex<Vec<[u8; 32]>>,
+    pub(crate) presence: Mutex<std::collections::HashMap<[u8; 32], bool>>,
     /// Para quem se está ligando e ainda não atendeu (vazio fora disso). Enquanto preenchido, a janela mostra
     /// "Chamando…"; `peer` só vale depois que a pessoa atende.
     pub(crate) ringing: Mutex<Option<[u8; 32]>>,

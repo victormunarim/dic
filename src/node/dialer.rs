@@ -151,6 +151,19 @@ impl Dialer {
         *PublicKey::from(&self.secret).as_bytes()
     }
 
+    /// Se o relay de `peer` está de pé agora: monta o circuito até ele e o larga sem chamar. Como cada pessoa é o
+    /// relay de si mesma, relay de pé quer dizer contato online. Custa um circuito de 2 saltos (até 5 s por
+    /// endereço), então o app sonda poucos contatos por vez e não a cada quadro.
+    pub async fn is_online(&self, peer: &[u8; 32]) -> bool {
+        match self.reachable_client(peer, ClientOptions::default).await.0 {
+            Some((client, _)) => {
+                client.stop();
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Liga para `peer`: acha um relay dele (o guardado, o que ele avisou, a DHT ou uma âncora) e chama por um
     /// circuito que passa pelos relays dos contatos.
     ///
