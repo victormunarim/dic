@@ -72,6 +72,19 @@ impl App {
         }
     }
 
+    /// Contatos que os servidores do usuário mostram offline. Não há presença direta por contato (isso exigiria
+    /// consultar a rede a cada um); quem não está em nenhum servidor em comum fica de fora e pode ser chamado.
+    fn offline_contacts(&self) -> std::collections::HashSet<[u8; 32]> {
+        let Some(hub) = self.shared.servers.lock_unpoisoned().clone() else { return Default::default() };
+        let mut seen = std::collections::HashMap::<[u8; 32], bool>::new();
+        for v in hub.read(|s, now| s.views(now)) {
+            for m in v.members.iter().filter(|m| !m.is_me) {
+                *seen.entry(m.key).or_insert(false) |= m.online;
+            }
+        }
+        seen.into_iter().filter(|(_, on)| !on).map(|(k, _)| k).collect()
+    }
+
     /// Lista de contatos na coluna da esquerda (o "início", como as mensagens diretas do Discord): um por linha,
     /// com ligar, a confiança para a tela (escudo) e remover (lixeira) à direita. No alto, a busca.
     pub(crate) fn contacts_list(&mut self, ui: &mut egui::Ui, online: bool, in_call: bool) {
@@ -87,6 +100,8 @@ impl App {
         } else if !needle.is_empty() && !contacts.iter().any(|(n, k)| matches_search(n, k, &needle)) {
             note(ui, "Ninguém com esse nome.");
         }
+        let offline_keys = self.offline_contacts();
+        let ringing = *self.shared.ringing.lock_unpoisoned();
         let mut remove = None;
         for (i, (name, key)) in contacts.iter().enumerate().filter(|(_, (n, k))| matches_search(n, k, &needle)) {
             raised_frame(ui, 12, 8, |ui| {
@@ -123,9 +138,17 @@ impl App {
                     // Os três ícones têm a mesma largura e ficam colados: o 📞 é texto, então sem o enchimento do botão.
                     let call = ui.scope(|ui| {
                         ui.spacing_mut().button_padding = vec2(0.0, 0.0);
-                        ui.add_enabled(online && !in_call, egui::Button::new(RichText::new("📞").size(16.0)).frame(false).min_size(vec2(28.0, 34.0)))
+                        let away = offline_keys.contains(key);
+                        ui.add_enabled(online && !in_call && !away, egui::Button::new(RichText::new("📞").size(16.0)).frame(false).min_size(vec2(28.0, 34.0)))
                     }).inner;
-                    if call.on_hover_text("Ligar").on_disabled_hover_text("Fique online e sem chamada para ligar").clicked() {
+                    let off_tip = if ringing == Some(*key) {
+                        "Chamando…"
+                    } else if online && !in_call {
+                        "Este contato está offline nos seus servidores"
+                    } else {
+                        "Fique online e sem chamada para ligar"
+                    };
+                    if call.on_hover_text("Ligar").on_disabled_hover_text(off_tip).clicked() {
                         self.dial(*key);
                     }
                 });

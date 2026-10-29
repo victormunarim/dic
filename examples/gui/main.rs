@@ -54,7 +54,6 @@ fn main() -> eframe::Result {
                 done: Arc::default(),
                 error: String::new(),
                 tab: Tab::Contacts,
-                was_in_call: false,
                 audio_dirty: false,
                 screen_tex: Default::default(),
                 zoom: None,

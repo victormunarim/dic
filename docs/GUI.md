@@ -14,7 +14,7 @@ A janela segue o layout do Discord e o visual neomórfico (soft UI: uma cor base
 |---|---|
 | **Contatos** (👤 no trilho; não é aba) | Na coluna da esquerda, no lugar das salas: um contato por linha com 📞 ligar, o escudo (*Contato de confiança*) e a lixeira (*Remover contato*), a busca no alto e o + *Novo contato* à direita do título (só o código; o nome vem do próprio contato). O centro mostra a tela de Chamada |
 | *Servidor* (pelo trilho) | As *Salas de voz* com quem está em cada uma, o aro verde de quem fala e, no centro, o bate-papo da sala em que você está (apagado quando a sala esvazia), *Telas da sala*, e, numa coluna à direita, os *Membros* (online e offline) com o convite recolhido e o aviso de IP. Detalhes em [SERVIDORES.md](SERVIDORES.md) |
-| **Chamada** | *Ligar para um código* (sem chamada); abre sozinha quando uma chamada 1:1 começa (entrar numa sala não troca de aba): a conversa, *Compartilhar a minha tela* (com a linha de diagnóstico) e a *Tela de ...* de quem transmite para você, que se amplia em outra janela |
+| **Chamada** | *Ligar para um código* (sem chamada); a conversa (chamar ou atender não troca de aba), *Compartilhar a minha tela* (com a linha de diagnóstico) e a *Tela de ...* de quem transmite para você, que se amplia em outra janela |
 | **Vídeo** | *Transmissão de tela*: privacidade, *Priorizar* fluidez ou nitidez e codificar pela placa de vídeo; valem da próxima transmissão, na chamada e nas salas |
 | **Áudio** | *Dispositivos* (usar microfone e alto-falante, escolha dos dois), *Volume e microfone* (mudo, volume, ganho, medidor, sensibilidade, teste) e *Tratamento da voz* (ruído, eco, porta, graves, volume automático, Opus) |
 | **Configurações** | *Conexão* (Ficar online / offline, o estado e a caixa *Tentar ficar online ao abrir o programa*, ligada por padrão; desmarcar grava `no_auto_online=1` em `~/.clam-gui.conf`), *Meu código de contato* (com *Copiar o código*), *Identidade* (a chave secreta, oculta; *Gerar nova identidade*), *Seu nome*, *Endereço* público, *Encontrar contatos* (DHT, circuito da DHT, aceitar apresentações) e *Âncoras* (servir de âncora, as que você usa e o código da sua) |
@@ -88,6 +88,6 @@ Se nada chega por 8 s (a rede caiu ou mudou de Wi-Fi), a GUI dá a chamada como 
 
 ## Chamada 1:1 acima do perfil
 
-Em chamada 1:1 (fora de sala), a mesma subseção da sala aparece acima do perfil: 📞 com o nome do contato e a qualidade da linha, o monitor que compartilha a sua tela e o círculo vermelho que desliga. Não existe mais o botão vermelho grande no perfil; o desligar do cartão "Em chamada" é o mesmo círculo da sala.
+Ao ligar, a subseção mostra "Chamando…" (sem o monitor) até a pessoa atender; o círculo vermelho cancela. O 📞 do contato fica desabilitado se os servidores em comum o mostram offline (limite: sem servidor em comum não há presença por contato). Em chamada 1:1 (fora de sala), a mesma subseção da sala aparece acima do perfil: 📞 com o nome do contato e a qualidade da linha, o monitor que compartilha a sua tela e o círculo vermelho que desliga. Não existe mais o botão vermelho grande no perfil; o desligar do cartão "Em chamada" é o mesmo círculo da sala.
 
 As seções da janela (trilho, salas, centro, membros) são separadas por uma linha vertical fina e cinza (`DIVIDER` em `theme.rs`), além do relevo.

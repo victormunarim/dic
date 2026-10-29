@@ -36,8 +36,13 @@ impl App {
             });
             return;
         }
-        card(ui, "Em chamada", "", |ui| {
-            status_dot(ui, GREEN, "Conversando agora");
+        let ringing = self.shared.ringing.lock_unpoisoned().is_some();
+        card(ui, if ringing { "Chamando" } else { "Em chamada" }, "", |ui| {
+            if ringing {
+                status_dot(ui, YELLOW, "Chamando… aguardando a pessoa atender");
+            } else {
+                status_dot(ui, GREEN, "Conversando agora");
+            }
             let link = self.shared.link.lock_unpoisoned().clone();
             if !link.is_empty() {
                 note(ui, format!("Linha: {link}"));
@@ -45,15 +50,17 @@ impl App {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 let muted = self.shared.audio.muted.load(Ordering::Relaxed);
-                if icon_button(ui, true, if muted { "🔇" } else { "🎤" }, if muted { "Tirar do mudo" } else { "Silenciar" }, if muted { RED } else { GREY_BUTTON }).clicked() {
+                if !ringing && icon_button(ui, true, if muted { "🔇" } else { "🎤" }, if muted { "Tirar do mudo" } else { "Silenciar" }, if muted { RED } else { GREY_BUTTON }).clicked() {
                     self.shared.audio.muted.store(!muted, Ordering::Relaxed);
                 }
-                if hangup_button(ui).on_hover_text("Desligar a chamada").clicked() {
+                if hangup_button(ui).on_hover_text(if ringing { "Cancelar a chamada" } else { "Desligar a chamada" }).clicked() {
                     self.shared.hangup.store(true, Ordering::Relaxed);
                 }
             });
         });
-        self.screen_ui(ui);
+        if !ringing {
+            self.screen_ui(ui);
+        }
     }
 
     /// Mantém as texturas das telas que chegam em dia (a cada quadro da janela, qualquer que seja a aba).

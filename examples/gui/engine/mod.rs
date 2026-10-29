@@ -85,6 +85,9 @@ pub(crate) struct Shared {
     pub(crate) hangup: AtomicBool,
     /// Com quem é a chamada 1:1 em andamento (vazio fora de chamada).
     pub(crate) peer: Mutex<Option<[u8; 32]>>,
+    /// Para quem se está ligando e ainda não atendeu (vazio fora disso). Enquanto preenchido, a janela mostra
+    /// "Chamando…"; `peer` só vale depois que a pessoa atende.
+    pub(crate) ringing: Mutex<Option<[u8; 32]>>,
     /// Qualidade da linha na chamada atual (vazio fora de chamada).
     pub(crate) link: Mutex<String>,
     /// Tela: o que a pessoa pediu, o que está rodando e o que chegou do outro lado.

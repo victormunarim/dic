@@ -33,8 +33,6 @@ pub(crate) struct App {
     pub(crate) error: String,
     /// Aba aberta.
     pub(crate) tab: Tab,
-    /// Havia chamada no quadro anterior (para abrir a aba da chamada quando ela começa).
-    pub(crate) was_in_call: bool,
     /// Ajustes de áudio mudaram e ainda não foram salvos (salva ao soltar o controle).
     pub(crate) audio_dirty: bool,
     /// Microfones e alto-falantes que o sistema listou (atualizável na janela).
@@ -320,12 +318,9 @@ impl eframe::App for App {
         let in_call = self.shared.in_call.load(Ordering::Relaxed);
         let testing = self.shared.mic_test.load(Ordering::Relaxed);
         let calling = in_call && !testing;
-        // Quando a chamada começa, a aba dela abre sozinha.
+        // A chamada não muda de aba: a coluna de contatos continua onde está e a subseção acima do perfil mostra
+        // "Chamando…" ou a conversa.
         let in_room = self.shared.room.lock_unpoisoned().at.is_some();
-        if calling && !self.was_in_call && !in_room {
-            self.tab = Tab::Call;
-        }
-        self.was_in_call = calling;
         // As preferências de tela são lidas ao começar a transmissão, esteja a pessoa em que aba estiver.
         let st = &self.shared.screen;
         st.open_path.store(!self.form.screen_private, Ordering::Relaxed);

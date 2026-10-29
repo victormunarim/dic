@@ -252,7 +252,10 @@ impl App {
             Some((name, sv.name))
         });
         // Chamada 1:1 (fora de sala): com quem é.
-        let call_bar = (in_call && room_bar.is_none() && my_room.is_none()).then(|| self.shared.peer.lock_unpoisoned().map(|k| member_name(&self.form.names(), &k))).flatten();
+        let ringing = *self.shared.ringing.lock_unpoisoned();
+        let call_bar = (in_call && room_bar.is_none() && my_room.is_none())
+            .then(|| ringing.or(*self.shared.peer.lock_unpoisoned()).map(|k| member_name(&self.form.names(), &k)))
+            .flatten();
         egui::SidePanel::left("salas")
             .show_separator_line(true)
             .exact_width(300.0)
@@ -262,7 +265,7 @@ impl App {
                 ui.spacing_mut().item_spacing.y = 6.0;
                 // O perfil ocupa uma altura fixa no pé; a lista de salas rola no espaço que sobra.
                 let footer: f32 = 74.0 + if room_bar.is_some() || call_bar.is_some() { 76.0 } else { 0.0 };
-                if self.tab == Tab::Contacts {
+                if matches!(self.tab, Tab::Contacts | Tab::Call) {
                     let count = parse_contacts(&self.form.contacts).len();
                     ui.add_space(2.0);
                     ui.horizontal(|ui| {
@@ -319,15 +322,16 @@ impl App {
                     });
                     // A sala e a chamada 1:1 têm a mesma subseção: ícone, nome, compartilhar a tela e desligar.
                     if let Some((room, server)) = &room_bar {
-                        match self.session_bar(ui, "🔊", room, server, "Sair da sala") {
+                        match self.session_bar(ui, "🔊", room, server, "Sair da sala", false) {
                             Bar::Share(on) => self.send(Cmd::RoomShare(on)),
                             Bar::Leave => self.send(Cmd::LeaveRoom),
                             Bar::None => {}
                         }
                     } else if let Some(who) = call_bar {
                         let link = self.shared.link.lock_unpoisoned().clone();
-                        let sub = if link.is_empty() { "Chamada".to_string() } else { link };
-                        match self.session_bar(ui, "📞", &who, &sub, "Desligar a chamada") {
+                        let sub = if ringing.is_some() { "Chamando…".to_string() } else if link.is_empty() { "Chamada".to_string() } else { link };
+                        let tip = if ringing.is_some() { "Cancelar a chamada" } else { "Desligar a chamada" };
+                        match self.session_bar(ui, "📞", &who, &sub, tip, ringing.is_some()) {
                             Bar::Share(on) => self.shared.screen.want_share.store(on, Ordering::Relaxed),
                             Bar::Leave => self.shared.hangup.store(true, Ordering::Relaxed),
                             Bar::None => {}
@@ -339,7 +343,7 @@ impl App {
 
     /// Subseção acima do perfil (sala ou chamada 1:1): `glyph`, `title` e `sub` à esquerda; à direita, compartilhar a
     /// tela e desligar. Devolve o que a pessoa clicou.
-    fn session_bar(&mut self, ui: &mut egui::Ui, glyph: &str, title: &str, sub: &str, leave_tip: &str) -> Bar {
+    fn session_bar(&mut self, ui: &mut egui::Ui, glyph: &str, title: &str, sub: &str, leave_tip: &str, calling: bool) -> Bar {
         let sharing = self.shared.screen.want_share.load(Ordering::Relaxed);
         let mut out = Bar::None;
         // Mais estreita que o perfil (recuo nos lados), com folga interna.
@@ -361,7 +365,8 @@ impl App {
                         out = Bar::Leave;
                     }
                     let tip = if sharing { "Parar de compartilhar a tela" } else { "Compartilhar a minha tela" };
-                    if screen_button(ui, sharing).on_hover_text(tip).clicked() {
+                    // Chamando ainda não há com quem dividir a tela.
+                    if !calling && screen_button(ui, sharing).on_hover_text(tip).clicked() {
                         out = Bar::Share(!sharing);
                     }
                 });

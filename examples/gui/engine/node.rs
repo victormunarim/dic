@@ -89,6 +89,7 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
     // atendendo comandos; "Desligar" cancela.
     let spawn_dial = |peer: [u8; 32], attempt: u32, delay: Duration| {
         let (dialer, sh, tx, out) = (dialer.clone(), shared.clone(), dialed_tx.clone(), out.clone());
+        *shared.ringing.lock_unpoisoned() = Some(peer);
         tokio::spawn(async move {
             tokio::time::sleep(delay).await;
             out.line(match dialer.stored_address(&peer) {
@@ -145,7 +146,12 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
             }
             Some((peer, attempt, r)) = dialed_rx.recv() => {
                 saver.sync(&book_of(&node), &out);
-                match (dial_step(attempt, r.as_ref().map(|r| r.is_ok())), r) {
+                let step = dial_step(attempt, r.as_ref().map(|r| r.is_ok()));
+                // Entre uma tentativa e a próxima a janela segue "chamando"; em qualquer outro desfecho, acabou.
+                if !matches!(step, DialStep::Retry) {
+                    *shared.ringing.lock_unpoisoned() = None;
+                }
+                match (step, r) {
                     (DialStep::Talk, Some(Ok(c))) => {
                         out.line(if attempt > 0 { "religada" } else { "atendida" });
                         start_talk(c, 440.0, &shared, &out, &form, Some((redial_tx.clone(), peer)), Peer { key: peer, dialer: dialer.clone() });
@@ -171,6 +177,7 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
             Some((peer, attempt)) = redial_rx.recv() => {
                 if shared.hangup.load(Ordering::Relaxed) {
                     out.line("ligação cancelada");
+                    *shared.ringing.lock_unpoisoned() = None;
                     shared.in_call.store(false, Ordering::Relaxed);
                 } else {
                     out.line(format!("religando ({attempt}/{REDIAL_TRIES})..."));
