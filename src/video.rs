@@ -293,6 +293,10 @@ pub struct H264Encoder {
     size: Option<(usize, usize)>,
     /// Bytes que um quadro pode ter para que o vídeo caiba na taxa.
     target: f32,
+    /// Bytes que o circuito ainda deve escoar, pelo que se mandou acima do orçamento (balde furado, um
+    /// `target` a menos por quadro). Refinar a imagem parada só vale com o balde vazio: o pico do refino
+    /// empilhado no quadro-chave que ainda escoa soma segundos de atraso.
+    debt: f32,
     /// Quadros por segundo desta transmissão ([`fps_for`] da taxa).
     fps: f32,
     /// Taxa que acompanha a perda medida por quem assiste.
@@ -362,6 +366,7 @@ impl H264Encoder {
             inner: Self::open(qp, fps)?,
             size: None,
             target: bitrate as f32 / 8.0 / fps,
+            debt: 0.0,
             fps,
             rate: RateControl::new(bitrate),
             last_silence: None,
@@ -511,7 +516,9 @@ impl H264Encoder {
             if ratio > SPIKE {
                 self.floor = used_qp;
             }
-            self.qp = (used_qp - 1.0).max(self.floor).max(QP_MIN);
+            // Com o circuito ainda escoando o que já saiu, segura o QP: o próximo passo seria outro pico.
+            let owed = self.debt + size as f32 - self.target;
+            self.qp = if owed > 0.0 { used_qp } else { (used_qp - 1.0).max(self.floor).max(QP_MIN) };
             return;
         }
         self.calm = 0;
@@ -534,6 +541,8 @@ impl H264Encoder {
     pub fn encode(&mut self, frame: &RawFrame, force_key: bool) -> Result<Option<EncodedFrame>, VideoError> {
         let started = std::time::Instant::now();
         let out = self.encode_inner(frame, force_key);
+        let sent = out.as_ref().ok().and_then(Option::as_ref).map_or(0, |f| f.data.len());
+        self.debt = (self.debt + sent as f32 - self.target).max(0.0);
         self.encode_ms += (started.elapsed().as_secs_f32() * 1000.0 - self.encode_ms) * 0.1;
         if matches!(out, Ok(None)) {
             self.skipped += 1;
@@ -1170,12 +1179,32 @@ mod tests {
         let still = RawFrame::new(w, h, page).unwrap();
         let mut enc = H264Encoder::new(H264Encoder::default_bitrate()).unwrap();
         let mut queue = 0.0;
-        let (sent, max, refused) = run_ticks(&mut enc, &mut queue, 60, |_| still.clone());
+        let (sent, max, refused) = run_ticks(&mut enc, &mut queue, 150, |_| still.clone());
         assert_eq!(refused, 0);
         assert!(sent > 10);
         // O refinamento de uma imagem parada paga em picos; nenhum pode ocupar o circuito por mais de ≈ 0,7 s.
         assert!(max <= (MAX_QUEUE / 2) as f32, "pico de {max} fragmentos");
         assert!(enc.qp() < QP_START as u8, "a imagem não ficou mais nítida: qp {}", enc.qp());
+    }
+
+    #[test]
+    fn refining_waits_for_the_circuit_to_drain_what_was_already_sent() {
+        let (w, h) = (960usize, 540usize);
+        let still = RawFrame::new(w, h, text_page(w, h, 3)).unwrap();
+        let mut enc = H264Encoder::new(H264Encoder::default_bitrate()).unwrap();
+        let key = (0..6).find_map(|_| enc.encode(&still, false).unwrap()).expect("quadro-chave");
+        assert!(key.keyframe && enc.debt > enc.target, "o quadro-chave deixa dívida");
+        let qp = enc.qp;
+        enc.encode(&still, false).unwrap();
+        assert_eq!(enc.qp, qp, "com dívida o QP não desce");
+        let mut ticks = 0;
+        while enc.debt > 0.0 && ticks < 200 {
+            enc.encode(&still, false).unwrap();
+            ticks += 1;
+        }
+        assert!(enc.debt == 0.0, "a dívida não zerou");
+        enc.encode(&still, false).unwrap();
+        assert!(enc.qp < qp, "com o balde vazio o refino volta");
     }
 
     #[test]
@@ -1459,8 +1488,12 @@ mod tests {
                 off += 90;
                 run(&mut enc, &mut dec, off, "rolando", &mut t, &mut queue);
             }
-            for _ in 0..(fps as usize * 5) {
+            for _ in 0..(fps as usize * 2) {
                 run(&mut enc, &mut dec, off, "parou  ", &mut t, &mut queue);
+            }
+            // Troca de página: mudança grande, volta o quadro-chave e o refino.
+            for _ in 0..(fps as usize * 5) {
+                run(&mut enc, &mut dec, off + 5000, "trocou ", &mut t, &mut queue);
             }
         }
     }
