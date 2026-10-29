@@ -1654,4 +1654,29 @@ mod tests {
             println!("{label:20} média {:5.1} ms/quadro, {:6} B/quadro enviado ({n} de 40), conversão YUV {yuv:.1} ms, detect {det:.1} ms", total / 40.0, bytes / n.max(1));
         }
     }
+
+    /// Medição com quadros pré-gerados (`CLAM_FRAMES`: pares `nome__prev.rgba`/`nome__cur.rgba`, 1280x720):
+    /// o que o detector acha em rolagens com antialiasing, cursor, ruído, vídeo e reescala.
+    #[test]
+    #[ignore = "medição, precisa de CLAM_FRAMES"]
+    fn real_scroll_detection() {
+        let Ok(dir) = std::env::var("CLAM_FRAMES") else { return };
+        let mut names: Vec<String> = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()?.file_name().to_str()?.strip_suffix("__prev.rgba").map(String::from)).collect();
+        names.sort();
+        for n in names {
+            let load = |k: &str| RawFrame::new(1280, 720, std::fs::read(format!("{dir}/{n}__{k}.rgba")).unwrap()).unwrap();
+            let (a, b) = (load("prev"), load("cur"));
+            let t = std::time::Instant::now();
+            let region = scroll::detect_region(&a, &b);
+            let ms = t.elapsed().as_secs_f64() * 1e3;
+            let resid = region.map(|(r, d)| {
+                let mut p = a.clone();
+                let ok = scroll::strip_region(&b, r, d).is_some_and(|s| scroll::apply_region(&mut p, r, d, &s));
+                let stride = 1280 * 4;
+                let bad = (0..720).filter(|&y| p.rgba[y * stride..][..stride] != b.rgba[y * stride..][..stride]).count();
+                (ok, bad)
+            });
+            eprintln!("{n:22} página {:?} região {:?} resíduo {resid:?} {ms:.1} ms", scroll::detect(&a, &b), region.map(|(r, d)| (r.x, r.y, r.w, r.h, d)));
+        }
+    }
 }

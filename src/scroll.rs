@@ -50,7 +50,7 @@ const REGION_HEAD: usize = 1 + 2 + 4 * 2 + 2 * 2;
 /// A imagem é cortada em tantas colunas para achar o retângulo que rola.
 const BANDS: usize = 16;
 /// Linhas seguidas sem coincidir (cursor, destaque) que ainda não cortam a região.
-const ROW_GAP: usize = 16;
+const ROW_GAP: usize = 96;
 /// Quantas linhas, no máximo, a ponta de uma região procura além da última prova de movimento.
 const EDGE_SEARCH: usize = 64;
 /// Fração mínima da imagem que a região precisa cobrir.
@@ -368,8 +368,54 @@ pub fn detect_region(prev: &RawFrame, cur: &RawFrame) -> Option<(Rect, i32)> {
             }
         }
     }
-    let (x0, x1) = (edge(best.0), edge(best.1));
-    if best.1 <= best.0 || x1 <= x0 {
+    if best.1 <= best.0 {
+        return None;
+    }
+    // As faixas de colunas são grossas: a borda do menu fixo cai no meio de uma. Pixel a pixel, uma coluna
+    // é fixa quando seus pixels ficaram no lugar mais vezes do que andaram `dy`; coluna em branco empata
+    // e não decide nada (é igual nos dois casos).
+    // Só contam as linhas que a faixa do meio da corrida prova que andaram (única e coincidente): título e
+    // rodapé ficam de fora, senão a coluna em branco ao lado do texto pareceria fixa.
+    let (mp, mc) = cols.get((best.0 + best.1) / 2).map(|(p, c)| (p, c))?;
+    let mut count: HashMap<u64, u32> = HashMap::new();
+    for h in mp {
+        *count.entry(*h).or_default() += 1;
+    }
+    let proof: Vec<(usize, usize)> = (0..cur.height)
+        .filter_map(|y| {
+            let py = usize::try_from(i32::try_from(y).ok()?.checked_add(dy)?).ok()?;
+            let h = mp.get(py)?;
+            (count.get(h) == Some(&1) && mc.get(y) == Some(h)).then_some((y, py))
+        })
+        .collect();
+    // Positivo: a coluna anda com a região; negativo: fica; zero: indiferente (em branco).
+    let lean = |c: usize| -> i64 {
+        fn at(f: &RawFrame, row: usize, c: usize) -> Option<&[u8]> {
+            let i = (row * f.width + c) * 4;
+            f.rgba.get(i..i + 4)
+        }
+        let (mut moved, mut still) = (0u32, 0u32);
+        for &(y, py) in &proof {
+            let cur_px = at(cur, y, c);
+            still += u32::from(at(prev, y, c) == cur_px);
+            moved += u32::from(at(prev, py, c) == cur_px);
+        }
+        i64::from(moved) - i64::from(still)
+    };
+    let (mut x0, mut x1) = (edge(best.0), edge(best.1));
+    while x0 > edge(best.0.saturating_sub(1)) && lean(x0 - 1) > 0 {
+        x0 -= 1;
+    }
+    while x0 < x1 && lean(x0) < 0 {
+        x0 += 1;
+    }
+    while x1 < edge((best.1 + 1).min(BANDS)) && lean(x1) > 0 {
+        x1 += 1;
+    }
+    while x1 > x0 && lean(x1 - 1) < 0 {
+        x1 -= 1;
+    }
+    if x1 <= x0 {
         return None;
     }
     // Extensão vertical. Só linha única do quadro anterior prova movimento: linha em branco coincide em
@@ -759,5 +805,36 @@ mod tests {
             assert!(parse_region(&m[..cut]).is_none(), "cortada em {cut}");
         }
         assert!(parse_region(&[0xA5, 0, 1]).is_none());
+    }
+
+    /// Janela 640x240 com parágrafos separados por 40 linhas em branco e menu fixo até a coluna 100 (no
+    /// meio de uma faixa de 40 colunas): o retângulo tem de sair exato, sem resíduo.
+    fn sparse_window(off: usize) -> RawFrame {
+        let (w, h) = (640, 240);
+        let mut f = page(w, h, 7000);
+        let moving = page(w, h, off);
+        for y in 24..h - 24 {
+            for x in 100..w {
+                let i = (y * w + x) * 4;
+                if (y + off) % 80 < 40 {
+                    f.rgba[i..i + 4].copy_from_slice(&[250, 250, 250, 255]);
+                } else {
+                    f.rgba[i..i + 4].copy_from_slice(&moving.rgba[i..i + 4]);
+                }
+            }
+        }
+        f
+    }
+
+    #[test]
+    fn a_sparse_window_with_a_side_menu_off_the_band_grid_has_no_residue() {
+        let (a, b) = (sparse_window(800), sparse_window(860));
+        let (rect, dy) = detect_region(&a, &b).expect("região");
+        assert_eq!(dy, 60);
+        let mut p = a.clone();
+        let s = strip_region(&b, rect, dy).unwrap();
+        assert!(apply_region(&mut p, rect, dy, &s));
+        assert_eq!(p, b, "{rect:?}");
+        assert!(rect.x >= 80 && rect.x <= 120, "{rect:?}");
     }
 }
