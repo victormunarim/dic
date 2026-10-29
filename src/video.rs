@@ -268,6 +268,15 @@ pub struct EncodedFrame {
     pub droppable: bool,
 }
 
+/// Resultado de [`H264Encoder::try_patch`].
+enum Patched {
+    /// Segue o caminho normal (quadro-chave se o vídeo está atrás).
+    No,
+    /// Nada mudou desde o último quadro de quem assiste.
+    Same,
+    Sent(EncodedFrame),
+}
+
 /// Estado de quem transmite rolagem como mensagem ([`crate::scroll`]).
 struct ScrollTx {
     /// Último quadro (já reduzido) que quem assiste tem: de vídeo ou de rolagem.
@@ -317,6 +326,8 @@ pub struct H264Encoder {
     scroll: Option<ScrollTx>,
     /// Rolagens enviadas no lugar de quadros de vídeo.
     pub scrolled: u64,
+    /// Bandas mandadas no lugar do quadro-chave que a rolagem pediria.
+    pub patched: u64,
     /// Quadros que o codificador recebeu e não devolveu (pulados ou grandes demais).
     pub skipped: u64,
     /// Quadros largados da camada alta porque a fila do circuito estava cheia.
@@ -369,6 +380,7 @@ impl H264Encoder {
             hw_note: None,
             scroll: None,
             scrolled: 0,
+            patched: 0,
             skipped: 0,
             layer_dropped: 0,
             held: 0,
@@ -550,6 +562,13 @@ impl H264Encoder {
         if rolled.is_some() {
             return Ok(rolled);
         }
+        if !(force_key || self.need_key) {
+            match self.try_patch(&frame)? {
+                Patched::Sent(f) => return Ok(Some(f)),
+                Patched::Same => return Ok(None),
+                Patched::No => {}
+            }
+        }
         let want_key = force_key || self.need_key || self.scroll.as_ref().is_some_and(|s| s.stale);
         if want_key {
             self.inner.force_intra_frame();
@@ -619,6 +638,35 @@ impl H264Encoder {
         let Some(s) = self.scroll.as_mut() else { return Ok(None) };
         let Some(dy) = s.prev.as_ref().and_then(|prev| scroll::detect(prev, frame)) else { return Ok(None) };
         let Some(strip) = scroll::strip(frame, dy) else { return Ok(None) };
+        let Some(data) = Self::encode_strip(s, fps, &strip)? else { return Ok(None) };
+        let Some(msg) = scroll::write(dy, frame.width, frame.height, &data) else { return Ok(None) };
+        s.prev = Some(frame.clone());
+        s.stale = true;
+        self.scrolled += 1;
+        Ok(Some(EncodedFrame { data: msg, keyframe: false, droppable: false }))
+    }
+
+    /// Depois de uma rolagem o vídeo principal está atrás de quem assiste. Se só uma faixa de linhas mudou
+    /// (barra de rolagem, cursor, um botão), manda essa banda em vez do quadro-chave inteiro; `Ok(None)` com
+    /// `skip` verdadeiro: nada mudou, não há o que mandar. Mudança grande volta ao quadro-chave.
+    fn try_patch(&mut self, frame: &RawFrame) -> Result<Patched, VideoError> {
+        let fps = self.fps;
+        let Some(s) = self.scroll.as_mut().filter(|s| s.stale) else { return Ok(Patched::No) };
+        let Some(prev) = s.prev.as_ref() else { return Ok(Patched::No) };
+        if prev == frame {
+            return Ok(Patched::Same);
+        }
+        let Some((y, rows)) = scroll::changed_rows(prev, frame) else { return Ok(Patched::No) };
+        let Some(strip) = scroll::band(frame, y, rows) else { return Ok(Patched::No) };
+        let Some(data) = Self::encode_strip(s, fps, &strip)? else { return Ok(Patched::No) };
+        let Some(msg) = scroll::write_patch(y, rows, frame.width, frame.height, &data) else { return Ok(Patched::No) };
+        s.prev = Some(frame.clone());
+        self.patched += 1;
+        Ok(Patched::Sent(EncodedFrame { data: msg, keyframe: false, droppable: false }))
+    }
+
+    /// Codifica `strip` no codificador de faixas (sempre intra); `None` se vazia ou grande demais.
+    fn encode_strip(s: &mut ScrollTx, fps: f32, strip: &RawFrame) -> Result<Option<Vec<u8>>, VideoError> {
         if s.strip.as_ref().is_none_or(|(h, _)| *h != strip.height) {
             s.strip = Some((strip.height, Self::open(STRIP_QP, fps)?));
         }
@@ -627,14 +675,7 @@ impl H264Encoder {
         let bits = enc.encode(&YUVBuffer::from_rgba8_source(RgbaSliceU8::new(&strip.rgba, (strip.width, strip.height)))).map_err(codec_err)?;
         let mut data = Vec::new();
         bits.write_vec(&mut data);
-        if data.is_empty() || data.len() > FRAME_LIMIT {
-            return Ok(None);
-        }
-        let Some(msg) = scroll::write(dy, frame.width, frame.height, &data) else { return Ok(None) };
-        s.prev = Some(frame.clone());
-        s.stale = true;
-        self.scrolled += 1;
-        Ok(Some(EncodedFrame { data: msg, keyframe: false, droppable: false }))
+        Ok((!data.is_empty() && data.len() <= FRAME_LIMIT).then_some(data))
     }
 
     /// Caminho do hardware: o quadro vai para o processo e volta o que já saiu (com atraso). Não há QP nem
@@ -738,6 +779,22 @@ impl ScreenDecoder {
     /// Decodifica um quadro de tela (vídeo ou rolagem). `Ok(None)`: ainda sem imagem, ou a rolagem não
     /// se aplica à imagem que se tem (outra medida, ou nenhuma imagem ainda).
     pub fn decode(&mut self, data: &[u8]) -> Result<Option<RawFrame>, VideoError> {
+        if let Some(p) = scroll::parse_patch(data) {
+            match &self.canvas {
+                Some(c) if (c.width, c.height) == (p.width, p.height) => {}
+                _ => return Ok(None),
+            }
+            if self.strips.is_none() {
+                self.strips = Some(H264Decoder::new()?);
+            }
+            let Some(strips) = self.strips.as_mut() else { return Ok(None) };
+            let Some(strip) = strips.decode(p.strip)? else { return Ok(None) };
+            let Some(canvas) = self.canvas.as_mut() else { return Ok(None) };
+            if !scroll::apply_patch(canvas, p.y, p.rows, &strip) {
+                return Err(VideoError::Codec("banda não cabe na imagem".into()));
+            }
+            return Ok(Some(canvas.clone()));
+        }
         let Some(msg) = scroll::parse(data) else {
             let img = self.video.decode(data)?;
             if let Some(img) = &img {
@@ -922,7 +979,7 @@ mod tests {
     }
 
     #[test]
-    fn scrolling_goes_as_a_message_and_a_keyframe_follows_when_it_stops() {
+    fn scrolling_goes_as_a_message_and_what_changes_after_goes_as_a_band() {
         let open = H264Encoder::bitrate_for(crate::phone::OPEN_SCREEN_SLOT);
         let mut enc = H264Encoder::new(open).unwrap();
         enc.set_scroll(true);
@@ -947,12 +1004,25 @@ mod tests {
             assert!(mean_error(&out, &src) < 20, "quadro {i}: erro {}", mean_error(&out, &src));
         }
         assert_eq!(enc.scrolled, 8);
-        // Parou: a imagem do vídeo principal está atrás, então o quadro seguinte é chave e o vídeo volta.
+        // Parou e nada mudou: quem assiste já tem a imagem, não sai nada (nem quadro-chave).
         let still = lines(w, h, 8 * 90);
-        let (f, out) = shown(&mut enc, &still);
-        assert!(f.keyframe && !scroll::is_scroll(&f.data));
-        assert!(mean_error(&out, &still) < 20);
-        let (f, _) = shown(&mut enc, &lines(w, h, 8 * 90));
+        assert!(enc.encode(&still, false).unwrap().is_none());
+        // Mudou um trecho (cursor, barra): sai só a banda, não um quadro-chave de dezenas de kB.
+        let mut touched = still.clone();
+        for y in 300..316 {
+            touched.rgba[(y * w + 100) * 4..][..3 * 4].fill(200);
+        }
+        let (f, out) = shown(&mut enc, &touched);
+        assert!(scroll::is_patch(&f.data) && !f.keyframe, "banda");
+        assert!(f.data.len() < 8_000, "banda: {} B", f.data.len());
+        assert_eq!(enc.patched, 1);
+        assert!(mean_error(&out, &touched) < 20);
+        // Mudou muito: volta o quadro-chave e o vídeo principal acompanha de novo.
+        let moved = lines(w, h, 8 * 90 + 5000);
+        let (f, out) = shown(&mut enc, &moved);
+        assert!(f.keyframe && !scroll::is_scroll(&f.data) && !scroll::is_patch(&f.data));
+        assert!(mean_error(&out, &moved) < 20);
+        let (f, _) = shown(&mut enc, &lines(w, h, 8 * 90 + 5000));
         assert!(!scroll::is_scroll(&f.data));
     }
 
@@ -1375,7 +1445,7 @@ mod tests {
                         *queue += f.data.len() as f32;
                         let delay = *queue / cap * 1000.0;
                         let err = dec.decode(&f.data).unwrap().map_or(-1, |o| mean_error(&o, &src) as i64);
-                        let kind = if scroll::is_scroll(&f.data) { "rolagem" } else if f.keyframe { "CHAVE" } else { "vídeo" };
+                        let kind = if scroll::is_scroll(&f.data) { "rolagem" } else if scroll::is_patch(&f.data) { "banda" } else if f.keyframe { "CHAVE" } else { "vídeo" };
                         println!("{tag} t={:5.2}s {kind:8} {:6} B  qp {:2} k {} enc {ms:4.1} ms  entrega +{delay:5.0} ms  erro {err}", *t, f.data.len(), enc.qp(), enc.scale());
                     }
                     None => println!("{tag} t={:5.2}s (pulado)    qp {:2} k {} enc {ms:4.1} ms", *t, enc.qp(), enc.scale()),

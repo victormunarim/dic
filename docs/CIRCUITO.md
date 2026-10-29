@@ -457,7 +457,7 @@ cargo fuzz run relay -- -max_total_time=300
 RUSTC_BOOTSTRAP=1 cargo fuzz run -s none relay -- -max_total_time=300
 ```
 
-O crate `fuzz/` compila o `clam` com a feature `net` (o alvo `link` precisa do transporte), então a primeira compilação é mais demorada. Um crash fica em `fuzz/artifacts/<alvo>/`; reproduza com `cargo fuzz run <alvo> fuzz/artifacts/<alvo>/crash-...`. O corpus (`fuzz/corpus`) e os artefatos não vão para o git.
+O crate `fuzz/` compila o `clam` com as features `net` (o alvo `link` precisa do transporte) e `video` (o alvo `scroll_message`), então a primeira compilação é mais demorada. Um crash fica em `fuzz/artifacts/<alvo>/`; reproduza com `cargo fuzz run <alvo> fuzz/artifacts/<alvo>/crash-...`. O corpus (`fuzz/corpus`) e os artefatos não vão para o git.
 
 Resultado (Rust 1.93 estável, `-s none`, sem AddressSanitizer): nenhum crash nem violação de propriedade em nenhuma rodada.
 

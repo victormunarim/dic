@@ -9,8 +9,8 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-# `net` liga o link, o único alvo que precisa de rede; o resto do `clam` compila igual.
-clam = { path = "..", features = ["net"] }
+# `net` liga o link, o único alvo que precisa de rede; `video` traz o `scroll`; o resto do `clam` compila igual.
+clam = { path = "..", features = ["net", "video"] }
 arbitrary = { version = "1", features = ["derive"] }
 snow = "0.10"
 tokio = { version = "1", features = ["rt", "net", "io-util", "time", "macros"] }
@@ -110,3 +110,10 @@ name = "media_update"
 path = "fuzz_targets/media_update.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "scroll_message"
+path = "fuzz_targets/scroll_message.rs"
+test = false
+doc = false
+bench = false

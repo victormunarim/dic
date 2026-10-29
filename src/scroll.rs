@@ -12,7 +12,15 @@
 //!
 //! `largura` e `altura` são as da imagem de quem assiste: se não baterem, a mensagem é ignorada. A faixa
 //! vai num codificador à parte, sempre intra, para não mexer nas referências do vídeo principal; por isso,
-//! quando a rolagem acaba, o primeiro quadro de vídeo sai como quadro-chave.
+//! quando a rolagem acaba, o vídeo principal está atrás de quem assiste. Em vez de um quadro-chave inteiro,
+//! o que mudou depois da rolagem (barra de rolagem, cursor, um botão) vai como **banda**: só as linhas que
+//! mudaram, no mesmo tipo de faixa intra. O quadro-chave só sai se a mudança for grande.
+//!
+//! ```text
+//! tag (1) ‖ y (2) ‖ linhas (2) ‖ largura (2) ‖ altura (2) ‖ faixa: H.264 intra (SPS/PPS/IDR)
+//! ```
+//!
+//! A banda cola as `linhas` primeiras linhas da faixa decodificada a partir da linha `y` da imagem.
 
 // `parse` lê bytes de quem transmite, que pode ser hostil: nada de índice nem `unwrap` que derrube o processo.
 #![deny(clippy::indexing_slicing, clippy::unwrap_used)]
@@ -26,6 +34,11 @@ pub const TAG: u8 = 0xA5;
 /// Maior deslocamento, em linhas, por mensagem.
 pub const MAX_SHIFT: usize = 512;
 const HEAD: usize = 1 + 2 + 2 + 2;
+/// Primeiro byte de uma banda (linhas que mudaram depois de uma rolagem).
+pub const PATCH_TAG: u8 = 0xA6;
+const PATCH_HEAD: usize = 1 + 2 + 2 + 2 + 2;
+/// Uma banda só vale se tem no máximo esta fração da altura; acima disso o quadro-chave sai mais barato.
+const MAX_PATCH: f32 = 0.25;
 /// Linhas menores que isso não valem a conta.
 const MIN_HEIGHT: usize = 64;
 /// Bytes do fim de cada linha fora da comparação: a barra de rolagem da janela anda sozinha.
@@ -50,6 +63,18 @@ pub struct Message<'a> {
     pub strip: &'a [u8],
 }
 
+/// Banda lida da rede.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Patch<'a> {
+    /// Primeira linha da imagem que a banda substitui.
+    pub y: usize,
+    /// Quantas linhas da faixa valem.
+    pub rows: usize,
+    pub width: usize,
+    pub height: usize,
+    pub strip: &'a [u8],
+}
+
 fn take<const N: usize>(b: &mut &[u8]) -> Option<[u8; N]> {
     let (head, rest) = b.split_at_checked(N)?;
     *b = rest;
@@ -60,6 +85,12 @@ fn take<const N: usize>(b: &mut &[u8]) -> Option<[u8; N]> {
 #[must_use]
 pub fn is_scroll(data: &[u8]) -> bool {
     data.first() == Some(&TAG)
+}
+
+/// `data` é uma banda?
+#[must_use]
+pub fn is_patch(data: &[u8]) -> bool {
+    data.first() == Some(&PATCH_TAG)
 }
 
 /// Monta a mensagem. `None` se algum campo não cabe.
@@ -91,6 +122,38 @@ pub fn parse(data: &[u8]) -> Option<Message<'_>> {
         return None;
     }
     Some(Message { dy, width, height, strip: b })
+}
+
+/// Monta uma banda. `None` se algum campo não cabe ou a banda é vazia.
+#[must_use]
+pub fn write_patch(y: usize, rows: usize, width: usize, height: usize, strip: &[u8]) -> Option<Vec<u8>> {
+    if rows == 0 || y.checked_add(rows)? > height {
+        return None;
+    }
+    let mut out = Vec::with_capacity(PATCH_HEAD + strip.len());
+    out.push(PATCH_TAG);
+    for v in [y, rows, width, height] {
+        out.extend_from_slice(&u16::try_from(v).ok()?.to_be_bytes());
+    }
+    out.extend_from_slice(strip);
+    Some(out)
+}
+
+/// Lê uma banda; `None` se `data` não é uma ou está malformada.
+#[must_use]
+pub fn parse_patch(data: &[u8]) -> Option<Patch<'_>> {
+    let mut b = data;
+    if take::<1>(&mut b)? != [PATCH_TAG] {
+        return None;
+    }
+    let y = usize::from(u16::from_be_bytes(take(&mut b)?));
+    let rows = usize::from(u16::from_be_bytes(take(&mut b)?));
+    let width = usize::from(u16::from_be_bytes(take(&mut b)?));
+    let height = usize::from(u16::from_be_bytes(take(&mut b)?));
+    if rows == 0 || y + rows > height || b.is_empty() {
+        return None;
+    }
+    Some(Patch { y, rows, width, height, strip: b })
 }
 
 /// Resumo de uma linha, sem a ponta direita.
@@ -163,6 +226,12 @@ pub fn strip(cur: &RawFrame, dy: i32) -> Option<RawFrame> {
         return None;
     }
     let rows = if dy > 0 { cur.rgba.get((cur.height - n) * stride..)? } else { cur.rgba.get(..n * stride)? };
+    padded(cur.width, rows, n)
+}
+
+/// `rows` (`n` linhas de `width` pixels) com altura arredondada para cima, repetindo a última linha.
+fn padded(width: usize, rows: &[u8], n: usize) -> Option<RawFrame> {
+    let stride = width * 4;
     let height = n.next_power_of_two().max(MIN_STRIP);
     let mut rgba = Vec::with_capacity(height * stride);
     rgba.extend_from_slice(rows);
@@ -170,7 +239,49 @@ pub fn strip(cur: &RawFrame, dy: i32) -> Option<RawFrame> {
     for _ in n..height {
         rgba.extend_from_slice(last);
     }
-    RawFrame::new(cur.width, height, rgba).ok()
+    RawFrame::new(width, height, rgba).ok()
+}
+
+/// Faixa contínua de linhas que difere entre `prev` e `cur`: `(primeira, quantas)`. `None` se as imagens são
+/// iguais, têm medidas diferentes, ou a faixa é grande demais para valer mais que um quadro-chave.
+#[must_use]
+pub fn changed_rows(prev: &RawFrame, cur: &RawFrame) -> Option<(usize, usize)> {
+    let stride = cur.width * 4;
+    if (prev.width, prev.height) != (cur.width, cur.height) || stride == 0 || cur.rgba.len() != stride * cur.height || prev.rgba.len() != cur.rgba.len() {
+        return None;
+    }
+    let mut diff = prev.rgba.chunks_exact(stride).zip(cur.rgba.chunks_exact(stride)).map(|(a, b)| a != b).enumerate().filter(|(_, d)| *d);
+    let first = diff.next()?.0;
+    let last = diff.next_back().map_or(first, |(i, _)| i);
+    let rows = last - first + 1;
+    (rows as f32 <= cur.height as f32 * MAX_PATCH && rows <= MAX_SHIFT).then_some((first, rows))
+}
+
+/// A faixa de `cur` com as `rows` linhas a partir de `y`, pronta para o codificador de faixas.
+#[must_use]
+pub fn band(cur: &RawFrame, y: usize, rows: usize) -> Option<RawFrame> {
+    let stride = cur.width * 4;
+    if rows == 0 || cur.rgba.len() != stride * cur.height {
+        return None;
+    }
+    padded(cur.width, cur.rgba.get(y * stride..y.checked_add(rows)? * stride)?, rows)
+}
+
+/// Cola as `rows` primeiras linhas de `strip` em `canvas` a partir da linha `y`. `false` (e `canvas` intacto)
+/// se as medidas não batem.
+pub fn apply_patch(canvas: &mut RawFrame, y: usize, rows: usize, strip: &RawFrame) -> bool {
+    let stride = canvas.width * 4;
+    if rows == 0 || strip.width != canvas.width || strip.height < rows || canvas.rgba.len() != stride * canvas.height {
+        return false;
+    }
+    let (Some(new), Some(end)) = (strip.rgba.get(..rows * stride), y.checked_add(rows)) else { return false };
+    match canvas.rgba.get_mut(y * stride..end * stride) {
+        Some(dst) => {
+            dst.copy_from_slice(new);
+            true
+        }
+        None => false,
+    }
 }
 
 /// Desloca `canvas` por `dy` e cola as `|dy|` primeiras linhas de `strip` na ponta que ficou descoberta.
@@ -275,5 +386,41 @@ mod tests {
         assert!(parse(&msg[..HEAD]).is_none(), "sem faixa");
         assert!(parse(&[0, 0, 0, 1, 0x65]).is_none(), "quadro H.264");
         assert!(parse(&[TAG, 0, 0, 0, 1, 0, 1, 9]).is_none(), "deslocamento zero");
+    }
+
+    #[test]
+    fn a_patch_reproduces_the_changed_rows_only() {
+        let a = page(320, 200, 100);
+        let mut b = a.clone();
+        for y in 50..58 {
+            b.rgba[(y * 320 + 10) * 4] ^= 0xff;
+        }
+        assert_eq!(changed_rows(&a, &a), None);
+        assert_eq!(changed_rows(&a, &b), Some((50, 8)));
+        let mut c = a.clone();
+        for y in 10..150 {
+            c.rgba[y * 320 * 4] ^= 0xff;
+        }
+        assert_eq!(changed_rows(&a, &c), None, "mudança grande vale um quadro-chave");
+        let s = band(&b, 50, 8).unwrap();
+        let mut canvas = a.clone();
+        assert!(apply_patch(&mut canvas, 50, 8, &s));
+        assert_eq!(canvas, b);
+        assert!(!apply_patch(&mut canvas, 195, 8, &s), "passa do fim");
+        assert!(!apply_patch(&mut canvas, 50, 0, &s));
+    }
+
+    #[test]
+    fn patch_round_trips_and_malformed_ones_are_refused() {
+        let msg = write_patch(40, 8, 1920, 1080, b"faixa").unwrap();
+        assert_eq!(parse_patch(&msg), Some(Patch { y: 40, rows: 8, width: 1920, height: 1080, strip: b"faixa" }));
+        assert!(is_patch(&msg) && !is_scroll(&msg));
+        assert!(write_patch(1075, 8, 1920, 1080, b"x").is_none());
+        assert!(write_patch(0, 0, 10, 10, b"x").is_none());
+        for cut in 0..=PATCH_HEAD {
+            assert!(parse_patch(msg.get(..cut).unwrap()).is_none(), "cortado em {cut}");
+        }
+        assert!(parse_patch(&[PATCH_TAG, 0, 9, 0, 3, 0, 4, 0, 10, 1]).is_none(), "passa da altura");
+        assert!(parse(&msg).is_none() && parse_patch(&[TAG, 0, 0, 0, 1, 0, 1, 0, 1, 9]).is_none());
     }
 }
