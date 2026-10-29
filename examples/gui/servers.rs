@@ -394,22 +394,18 @@ impl App {
                     let who = if m.name.is_empty() { member_name(&contacts, &m.key) } else { m.name.clone() };
                     avatar(ui, &who, 22.0, speaking.then_some(GREEN));
                     ui.label(RichText::new(who).size(14.0).color(if speaking { GREEN } else { MUTED }));
+                    // Quem transmite mostra o mesmo monitor do botão de compartilhar; na sala em que estou, clicar assiste.
                     if m.sharing {
-                        let (rect, tip) = ui.allocate_exact_size(vec2(10.0, 10.0), egui::Sense::hover());
-                        ui.painter().rect_filled(rect, CornerRadius::same(2), RED);
-                        tip.on_hover_text("transmitindo a tela");
-                    }
-                    // Assistir à tela só vale na sala em que estou.
-                    if here {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            // Mesma folga da borda que o avatar tem à esquerda (26 menos o enchimento do botão).
-                            ui.add_space(22.0);
-                            // Compartilhar a própria tela fica na subseção da sala, acima do perfil.
-                            if !m.is_me && m.sharing {
-                                let on = live.watching.contains(&m.key);
-                                if ui.add(egui::Button::new(RichText::new(if on { "🚫" } else { "👁" }).color(GREEN)).frame(false)).on_hover_text(if on { "Parar de assistir" } else { "Assistir à tela" }).clicked() {
+                            // Mesma folga da borda que o avatar tem à esquerda.
+                            ui.add_space(14.0);
+                            let on = live.watching.contains(&m.key);
+                            if here && !m.is_me {
+                                if screen_icon(ui, GREEN, on, egui::Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(if on { "Parar de assistir" } else { "Assistir à tela" }).clicked() {
                                     action = Some((m.key, !on));
                                 }
+                            } else {
+                                screen_icon(ui, GREEN, false, egui::Sense::hover()).on_hover_text("transmitindo a tela");
                             }
                         });
                     }

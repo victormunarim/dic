@@ -321,21 +321,27 @@ pub(crate) fn hangup_button(ui: &mut Ui) -> egui::Response {
     reply.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// Monitor desenhado (compartilhar a tela): vermelho e preenchido enquanto transmite, cinza em repouso.
-pub(crate) fn screen_button(ui: &mut Ui, sharing: bool) -> egui::Response {
-    let (rect, reply) = ui.allocate_exact_size(vec2(32.0, 34.0), egui::Sense::click());
+/// Monitor desenhado, na `color` dada; `filled` preenche a tela. Base de [`screen_button`] e do ícone de quem transmite.
+pub(crate) fn screen_icon(ui: &mut Ui, color: Color32, filled: bool, sense: egui::Sense) -> egui::Response {
+    let (rect, reply) = ui.allocate_exact_size(vec2(32.0, 34.0), sense);
     let c = rect.center();
-    let color = if sharing { RED } else if reply.hovered() { Color32::WHITE } else { MUTED };
     let ink = Stroke::new(1.7_f32, color);
     let p = ui.painter();
     let screen = egui::Rect::from_center_size(c + vec2(0.0, -2.0), vec2(20.0, 14.0));
     p.rect_stroke(screen, CornerRadius::same(2), ink, egui::StrokeKind::Middle);
-    if sharing {
+    if filled {
         p.rect_filled(screen.shrink(3.5), CornerRadius::same(1), color);
     }
     p.line_segment([c + vec2(0.0, 5.0), c + vec2(0.0, 9.0)], ink);
     p.line_segment([c + vec2(-5.0, 9.0), c + vec2(5.0, 9.0)], ink);
-    reply.on_hover_cursor(egui::CursorIcon::PointingHand)
+    reply
+}
+
+/// Monitor desenhado (compartilhar a tela): vermelho e preenchido enquanto transmite, cinza em repouso.
+pub(crate) fn screen_button(ui: &mut Ui, sharing: bool) -> egui::Response {
+    let hovered = ui.rect_contains_pointer(egui::Rect::from_min_size(ui.cursor().min, vec2(32.0, 34.0)));
+    let color = if sharing { RED } else if hovered { Color32::WHITE } else { MUTED };
+    screen_icon(ui, color, sharing, egui::Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// Uma explicação em letra menor e apagada.
