@@ -390,6 +390,8 @@ impl Node {
         if let Some(task) = self.retiring.lock_unpoisoned().remove(&peer) {
             task.abort();
         }
+        // Adicionar de propósito vale mais que a lápide de uma remoção antiga (veja `Inbox::unbury`).
+        self.inbox.unbury(&peer);
         self.allow(&[peer]);
         if let Some(r) = relay {
             self.add_hint(peer, r);

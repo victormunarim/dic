@@ -39,6 +39,13 @@ impl Inbox {
         tombs.retain(|_, s| *s >= floor);
     }
 
+    /// Levanta a lápide de `peer`: quem a pessoa adiciona de novo de propósito volta a ser aceito. Sem isso, a
+    /// apresentação dele leva o carimbo do relógio dele e perde para a lápide, que leva o do nosso; qualquer
+    /// diferença entre os relógios descartava o nome em silêncio.
+    pub(super) fn unbury(&self, peer: &[u8; 32]) {
+        self.tombs.lock_unpoisoned().remove(peer);
+    }
+
     /// As lápides vivas, para o app guardar entre execuções.
     pub(super) fn tombs(&self) -> Vec<([u8; 32], u64)> {
         self.tombs.lock_unpoisoned().iter().map(|(k, v)| (*k, *v)).collect()
@@ -333,6 +340,16 @@ mod tests {
         assert!(inbox.introduced.lock_unpoisoned().is_empty());
         assert!(inbox.receive(peer, intro(now + 1)), "convite posterior à remoção vale");
         assert_eq!(inbox.introduced.lock_unpoisoned().len(), 1);
+    }
+
+    #[test]
+    fn adding_the_contact_again_lifts_its_tombstone() {
+        let (inbox, peer, now) = (Inbox::default(), [7; 32], unix_millis() as u64);
+        inbox.bury(peer, now);
+        assert!(!inbox.receive(peer, intro(now - 60_000)), "relógio do outro atrasado: descartada");
+        inbox.unbury(&peer);
+        assert!(inbox.receive(peer, intro(now - 60_000)));
+        assert!(inbox.tombs().is_empty());
     }
 
     #[test]
