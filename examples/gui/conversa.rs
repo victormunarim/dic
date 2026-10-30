@@ -16,7 +16,7 @@ impl App {
         let mut close = false;
         card(ui, &format!("Bate-papo com {name}"), "", |ui| {
             ui.horizontal(|ui| {
-                if !self.shared.in_call.load(std::sync::atomic::Ordering::Relaxed) && ui.button("✕").on_hover_text("Fechar a conversa").clicked() {
+                if !self.shared.in_call.load(std::sync::atomic::Ordering::Relaxed) && close_button(ui, "Fechar a conversa").clicked() {
                     close = true;
                 }
                 note(ui, "Só vai para quem está online. Cada um guarda a sua cópia nesta máquina.");

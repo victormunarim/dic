@@ -249,6 +249,17 @@ pub(crate) fn plus_button(ui: &mut Ui, tip: &str) -> egui::Response {
     reply.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
+/// Botão só com um X, sem moldura (fechar). Desenhado: a fonte pode não ter o glifo "✕".
+pub(crate) fn close_button(ui: &mut Ui, tip: &str) -> egui::Response {
+    let (rect, reply) = ui.allocate_exact_size(vec2(28.0, 28.0), egui::Sense::click());
+    let ink = Stroke::new(2.0, if reply.hovered() { Color32::WHITE } else { TEXT });
+    let (c, h) = (rect.center(), 6.0);
+    let p = ui.painter();
+    p.line_segment([c + vec2(-h, -h), c + vec2(h, h)], ink);
+    p.line_segment([c + vec2(-h, h), c + vec2(h, -h)], ink);
+    reply.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 /// Três pontos um acima do outro (menu de ações), desenhados: a fonte pode não ter o glifo "⋮". Quem chama
 /// abre o menu com `egui::Popup::menu(&resposta)`.
 pub(crate) fn dots_button(ui: &mut Ui) -> egui::Response {
