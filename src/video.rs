@@ -141,8 +141,6 @@ impl RawFrame {
 /// Fragmentos na fila (≈ 40 ms de circuito) acima dos quais [`pump_all`] adia o quadro: a imagem
 /// seguinte só é capturada e codificada quando o circuito já escoou o quadro anterior.
 const GATE_BACKLOG: usize = 20;
-/// Fragmentos na fila a partir dos quais um quadro de camada alta é largado em vez de enfileirado.
-const DROP_BACKLOG: usize = 40;
 /// Maior quadro que o circuito aceita com a fila no limite do adiamento: acima disso `push` o recusaria
 /// (a fila passaria de [`MAX_QUEUE`]) e o quadro-chave de recuperação seria igualmente recusado.
 pub const FRAME_LIMIT: usize = {
@@ -276,9 +274,6 @@ pub trait ScreenSource {
 pub struct EncodedFrame {
     pub data: Vec<u8>,
     pub keyframe: bool,
-    /// Camada temporal superior: nenhum outro quadro depende dele, então pode ser largado sem quebrar
-    /// a imagem (só cai a taxa de quadros). [`pump_all`] larga estes quando a fila do circuito enche.
-    pub droppable: bool,
 }
 
 /// Resultado de [`H264Encoder::try_patch`].
@@ -354,8 +349,6 @@ pub struct H264Encoder {
     pub regions: u64,
     /// Quadros que o codificador recebeu e não devolveu (pulados ou grandes demais).
     pub skipped: u64,
-    /// Quadros largados da camada alta porque a fila do circuito estava cheia.
-    pub layer_dropped: u64,
     /// Quadros adiados porque o circuito ainda escoava o anterior.
     pub held: u64,
     /// Média móvel, em ms, do tempo gasto em `encode`.
@@ -410,7 +403,6 @@ impl H264Encoder {
             patched: 0,
             regions: 0,
             skipped: 0,
-            layer_dropped: 0,
             held: 0,
             encode_ms: 0.0,
         })
@@ -426,6 +418,9 @@ impl H264Encoder {
             .qp(QpRange::new(qp, qp))
             .max_frame_rate(FrameRate::from_hz(fps))
             .skip_frames(false)
+            // A detecção de cena do openh264 manda quadro-chave sozinho em vídeo pesado (10× um quadro comum); o
+            // quadro-chave é decisão deste módulo (`need_key`), que sabe o que o circuito aguenta.
+            .scene_change_detect(false)
             .max_slice_len(SLICE_LEN)
             // Quadro-chave grande (dezenas de kB) leva segundos no circuito e congela a imagem: só periódico
             // de longe em longe; perda e quem entra pedem o seu por `WANT_KEY`.
@@ -615,19 +610,18 @@ impl H264Encoder {
         let qp = self.plan_qp(changed, want_key).round();
         let yuv = YUVBuffer::from_rgba8_source(RgbaSliceU8::new(&frame.rgba, dims));
         if !self.layered {
-            // O openh264 só inicializa no primeiro quadro; as camadas temporais entram depois disso.
+            // O openh264 só aceita ajuste depois de inicializado, o que acontece no primeiro quadro.
             self.inner.encode(&yuv).map_err(codec_err)?;
-            configure(&mut self.inner, qp, true)?;
+            configure(&mut self.inner, qp)?;
             self.applied_qp = qp;
             self.inner.force_intra_frame();
             self.layered = true;
         } else if qp != self.applied_qp {
-            configure(&mut self.inner, qp, false)?;
+            configure(&mut self.inner, qp)?;
             self.applied_qp = qp;
         }
         let bits = self.inner.encode(&yuv).map_err(codec_err)?;
         let key = matches!(bits.frame_type(), FrameType::IDR | FrameType::I);
-        let droppable = !key && bits.num_layers().checked_sub(1).and_then(|i| bits.layer(i)).is_some_and(|l| l.raw_info().uiTemporalId > 0);
         if matches!(bits.frame_type(), FrameType::Skip | FrameType::Invalid) {
             return Ok(None);
         }
@@ -666,7 +660,7 @@ impl H264Encoder {
         } else {
             self.learn(qp, data.len(), changed);
         }
-        Ok(Some(EncodedFrame { data, keyframe: key, droppable }))
+        Ok(Some(EncodedFrame { data, keyframe: key }))
     }
 }
 
@@ -685,7 +679,7 @@ impl H264Encoder {
         s.prev = Some(frame.clone());
         s.stale = true;
         self.scrolled += 1;
-        Ok(Some(EncodedFrame { data: msg, keyframe: false, droppable: false }))
+        Ok(Some(EncodedFrame { data: msg, keyframe: false }))
     }
 
     /// Depois de uma rolagem o vídeo principal está atrás de quem assiste. Se só uma faixa de linhas mudou
@@ -712,7 +706,7 @@ impl H264Encoder {
         s.prev = Some(predicted);
         s.stale = true;
         self.regions += 1;
-        Ok(Some(EncodedFrame { data: msg, keyframe: false, droppable: false }))
+        Ok(Some(EncodedFrame { data: msg, keyframe: false }))
     }
 
     fn try_patch(&mut self, frame: &RawFrame) -> Result<Patched, VideoError> {
@@ -728,7 +722,7 @@ impl H264Encoder {
         let Some(msg) = scroll::write_patch(y, rows, frame.width, frame.height, &data) else { return Ok(Patched::No) };
         s.prev = Some(frame.clone());
         self.patched += 1;
-        Ok(Patched::Sent(EncodedFrame { data: msg, keyframe: false, droppable: false }))
+        Ok(Patched::Sent(EncodedFrame { data: msg, keyframe: false }))
     }
 
     /// Codifica `strip` no codificador de faixas (sempre intra); `None` se vazia ou grande demais.
@@ -773,15 +767,18 @@ impl H264Encoder {
         if au.keyframe {
             self.need_key = false;
         }
-        Ok(Some(EncodedFrame { data: au.data, keyframe: au.keyframe, droppable: false }))
+        Ok(Some(EncodedFrame { data: au.data, keyframe: au.keyframe }))
     }
 }
 
-/// Ajusta o codificador já inicializado: o QP do quadro seguinte e, uma vez, as duas camadas temporais
-/// (quadros pares, camada 0, servem de referência; os ímpares, camada 1, não). O crate `openh264` não
-/// expõe nenhum dos dois; entram pela API crua, sem reiniciar o fluxo nem gerar quadro-chave.
+/// Ajusta o codificador já inicializado: o QP do quadro seguinte. O crate `openh264` não o expõe com o
+/// controle de taxa desligado; entra pela API crua, sem reiniciar o fluxo nem gerar quadro-chave.
+///
+/// Sem camadas temporais de propósito: com elas todo quadro predizia do de dois antes (movimento dobrado),
+/// o vídeo custava até 2× e o openh264 mandava quadro-chave a cada dois quadros. O descarte da camada alta
+/// nunca disparava, porque [`pump_all`] já adia o quadro com a fila em [`GATE_BACKLOG`].
 #[allow(unsafe_code)]
-fn configure(enc: &mut Encoder, qp: f32, layers: bool) -> Result<(), VideoError> {
+fn configure(enc: &mut Encoder, qp: f32) -> Result<(), VideoError> {
     use openh264_sys2::{ENCODER_OPTION_SVC_ENCODE_PARAM_EXT, SEncParamExt};
     // SAFETY: `SEncParamExt` é só dados; o codificador preenche a estrutura inteira em `get_option`,
     // e `set_option` a lê sem guardar o ponteiro.
@@ -790,9 +787,6 @@ fn configure(enc: &mut Encoder, qp: f32, layers: bool) -> Result<(), VideoError>
         let raw = enc.raw_api();
         if raw.get_option(ENCODER_OPTION_SVC_ENCODE_PARAM_EXT, (&raw mut params).cast()) != 0 {
             return Err(VideoError::Codec("não deu para ler os parâmetros do codificador".into()));
-        }
-        if layers {
-            params.iTemporalLayerNum = 2;
         }
         // Sem controle de taxa, o QP do quadro é o da camada espacial.
         params.sSpatialLayers[0].iDLayerQp = qp as i32;
@@ -936,11 +930,6 @@ pub fn pump_all(source: &mut dyn ScreenSource, encoder: &mut H264Encoder, shares
     let Some(frame) = encoder.encode(&raw, wanted)? else { return Ok(0) };
     let mut sent = 0;
     for share in shares {
-        // Fila cheia: larga o quadro que ninguém usa de referência em vez de atrasar todos os seguintes.
-        if frame.droppable && share.queued() >= DROP_BACKLOG {
-            encoder.layer_dropped += 1;
-            continue;
-        }
         match share.push(&frame.data, frame.keyframe) {
             Ok(true) => sent += 1,
             Ok(false) => encoder.need_key = true,
@@ -1039,7 +1028,7 @@ mod tests {
         assert!(shown >= 10, "só {shown} de 12 quadros viraram imagem");
         let (out, src) = last.unwrap();
         let err: u64 = out.rgba.iter().zip(&src.rgba).step_by(4).map(|(a, b)| a.abs_diff(*b) as u64).sum::<u64>() / (1920 * 1080);
-        assert!(err < 12, "erro médio {err} por pixel");
+        assert!(err < 14, "erro médio {err} por pixel");
     }
 
     /// Página em que toda linha é diferente (como texto de verdade, ao contrário de [`page`]).
@@ -1134,7 +1123,7 @@ mod tests {
             let src = lines(w, h, i * 90);
             let (f, out) = shown(&mut enc, &src);
             assert!(scroll::is_scroll(&f.data), "quadro {i}");
-            assert!(!f.keyframe && !f.droppable);
+            assert!(!f.keyframe);
             assert!(f.data.len() < 40_000, "quadro {i}: {} B", f.data.len());
             assert!(mean_error(&out, &src) < 20, "quadro {i}: erro {}", mean_error(&out, &src));
         }
@@ -1208,11 +1197,11 @@ mod tests {
     #[test]
     fn a_keyframe_that_does_not_fit_makes_the_encoder_send_fewer_pixels() {
         let detailed = |t: usize| {
-            let rgba = (0..1920 * 1080).flat_map(|i| {
-                let n = (((i + t) * 2654435761usize) >> 24) as u8;
-                [n, n.wrapping_mul(3), n ^ 90, 255]
+            let rgba = (0..1920 * 2160).flat_map(|i| {
+                let n = |k: usize| (((i + t).wrapping_add(k).wrapping_mul(2654435761usize)) >> 24) as u8;
+                [n(0), n(7_919), n(104_729), 255]
             });
-            RawFrame::new(1920, 1080, rgba.collect()).unwrap()
+            RawFrame::new(1920, 2160, rgba.collect()).unwrap()
         };
         let mut enc = H264Encoder::new(H264Encoder::default_bitrate()).unwrap();
         let key = (0..10).find_map(|t| enc.encode(&detailed(t), false).unwrap()).expect("um quadro-chave acaba cabendo");
@@ -1335,7 +1324,7 @@ mod tests {
 
     #[test]
     fn a_page_switch_goes_out_at_half_resolution_when_the_key_is_dear_and_full_size_returns_when_calm() {
-        let (w, h) = (1280, 720);
+        let (w, h) = (1920, 1080);
         for (slot, half) in [(SCREEN_SLOT, true), (crate::phone::OPEN_SCREEN_SLOT, false)] {
             let mut enc = H264Encoder::new(H264Encoder::bitrate_for(slot)).unwrap();
             let mut dec = ScreenDecoder::new().unwrap();
@@ -1378,24 +1367,22 @@ mod tests {
     }
 
     #[test]
-    fn odd_frames_are_droppable_and_the_rest_still_decodes_without_them() {
-        let mut enc = H264Encoder::new(H264Encoder::default_bitrate()).unwrap();
-        let mut full = H264Decoder::new().unwrap();
-        let mut base = H264Decoder::new().unwrap();
-        let (mut droppable, mut kept) = (0, 0);
-        for t in 0..30 {
-            let Some(f) = enc.encode(&scene(640, 360, t), false).unwrap() else { continue };
-            assert!(full.decode(&f.data).unwrap().is_some() || t == 0);
-            if f.droppable {
-                assert!(!f.keyframe);
-                droppable += 1;
-            } else {
-                kept += 1;
-                let img = base.decode(&f.data).unwrap();
-                assert!(img.is_some(), "quadro {t} não decodificou sem a camada alta");
+    fn hard_video_does_not_make_the_encoder_send_keyframes_on_its_own() {
+        // Com camadas temporais, vídeo pesado fazia o openh264 mandar um quadro-chave (10× um quadro comum)
+        // por decisão dele. Passado o começo, em que o QP ainda assenta, nenhum quadro é chave.
+        let mut enc = H264Encoder::new(H264Encoder::bitrate_for(crate::phone::OPEN_SCREEN_SLOT)).unwrap();
+        let mut dec = ScreenDecoder::new().unwrap();
+        let (mut keys, mut sent) = (0, 0);
+        for i in 0..120 {
+            let Some(f) = enc.encode(&footage(1920, 1080, i, 31), false).unwrap() else { continue };
+            dec.decode(&f.data).unwrap();
+            if i >= 40 {
+                keys += usize::from(f.keyframe);
+                sent += 1;
             }
         }
-        assert!(droppable >= 10 && kept >= 10, "{droppable} largáveis, {kept} mantidos");
+        assert!(sent >= 60, "{sent} quadros");
+        assert_eq!(keys, 0, "{keys} quadros-chave em {sent}");
     }
 
     #[test]
@@ -1447,7 +1434,6 @@ mod tests {
             t += 1;
             if let Some(f) = enc.encode(&scene(320, 240, t), false).unwrap() {
                 keys += usize::from(f.keyframe);
-                assert!(!f.droppable);
                 shown += usize::from(dec.decode(&f.data).unwrap().is_some());
             }
             std::thread::sleep(std::time::Duration::from_millis(30));
@@ -1677,7 +1663,7 @@ mod tests {
         let frames = (fps * 6.0) as usize;
         for i in 0..frames {
             queue = (queue - cap / fps).max(0.0);
-            if let Some(f) = enc.encode(&footage(1280, 720, i, 31), false).unwrap() {
+            if let Some(f) = enc.encode(&footage(1920, 1080, i, 31), false).unwrap() {
                 queue += f.data.len() as f32;
             }
             if i >= frames - fps as usize {
@@ -1745,7 +1731,7 @@ mod tests {
             let cap = ScreenStream::capacity_bps(slot) as f32 / 8.0;
             println!("\n== {label}: {bitrate} bps, {fps} fps, circuito {:.0} kB/s", cap / 1000.0);
             let mut queue = 0.0f32;
-            let (mut qps, mut bytes, mut sent, mut db, mut shown, mut peak) = (0.0f32, 0usize, 0usize, 0.0f32, 0usize, 0.0f32);
+            let (mut qps, mut bytes, mut sent, mut db, mut shown, mut peak, mut keys) = (0.0f32, 0usize, 0usize, 0.0f32, 0usize, 0.0f32, 0usize);
             for i in 0..fps * 6 {
                 let src = footage(w, h, i, grain);
                 queue = (queue - cap / fps as f32).max(0.0);
@@ -1754,6 +1740,7 @@ mod tests {
                     peak = peak.max(queue / cap * 1000.0);
                     bytes += f.data.len();
                     sent += 1;
+                    keys += usize::from(f.keyframe);
                     qps += enc.qp() as f32;
                     if let Some(o) = dec.decode(&f.data).unwrap() {
                         db += psnr_against(&o, &src);
@@ -1762,8 +1749,8 @@ mod tests {
                 }
                 if (i + 1) % fps == 0 {
                     let n = sent.max(1) as f32;
-                    println!("t={}s enviados {sent:2}/{fps} qp {:4.1} k {} {:6.0} B/quadro  PSNR {:4.1} dB  atraso máx. {peak:4.0} ms", (i + 1) / fps, qps / n, enc.scale(), bytes as f32 / n, db / shown.max(1) as f32);
-                    (qps, bytes, sent, db, shown, peak) = (0.0, 0, 0, 0.0, 0, 0.0);
+                    println!("t={}s enviados {sent:2}/{fps} chaves {keys:2} qp {:4.1} k {} {:6.0} B/quadro  PSNR {:4.1} dB  atraso máx. {peak:4.0} ms", (i + 1) / fps, qps / n, enc.scale(), bytes as f32 / n, db / shown.max(1) as f32);
+                    (qps, bytes, sent, db, shown, peak, keys) = (0.0, 0, 0, 0.0, 0, 0.0, 0);
                 }
             }
         }

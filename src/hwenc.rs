@@ -7,7 +7,7 @@
 //! execução (`gstreamer1.0-tools`, `gstreamer1.0-plugins-bad` e o driver de vídeo da GPU).
 //!
 //! O processo não aceita comandos: o que o [`crate::video::H264Encoder`] controla por quadro no
-//! openh264 (QP, camadas temporais) aqui não existe. Quadro-chave sob demanda, mudança de resolução e
+//! openh264 (QP) aqui não existe. Quadro-chave sob demanda, mudança de resolução e
 //! corte grande da taxa recomeçam o processo, que sempre abre com um quadro-chave. A saída chega com
 //! alguns quadros de atraso, então [`HwEncoder::encode`] devolve o que já saiu, não o quadro que entrou.
 

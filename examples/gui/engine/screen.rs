@@ -225,8 +225,8 @@ pub(crate) async fn share_task(dialer: Dialer, peer: [u8; 32], keys: clam::media
                 (mark, mark_packets) = (std::time::Instant::now(), t.packets_sent);
             }
             *flag.screen.tx_info.lock_unpoisoned() = format!(
-                "enviados {pushed}, pulados {skipped} ({} pelo codificador, {} adiados com o circuito cheio, {} largados da camada alta), descartados na fila {}, saindo {rate:.0} pacotes/s, taxa {} kbps, QP {}, imagem 1/{}, codificar leva {:.0} ms, codificador {}",
-                enc.skipped, enc.held, enc.layer_dropped, t.frames_dropped, enc.bitrate() / 1000, enc.qp(), enc.scale(), enc.encode_ms,
+                "enviados {pushed}, pulados {skipped} ({} pelo codificador, {} adiados com o circuito cheio), descartados na fila {}, saindo {rate:.0} pacotes/s, taxa {} kbps, QP {}, imagem 1/{}, codificar leva {:.0} ms, codificador {}",
+                enc.skipped, enc.held, t.frames_dropped, enc.bitrate() / 1000, enc.qp(), enc.scale(), enc.encode_ms,
                 match (enc.hardware(), &enc.hw_note) {
                     (Some(name), _) => format!("hardware ({name})"),
                     (None, Some(why)) => format!("openh264 (o hardware parou: {why})"),
