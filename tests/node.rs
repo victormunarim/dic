@@ -1043,3 +1043,37 @@ async fn the_keeper_passes_the_custody_one_hop_only() {
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert!(e.custody_export().is_empty(), "o repasse para em um salto");
 }
+
+/// Bate-papo 1:1 sem chamada: o contato recebe uma vez, o remetente recebe a confirmação, e quem não é contato
+/// não consegue entregar.
+#[tokio::test]
+async fn chat_reaches_an_online_contact_once_and_never_a_stranger() {
+    let (sa, sb, sc) = (key(), key(), key());
+    let (pa, pb) = (*PublicKey::from(&sa).as_bytes(), *PublicKey::from(&sb).as_bytes());
+    let a = Node::start(fixed(sa, free_port(), vec![pb])).await.unwrap();
+    let b = Node::start(fixed(sb, free_port(), vec![pa])).await.unwrap();
+    a.add_hint(pb, b.relay_info().unwrap());
+    let dialer = a.dialer();
+    let (id1, id2) = (dialer.next_chat_id(), dialer.next_chat_id());
+    assert!(id2 > id1);
+    assert!(dialer.send_chat(pb, id1, "oi, tudo bem?", Duration::from_secs(8)).await);
+    assert!(dialer.send_chat(pb, id2, "segunda", Duration::from_secs(8)).await);
+    // O mesmo número reenviado (ack perdido) é confirmado de novo e não aparece duas vezes.
+    assert!(dialer.send_chat(pb, id2, "segunda", Duration::from_secs(8)).await);
+    let mut got = Vec::new();
+    until("as duas mensagens chegam", || {
+        got.extend(b.take_chats());
+        (got.len() >= 2).then_some(())
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    got.extend(b.take_chats());
+    let texts: Vec<_> = got.iter().map(|(from, c)| (*from, c.text.as_str())).collect();
+    assert_eq!(texts, vec![(pa, "oi, tudo bem?"), (pa, "segunda")]);
+
+    // Quem não é contato de B não é confirmado nem entregue.
+    let c = Node::start(fixed(sc, free_port(), vec![pb])).await.unwrap();
+    c.add_hint(pb, b.relay_info().unwrap());
+    assert!(!c.dialer().send_chat(pb, c.dialer().next_chat_id(), "intruso", Duration::from_secs(3)).await);
+    assert!(b.take_chats().is_empty());
+}

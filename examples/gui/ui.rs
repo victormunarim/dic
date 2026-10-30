@@ -46,6 +46,9 @@ pub(crate) struct App {
     pub(crate) screen_tex: std::collections::HashMap<[u8; 32], (u64, egui::TextureHandle)>,
     /// Contato que a pessoa acabou de marcar como de confiança e ainda não confirmou o aviso do IP.
     pub(crate) trust_ask: Option<[u8; 32]>,
+    /// Contato cuja conversa 1:1 está aberta no centro, e o texto ainda não enviado.
+    pub(crate) chat_with: Option<[u8; 32]>,
+    pub(crate) chat_draft: String,
 }
 
 /// Larguras a partir das quais o conteúdo se divide em duas colunas.

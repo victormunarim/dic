@@ -74,7 +74,7 @@ impl App {
 
     /// Contatos online agora: a sondagem do nó (`Shared::presence`) ou um servidor em comum que os mostra online.
     /// Quem ainda não foi sondado não está na lista, e o 📞 espera o resultado.
-    fn online_contacts(&self, contacts: &[(String, [u8; 32])]) -> std::collections::HashSet<[u8; 32]> {
+    pub(crate) fn online_contacts(&self, contacts: &[(String, [u8; 32])]) -> std::collections::HashSet<[u8; 32]> {
         let keys: Vec<[u8; 32]> = contacts.iter().map(|(_, k)| *k).collect();
         {
             let mut watch = self.shared.watch.lock_unpoisoned();
@@ -118,7 +118,7 @@ impl App {
                 avatar(ui, name, 32.0, None);
                 // Adicionado só pelo código: o nome chega quando o contato devolve a apresentação.
                 let pending = *name == hex(key)[..8];
-                ui.add_sized([ui.available_width() - 90.0 - if pending { 22.0 } else { 0.0 }, 32.0], egui::Label::new(RichText::new(name).strong().color(TEXT)).truncate())
+                ui.add_sized([ui.available_width() - 118.0 - if pending { 22.0 } else { 0.0 }, 32.0], egui::Label::new(RichText::new(name).strong().color(TEXT)).truncate())
                     .on_hover_text(format!("{}…", &hex(key)[..16]));
                 if pending {
                     ui.label(RichText::new("❗").size(14.0).color(YELLOW)).on_hover_text("O nome do contato aparecerá assim que você e ele estiverem online ao mesmo tempo.");
@@ -156,6 +156,16 @@ impl App {
                     };
                     if call.on_hover_text("Ligar").on_disabled_hover_text(off_tip).clicked() {
                         self.dial(*key);
+                    }
+                    let unread = self.shared.chats.lock_unpoisoned().unread(key);
+                    let chat = ui.scope(|ui| {
+                        ui.spacing_mut().button_padding = vec2(0.0, 0.0);
+                        let ink = if unread > 0 { BLURPLE } else { TEXT };
+                        ui.add(egui::Button::new(RichText::new("💬").size(16.0).color(ink)).frame(false).min_size(vec2(28.0, 34.0)))
+                    }).inner;
+                    let tip = if unread > 0 { format!("Bate-papo ({unread} nova(s))") } else { "Bate-papo".to_string() };
+                    if chat.on_hover_text(tip).clicked() {
+                        self.open_chat(*key);
                     }
                 });
               });

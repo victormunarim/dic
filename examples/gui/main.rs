@@ -17,6 +17,8 @@
 mod conf;
 mod engine;
 mod call;
+mod chats;
+mod conversa;
 mod contacts;
 mod media;
 mod settings;
@@ -45,6 +47,7 @@ fn main() -> eframe::Result {
             let form = Form::load();
             let shared = Arc::<engine::Shared>::default();
             shared.audio.set_prefs(form.audio);
+            *clam::sync::LockExt::lock_unpoisoned(&shared.chats) = chats::ChatBook::load();
             let mut app = App {
                 rt,
                 form,
@@ -58,6 +61,8 @@ fn main() -> eframe::Result {
                 screen_tex: Default::default(),
                 zoom: None,
                 trust_ask: None,
+                chat_with: None,
+                chat_draft: String::new(),
                 srv: Default::default(),
                 #[cfg(feature = "audio")]
                 devs: clam::audio::devices(),

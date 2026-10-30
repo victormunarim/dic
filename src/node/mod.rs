@@ -108,6 +108,9 @@ fn set_known(known: &Known, history: &History, peer: &[u8; 32], relay: RelayInfo
     }
 }
 
+/// Chave pública de um contato.
+pub type PeerKey = [u8; 32];
+
 /// Quem adicionou esta pessoa e se apresentou ([`Node::introduce`] do outro lado): ainda não é contato.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Introduced {
@@ -157,6 +160,8 @@ pub struct Node {
     retiring: Arc<Mutex<HashMap<[u8; 32], JoinHandle<()>>>>,
     /// Quem removeu esta pessoa e já foi tirado dos contatos do telefone ([`Node::take_removals`]).
     removed: Arc<Mutex<Vec<[u8; 32]>>>,
+    /// Mensagens de bate-papo que contatos mandaram e o app ainda não retirou ([`Node::take_chats`]).
+    chats: Arc<Mutex<Vec<(PeerKey, update::Chat)>>>,
     /// Os servidores desta pessoa (veja [`Node::servers`]).
     servers: ServerHub,
     /// Tarefas de fundo: a que aplica os avisos de endereço dos contatos e a fila de saída dos nossos.
@@ -259,7 +264,7 @@ impl Node {
         if let Some(n) = dht_note {
             push_note(&mut note, n);
         }
-        let dialer = Dialer { secret: secret.clone(), mine: mine.clone(), relay_port: port, known: known.clone(), hints: hints.clone(), history: history.clone(), seen_seq: Arc::default(), link: phone.link(), dht: dht_client.clone(), dht_circuit: dht_options.as_ref().is_some_and(|o| o.circuit), anchors, trusted: Arc::default() };
+        let dialer = Dialer { secret: secret.clone(), mine: mine.clone(), relay_port: port, known: known.clone(), hints: hints.clone(), history: history.clone(), seen_seq: Arc::default(), link: phone.link(), dht: dht_client.clone(), dht_circuit: dht_options.as_ref().is_some_and(|o| o.circuit), anchors, trusted: Arc::default(), chat_stamp: Arc::default() };
         // Os convites levam este relay, para o outro lado ligar de volta.
         let link_to_phone = phone.link();
         let own = Arc::new(Mutex::new(own_relay(&mine, published)));
@@ -329,7 +334,16 @@ impl Node {
                 }
             }));
         }
-        Ok(Self { secret, name, retry: update_retry, phone, _relay: relay, renew, reach, note, dialer, known, hints, history, own, update_notice, background, addr: addr_now, inbox, retiring: Arc::default(), removed, servers: server_hub })
+        let chats: Arc<Mutex<Vec<(PeerKey, update::Chat)>>> = Arc::default();
+        if let Some(mut rx) = phone.take_chats() {
+            let chats = chats.clone();
+            background.push(tokio::spawn(async move {
+                while let Some(item) = rx.recv().await {
+                    chats.lock_unpoisoned().push(item);
+                }
+            }));
+        }
+        Ok(Self { chats, secret, name, retry: update_retry, phone, _relay: relay, renew, reach, note, dialer, known, hints, history, own, update_notice, background, addr: addr_now, inbox, retiring: Arc::default(), removed, servers: server_hub })
     }
 
     /// Se `peer` está entre os contatos atendidos agora.
@@ -397,6 +411,13 @@ impl Node {
     #[must_use]
     pub fn take_introductions(&self) -> Vec<Introduced> {
         std::mem::take(&mut *self.inbox.introduced.lock_unpoisoned())
+    }
+
+    /// As mensagens de bate-papo que contatos mandaram desde a última chamada, na ordem de chegada. Cada uma já foi
+    /// confirmada a quem mandou; guardar é com o app.
+    #[must_use]
+    pub fn take_chats(&self) -> Vec<(PeerKey, update::Chat)> {
+        std::mem::take(&mut *self.chats.lock_unpoisoned())
     }
 
     /// Remove o contato `peer` e avisa a ele (cifrado, só ele abre) para que o tire da lista dele também. Deixa de

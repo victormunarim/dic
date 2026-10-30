@@ -74,6 +74,8 @@ pub(crate) enum Cmd {
     LeaveRoom,
     /// Transmitir (ou parar de transmitir) a tela para quem pedir, na sala.
     RoomShare(bool),
+    /// Mensagem de bate-papo 1:1 para o contato (o motor parte o texto em quadros, numera e guarda no histórico).
+    Chat([u8; 32], String),
 }
 
 pub(crate) const ANSWER_NONE: u8 = 0;
@@ -121,6 +123,8 @@ pub(crate) struct Shared {
     pub(crate) introduced: Mutex<Vec<clam::node::Introduced>>,
     /// Quem removeu esta pessoa; o nó já o esqueceu e a janela o tira da lista de contatos.
     pub(crate) removed: Mutex<Vec<[u8; 32]>>,
+    /// Histórico do bate-papo 1:1 (carregado ao abrir; o laço do nó o grava quando muda).
+    pub(crate) chats: Mutex<crate::chats::ChatBook>,
     /// Os servidores desta pessoa; vazio offline.
     pub(crate) servers: Mutex<Option<clam::server::net::ServerHub>>,
     /// Sala de voz em que está e quem fala.

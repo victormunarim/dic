@@ -741,6 +741,7 @@ pub struct Phone {
     introductions: Option<mpsc::Receiver<Introduction>>,
     accept_intros: Arc<AtomicBool>,
     removals: Option<mpsc::Receiver<([u8; 32], u64)>>,
+    chats: Option<mpsc::Receiver<([u8; 32], update::Chat)>>,
     custody: Arc<Mutex<Custody>>,
     servers: ServerSlot,
     room_peers: Contacts,
@@ -822,12 +823,13 @@ impl Phone {
         let (intro_tx, intro_rx) = mpsc::channel(64);
         let accept_intros = Arc::new(AtomicBool::new(true));
         let (removal_tx, removal_rx) = mpsc::channel(64);
+        let (chat_tx, chat_rx) = mpsc::channel(256);
         let servers = ServerSlot::default();
         let room_peers = Contacts::default();
         let custody = Arc::new(Mutex::new(Custody::new()));
-        let out = ActorOut { custody: custody.clone(), incoming: inc_tx, updates: upd_tx, introductions: intro_tx, accept_intros: accept_intros.clone(), removals: removal_tx, servers: servers.clone(), room_peers: room_peers.clone(), notice: notice.clone() };
+        let out = ActorOut { custody: custody.clone(), incoming: inc_tx, updates: upd_tx, introductions: intro_tx, accept_intros: accept_intros.clone(), removals: removal_tx, chats: chat_tx, servers: servers.clone(), room_peers: room_peers.clone(), notice: notice.clone() };
         let actor = tokio::spawn(run_actor(actor_rx, actor_tx.clone(), out, my_static, contacts.clone(), ids.clone()));
-        Ok(Self { addr, incoming: inc_rx, notice, contacts, ids, link_tx: actor_tx, hint: Arc::default(), updates: Some(upd_rx), introductions: Some(intro_rx), accept_intros, removals: Some(removal_rx), custody, servers, room_peers, tasks: vec![accept, actor] })
+        Ok(Self { addr, incoming: inc_rx, notice, contacts, ids, link_tx: actor_tx, hint: Arc::default(), updates: Some(upd_rx), introductions: Some(intro_rx), accept_intros, removals: Some(removal_rx), chats: Some(chat_rx), custody, servers, room_peers, tasks: vec![accept, actor] })
     }
 
     /// Para registrar neste telefone as chamadas que esta máquina faz ([`call_linked`]).
@@ -890,6 +892,12 @@ impl Phone {
     /// ([`Phone::accept_introductions`]) e só vale de quem já é contato.
     pub fn take_removals(&mut self) -> Option<mpsc::Receiver<([u8; 32], u64)>> {
         self.removals.take()
+    }
+
+    /// Fila das mensagens de bate-papo que contatos mandaram (a chave já provada; cada uma foi confirmada a quem
+    /// mandou e a mesma mensagem repetida não entra duas vezes). Só de quem é contato. Só se retira uma vez.
+    pub fn take_chats(&mut self) -> Option<mpsc::Receiver<([u8; 32], update::Chat)>> {
+        self.chats.take()
     }
 
     /// Passa a atender os quadros de servidor com `handler` (veja [`ServerHandler`]).
@@ -964,6 +972,30 @@ impl SeenInvites {
     }
 }
 
+/// Mensagens de bate-papo aceitas por minuto, de todos os contatos juntos.
+const CHAT_PER_MINUTE: usize = 600;
+
+/// As últimas mensagens de bate-papo entregues, para o reenvio de uma mensagem já recebida (ack perdido) não aparecer duas vezes.
+#[derive(Default)]
+struct SeenChats {
+    order: std::collections::VecDeque<([u8; 32], u64)>,
+}
+
+impl SeenChats {
+    const KEEP: usize = 1024;
+
+    fn first_time(&mut self, peer: [u8; 32], id: u64) -> bool {
+        if self.order.contains(&(peer, id)) {
+            return false;
+        }
+        if self.order.len() >= Self::KEEP {
+            self.order.pop_front();
+        }
+        self.order.push_back((peer, id));
+        true
+    }
+}
+
 /// Para onde o telefone entrega o que recebe: convites, avisos de endereço e o motivo do último descarte.
 struct ActorOut {
     custody: Arc<Mutex<Custody>>,
@@ -972,6 +1004,7 @@ struct ActorOut {
     introductions: mpsc::Sender<Introduction>,
     accept_intros: Arc<AtomicBool>,
     removals: mpsc::Sender<([u8; 32], u64)>,
+    chats: mpsc::Sender<([u8; 32], update::Chat)>,
     servers: ServerSlot,
     room_peers: Contacts,
     notice: Arc<Mutex<Option<String>>>,
@@ -985,7 +1018,9 @@ async fn run_actor(
     contacts: Contacts,
     ids: Arc<AtomicU64>,
 ) {
-    let ActorOut { custody, incoming, updates, introductions, accept_intros, removals, servers, room_peers, notice } = out;
+    let ActorOut { custody, incoming, updates, introductions, accept_intros, removals, chats, servers, room_peers, notice } = out;
+    let mut chat_window: (Instant, usize) = (Instant::now(), 0);
+    let mut chat_seen = SeenChats::default();
     let mut intro_window: (Instant, usize) = (Instant::now(), 0);
     let mut server_window: (Instant, usize) = (Instant::now(), 0);
     let mut writers: HashMap<u64, mpsc::Sender<Vec<u8>>> = HashMap::new();
@@ -1088,6 +1123,26 @@ async fn run_actor(
                             && let Some(w) = writers.get(&conn)
                         {
                             let _ = w.try_send(ack.to_vec());
+                        }
+                        continue;
+                    }
+                    // Bate-papo de um contato: só de quem já é contato. Confirma sempre (o ack perdido faria o outro lado
+                    // reenviar), mas entrega ao app uma vez só.
+                    if let Some((peer, chat)) = update::open_chat(&secret, &data, unix_millis()) {
+                        if chat_window.0.elapsed() >= Duration::from_secs(60) {
+                            chat_window = (Instant::now(), 0);
+                        }
+                        chat_window.1 += 1;
+                        if chat_window.1 <= CHAT_PER_MINUTE
+                            && contacts.lock_unpoisoned().contains(&peer)
+                            && let Ok(ack) = update::seal_ack(&secret, &PublicKey::from(peer), chat.id)
+                        {
+                            if chat_seen.first_time(peer, chat.id) {
+                                let _ = chats.try_send((peer, chat));
+                            }
+                            if let Some(w) = writers.get(&conn) {
+                                let _ = w.try_send(ack.to_vec());
+                            }
                         }
                         continue;
                     }

@@ -6,7 +6,7 @@ use arbitrary::Arbitrary;
 use clam::{
     mailbox::Custody,
     media::update::{
-        AddressRecord, CUSTODY_DATA, Intro, MAIL_SLOTS, Reach, invite_mail_item, join_custody, mail_author, mail_item, open_mail_item, seal_custody, mail_slot, mailbox_master, mailbox_target, reply_master, open_ack, open_custody, open_intro, open_mail, open_record, open_removal, open_server_record, open_update, seal_ack, seal_intro, seal_record, seal_removal,
+        AddressRecord, Chat, CUSTODY_DATA, Intro, MAIL_SLOTS, Reach, invite_mail_item, join_custody, mail_author, mail_item, open_mail_item, seal_custody, mail_slot, mailbox_master, mailbox_target, reply_master, open_ack, open_custody, open_intro, open_mail, open_record, open_chat, open_removal, seal_chat, open_server_record, open_update, seal_ack, seal_intro, seal_record, seal_removal,
         seal_server_record, seal_update, valid_addr,
     },
     x25519_dalek::{PublicKey, StaticSecret},
@@ -49,6 +49,7 @@ fuzz_target!(|input: Input| {
             let chunks: Vec<[u8; CUSTODY_DATA]> = data.chunks_exact(CUSTODY_DATA).filter_map(|c| c.try_into().ok()).collect();
             let _ = join_custody(&chunks);
             let _ = open_removal(&me, &data, 1);
+            let _ = open_chat(&me, &data, 1);
             let _ = open_ack(&me, &peer_pk, 1, &data);
             let _ = open_record(&me, &peer_pk, &data);
             let _ = open_server_record(&[3; 32], &[4; 16], &peer_pk.to_bytes(), &data);
@@ -64,6 +65,7 @@ fuzz_target!(|input: Input| {
             let _ = open_mail(&me, &frame, 1);
             let _ = open_mail_item(&me, &frame, 1);
             let _ = open_removal(&me, &frame, 1);
+            let _ = open_chat(&me, &frame, 1);
             let _ = open_ack(&me, &peer_pk, 1, &frame);
         }
         Input::Sealed(f) => {
@@ -101,6 +103,11 @@ fuzz_target!(|input: Input| {
             if let Ok(frame) = seal_removal(&peer, &me_pk, f.seq) {
                 assert_eq!(open_removal(&me, &frame, f.seq), Some((peer_pk.to_bytes(), f.seq)));
                 assert_eq!(open_removal(&[9u8; 32].into(), &frame, f.seq), None, "só o destinatário abre");
+            }
+            if let Ok(frame) = seal_chat(&peer, &me_pk, &Chat { id: f.seq, text: intro.name.clone() }) {
+                let (from, got) = open_chat(&me, &frame, f.seq).expect("chat abre");
+                assert_eq!((from, got.id, got.text), (peer_pk.to_bytes(), f.seq, intro.name.clone()));
+                assert_eq!(open_chat(&[9u8; 32].into(), &frame, f.seq), None, "só o destinatário abre");
             }
             if let Ok(mail) = seal_intro(&peer, &me_pk, &intro) {
                 let master = mailbox_master(&me_pk.to_bytes());

@@ -60,6 +60,7 @@ pub const TAG_UPDATE: u8 = 4;
 pub const TAG_ACK: u8 = 5;
 pub const TAG_INTRO: u8 = 7;
 pub const TAG_REMOVAL: u8 = 10;
+pub const TAG_CHAT: u8 = 13;
 pub const TAG_CUSTODY: u8 = 11;
 /// Etiqueta do convite de servidor na caixa de correio (não é um quadro de rede: só abre o item da DHT e a custódia).
 pub const TAG_MAIL_INVITE: u8 = 12;
@@ -80,6 +81,11 @@ pub const CUSTODY_DATA: usize = CUSTODY_PLAIN_LEN - 1 - 8 - 1;
 /// Diferença máxima, em ms, entre o carimbo da remoção e o relógio de quem recebe (1 h): cobre relógios tortos e
 /// limita o que um quadro gravado pode fazer depois.
 pub const REMOVAL_WINDOW_MS: u64 = 3_600_000;
+/// Maior texto de uma mensagem do bate-papo 1:1 (bytes UTF-8): o que sobra do quadro de 200 bytes depois de
+/// versão, carimbo e tamanho. Texto maior o app divide em várias mensagens.
+pub const MAX_CHAT: usize = 128;
+/// Conteúdo da mensagem: versão, carimbo, tamanho e o texto preenchido com zeros.
+const CHAT_PLAIN_LEN: usize = 1 + 8 + 1 + MAX_CHAT;
 /// Só separa o domínio da cifra do registro guardado na DHT (entra como dado associado, não vai a nenhum quadro).
 const TAG_RECORD: u8 = 6;
 /// Tamanho máximo do endereço (`host:porta`) no registro, o que cabe no quadro.
@@ -428,6 +434,51 @@ pub fn open_removal(my_static: &StaticSecret, frame: &[u8], now_ms: u64) -> Opti
     (stamp.abs_diff(now_ms) <= REMOVAL_WINDOW_MS).then_some((author, stamp))
 }
 
+/// Mensagem do bate-papo entre dois contatos: `id` é o carimbo (ms Unix) do remetente, único por conversa, e é o
+/// que o ack repete.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Chat {
+    pub id: u64,
+    pub text: String,
+}
+
+/// Quadro de bate-papo de `my_static` para `peer`. Falha se o texto for vazio, passar de [`MAX_CHAT`] bytes ou tiver
+/// caractere de controle.
+pub fn seal_chat(my_static: &StaticSecret, peer: &PublicKey, chat: &Chat) -> Result<Frame, MediaError> {
+    if chat.text.is_empty() || chat.text.len() > MAX_CHAT || chat.text.chars().any(char::is_control) {
+        return Err(MediaError::Malformed);
+    }
+    let me = PublicKey::from(my_static);
+    let cipher = cipher(my_static, peer, &me).ok_or(MediaError::BadKey)?;
+    let plain: [u8; CHAT_PLAIN_LEN] = padded(&[&[VERSION], &chat.id.to_be_bytes(), &[chat.text.len() as u8], chat.text.as_bytes()]);
+    Ok(seal_after(&cipher, TAG_CHAT, me.as_bytes(), &plain))
+}
+
+/// Abre `frame` como mensagem de bate-papo para `my_static`. Devolve a chave de quem mandou (provada) e a mensagem.
+/// `None`: não é bate-papo para esta chave, ou o carimbo está a mais de [`REMOVAL_WINDOW_MS`] de `now_ms` (um quadro
+/// gravado não volta depois).
+pub fn open_chat(my_static: &StaticSecret, frame: &[u8], now_ms: u64) -> Option<([u8; 32], Chat)> {
+    let mut head = Reader::new(frame);
+    if frame.len() != PACKET_LEN || head.u8()? != TAG_CHAT {
+        return None;
+    }
+    let author: [u8; 32] = head.array()?;
+    let owner = PublicKey::from(author);
+    let cipher = cipher(my_static, &owner, &owner)?;
+    let plain = open_after(&cipher, TAG_CHAT, 32, frame, CHAT_PLAIN_LEN)?;
+    let mut r = Reader::new(&plain);
+    if r.u8()? != VERSION {
+        return None;
+    }
+    let id = r.u64()?;
+    let len = usize::from(r.u8()?);
+    if len == 0 || len > MAX_CHAT || id.abs_diff(now_ms) > REMOVAL_WINDOW_MS {
+        return None;
+    }
+    let text = String::from_utf8(r.take(len)?.to_vec()).ok().filter(|t| !t.chars().any(char::is_control))?;
+    Some((author, Chat { id, text }))
+}
+
 /// Um pedaço da custódia: o `id` (o `seq` da apresentação) liga os pedaços do mesmo depósito.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CustodyPart {
@@ -666,6 +717,31 @@ mod tests {
 
     fn record(seq: u64) -> AddressRecord {
         AddressRecord { seq, addr: "casa.exemplo.com:4001".into(), onion: [7; 32], link: [9; 32] }
+    }
+
+    #[test]
+    fn chat_opens_only_for_the_recipient_and_only_while_fresh() {
+        let (a, b) = ids();
+        let (pa, pb) = (PublicKey::from(&a), PublicKey::from(&b));
+        let chat = Chat { id: 1_000_000, text: "olá, tudo bem? ção".into() };
+        let frame = seal_chat(&a, &pb, &chat).unwrap();
+        assert_eq!(frame.len(), PACKET_LEN);
+        assert_eq!(open_chat(&b, &frame, 1_000_500), Some((*pa.as_bytes(), chat.clone())));
+        assert_eq!(open_chat(&a, &frame, 1_000_500), None, "o remetente não abre o próprio quadro");
+        assert_eq!(open_chat(&StaticSecret::random_from_rng(OsRng), &frame, 1_000_500), None);
+        assert_eq!(open_chat(&b, &frame, 1_000_000 + REMOVAL_WINDOW_MS + 1), None, "quadro velho");
+        assert!(open_ack(&a, &pb, 1, &seal_ack(&b, &pa, 1).unwrap()));
+        assert!(!frame.windows(3).any(|w| w == b"ol\xc3\xa1"), "o texto não aparece em claro");
+    }
+
+    #[test]
+    fn chat_refuses_empty_long_and_control_text() {
+        let (a, b) = ids();
+        let pb = PublicKey::from(&b);
+        for text in [String::new(), "x".repeat(MAX_CHAT + 1), "a\nb".to_string()] {
+            assert!(seal_chat(&a, &pb, &Chat { id: 1, text }).is_err());
+        }
+        assert!(seal_chat(&a, &pb, &Chat { id: 1, text: "x".repeat(MAX_CHAT) }).is_ok());
     }
 
     #[test]

@@ -5,7 +5,7 @@ use std::sync::atomic::Ordering;
 
 use eframe::egui::{self, Color32, CornerRadius, RichText};
 
-use crate::{engine::*, theme::*, ui::*};
+use crate::{conf::parse_contacts, engine::*, theme::*, ui::*};
 
 impl App {
     /// Cartão para ligar a um código de contato ou ao nome de um contato.
@@ -30,6 +30,12 @@ impl App {
 
     pub(crate) fn call_tab(&mut self, ui: &mut egui::Ui, offline: bool, busy: bool, in_call: bool) {
         if !in_call {
+            if let Some(peer) = self.chat_with {
+                let contacts = parse_contacts(&self.form.contacts);
+                let online = self.online_contacts(&contacts).contains(&peer);
+                self.chat_panel(ui, peer, online);
+                return;
+            }
             self.dial_card(ui, offline, busy);
             card(ui, "Nenhuma chamada em andamento", "Quando você ligar ou atender, ela aparece aqui, com a tela compartilhada.", |ui| {
                 note(ui, "Para ligar a um contato, use o 📞 ao lado dele na lista de contatos (👤, na coluna da esquerda).");
@@ -70,6 +76,11 @@ impl App {
             }
         });
         if !ringing {
+            // Na chamada a conversa é com quem está na linha, e dá para escrever sem checar presença.
+            let peer = *self.shared.peer.lock_unpoisoned();
+            if let Some(peer) = peer {
+                self.chat_panel(ui, peer, true);
+            }
             self.screen_ui(ui);
         }
     }

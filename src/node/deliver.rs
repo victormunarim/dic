@@ -66,6 +66,16 @@ impl Dialer {
         self.deliver_confirmed(peer, &frame, intro.seq, wait).await
     }
 
+    /// Manda a `peer` a mensagem de bate-papo `id` (de [`Dialer::next_chat_id`]) e espera a confirmação cifrada.
+    /// `true`: ele abriu e confirmou. Uma tentativa só: o contato offline não recebe (não há caixa de correio
+    /// para bate-papo), e quem chama mostra que não foi entregue. O texto passa de [`update::MAX_CHAT`] bytes ou
+    /// tem caractere de controle: `false` sem rede.
+    pub async fn send_chat(&self, peer: [u8; 32], id: u64, text: &str, wait: Duration) -> bool {
+        let chat = update::Chat { id, text: text.to_string() };
+        let Ok(frame) = update::seal_chat(&self.secret, &PublicKey::from(peer), &chat) else { return false };
+        self.deliver_confirmed(peer, &frame, id, wait).await
+    }
+
     /// Avisa `peer` de que esta pessoa o removeu (carimbo `stamp`, milissegundos Unix) e espera a confirmação.
     pub(super) async fn deliver_removal(&self, peer: [u8; 32], stamp: u64, wait: Duration) -> bool {
         let Ok(frame) = update::seal_removal(&self.secret, &PublicKey::from(peer), stamp) else { return false };

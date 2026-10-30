@@ -54,9 +54,27 @@ pub struct Dialer {
     pub(super) anchors: Vec<RelayInfo>,
     /// Contatos de confiança: os únicos para quem a tela sem privacidade vai direto (veja [`Dialer::set_trusted`]).
     pub(super) trusted: Arc<Mutex<HashSet<[u8; 32]>>>,
+    /// Último carimbo de bate-papo usado (veja [`Dialer::next_chat_id`]).
+    pub(super) chat_stamp: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Dialer {
+    /// Identificador da próxima mensagem de bate-papo: o relógio em ms Unix, e sempre maior que o anterior (duas
+    /// mensagens no mesmo milissegundo não repetem o número, que é o que o ack e o descarte de repetidas usam).
+    #[must_use]
+    pub fn next_chat_id(&self) -> u64 {
+        use std::sync::atomic::Ordering;
+        let now = super::util::unix_millis() as u64;
+        let mut last = self.chat_stamp.load(Ordering::Relaxed);
+        loop {
+            let id = now.max(last.saturating_add(1));
+            match self.chat_stamp.compare_exchange(last, id, Ordering::Relaxed, Ordering::Relaxed) {
+                Ok(_) => return id,
+                Err(seen) => last = seen,
+            }
+        }
+    }
+
     /// Endereço de relay guardado de `peer` (da última ligação ou aviso, ou, na falta, do convite que ele
     /// mandou), se houver; é por ele que [`Dialer::dial`] tenta primeiro.
     #[must_use]

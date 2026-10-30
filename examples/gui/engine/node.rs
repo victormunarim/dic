@@ -239,6 +239,25 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
                     saver.sync(&book_of(&node), &out);
                 }
                 Some(Cmd::Trust(key, on)) => dialer.set_trusted(key, on),
+                Some(Cmd::Chat(peer, text)) => {
+                    let parts = crate::chats::split_text(&text, clam::media::update::MAX_CHAT);
+                    let sends: Vec<(u64, String)> = parts.into_iter().map(|t| (dialer.next_chat_id(), t)).collect();
+                    {
+                        let mut book = shared.chats.lock_unpoisoned();
+                        for (id, t) in &sends {
+                            book.push_mine(peer, *id, t.clone());
+                        }
+                    }
+                    // Em fila única, para as partes de um texto longo chegarem na ordem.
+                    let (sh, d, o) = (shared.clone(), dialer.clone(), out.clone());
+                    tokio::spawn(async move {
+                        for (id, t) in sends {
+                            let ok = d.send_chat(peer, id, &t, Duration::from_secs(8)).await;
+                            sh.chats.lock_unpoisoned().set_state(&peer, id, if ok { crate::chats::State::Sent } else { crate::chats::State::Failed });
+                            (o.repaint)();
+                        }
+                    });
+                }
                 Some(Cmd::Retire(key)) => {
                     node.retire(key);
                     save_pending_if_changed(&node, &mut pending_saved, &out);
@@ -349,6 +368,16 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
         if let Some(n) = node.take_notice() {
             out.line(n);
         }
+        let got = node.take_chats();
+        if !got.is_empty() {
+            let mut book = shared.chats.lock_unpoisoned();
+            for (peer, c) in got {
+                book.push_received(peer, c.id, c.text);
+            }
+            drop(book);
+            (out.repaint)();
+        }
+        save_chats_if_dirty(&shared, &out);
         let introduced = node.take_introductions();
         if !introduced.is_empty() {
             for i in &introduced {
@@ -395,6 +424,7 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
             }
         }
     }
+    save_chats_if_dirty(&shared, &out);
     saver.sync(&book_of(&node), &out);
     let _ = save_custody(&node.custody_export());
     let _ = save_tombs(&node.tombstones());
@@ -405,6 +435,14 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
     *shared.servers.lock_unpoisoned() = None;
     shared.hangup.store(true, Ordering::Relaxed);
     Ok(())
+}
+
+/// Grava `.clam-gui.chats` quando o histórico mudou.
+fn save_chats_if_dirty(shared: &Shared, out: &Sink) {
+    let Some(text) = shared.chats.lock_unpoisoned().take_dirty() else { return };
+    if let Err(e) = crate::chats::save_chats(&text) {
+        out.line(format!("não consegui gravar o bate-papo em {}: {e}", crate::chats::chats_path().display()));
+    }
 }
 
 /// Nome do contato, ou os 8 primeiros caracteres da chave.
