@@ -77,10 +77,8 @@ pub(crate) enum Cmd {
     RoomShare(bool),
     /// Mensagem de bate-papo 1:1 para o contato (o motor parte o texto em quadros, numera e guarda no histórico).
     Chat([u8; 32], String),
-    /// Oferece o arquivo ao contato (só vai depois que ele aceitar).
+    /// Envia o arquivo ao contato (ele recebe sem precisar aceitar).
     SendFile([u8; 32], std::path::PathBuf),
-    /// Resposta da pessoa a uma oferta de arquivo do contato (`true` = aceitar).
-    FileAnswer([u8; 32], u64, bool),
     /// Cancela a transferência (minha ou do contato) ou retira a oferta.
     FileCancel([u8; 32], u64, bool),
 }

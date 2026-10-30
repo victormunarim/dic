@@ -260,7 +260,6 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
                     });
                 }
                 Some(Cmd::SendFile(peer, path)) => super::files::start_send(&shared, &dialer, &out, peer, path),
-                Some(Cmd::FileAnswer(peer, id, accept)) => super::files::answer(&shared, &dialer, &out, &mut receiving, peer, id, accept),
                 Some(Cmd::FileCancel(peer, id, mine)) => super::files::cancel(&shared, &dialer, &out, &mut receiving, peer, id, mine),
                 Some(Cmd::Retire(key)) => {
                     node.retire(key);
@@ -383,7 +382,10 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
         }
         let files = node.take_files();
         if !files.is_empty() {
-            super::files::on_frames(&shared, &mut receiving, files);
+            // Contato não precisa de aceite: o arquivo começa a chegar e a pessoa pode cancelar.
+            for (peer, id) in super::files::on_frames(&shared, &mut receiving, files) {
+                super::files::answer(&shared, &dialer, &out, &mut receiving, peer, id, true);
+            }
             (out.repaint)();
         }
         save_chats_if_dirty(&shared, &out);

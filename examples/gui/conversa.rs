@@ -66,13 +66,19 @@ impl App {
             });
             ui.add_space(4.0);
             ui.allocate_ui_with_layout(vec2(ui.available_width(), 36.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let path = std::path::PathBuf::from(self.chat_draft.trim());
-                let is_file = !self.chat_draft.trim().is_empty() && path.is_file();
-                let ready = sendable && !self.chat_draft.trim().is_empty() && !is_file;
+                let ready = sendable && !self.chat_draft.trim().is_empty();
                 let sent = button(ui, ready, "Enviar", BLURPLE).clicked();
-                if attach_button(ui, sendable && is_file).clicked() {
-                    self.chat_draft.clear();
-                    file_cmds.push(Cmd::SendFile(peer, path));
+                if attach_button(ui, sendable).clicked()
+                    && let Some(r) = &self.running
+                {
+                    // O diálogo do sistema bloqueia: roda fora da janela e devolve o caminho como comando.
+                    let (tx, repaint) = (r.cmds.clone(), ui.ctx().clone());
+                    std::thread::spawn(move || {
+                        if let Some(path) = rfd::FileDialog::new().set_title("Enviar arquivo").pick_file() {
+                            let _ = tx.send(Cmd::SendFile(peer, path));
+                            repaint.request_repaint();
+                        }
+                    });
                 }
                 let hint = if sendable { "Mensagem" } else { "Contato offline: não dá para enviar" };
                 let reply = ui.add_enabled(sendable, field(&mut self.chat_draft, hint).desired_width(ui.available_width().max(80.0)));
@@ -111,22 +117,12 @@ fn file_row(ui: &mut egui::Ui, x: &crate::arquivos::Xfer, cmds: &mut Vec<Cmd>) {
         let way = if x.mine { "Enviando" } else { "Recebendo" };
         ui.label(RichText::new(format!("{} ({})", x.name, size_text(x.size))).strong().color(Color32::WHITE));
         match &x.phase {
-            Phase::Asking => {
-                ui.label(RichText::new("quer enviar este arquivo").color(MUTED));
+            // Aceito sozinho pelo laço; aqui só aparece no instante entre a oferta e o início.
+            Phase::Asking | Phase::Offering => {
+                ui.label(RichText::new(if x.mine { "esperando o contato…" } else { "começando…" }).color(MUTED));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if close_button(ui, "Recusar").clicked() {
-                        cmds.push(Cmd::FileAnswer(x.peer, x.id, false));
-                    }
-                    if button(ui, true, "Aceitar", GREEN).on_hover_text("Salva em Downloads/clam, na sua pasta pessoal").clicked() {
-                        cmds.push(Cmd::FileAnswer(x.peer, x.id, true));
-                    }
-                });
-            }
-            Phase::Offering => {
-                ui.label(RichText::new("esperando o contato aceitar…").color(MUTED));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if close_button(ui, "Cancelar o envio").clicked() {
-                        cmds.push(Cmd::FileCancel(x.peer, x.id, true));
+                    if close_button(ui, "Cancelar").clicked() {
+                        cmds.push(Cmd::FileCancel(x.peer, x.id, x.mine));
                     }
                 });
             }
@@ -158,7 +154,7 @@ fn file_row(ui: &mut egui::Ui, x: &crate::arquivos::Xfer, cmds: &mut Vec<Cmd>) {
     });
 }
 
-/// Clipe de papel desenhado (a fonte pode não ter o glifo): anexa o arquivo cujo caminho está no campo.
+/// Clipe de papel desenhado (a fonte pode não ter o glifo): abre o seletor de arquivos do sistema.
 fn attach_button(ui: &mut egui::Ui, enabled: bool) -> egui::Response {
     let (rect, reply) = ui.allocate_exact_size(vec2(34.0, 34.0), egui::Sense::click());
     let ink = if !enabled { MUTED.gamma_multiply(0.5) } else if reply.hovered() { Color32::WHITE } else { TEXT };
@@ -167,7 +163,7 @@ fn attach_button(ui: &mut egui::Ui, enabled: bool) -> egui::Response {
     // Uma alça comprida e a volta interna, como um clipe visto de frente.
     let pts = [vec2(-3.0, 8.0), vec2(-6.0, 5.0), vec2(-6.0, -7.0), vec2(0.0, -10.0), vec2(6.0, -7.0), vec2(6.0, 6.0), vec2(2.0, 9.0), vec2(-2.0, 6.0), vec2(-2.0, -4.0)];
     ui.painter().add(egui::Shape::line(pts.iter().map(|p| c + *p).collect(), stroke));
-    let tip = "Anexar arquivo: arraste-o para a janela, ou cole o caminho dele no campo e clique aqui. O contato precisa aceitar (limite de 32 MB)";
+    let tip = "Anexar arquivo: abre as pastas do computador (ou arraste o arquivo para a janela). Limite de 32 MB";
     let reply = reply.on_hover_text(tip);
     if enabled { reply.on_hover_cursor(egui::CursorIcon::PointingHand) } else { reply }
 }

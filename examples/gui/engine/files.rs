@@ -16,7 +16,7 @@ use crate::arquivos::Phase;
 /// Quanto o envio espera a resposta do contato à oferta; a pessoa do outro lado pode estar longe da tela.
 const ANSWER_WAIT: Duration = Duration::from_secs(300);
 const CONTROL_WAIT: Duration = Duration::from_secs(8);
-/// Ofertas abertas de um mesmo contato; passando disso, as novas são ignoradas (e não confirmadas ao usuário).
+/// Ofertas abertas de um mesmo contato; passando disso, as novas são ignoradas.
 const MAX_ASKING: usize = 8;
 
 /// Arquivos que estão chegando, por (contato, número). Mora no laço do nó: o disco não passa pela janela.
@@ -113,7 +113,9 @@ pub(crate) fn start_send(shared: &std::sync::Arc<Shared>, dialer: &Dialer, out: 
 }
 
 /// Trata os quadros de arquivo que chegaram de contatos.
-pub(crate) fn on_frames(shared: &std::sync::Arc<Shared>, rx: &mut Receiving, frames: Vec<([u8; 32], FileFrame)>) {
+/// Devolve as ofertas novas (contato, número): o laço as aceita sozinho.
+pub(crate) fn on_frames(shared: &std::sync::Arc<Shared>, rx: &mut Receiving, frames: Vec<([u8; 32], FileFrame)>) -> Vec<([u8; 32], u64)> {
+    let mut fresh = Vec::new();
     for (peer, frame) in frames {
         let id = frame.id();
         match frame {
@@ -125,7 +127,8 @@ pub(crate) fn on_frames(shared: &std::sync::Arc<Shared>, rx: &mut Receiving, fra
                 if t.add_in(peer, id, name.clone(), size) {
                     drop(t);
                     // Conta como mensagem nova: aparece na bolinha do contato.
-                    shared.chats.lock_unpoisoned().push_received(peer, id, format!("📎 quer enviar {name}"));
+                    shared.chats.lock_unpoisoned().push_received(peer, id, format!("📎 {name}"));
+                    fresh.push((peer, id));
                 }
             }
             FileFrame::Answer { accept, .. } => shared.transfers.lock_unpoisoned().answered(&peer, id, accept),
@@ -169,9 +172,10 @@ pub(crate) fn on_frames(shared: &std::sync::Arc<Shared>, rx: &mut Receiving, fra
             }
         }
     }
+    fresh
 }
 
-/// A pessoa respondeu a uma oferta. Aceitar cria o arquivo parcial em `~/Downloads/clam`.
+/// Resposta a uma oferta (o laço aceita as de contato sozinho; quem cancela é a pessoa). Aceitar cria o arquivo parcial em `~/Downloads/clam`.
 pub(crate) fn answer(shared: &std::sync::Arc<Shared>, dialer: &Dialer, out: &Sink, rx: &mut Receiving, peer: [u8; 32], id: u64, accept: bool) {
     let Some((name, size)) = shared.transfers.lock_unpoisoned().asked(&peer, id) else { return };
     let phase = if !accept {

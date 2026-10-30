@@ -32,6 +32,7 @@ opus-pure = "0.2.2"
 [target.'cfg(unix)'.dependencies]
 x11rb = { version = "0.14.0", optional = true }
 ashpd = { version = "0.13.13", default-features = false, features = ["tokio", "screencast"], optional = true }
+rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"], optional = true }
 rustix = { version = "1", default-features = false, features = ["std"], optional = true }
 
 [target.'cfg(windows)'.dependencies]
@@ -46,7 +47,7 @@ unsafe_code = "deny"
 undocumented_unsafe_blocks = "warn"
 
 [features]
-gui = ["net", "capture", "portal", "dep:eframe", "dep:keyring", "dep:nnnoiseless"]
+gui = ["net", "capture", "portal", "dep:eframe", "dep:rfd", "dep:keyring", "dep:nnnoiseless"]
 audio = ["dep:cpal", "dep:sonora"]
 net = ["dep:igd-next", "dep:libp2p", "dep:tokio", "dep:futures", "dep:snow", "dep:mainline"]
 video = ["net", "dep:openh264", "dep:openh264-sys2"]
