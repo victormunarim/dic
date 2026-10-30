@@ -44,8 +44,9 @@ fn main() -> eframe::Result {
         "Clam",
         opts,
         Box::new(|cc| {
-            theme::apply(&cc.egui_ctx);
             let form = Form::load();
+            theme::set_light(form.light);
+            theme::apply(&cc.egui_ctx);
             let shared = Arc::<engine::Shared>::default();
             shared.audio.set_prefs(form.audio);
             *clam::sync::LockExt::lock_unpoisoned(&shared.chats) = chats::ChatBook::load();

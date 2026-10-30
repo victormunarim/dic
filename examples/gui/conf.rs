@@ -123,6 +123,8 @@ pub(crate) struct Form {
     /// Chaves bloqueadas, em hex separadas por `;`: não voltam como contato sozinhas, por apresentação ou convite
     /// (veja `Node::block`). Só adicionar a chave de novo, de propósito, desbloqueia.
     pub(crate) blocked: String,
+    /// Tema claro ligado (o escuro é o padrão).
+    pub(crate) light: bool,
     /// Nitidez em vez de fluidez na transmissão da tela: metade dos quadros por segundo, cada um mais fino
     /// (veja `video::Priority`). Desligada (fluidez) de início.
     pub(crate) screen_sharp: bool,
@@ -547,6 +549,7 @@ impl Form {
             screen_private: get("no_screen_privacy") != "1",
             trusted: get("trusted"),
             blocked: get("blocked"),
+            light: get("light") == "1",
             screen_sharp: get("screen_sharp") == "1",
             screen_hardware: get("screen_hardware") == "1",
             // Ligado de início: a chave guarda o "não", então o arquivo antigo, sem ela, também aceita.
@@ -574,7 +577,7 @@ impl Form {
         let secret = self.secret_to_write(vault_set);
         let secret = secret.as_str();
         let text = format!(
-            "audio={}\nsecret={}\ncontacts={}\npeer={}\npublic_addr={}\nno_dht={}\ndht_circuit={}\nname={}\nintros={}\nno_anchor={}\nno_screen_privacy={}\nscreen_sharp={}\nscreen_hardware={}\nanchors={}\ninput_dev={}\noutput_dev={}\nno_opus={}\nno_auto_online={}\ntrusted={}\nblocked={}\n{}",
+            "audio={}\nsecret={}\ncontacts={}\npeer={}\npublic_addr={}\nno_dht={}\ndht_circuit={}\nname={}\nintros={}\nno_anchor={}\nno_screen_privacy={}\nscreen_sharp={}\nscreen_hardware={}\nanchors={}\ninput_dev={}\noutput_dev={}\nno_opus={}\nno_auto_online={}\ntrusted={}\nblocked={}\nlight={}\n{}",
             u8::from(self.use_audio),
             secret,
             self.contacts.trim().replace('\n', ";"),
@@ -595,6 +598,7 @@ impl Form {
             u8::from(!self.auto_online),
             self.trusted.trim(),
             self.blocked.trim(),
+            u8::from(self.light),
             self.audio.to_conf()
         );
         // Contém a chave secreta: só o dono lê.
@@ -881,6 +885,11 @@ mod tests {
         // Tirar o contato da lista tira a confiança, mesmo que a chave continue no texto.
         f.contacts = remove_contact(&f.contacts, 1);
         assert!(f.trusted_keys().is_empty());
+    }
+
+    #[test]
+    fn the_light_theme_is_off_on_first_run() {
+        assert!(!Form::first_run().light, "escuro é o padrão; o claro é escolha da pessoa");
     }
 
     #[test]

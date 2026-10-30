@@ -3,7 +3,7 @@
 use clam::sync::LockExt;
 use std::sync::atomic::Ordering;
 
-use eframe::egui::{self, Color32, Margin, RichText, vec2};
+use eframe::egui::{self, Margin, RichText, vec2};
 use clam::{rand_core::OsRng, x25519_dalek::StaticSecret};
 
 use crate::{conf::*, theme::*, ui::*};
@@ -18,7 +18,7 @@ impl App {
             }
             ui.add_space(4.0);
             if offline {
-                if big_button(ui, "Ficar online", GREEN).clicked() {
+                if big_button(ui, "Ficar online", pal().green).clicked() {
                     self.go_online(ctx);
                 }
             } else if ui.add_enabled(!in_call, egui::Button::new(RichText::new("Ficar offline").strong().size(17.0)).min_size(vec2(180.0, 46.0))).clicked()
@@ -30,7 +30,7 @@ impl App {
                 self.form.save();
             }
             if !self.error.is_empty() {
-                ui.colored_label(Color32::from_rgb(0xf2, 0x7b, 0x7e), &self.error);
+                ui.colored_label(pal().error, &self.error);
             }
             note(
                 ui,
@@ -79,9 +79,9 @@ impl App {
                         card(ui, "Bloqueados", "Não voltam à sua lista sozinhos, por apresentação ou convite. Adicionar o código de novo também desbloqueia.", |ui| {
                             for key in blocked {
                                 ui.horizontal(|ui| {
-                                    ui.label(RichText::new(&hex(&key)[..8]).color(TEXT));
+                                    ui.label(RichText::new(&hex(&key)[..8]).color(pal().text));
                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                        if icon_button(ui, true, "✕", "Desbloquear", TEXT).clicked() {
+                                        if icon_button(ui, true, "✕", "Desbloquear", pal().text).clicked() {
                                             self.set_block(key, false);
                                         }
                                     });

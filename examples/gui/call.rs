@@ -3,7 +3,7 @@
 use clam::sync::LockExt;
 use std::sync::atomic::Ordering;
 
-use eframe::egui::{self, Color32, CornerRadius, RichText};
+use eframe::egui::{self, CornerRadius, RichText};
 
 use crate::{conf::parse_contacts, engine::*, theme::*, ui::*};
 
@@ -13,7 +13,7 @@ impl App {
         card(ui, "Ligar para um código", "Cole o código de contato de alguém, ou o nome de um contato.", |ui| {
             let live = !offline && !busy;
             ui.add_enabled(live, field(&mut self.form.peer, "código de contato ou nome de um contato"));
-            if icon_button(ui, live, "📞", "Ligar", GREEN).clicked() {
+            if icon_button(ui, live, "📞", "Ligar", pal().green).clicked() {
                 match self.form.target() {
                     Ok(k) => {
                         self.form.save();
@@ -46,10 +46,10 @@ impl App {
         if let Some(who) = incoming {
             let name = member_name(&self.form.names(), &who);
             card(ui, "Chamada recebida", "", |ui| {
-                status_dot(ui, YELLOW, &format!("{name} está ligando para você"));
+                status_dot(ui, pal().yellow, &format!("{name} está ligando para você"));
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    if icon_button(ui, true, "📞", "Atender", GREEN).clicked() {
+                    if icon_button(ui, true, "📞", "Atender", pal().green).clicked() {
                         self.shared.answer.store(ANSWER_ACCEPT, Ordering::Relaxed);
                     }
                     if hangup_button(ui).on_hover_text("Recusar").clicked() {
@@ -62,9 +62,9 @@ impl App {
         let ringing = self.shared.ringing.lock_unpoisoned().is_some();
         card(ui, if ringing { "Chamando" } else { "Em chamada" }, "", |ui| {
             if ringing {
-                status_dot(ui, YELLOW, "Chamando… aguardando a pessoa atender");
+                status_dot(ui, pal().yellow, "Chamando… aguardando a pessoa atender");
             } else {
-                status_dot(ui, GREEN, "Conversando agora");
+                status_dot(ui, pal().green, "Conversando agora");
             }
             let link = self.shared.link.lock_unpoisoned().clone();
             if !link.is_empty() {
@@ -125,15 +125,15 @@ impl App {
         if sharing || wanted || !diag.is_empty() || !note_text.is_empty() {
             card(ui, "Sua transmissão", "O vídeo segue cifrado de ponta a ponta, em um circuito só dele.", |ui| {
                 if sharing {
-                    ui.colored_label(GREEN, RichText::new("● sua tela está sendo vista").strong());
+                    ui.colored_label(pal().green, RichText::new("● sua tela está sendo vista").strong());
                 } else if wanted {
                     note(ui, "ligando o circuito de vídeo...");
                 }
                 if !wanted && !sharing && !note_text.is_empty() {
-                    ui.colored_label(Color32::from_rgb(0xf2, 0x7b, 0x7e), note_text);
+                    ui.colored_label(pal().error, note_text);
                 }
                 if !diag.is_empty() {
-                    ui.label(RichText::new(diag).monospace().size(13.0).color(MUTED));
+                    ui.label(RichText::new(diag).monospace().size(13.0).color(pal().muted));
                 }
             });
         }

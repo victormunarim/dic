@@ -135,11 +135,11 @@ impl App {
     /// Texto e cor do estado da conexão.
     pub(crate) fn connection(&self, offline: bool, status: &str) -> (Color32, &'static str) {
         if offline {
-            (MUTED, "Offline")
+            (pal().muted, "Offline")
         } else if status.is_empty() {
-            (YELLOW, "Conectando...")
+            (pal().yellow, "Conectando...")
         } else {
-            (GREEN, "Online")
+            (pal().green, "Online")
         }
     }
 }
@@ -159,7 +159,7 @@ impl App {
             // A bolinha de estado também liga/desliga o "aparecer online" para os membros dos servidores.
             let hub = self.shared.servers.lock_unpoisoned().clone().filter(|_| !offline);
             let hidden = hub.as_ref().is_some_and(|h| !h.read(|s, _| s.visible()));
-            let me = theme::avatar(ui, &name, 40.0, Some(if hidden { DEEP } else { color }));
+            let me = theme::avatar(ui, &name, 40.0, Some(if hidden { pal().deep } else { color }));
             if !offline && status.is_empty() {
                 // Conectando: um arco gira em volta do avatar até o nó dar sinal de vida.
                 let t = ui.input(|i| i.time) as f32;
@@ -169,7 +169,7 @@ impl App {
                     let a = start + k as f32 * (std::f32::consts::PI * 1.2 / 16.0);
                     me.rect.center() + vec2(a.cos(), a.sin()) * radius
                 }).collect();
-                ui.painter().add(egui::Shape::line(arc, egui::Stroke::new(2.5_f32, YELLOW)));
+                ui.painter().add(egui::Shape::line(arc, egui::Stroke::new(2.5_f32, pal().yellow)));
                 ctx.request_repaint();
             }
             if let Some(hub) = &hub {
@@ -189,7 +189,7 @@ impl App {
             let can_toggle = offline || !in_call;
             if can_toggle && me.hovered() {
                 ui.painter().circle_filled(me.rect.center(), me.rect.width() / 2.0, Color32::from_black_alpha(150));
-                theme::power_icon(ui, me.rect, if offline { GREEN } else { RED });
+                theme::power_icon(ui, me.rect, if offline { pal().green } else { pal().red });
             }
             let tip = format!("{name}: {text}{}", if !can_toggle { "" } else if offline { "\nClique para ficar online" } else { "\nClique para ficar offline" });
             let me = me.on_hover_text(tip);
@@ -203,7 +203,7 @@ impl App {
             // Sair da sala e desligar a chamada 1:1 ficam na subseção acima deste painel.
             // Engrenagem e mudo ficam juntos na ponta direita da linha (a engrenagem por último, na borda).
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let gear = egui::Button::new(RichText::new("⚙").size(19.0).color(TEXT)).frame(false).min_size(vec2(34.0, 36.0));
+                let gear = egui::Button::new(RichText::new("⚙").size(19.0).color(pal().text)).frame(false).min_size(vec2(34.0, 36.0));
                 let gear = ui.add(gear).on_hover_text("Chamada, vídeo, áudio, configurações e atividade");
                 let calling_1to1 = in_call && !in_room;
                 egui::Popup::menu(&gear).show(|ui| {
@@ -221,7 +221,7 @@ impl App {
                     }
                 });
                 let muted = self.shared.audio.muted.load(Ordering::Relaxed);
-                let mic = egui::Button::new(RichText::new(if muted { "🔇" } else { "🎤" }).size(19.0).color(if muted { RED } else { TEXT })).frame(false).min_size(vec2(34.0, 36.0));
+                let mic = egui::Button::new(RichText::new(if muted { "🔇" } else { "🎤" }).size(19.0).color(if muted { pal().red } else { pal().text })).frame(false).min_size(vec2(34.0, 36.0));
                 if ui.add(mic).on_hover_text(if muted { "Você está no mudo: clique para voltar a falar" } else { "Silenciar o microfone" }).clicked() {
                     self.shared.audio.muted.store(!muted, Ordering::Relaxed);
                 }
@@ -308,7 +308,7 @@ impl eframe::App for App {
     /// Fundo da janela atrás dos painéis: com o padrão (preto), uma fresta de 1 px entre dois painéis, por
     /// arredondamento de escala fracionária (comum no Linux), aparecia como uma linha preta.
     fn clear_color(&self, _: &egui::Visuals) -> [f32; 4] {
-        BG.to_normalized_gamma_f32()
+        pal().bg.to_normalized_gamma_f32()
     }
 
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
@@ -352,7 +352,7 @@ impl eframe::App for App {
         self.server_rail(ctx, offline);
         self.rooms_panel(ctx, offline, calling, &status);
         self.members_panel(ctx, offline);
-        egui::CentralPanel::default().frame(egui::Frame::new().fill(BG).inner_margin(Margin::symmetric(36, 26))).show(ctx, |ui| {
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(pal().bg).inner_margin(Margin::symmetric(36, 26))).show(ctx, |ui| {
             let (title, subtitle) = self.title();
             page_header(ui, title, &subtitle);
             if self.tab == Tab::Log {

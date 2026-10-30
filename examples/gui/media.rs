@@ -88,7 +88,7 @@ impl App {
                             .desired_width(ui.available_width())
                             .desired_height(26.0)
                             .corner_radius(CornerRadius::same(6))
-                            .fill(if speaking { GREEN } else { BLURPLE })
+                            .fill(if speaking { pal().green } else { BLURPLE })
                             .text(if speaking { "voz" } else { "" }),
                     );
                     let x = meter.rect.left() + meter.rect.width() * voice_meter(p.gate_db);
@@ -100,7 +100,7 @@ impl App {
                         note(ui, "Fale e veja o medidor: a linha laranja deve ficar abaixo da sua voz e acima do ruído.");
                     }
                     if testing {
-                        if button(ui, true, "Parar o teste", RED).clicked() {
+                        if button(ui, true, "Parar o teste", pal().red).clicked() {
                             self.shared.mic_test.store(false, Ordering::Relaxed);
                         }
                     } else if button(ui, !in_call && !offline, "Testar o microfone", BLURPLE).clicked()

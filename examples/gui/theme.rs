@@ -1,34 +1,92 @@
-//! Aparência: neomorfismo (soft UI) escuro. Uma cor base só; o relevo vem de duas sombras opostas (uma clara
+//! Aparência: neomorfismo (soft UI), escuro ou claro. Uma cor base só; o relevo vem de duas sombras opostas (uma clara
 //! no canto superior esquerdo, uma escura no inferior direito). Três estados: elevado (`raised`), afundado
 //! (`sunken`) e plano. As telas não pintam sombra: usam `card`, `button`, `icon_button`, `raised_frame` e
 //! `sunken_frame` daqui, de modo que mudar o visual é mudar este arquivo.
 
 use eframe::egui::{self, Color32, CornerRadius, FontId, Margin, Pos2, Rect, RichText, Shadow, Shape, Stroke, TextStyle, Ui, vec2};
 
-/// Cor base: fundo da área de conteúdo e das superfícies elevadas (a mesma, é o que dá o efeito).
-pub(crate) const BG: Color32 = Color32::from_rgb(0x2b, 0x2e, 0x35);
-/// Barras laterais e cartões: o mesmo material do fundo; quem separa é o relevo.
-pub(crate) const PANEL: Color32 = BG;
-/// Superfície afundada: campos de texto, caixas de registro, painel do usuário.
-pub(crate) const DEEP: Color32 = Color32::from_rgb(0x24, 0x27, 0x2d);
-/// Item selecionado/ativo (afundado, um pouco mais claro que o fundo afundado).
-pub(crate) const SELECTED: Color32 = Color32::from_rgb(0x33, 0x37, 0x40);
-/// Sombra clara (luz vinda de cima à esquerda) e sombra escura (embaixo à direita).
-const LIGHT: Color32 = Color32::from_rgb(0x38, 0x3c, 0x45);
-const DARK: Color32 = Color32::from_rgb(0x1d, 0x1f, 0x24);
-/// Linha fina e discreta entre as seções da janela (trilho, salas, centro, membros).
-pub(crate) const DIVIDER: Color32 = Color32::from_rgb(0x4a, 0x4f, 0x5a);
-pub(crate) const TEXT: Color32 = Color32::from_rgb(0xdd, 0xe0, 0xe6);
-pub(crate) const MUTED: Color32 = Color32::from_rgb(0x9a, 0xa1, 0xad);
-/// O único acento: ação principal, estado ativo, aro de quem fala.
+/// O único acento: ação principal, estado ativo, aro de quem fala (igual nos dois temas).
 pub(crate) const BLURPLE: Color32 = Color32::from_rgb(0x6a, 0x77, 0xf5);
-/// Só para "ao vivo/ok".
-pub(crate) const GREEN: Color32 = Color32::from_rgb(0x2f, 0xb0, 0x68);
-/// Só para o destrutivo.
-pub(crate) const RED: Color32 = Color32::from_rgb(0xe0, 0x4a, 0x4f);
-pub(crate) const YELLOW: Color32 = Color32::from_rgb(0xf0, 0xb2, 0x32);
-/// Botão neutro: a própria base, elevada.
-pub(crate) const GREY_BUTTON: Color32 = BG;
+
+/// As cores que mudam entre o tema escuro e o claro. O resto (acento, raios) é igual nos dois.
+pub(crate) struct Palette {
+    /// Cor base: fundo da área de conteúdo, barras e superfícies elevadas (a mesma, é o que dá o efeito).
+    pub bg: Color32,
+    /// Superfície afundada: campos de texto, caixas de registro, painel do usuário.
+    pub deep: Color32,
+    /// Item selecionado/ativo.
+    pub selected: Color32,
+    /// Item sob o ponteiro.
+    pub hover: Color32,
+    /// Sombra clara (luz vinda de cima à esquerda) e sombra escura (embaixo à direita).
+    pub light: Color32,
+    pub dark: Color32,
+    /// Linha fina e discreta entre as seções da janela.
+    pub divider: Color32,
+    pub text: Color32,
+    pub muted: Color32,
+    /// Texto de destaque (títulos, nomes): o extremo de contraste do tema.
+    pub strong: Color32,
+    /// Só para "ao vivo/ok".
+    pub green: Color32,
+    /// Só para o destrutivo.
+    pub red: Color32,
+    pub yellow: Color32,
+    /// Texto de erro.
+    pub error: Color32,
+}
+
+const DARK_PALETTE: Palette = Palette {
+    bg: Color32::from_rgb(0x2b, 0x2e, 0x35),
+    deep: Color32::from_rgb(0x24, 0x27, 0x2d),
+    selected: Color32::from_rgb(0x33, 0x37, 0x40),
+    hover: Color32::from_rgb(0x35, 0x39, 0x42),
+    light: Color32::from_rgb(0x38, 0x3c, 0x45),
+    dark: Color32::from_rgb(0x1d, 0x1f, 0x24),
+    divider: Color32::from_rgb(0x4a, 0x4f, 0x5a),
+    text: Color32::from_rgb(0xdd, 0xe0, 0xe6),
+    muted: Color32::from_rgb(0x9a, 0xa1, 0xad),
+    strong: Color32::WHITE,
+    green: Color32::from_rgb(0x2f, 0xb0, 0x68),
+    red: Color32::from_rgb(0xe0, 0x4a, 0x4f),
+    yellow: Color32::from_rgb(0xf0, 0xb2, 0x32),
+    error: Color32::from_rgb(0xf2, 0x7b, 0x7e),
+};
+
+/// Tema claro: mesma lógica de relevo, com a luz branca e a sombra azulada; texto escuro (AA sobre a base).
+const LIGHT_PALETTE: Palette = Palette {
+    bg: Color32::from_rgb(0xe4, 0xe8, 0xee),
+    deep: Color32::from_rgb(0xd6, 0xdb, 0xe4),
+    selected: Color32::from_rgb(0xd9, 0xde, 0xe8),
+    hover: Color32::from_rgb(0xdc, 0xe1, 0xea),
+    light: Color32::from_rgb(0xff, 0xff, 0xff),
+    dark: Color32::from_rgb(0xb4, 0xbb, 0xc8),
+    divider: Color32::from_rgb(0xb0, 0xb7, 0xc4),
+    text: Color32::from_rgb(0x2a, 0x2e, 0x37),
+    muted: Color32::from_rgb(0x55, 0x5d, 0x6b),
+    strong: Color32::from_rgb(0x12, 0x14, 0x19),
+    green: Color32::from_rgb(0x15, 0x72, 0x3e),
+    red: Color32::from_rgb(0xc2, 0x34, 0x3a),
+    yellow: Color32::from_rgb(0x8f, 0x5f, 0x00),
+    error: Color32::from_rgb(0xb0, 0x24, 0x2a),
+};
+
+static LIGHT_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// A paleta do tema em uso.
+pub(crate) fn pal() -> &'static Palette {
+    if LIGHT_ON.load(std::sync::atomic::Ordering::Relaxed) { &LIGHT_PALETTE } else { &DARK_PALETTE }
+}
+
+/// Liga ou desliga o tema claro. Quem chama refaz o `apply` para o egui acompanhar.
+pub(crate) fn set_light(on: bool) {
+    LIGHT_ON.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// O tema claro está ligado?
+pub(crate) fn is_light() -> bool {
+    LIGHT_ON.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 /// Raios de canto, um por categoria.
 pub(crate) const R_CARD: u8 = 18;
@@ -38,8 +96,8 @@ const R_BUTTON: u8 = 12;
 fn shadows(depth: i8) -> (Shadow, Shadow) {
     let blur = (depth as u8).saturating_mul(2);
     (
-        Shadow { offset: [-depth, -depth], blur, spread: 0, color: LIGHT },
-        Shadow { offset: [depth, depth], blur, spread: 0, color: DARK },
+        Shadow { offset: [-depth, -depth], blur, spread: 0, color: pal().light },
+        Shadow { offset: [depth, depth], blur, spread: 0, color: pal().dark },
     )
 }
 
@@ -59,8 +117,8 @@ fn sunken_shapes(rect: Rect, radius: u8, fill: Color32) -> Vec<Shape> {
     let (l, t, rt, b) = (rect.left() + inset, rect.top() + inset, rect.right() - inset, rect.bottom() - inset);
     vec![
         Shape::rect_filled(rect, CornerRadius::same(radius), fill),
-        Shape::line(vec![Pos2::new(l, b - r), Pos2::new(l, t + r * 0.4), Pos2::new(l + r * 0.4, t), Pos2::new(rt - r, t)], Stroke::new(w, DARK)),
-        Shape::line(vec![Pos2::new(rt, t + r), Pos2::new(rt, b - r * 0.4), Pos2::new(rt - r * 0.4, b), Pos2::new(l + r, b)], Stroke::new(w, LIGHT)),
+        Shape::line(vec![Pos2::new(l, b - r), Pos2::new(l, t + r * 0.4), Pos2::new(l + r * 0.4, t), Pos2::new(rt - r, t)], Stroke::new(w, pal().dark)),
+        Shape::line(vec![Pos2::new(rt, t + r), Pos2::new(rt, b - r * 0.4), Pos2::new(rt - r * 0.4, b), Pos2::new(l + r, b)], Stroke::new(w, pal().light)),
     ]
 }
 
@@ -70,15 +128,15 @@ pub(crate) fn sunken(painter: &egui::Painter, rect: Rect, radius: u8, fill: Colo
 }
 
 pub(crate) fn apply(ctx: &egui::Context) {
-    let mut v = egui::Visuals::dark();
-    v.override_text_color = Some(TEXT);
-    v.panel_fill = BG;
-    v.window_fill = PANEL;
+    let mut v = if is_light() { egui::Visuals::light() } else { egui::Visuals::dark() };
+    v.override_text_color = Some(pal().text);
+    v.panel_fill = pal().bg;
+    v.window_fill = pal().bg;
     // Contorno fino nos menus e janelas: sem ele o menu se mistura ao fundo do painel.
-    v.window_stroke = Stroke::new(1.0_f32, MUTED);
-    v.extreme_bg_color = DEEP;
-    v.faint_bg_color = PANEL;
-    v.code_bg_color = DEEP;
+    v.window_stroke = Stroke::new(1.0_f32, pal().muted);
+    v.extreme_bg_color = pal().deep;
+    v.faint_bg_color = pal().bg;
+    v.code_bg_color = pal().deep;
     v.hyperlink_color = Color32::from_rgb(0x00, 0xa8, 0xfc);
     v.selection.bg_fill = BLURPLE;
     v.selection.stroke = Stroke::new(1.0_f32, Color32::WHITE);
@@ -88,25 +146,25 @@ pub(crate) fn apply(ctx: &egui::Context) {
     v.popup_shadow = shadows(4).1;
     let radius = CornerRadius::same(R_BUTTON);
     let w = &mut v.widgets;
-    w.noninteractive.bg_fill = PANEL;
-    w.noninteractive.bg_stroke = Stroke::new(1.0_f32, DIVIDER);
-    w.noninteractive.fg_stroke = Stroke::new(1.0_f32, TEXT);
+    w.noninteractive.bg_fill = pal().bg;
+    w.noninteractive.bg_stroke = Stroke::new(1.0_f32, pal().divider);
+    w.noninteractive.fg_stroke = Stroke::new(1.0_f32, pal().text);
     w.noninteractive.corner_radius = radius;
-    w.inactive.bg_fill = GREY_BUTTON;
-    w.inactive.weak_bg_fill = GREY_BUTTON;
-    w.inactive.fg_stroke = Stroke::new(1.0_f32, TEXT);
+    w.inactive.bg_fill = pal().bg;
+    w.inactive.weak_bg_fill = pal().bg;
+    w.inactive.fg_stroke = Stroke::new(1.0_f32, pal().text);
     w.inactive.corner_radius = radius;
-    w.hovered.bg_fill = Color32::from_rgb(0x35, 0x39, 0x42);
-    w.hovered.weak_bg_fill = Color32::from_rgb(0x35, 0x39, 0x42);
+    w.hovered.bg_fill = pal().hover;
+    w.hovered.weak_bg_fill = pal().hover;
     w.hovered.bg_stroke = Stroke::NONE;
-    w.hovered.fg_stroke = Stroke::new(1.5_f32, Color32::WHITE);
+    w.hovered.fg_stroke = Stroke::new(1.5_f32, pal().strong);
     w.hovered.corner_radius = radius;
     w.active.bg_fill = BLURPLE;
     w.active.weak_bg_fill = Color32::from_rgb(0x5a, 0x67, 0xe0);
     w.active.fg_stroke = Stroke::new(1.5_f32, Color32::WHITE);
     w.active.corner_radius = radius;
-    w.open.bg_fill = SELECTED;
-    w.open.weak_bg_fill = SELECTED;
+    w.open.bg_fill = pal().selected;
+    w.open.weak_bg_fill = pal().selected;
     w.open.corner_radius = radius;
     ctx.set_visuals(v);
 
@@ -135,7 +193,7 @@ pub(crate) fn apply(ctx: &egui::Context) {
 pub(crate) fn raised_frame<R>(ui: &mut Ui, radius: u8, margin: i8, add: impl FnOnce(&mut Ui) -> R) -> egui::InnerResponse<R> {
     let (light, dark) = shadows(5);
     let slot = ui.painter().add(Shape::Noop);
-    let out = egui::Frame::new().fill(PANEL).corner_radius(CornerRadius::same(radius)).inner_margin(Margin::same(margin)).shadow(dark).show(ui, add);
+    let out = egui::Frame::new().fill(pal().bg).corner_radius(CornerRadius::same(radius)).inner_margin(Margin::same(margin)).shadow(dark).show(ui, add);
     ui.painter().set(slot, light.as_shape(out.response.rect, radius));
     out
 }
@@ -145,7 +203,7 @@ pub(crate) fn raised_frame<R>(ui: &mut Ui, radius: u8, margin: i8, add: impl FnO
 pub(crate) fn sunken_frame<R>(ui: &mut Ui, radius: u8, margin: i8, add: impl FnOnce(&mut Ui) -> R) -> egui::InnerResponse<R> {
     let slot = ui.painter().add(Shape::Noop);
     let out = egui::Frame::new().inner_margin(Margin::same(margin)).show(ui, add);
-    ui.painter().set(slot, Shape::Vec(sunken_shapes(out.response.rect, radius, DEEP)));
+    ui.painter().set(slot, Shape::Vec(sunken_shapes(out.response.rect, radius, pal().deep)));
     out
 }
 
@@ -154,9 +212,9 @@ pub(crate) fn card(ui: &mut Ui, title: &str, subtitle: &str, add: impl FnOnce(&m
     ui.add_space(4.0);
     raised_frame(ui, R_CARD, 22, |ui| {
         ui.set_width(ui.available_width());
-        ui.label(RichText::new(title).strong().size(18.0).color(Color32::WHITE));
+        ui.label(RichText::new(title).strong().size(18.0).color(pal().strong));
         if !subtitle.is_empty() {
-            ui.label(RichText::new(subtitle).color(MUTED));
+            ui.label(RichText::new(subtitle).color(pal().muted));
         }
         ui.add_space(6.0);
         add(ui);
@@ -166,8 +224,8 @@ pub(crate) fn card(ui: &mut Ui, title: &str, subtitle: &str, add: impl FnOnce(&m
 
 /// Cabeçalho da página: título grande e uma linha de explicação.
 pub(crate) fn page_header(ui: &mut Ui, title: &str, subtitle: &str) {
-    ui.label(RichText::new(title).heading().strong().color(Color32::WHITE));
-    ui.label(RichText::new(subtitle).color(MUTED));
+    ui.label(RichText::new(title).heading().strong().color(pal().strong));
+    ui.label(RichText::new(subtitle).color(pal().muted));
     ui.add_space(14.0);
 }
 
@@ -188,7 +246,7 @@ fn soft_button(ui: &mut Ui, enabled: bool, text: RichText, fill: Color32, min: e
         } else {
             raised(painter, rect, R_BUTTON, surface, 4);
         }
-        let color = if enabled { galley.job.sections.first().map_or(Color32::WHITE, |s| s.format.color) } else { MUTED };
+        let color = if enabled { galley.job.sections.first().map_or(Color32::WHITE, |s| s.format.color) } else { pal().muted };
         let at = egui::Align2::CENTER_CENTER.align_size_within_rect(galley.size(), rect).min + if pressed { vec2(0.0, 1.0) } else { egui::Vec2::ZERO };
         painter.galley(at, galley, color);
     }
@@ -211,7 +269,7 @@ pub(crate) fn icon_button(ui: &mut Ui, enabled: bool, icon: &str, tip: &str, fil
 }
 
 /// Caixa de marcar com a caixinha visível: no tema neomórfico o `checkbox` padrão some no fundo (mesma cor
-/// base, sem contorno). Aqui a caixinha fica afundada (`DEEP`) e com contorno `MUTED`.
+/// base, sem contorno). Aqui a caixinha fica afundada (`pal().deep`) e com contorno `pal().muted`.
 pub(crate) trait CheckExt {
     fn check(&mut self, checked: &mut bool, text: impl Into<egui::WidgetText>) -> egui::Response;
 }
@@ -220,10 +278,10 @@ impl CheckExt for egui::Ui {
     fn check(&mut self, checked: &mut bool, text: impl Into<egui::WidgetText>) -> egui::Response {
         self.scope(|ui| {
             let w = &mut ui.visuals_mut().widgets;
-            w.inactive.bg_fill = DEEP;
-            w.inactive.bg_stroke = Stroke::new(1.5_f32, MUTED);
-            w.hovered.bg_fill = DEEP;
-            w.hovered.bg_stroke = Stroke::new(1.5_f32, TEXT);
+            w.inactive.bg_fill = pal().deep;
+            w.inactive.bg_stroke = Stroke::new(1.5_f32, pal().muted);
+            w.hovered.bg_fill = pal().deep;
+            w.hovered.bg_stroke = Stroke::new(1.5_f32, pal().text);
             ui.checkbox(checked, text)
         })
         .inner
@@ -245,14 +303,14 @@ pub(crate) fn draw_plus(painter: &egui::Painter, center: Pos2, half: f32, color:
 /// Botão só com o sinal de mais, sem moldura. A dica diz o que ele cria.
 pub(crate) fn plus_button(ui: &mut Ui, tip: &str) -> egui::Response {
     let (rect, reply) = ui.allocate_exact_size(vec2(34.0, 34.0), egui::Sense::click());
-    draw_plus(ui.painter(), rect.center(), 8.0, if reply.hovered() { Color32::WHITE } else { TEXT });
+    draw_plus(ui.painter(), rect.center(), 8.0, if reply.hovered() { pal().strong } else { pal().text });
     reply.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// Botão só com um X, sem moldura (fechar). Desenhado: a fonte pode não ter o glifo "✕".
 pub(crate) fn close_button(ui: &mut Ui, tip: &str) -> egui::Response {
     let (rect, reply) = ui.allocate_exact_size(vec2(28.0, 28.0), egui::Sense::click());
-    let ink = Stroke::new(2.0_f32, if reply.hovered() { Color32::WHITE } else { TEXT });
+    let ink = Stroke::new(2.0_f32, if reply.hovered() { pal().strong } else { pal().text });
     let (c, h) = (rect.center(), 6.0);
     let p = ui.painter();
     p.line_segment([c + vec2(-h, -h), c + vec2(h, h)], ink);
@@ -264,7 +322,7 @@ pub(crate) fn close_button(ui: &mut Ui, tip: &str) -> egui::Response {
 /// abre o menu com `egui::Popup::menu(&resposta)`.
 pub(crate) fn dots_button(ui: &mut Ui) -> egui::Response {
     let (rect, reply) = ui.allocate_exact_size(vec2(28.0, 34.0), egui::Sense::click());
-    let ink = if reply.hovered() { Color32::WHITE } else { MUTED };
+    let ink = if reply.hovered() { pal().strong } else { pal().muted };
     for dy in [-6.0, 0.0, 6.0] {
         ui.painter().circle_filled(rect.center() + vec2(0.0, dy), 2.0, ink);
     }
@@ -277,13 +335,13 @@ pub(crate) fn shield_button(ui: &mut Ui, on: bool) -> egui::Response {
     let c = rect.center();
     let pts = [vec2(-7.0, -8.0), vec2(7.0, -8.0), vec2(7.0, 1.0), vec2(0.0, 9.0), vec2(-7.0, 1.0)].map(|d| c + d).to_vec();
     if on {
-        ui.painter().add(egui::Shape::convex_polygon(pts, GREEN, Stroke::NONE));
+        ui.painter().add(egui::Shape::convex_polygon(pts, pal().green, Stroke::NONE));
         // Visto no meio: o estado ligado não depende só da cor.
-        let ink = Stroke::new(1.8_f32, DEEP);
+        let ink = Stroke::new(1.8_f32, pal().deep);
         ui.painter().line_segment([c + vec2(-3.5, 0.0), c + vec2(-1.0, 3.0)], ink);
         ui.painter().line_segment([c + vec2(-1.0, 3.0), c + vec2(3.5, -3.0)], ink);
     } else {
-        let ink = if reply.hovered() { Color32::WHITE } else { MUTED };
+        let ink = if reply.hovered() { pal().strong } else { pal().muted };
         ui.painter().add(egui::Shape::convex_polygon(pts, Color32::TRANSPARENT, Stroke::new(1.6_f32, ink)));
     }
     reply.on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -293,7 +351,7 @@ pub(crate) fn shield_button(ui: &mut Ui, on: bool) -> egui::Response {
 pub(crate) fn trash_button(ui: &mut Ui) -> egui::Response {
     let (rect, reply) = ui.allocate_exact_size(vec2(28.0, 34.0), egui::Sense::click());
     let c = rect.center();
-    let ink = Stroke::new(1.6_f32, if reply.hovered() { RED } else { MUTED });
+    let ink = Stroke::new(1.6_f32, if reply.hovered() { pal().red } else { pal().muted });
     let p = ui.painter();
     p.line_segment([c + vec2(-7.0, -5.0), c + vec2(7.0, -5.0)], ink);
     p.line_segment([c + vec2(-2.5, -5.0), c + vec2(-2.5, -8.0)], ink);
@@ -309,7 +367,7 @@ pub(crate) fn trash_button(ui: &mut Ui) -> egui::Response {
 pub(crate) fn exit_button(ui: &mut Ui) -> egui::Response {
     let (rect, reply) = ui.allocate_exact_size(vec2(28.0, 34.0), egui::Sense::click());
     let c = rect.center();
-    let ink = Stroke::new(1.6_f32, if reply.hovered() { RED } else { MUTED });
+    let ink = Stroke::new(1.6_f32, if reply.hovered() { pal().red } else { pal().muted });
     let p = ui.painter();
     // Batente aberto à direita, para a seta sair por ali.
     p.line_segment([c + vec2(1.0, -8.0), c + vec2(-6.0, -8.0)], ink);
@@ -326,7 +384,7 @@ pub(crate) fn exit_button(ui: &mut Ui) -> egui::Response {
 pub(crate) fn hangup_button(ui: &mut Ui) -> egui::Response {
     let (rect, reply) = ui.allocate_exact_size(vec2(32.0, 34.0), egui::Sense::click());
     let c = rect.center();
-    let ink = Stroke::new(1.8_f32, if reply.hovered() { RED } else { MUTED });
+    let ink = Stroke::new(1.8_f32, if reply.hovered() { pal().red } else { pal().muted });
     let p = ui.painter();
     p.circle_stroke(c, 9.0, ink);
     p.line_segment([c + vec2(-3.5, -3.5), c + vec2(3.5, 3.5)], ink);
@@ -353,13 +411,13 @@ pub(crate) fn screen_icon(ui: &mut Ui, color: Color32, filled: bool, sense: egui
 /// Monitor desenhado (compartilhar a tela): vermelho e preenchido enquanto transmite, cinza em repouso.
 pub(crate) fn screen_button(ui: &mut Ui, sharing: bool) -> egui::Response {
     let hovered = ui.rect_contains_pointer(egui::Rect::from_min_size(ui.cursor().min, vec2(32.0, 34.0)));
-    let color = if sharing { RED } else if hovered { Color32::WHITE } else { MUTED };
+    let color = if sharing { pal().red } else if hovered { pal().strong } else { pal().muted };
     screen_icon(ui, color, sharing, egui::Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// Uma explicação em letra menor e apagada.
 pub(crate) fn note(ui: &mut Ui, text: impl Into<String>) {
-    ui.label(RichText::new(text.into()).size(14.0).color(MUTED));
+    ui.label(RichText::new(text.into()).size(14.0).color(pal().muted));
 }
 
 /// Cor estável de um nome, para o avatar.
@@ -385,7 +443,7 @@ pub(crate) fn avatar(ui: &mut Ui, name: &str, size: f32, dot: Option<Color32>) -
     if let Some(color) = dot {
         let r = size * 0.17;
         let at = rect.right_bottom() - vec2(r * 0.9, r * 0.9);
-        p.circle_filled(at, r + 2.5, PANEL);
+        p.circle_filled(at, r + 2.5, pal().bg);
         p.circle_filled(at, r, color);
     }
     reply
@@ -411,7 +469,7 @@ pub(crate) fn status_dot(ui: &mut Ui, color: Color32, text: &str) {
     ui.horizontal(|ui| {
         let (rect, _) = ui.allocate_exact_size(vec2(12.0, 12.0), egui::Sense::hover());
         ui.painter().circle_filled(rect.center(), 6.0, color);
-        ui.label(RichText::new(text).strong().size(18.0).color(Color32::WHITE));
+        ui.label(RichText::new(text).strong().size(18.0).color(pal().strong));
     });
 }
 
@@ -428,4 +486,72 @@ pub(crate) fn power_icon(ui: &Ui, rect: egui::Rect, color: Color32) {
         .collect();
     ui.painter().add(egui::Shape::line(arc, stroke));
     ui.painter().line_segment([c - vec2(0.0, r * 1.25), c - vec2(0.0, r * 0.1)], stroke);
+}
+
+/// Sol (ou lua, no tema claro) desenhado à mão: o botão que troca o tema. O raio do disco e os raios de luz
+/// seguem a largura de `rect`.
+pub(crate) fn theme_icon(painter: &egui::Painter, rect: Rect, light: bool, color: Color32) {
+    let (c, u) = (rect.center(), rect.width());
+    if light {
+        // Lua crescente: disco cheio com outro disco da cor do fundo deslocado por cima.
+        painter.circle_filled(c, u * 0.2, color);
+        painter.circle_filled(c + vec2(u * 0.09, -u * 0.07), u * 0.17, pal().bg);
+        return;
+    }
+    painter.circle_filled(c, u * 0.14, color);
+    let stroke = Stroke::new(u * 0.045, color);
+    for i in 0..8 {
+        let a = (i as f32 * 45.0).to_radians();
+        let d = vec2(a.cos(), a.sin());
+        painter.line_segment([c + d * (u * 0.22), c + d * (u * 0.32)], stroke);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn luminance(c: Color32) -> f32 {
+        let lin = |v: u8| {
+            let v = f32::from(v) / 255.0;
+            if v <= 0.03928 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+        };
+        0.2126 * lin(c.r()) + 0.7152 * lin(c.g()) + 0.0722 * lin(c.b())
+    }
+
+    fn contrast(a: Color32, b: Color32) -> f32 {
+        let (x, y) = (luminance(a), luminance(b));
+        (x.max(y) + 0.05) / (x.min(y) + 0.05)
+    }
+
+    #[test]
+    fn both_themes_keep_aa_contrast_for_text_on_the_base() {
+        for (name, p) in [("escuro", &DARK_PALETTE), ("claro", &LIGHT_PALETTE)] {
+            for (what, c) in [("text", p.text), ("muted", p.muted), ("strong", p.strong), ("error", p.error)] {
+                for (on, bg) in [("bg", p.bg), ("deep", p.deep)] {
+                    let r = contrast(c, bg);
+                    assert!(r >= 4.5, "tema {name}: {what} sobre {on} tem contraste {r:.2} (< 4,5)");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn status_colors_are_visible_on_the_base_in_both_themes() {
+        // Cores de estado são ícones e preenchimentos, não texto: AA para componentes (3:1).
+        for p in [&DARK_PALETTE, &LIGHT_PALETTE] {
+            for c in [p.green, p.red, p.yellow] {
+                assert!(contrast(c, p.bg) >= 3.0, "{:?} sobre a base", c);
+            }
+        }
+    }
+
+    #[test]
+    fn light_switch_changes_the_palette() {
+        set_light(true);
+        let light = pal().bg;
+        set_light(false);
+        assert_ne!(light, pal().bg);
+        assert!(!is_light());
+    }
 }

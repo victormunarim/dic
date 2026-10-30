@@ -65,10 +65,10 @@ impl App {
             None => self.server_add(ui, &hub),
         }
         if !self.srv.info.is_empty() {
-            ui.colored_label(GREEN, &self.srv.info);
+            ui.colored_label(pal().green, &self.srv.info);
         }
         if !self.srv.msg.is_empty() {
-            ui.colored_label(Color32::from_rgb(0xf2, 0x7b, 0x7e), &self.srv.msg);
+            ui.colored_label(pal().error, &self.srv.msg);
         }
     }
 
@@ -82,26 +82,32 @@ impl App {
         }
         let here = self.tab == Tab::Servers;
         egui::SidePanel::left("trilho")
-            // Linha cinza discreta (`DIVIDER`, via `noninteractive.bg_stroke`) entre as seções.
+            // Linha cinza discreta (`pal().divider`, via `noninteractive.bg_stroke`) entre as seções.
             .show_separator_line(true)
             .exact_width(76.0)
             .resizable(false)
-            .frame(egui::Frame::new().fill(BG).inner_margin(Margin::symmetric(12, 14)))
+            .frame(egui::Frame::new().fill(pal().bg).inner_margin(Margin::symmetric(12, 14)))
             .show(ctx, |ui| {
                 ui.spacing_mut().item_spacing.y = 14.0;
-                egui::ScrollArea::vertical().scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).auto_shrink([false, false]).show(ui, |ui| {
+                // O botão do tema fica preso no fim da janela; a rolagem dos servidores usa o que sobra.
+                let mut toggle = false;
+                ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+                    toggle = theme_toggle(ui).clicked();
+                    ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                        ui.spacing_mut().item_spacing.y = 14.0;
+                        egui::ScrollArea::vertical().scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).auto_shrink([false, false]).show(ui, |ui| {
                     let on = self.tab == Tab::Contacts;
-                    let people = server_icon(ui, "👤", on.then_some(BLURPLE), Color32::WHITE);
-                    count_badge(ui.painter(), people.rect, self.shared.chats.lock_unpoisoned().unread_total(), BG);
+                    let people = server_icon(ui, "👤", on.then_some(BLURPLE), if on { Color32::WHITE } else { pal().strong });
+                    count_badge(ui.painter(), people.rect, self.shared.chats.lock_unpoisoned().unread_total(), pal().bg);
                     if people.on_hover_text("Contatos").clicked() {
                         self.tab = Tab::Contacts;
                     }
                     ui.separator();
                     for v in &views {
-                        // Qualquer tela que não seja Contatos mantém a coluna de salas no servidor: o ícone segue marcado.
+                        // Fora de Contatos o ícone do servidor escolhido segue marcado.
                         let on = self.tab != Tab::Contacts && self.srv.sel == Some(v.id);
                         let initial = v.name.chars().next().map_or("?".to_string(), |c| c.to_uppercase().to_string());
-                        let reply = server_icon(ui, &initial, on.then_some(BLURPLE), Color32::WHITE);
+                        let reply = server_icon(ui, &initial, on.then_some(BLURPLE), if on { Color32::WHITE } else { pal().strong });
                         if reply.on_hover_text(&v.name).clicked() {
                             self.tab = Tab::Servers;
                             self.srv.sel = Some(v.id);
@@ -111,12 +117,20 @@ impl App {
                         }
                     }
                     let on = here && self.srv.sel.is_none();
-                    let plus = server_icon(ui, "+", on.then_some(GREEN), if on { Color32::WHITE } else { GREEN });
+                    let plus = server_icon(ui, "+", on.then_some(pal().green), if on { Color32::WHITE } else { pal().green });
                     if plus.on_hover_text("Criar um servidor ou entrar com um convite").clicked() {
                         self.tab = Tab::Servers;
                         self.srv.sel = None;
                     }
+                        });
+                    });
                 });
+                if toggle {
+                    self.form.light = !self.form.light;
+                    set_light(self.form.light);
+                    apply(ctx);
+                    self.form.save();
+                }
             });
     }
 
@@ -133,7 +147,7 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(&p.name).strong());
                     ui.label(format!("de {}", member_name(&contacts, &p.from)));
-                    if button(ui, self.srv.join_ok, "Aceitar", GREEN).clicked() {
+                    if button(ui, self.srv.join_ok, "Aceitar", pal().green).clicked() {
                         match hub.try_run(|s, now| s.accept(&p.text, now)) {
                             Ok(id) => {
                                 self.srv.sel = Some(id);
@@ -142,7 +156,7 @@ impl App {
                             Err(e) => self.srv.msg = e.to_string(),
                         }
                     }
-                    if button(ui, true, "Recusar", PANEL).clicked() {
+                    if button(ui, true, "Recusar", pal().bg).clicked() {
                         hub.run(|s, _| {
                             s.decline_invite(&p.server);
                             Output::default()
@@ -156,7 +170,7 @@ impl App {
     fn server_add(&mut self, ui: &mut egui::Ui, hub: &clam::server::net::ServerHub) {
         card(ui, "Criar um servidor", "Você vira o dono. Convide depois quem estiver nos seus contatos.", |ui| {
             ui.add(field(&mut self.srv.new_server, "Nome do servidor"));
-            if button(ui, !self.srv.new_server.trim().is_empty(), "Criar", GREEN).clicked() {
+            if button(ui, !self.srv.new_server.trim().is_empty(), "Criar", pal().green).clicked() {
                 let name = self.srv.new_server.trim().to_string();
                 match hub.try_run(|s, now| s.create(&name, now)) {
                     Ok(id) => {
@@ -219,7 +233,7 @@ impl App {
             .show_separator_line(true)
             .exact_width(340.0)
             .resizable(false)
-            .frame(egui::Frame::new().fill(BG).inner_margin(Margin::symmetric(14, 26)))
+            .frame(egui::Frame::new().fill(pal().bg).inner_margin(Margin::symmetric(14, 26)))
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                     self.members_card(ui, &hub, &v);
@@ -237,13 +251,13 @@ impl App {
             });
             return;
         };
-        ui.label(RichText::new(format!("🔊  {}", room.name)).strong().size(18.0).color(Color32::WHITE));
+        ui.label(RichText::new(format!("🔊  {}", room.name)).strong().size(18.0).color(pal().strong));
         self.chat_box(ui, hub, v, room);
     }
 
     /// Menu aberto pelo ícone de sair do servidor: um único item vermelho, que serve de confirmação.
     fn server_menu(&mut self, ui: &mut egui::Ui, hub: &clam::server::net::ServerHub, v: &ServerView) {
-        if ui.button(RichText::new("Confirmar saída").color(RED)).clicked() {
+        if ui.button(RichText::new("Confirmar saída").color(pal().red)).clicked() {
             if let Err(e) = hub.try_act(|s, now| s.leave(&v.id, now)) {
                 self.srv.msg = e.to_string();
             }
@@ -274,7 +288,7 @@ impl App {
             .show_separator_line(true)
             .exact_width(300.0)
             .resizable(false)
-            .frame(egui::Frame::new().fill(BG).inner_margin(Margin::symmetric(12, 14)))
+            .frame(egui::Frame::new().fill(pal().bg).inner_margin(Margin::symmetric(12, 14)))
             .show(ctx, |ui| {
                 ui.spacing_mut().item_spacing.y = 6.0;
                 // O perfil ocupa uma altura fixa no pé; a lista de salas rola no espaço que sobra.
@@ -288,8 +302,8 @@ impl App {
                         ui.horizontal(|ui| {
                             ui.vertical(|ui| {
                                 ui.spacing_mut().item_spacing.y = 2.0;
-                                ui.label(RichText::new(&v.name).strong().size(17.0).color(Color32::WHITE));
-                                ui.label(RichText::new(format!("{} online", v.members.iter().filter(|m| m.online).count())).size(13.0).color(MUTED));
+                                ui.label(RichText::new(&v.name).strong().size(17.0).color(pal().strong));
+                                ui.label(RichText::new(format!("{} online", v.members.iter().filter(|m| m.online).count())).size(13.0).color(pal().muted));
                             });
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 let exit = exit_button(ui).on_hover_text("Sair do servidor");
@@ -342,8 +356,8 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
                         ui.spacing_mut().item_spacing.y = 2.0;
-                        ui.label(RichText::new("Contatos").strong().size(17.0).color(Color32::WHITE));
-                        ui.label(RichText::new(match count { 0 => "ninguém ainda".to_string(), 1 => "1 pessoa".to_string(), n => format!("{n} pessoas") }).size(13.0).color(MUTED));
+                        ui.label(RichText::new("Contatos").strong().size(17.0).color(pal().strong));
+                        ui.label(RichText::new(match count { 0 => "ninguém ainda".to_string(), 1 => "1 pessoa".to_string(), n => format!("{n} pessoas") }).size(13.0).color(pal().muted));
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let plus = plus_button(ui, "Novo contato");
@@ -370,11 +384,11 @@ impl App {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 10.0;
                 ui.add_space(6.0);
-                ui.label(RichText::new(glyph).size(24.0).color(GREEN));
+                ui.label(RichText::new(glyph).size(24.0).color(pal().green));
                 let name = ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 2.0;
-                    ui.label(RichText::new(title).strong().size(17.0).color(GREEN));
-                    ui.label(RichText::new(sub).size(13.0).color(MUTED));
+                    ui.label(RichText::new(title).strong().size(17.0).color(pal().green));
+                    ui.label(RichText::new(sub).size(13.0).color(pal().muted));
                 });
                 if name.response.interact(egui::Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                     out = Bar::Open;
@@ -387,7 +401,7 @@ impl App {
                     }
                     let tip = if sharing { "Parar de compartilhar a tela" } else { "Compartilhar a minha tela" };
                     // Chamando ainda não há com quem dividir a tela.
-                    if ring == Ring::In && icon_button(ui, true, "📞", "Atender", GREEN).clicked() {
+                    if ring == Ring::In && icon_button(ui, true, "📞", "Atender", pal().green).clicked() {
                         out = Bar::Accept;
                     }
                     if ring == Ring::No && screen_button(ui, sharing).on_hover_text(tip).clicked() {
@@ -409,9 +423,9 @@ impl App {
             raised_frame(ui, 12, 8, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
-                let title = RichText::new(format!("🔊  {}", room.name)).strong().color(if here { Color32::WHITE } else { TEXT });
+                let title = RichText::new(format!("🔊  {}", room.name)).strong().color(if here { pal().strong } else { pal().text });
                 let width = ui.available_width() - if manages { 34.0 } else { 0.0 };
-                let entry = egui::Button::new((title, egui::Atom::grow())).fill(if here { SELECTED } else { Color32::TRANSPARENT }).min_size(vec2(width, 32.0));
+                let entry = egui::Button::new((title, egui::Atom::grow())).fill(if here { pal().selected } else { Color32::TRANSPARENT }).min_size(vec2(width, 32.0));
                 let reply = ui.add_enabled(blocked.is_none(), entry).on_hover_text("Entrar na sala").on_disabled_hover_text(blocked.unwrap_or_default());
                 if reply.clicked() && !here {
                     self.send(Cmd::JoinRoom(v.id, room.id));
@@ -426,7 +440,7 @@ impl App {
                     } else {
                         // Apagar sempre pede certeza: o item vermelho do menu é a confirmação.
                         egui::Popup::menu(&trash).show(|ui| {
-                            if ui.button(RichText::new("Confirmar exclusão").color(RED)).clicked() {
+                            if ui.button(RichText::new("Confirmar exclusão").color(pal().red)).clicked() {
                                 if let Err(e) = hub.try_act(|s, now| s.delete_room(&v.id, room.id, now)) {
                                     self.srv.msg = e.to_string();
                                 }
@@ -444,8 +458,8 @@ impl App {
                     ui.spacing_mut().item_spacing.x = 8.0;
                     ui.add_space(26.0);
                     let who = if m.name.is_empty() { member_name(&contacts, &m.key) } else { m.name.clone() };
-                    avatar(ui, &who, 22.0, speaking.then_some(GREEN));
-                    ui.label(RichText::new(who).size(14.0).color(if speaking { GREEN } else { MUTED }));
+                    avatar(ui, &who, 22.0, speaking.then_some(pal().green));
+                    ui.label(RichText::new(who).size(14.0).color(if speaking { pal().green } else { pal().muted }));
                     // Quem transmite mostra o mesmo monitor do botão de compartilhar; na sala em que estou, clicar assiste.
                     if m.sharing {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -453,11 +467,11 @@ impl App {
                             ui.add_space(14.0);
                             let on = live.watching.contains(&m.key);
                             if here && !m.is_me {
-                                if screen_icon(ui, GREEN, on, egui::Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(if on { "Parar de assistir" } else { "Assistir à tela" }).clicked() {
+                                if screen_icon(ui, pal().green, on, egui::Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(if on { "Parar de assistir" } else { "Assistir à tela" }).clicked() {
                                     action = Some((m.key, !on));
                                 }
                             } else {
-                                screen_icon(ui, GREEN, false, egui::Sense::hover()).on_hover_text("transmitindo a tela");
+                                screen_icon(ui, pal().green, false, egui::Sense::hover()).on_hover_text("transmitindo a tela");
                             }
                         });
                     }
@@ -511,8 +525,8 @@ impl App {
             }
         } else {
             let (rect, ghost) = ui.allocate_exact_size(vec2(ui.available_width(), 52.0), egui::Sense::click());
-            raised(ui.painter(), rect, 12, BG, 3);
-            draw_plus(ui.painter(), rect.center(), 8.0, if ghost.hovered() { TEXT } else { MUTED.gamma_multiply(0.6) });
+            raised(ui.painter(), rect, 12, pal().bg, 3);
+            draw_plus(ui.painter(), rect.center(), 8.0, if ghost.hovered() { pal().text } else { pal().muted.gamma_multiply(0.6) });
             if ghost.on_hover_text("Nova sala").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                 self.srv.adding_room = true;
             }
@@ -532,7 +546,7 @@ impl App {
                 if ui.button("🔍").on_hover_text("Tela cheia (Esc ou o X para sair)").clicked() {
                     self.zoom = Some(who);
                 }
-                if ui.button(RichText::new("Parar de assistir").color(RED)).clicked() {
+                if ui.button(RichText::new("Parar de assistir").color(pal().red)).clicked() {
                     crate::engine::follow(&self.shared, who, false);
                 }
             });
@@ -553,13 +567,13 @@ impl App {
                 let diag = self.shared.screen.diagnostics();
                 card(ui, "Telas da sala", "Cada espectador abre um circuito de vídeo próprio, cifrado, direto com quem transmite (até 3 por transmissão).", |ui| {
                     if wanted {
-                        ui.colored_label(GREEN, if sharing { "● sua tela está sendo vista" } else { "Sua tela está disponível: quem está na sala vê o botão Assistir ao lado do seu nome." });
+                        ui.colored_label(pal().green, if sharing { "● sua tela está sendo vista" } else { "Sua tela está disponível: quem está na sala vê o botão Assistir ao lado do seu nome." });
                     }
                     if !wanted && !note_text.is_empty() {
-                        ui.colored_label(Color32::from_rgb(0xf2, 0x7b, 0x7e), note_text);
+                        ui.colored_label(pal().error, note_text);
                     }
                     if !diag.is_empty() {
-                        ui.label(RichText::new(diag).monospace().size(13.0).color(MUTED));
+                        ui.label(RichText::new(diag).monospace().size(13.0).color(pal().muted));
                     }
                     let mut order: Vec<_> = self.screen_tex.iter().collect();
                     order.sort_by_key(|(k, _)| **k);
@@ -586,12 +600,12 @@ impl App {
             for m in &v.members {
                 ui.horizontal(|ui| {
                     let who = name_of(&m.key, &m.name);
-                    avatar(ui, &who, 34.0, Some(if m.online { GREEN } else { GREY_BUTTON }));
+                    avatar(ui, &who, 34.0, Some(if m.online { pal().green } else { pal().bg }));
                     ui.vertical(|ui| {
                         ui.spacing_mut().item_spacing.y = 0.0;
-                        ui.label(RichText::new(if m.is_me { format!("{who} (você)") } else { who }).strong().color(if m.online { Color32::WHITE } else { MUTED }));
+                        ui.label(RichText::new(if m.is_me { format!("{who} (você)") } else { who }).strong().color(if m.online { pal().strong } else { pal().muted }));
                         let place = m.room.and_then(|r| v.rooms.iter().find(|x| x.id == r)).map_or(String::new(), |r| format!(" · na sala {}", r.name));
-                        ui.label(RichText::new(format!("{}{}{place}", role_name(m.role), if m.online { "" } else { " · offline" })).size(13.0).color(MUTED));
+                        ui.label(RichText::new(format!("{}{}{place}", role_name(m.role), if m.online { "" } else { " · offline" })).size(13.0).color(pal().muted));
                     });
                     if manages && !m.is_me && m.role != Role::Owner {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -606,7 +620,7 @@ impl App {
                                         ui.close();
                                     }
                                 }
-                                if ui.button(RichText::new("Remover").color(RED)).on_hover_text("Remover do servidor").clicked() {
+                                if ui.button(RichText::new("Remover").color(pal().red)).on_hover_text("Remover do servidor").clicked() {
                                     if let Err(e) = hub.try_act(|s, now| s.remove_member(&v.id, m.id, now)) {
                                         self.srv.msg = e.to_string();
                                     }
@@ -629,8 +643,8 @@ impl App {
         // Como o cartão "nova sala": um cartão apagado com + que, ao clicar, vira o formulário no próprio lugar.
         if !self.srv.inviting {
             let (rect, ghost) = ui.allocate_exact_size(vec2(ui.available_width(), 52.0), egui::Sense::click());
-            raised(ui.painter(), rect, 12, BG, 3);
-            draw_plus(ui.painter(), rect.center(), 8.0, if ghost.hovered() { TEXT } else { MUTED.gamma_multiply(0.6) });
+            raised(ui.painter(), rect, 12, pal().bg, 3);
+            draw_plus(ui.painter(), rect.center(), 8.0, if ghost.hovered() { pal().text } else { pal().muted.gamma_multiply(0.6) });
             if ghost.on_hover_text("Convidar alguém para o servidor").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                 self.srv.inviting = true;
             }
@@ -640,9 +654,9 @@ impl App {
           raised_frame(ui, 12, 12, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Convidar alguém").strong().color(Color32::WHITE));
+                ui.label(RichText::new("Convidar alguém").strong().color(pal().strong));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.add(egui::Button::new(RichText::new("✖").color(MUTED)).frame(false)).on_hover_text("Fechar").clicked() {
+                    if ui.add(egui::Button::new(RichText::new("✖").color(pal().muted)).frame(false)).on_hover_text("Fechar").clicked() {
                         self.srv.inviting = false;
                     }
                 });
@@ -675,7 +689,7 @@ impl App {
                     }
                 }
             }
-            if button(ui, ready, "Gerar só o texto", PANEL).on_disabled_hover_text("Escolha um contato e marque o aviso do IP para liberar").clicked() {
+            if button(ui, ready, "Gerar só o texto", pal().bg).on_disabled_hover_text("Escolha um contato e marque o aviso do IP para liberar").clicked() {
                 let key = self.srv.pick.expect("botão só liga com contato escolhido");
                 match hub.try_run(|s, now| s.invite(&v.id, key, now).map(|t| (t, Output::default()))) {
                     Ok(text) => {
@@ -688,7 +702,7 @@ impl App {
             });
             if !self.srv.invite_out.is_empty() {
                 ui.add(egui::Label::new(RichText::new(&self.srv.invite_out).monospace().size(12.0)).wrap());
-                if button(ui, true, "Copiar o convite", GREEN).clicked() {
+                if button(ui, true, "Copiar o convite", pal().green).clicked() {
                     ui.ctx().copy_text(self.srv.invite_out.clone());
                 }
                 note(ui, "Mande o texto por onde preferir; ele só abre na conta do convidado. Ele entra quando você estiver online. (Este caminho não envia nada pela rede.)");
@@ -705,15 +719,15 @@ impl App {
         let room_height = (ui.clip_rect().bottom() - ui.cursor().top() - 84.0).max(160.0);
         egui::ScrollArea::vertical().id_salt(("bate-papo", room.id)).max_height(room_height).min_scrolled_height(room_height).stick_to_bottom(true).auto_shrink([false, false]).show(ui, |ui| {
             if room.chat.is_empty() {
-                ui.label(RichText::new("Sem mensagens. A conversa some quando a sala fica vazia.").size(13.0).color(MUTED));
+                ui.label(RichText::new("Sem mensagens. A conversa some quando a sala fica vazia.").size(13.0).color(pal().muted));
             }
             for line in &room.chat {
                 let who = v.members.iter().find(|m| m.id == line.from).map_or("?".to_string(), |m| if m.name.is_empty() { member_name(&contacts, &m.key) } else { m.name.clone() });
                 let mine = v.me == line.from;
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
-                    ui.label(RichText::new(format!("{who}:")).strong().color(if mine { GREEN } else { Color32::WHITE }));
-                    ui.label(RichText::new(&line.text).color(TEXT));
+                    ui.label(RichText::new(format!("{who}:")).strong().color(if mine { pal().green } else { pal().strong }));
+                    ui.label(RichText::new(&line.text).color(pal().text));
                 });
             }
         });
@@ -750,7 +764,7 @@ fn server_icon(ui: &mut egui::Ui, text: &str, active: Option<Color32>, ink: Colo
     let (rect, reply) = ui.allocate_exact_size(vec2(52.0, 52.0), egui::Sense::click());
     match active {
         Some(fill) => sunken(ui.painter(), rect, 18, fill),
-        None => raised(ui.painter(), rect, 18, if reply.hovered() { BG.lerp_to_gamma(Color32::WHITE, 0.06) } else { BG }, 4),
+        None => raised(ui.painter(), rect, 18, if reply.hovered() { pal().bg.lerp_to_gamma(Color32::WHITE, 0.06) } else { pal().bg }, 4),
     }
     if text == "+" {
         draw_plus(ui.painter(), rect.center(), 11.0, ink);
@@ -758,6 +772,16 @@ fn server_icon(ui: &mut egui::Ui, text: &str, active: Option<Color32>, ink: Colo
         ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, text, egui::FontId::proportional(24.0), ink);
     }
     reply.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Botão do tema no pé do trilho: sol no tema escuro (leva ao claro), lua no claro (volta ao escuro).
+fn theme_toggle(ui: &mut egui::Ui) -> egui::Response {
+    let light = is_light();
+    let (rect, reply) = ui.allocate_exact_size(vec2(52.0, 52.0), egui::Sense::click());
+    raised(ui.painter(), rect, 18, if reply.hovered() { pal().hover } else { pal().bg }, 4);
+    theme_icon(ui.painter(), rect, light, if light { pal().strong } else { pal().yellow });
+    let tip = if light { "Tema escuro" } else { "Tema claro" };
+    reply.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// A chamada da subseção ainda está tocando?

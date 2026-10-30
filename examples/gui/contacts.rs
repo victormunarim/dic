@@ -2,7 +2,7 @@
 
 use clam::sync::LockExt;
 
-use eframe::egui::{self, Color32, RichText, vec2};
+use eframe::egui::{self, RichText, vec2};
 
 use crate::{conf::*, engine::*, theme::*, ui::*};
 
@@ -68,7 +68,7 @@ impl App {
             }
         }
         if !self.error.is_empty() {
-            ui.colored_label(Color32::from_rgb(0xf2, 0x7b, 0x7e), &self.error);
+            ui.colored_label(pal().error, &self.error);
         }
     }
 
@@ -123,13 +123,13 @@ impl App {
               ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 let face = avatar(ui, name, 32.0, None);
-                count_badge(ui.painter(), face.rect, unread[key], PANEL);
+                count_badge(ui.painter(), face.rect, unread[key], pal().bg);
                 // Adicionado só pelo código: o nome chega quando o contato devolve a apresentação.
                 let pending = *name == hex(key)[..8];
-                ui.add_sized([ui.available_width() - 118.0 - if pending { 22.0 } else { 0.0 }, 32.0], egui::Label::new(RichText::new(name).strong().color(TEXT)).truncate())
+                ui.add_sized([ui.available_width() - 118.0 - if pending { 22.0 } else { 0.0 }, 32.0], egui::Label::new(RichText::new(name).strong().color(pal().text)).truncate())
                     .on_hover_text(format!("{}…", &hex(key)[..16]));
                 if pending {
-                    ui.label(RichText::new("❗").size(14.0).color(YELLOW)).on_hover_text("Contato pendente: ainda sem nome. Não existe servidor: cada pessoa fala direto com a outra, cifrado. Quando o contato se apresenta, o nome e o endereço dele chegam sozinhos e esta marca some. A apresentação só é entregue com ele ligado, e o programa insiste até conseguir.");
+                    ui.label(RichText::new("❗").size(14.0).color(pal().yellow)).on_hover_text("Contato pendente: ainda sem nome. Não existe servidor: cada pessoa fala direto com a outra, cifrado. Quando o contato se apresenta, o nome e o endereço dele chegam sozinhos e esta marca some. A apresentação só é entregue com ele ligado, e o programa insiste até conseguir.");
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;
@@ -168,7 +168,7 @@ impl App {
                     let unread = unread[key];
                     let chat = ui.scope(|ui| {
                         ui.spacing_mut().button_padding = vec2(0.0, 0.0);
-                        let ink = if unread > 0 { BLURPLE } else { TEXT };
+                        let ink = if unread > 0 { BLURPLE } else { pal().text };
                         ui.add(egui::Button::new(RichText::new("💬").size(16.0).color(ink)).frame(false).min_size(vec2(28.0, 34.0)))
                     }).inner;
                     let tip = if unread > 0 { format!("Bate-papo ({unread} nova(s))") } else { "Bate-papo".to_string() };
@@ -247,13 +247,13 @@ impl App {
                 ui.label(format!("{name} sai da sua lista de contatos e é avisado para tirar você da dele. Para voltar a falar, um dos dois precisa adicionar o outro de novo. O histórico do bate-papo fica guardado.\n\nBloquear também impede {name} de voltar sozinho à sua lista (por apresentação ou convite) até você adicioná-lo de novo ou desbloqueá-lo nas configurações."));
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    if button(ui, true, "Só remover", RED).clicked() {
+                    if button(ui, true, "Só remover", pal().red).clicked() {
                         answer = Some(Remove::Only);
                     }
-                    if button(ui, true, "Remover e bloquear", RED).clicked() {
+                    if button(ui, true, "Remover e bloquear", pal().red).clicked() {
                         answer = Some(Remove::AndBlock);
                     }
-                    if button(ui, true, "Cancelar", GREY_BUTTON).clicked() {
+                    if button(ui, true, "Cancelar", pal().bg).clicked() {
                         answer = Some(Remove::Cancel);
                     }
                 });
@@ -293,7 +293,7 @@ impl App {
                     if button(ui, true, "Confiar", BLURPLE).clicked() {
                         answer = Some(true);
                     }
-                    if button(ui, true, "Cancelar", GREY_BUTTON).clicked() {
+                    if button(ui, true, "Cancelar", pal().bg).clicked() {
                         answer = Some(false);
                     }
                 });

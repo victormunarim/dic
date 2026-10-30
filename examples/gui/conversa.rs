@@ -2,7 +2,7 @@
 
 use clam::sync::LockExt;
 
-use eframe::egui::{self, Color32, RichText, vec2};
+use eframe::egui::{self, RichText, vec2};
 
 use crate::{arquivos::{Phase, size_text}, chats::State, engine::*, theme::*, ui::*};
 
@@ -30,7 +30,7 @@ impl App {
         raised_frame(ui, R_CARD, 22, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
-                ui.label(RichText::new(format!("Bate-papo com {name}")).strong().size(18.0).color(Color32::WHITE));
+                ui.label(RichText::new(format!("Bate-papo com {name}")).strong().size(18.0).color(pal().strong));
                 // Em chamada a conversa é a da linha: fechar não faz sentido.
                 if !self.shared.in_call.load(std::sync::atomic::Ordering::Relaxed) {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -50,16 +50,16 @@ impl App {
                 for m in &msgs {
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing.x = 4.0;
-                        let (who, color) = if m.mine() { ("Você", GREEN) } else { (name.as_str(), Color32::WHITE) };
+                        let (who, color) = if m.mine() { ("Você", pal().green) } else { (name.as_str(), pal().strong) };
                         ui.label(RichText::new(format!("{who}:")).strong().color(color));
-                        ui.label(RichText::new(&m.text).color(TEXT));
+                        ui.label(RichText::new(&m.text).color(pal().text));
                         if let Some(x) = xfers.iter().find(|x| x.id == m.id && x.mine == m.mine() && x.phase.live()) {
                             file_progress(ui, x, &mut file_cmds);
                             return;
                         }
                         match m.state {
-                            State::Sending => ui.label(RichText::new("enviando…").size(12.0).color(MUTED)),
-                            State::Failed => ui.label(RichText::new("não entregue").size(12.0).color(Color32::from_rgb(0xf2, 0x7b, 0x7e))).on_hover_text("O contato não confirmou: estava offline ou sem rota. Não há caixa de correio; envie de novo quando ele voltar."),
+                            State::Sending => ui.label(RichText::new("enviando…").size(12.0).color(pal().muted)),
+                            State::Failed => ui.label(RichText::new("não entregue").size(12.0).color(pal().error)).on_hover_text("O contato não confirmou: estava offline ou sem rota. Não há caixa de correio; envie de novo quando ele voltar."),
                             State::Sent | State::Received => ui.label(""),
                         };
                     });
@@ -120,7 +120,7 @@ fn file_progress(ui: &mut egui::Ui, x: &crate::arquivos::Xfer, cmds: &mut Vec<Cm
         _ if x.mine => "esperando o contato…".to_string(),
         _ => "começando…".to_string(),
     };
-    ui.label(RichText::new(text).size(12.0).color(MUTED));
+    ui.label(RichText::new(text).size(12.0).color(pal().muted));
     if close_button(ui, "Cancelar").clicked() {
         cmds.push(Cmd::FileCancel(x.peer, x.id, x.mine));
     }
@@ -129,7 +129,7 @@ fn file_progress(ui: &mut egui::Ui, x: &crate::arquivos::Xfer, cmds: &mut Vec<Cm
 /// Clipe de papel desenhado (a fonte pode não ter o glifo): abre o seletor de arquivos do sistema.
 fn attach_button(ui: &mut egui::Ui, enabled: bool) -> egui::Response {
     let (rect, reply) = ui.allocate_exact_size(vec2(34.0, 34.0), if enabled { egui::Sense::click() } else { egui::Sense::hover() });
-    let ink = if !enabled { MUTED.gamma_multiply(0.5) } else if reply.hovered() { Color32::WHITE } else { TEXT };
+    let ink = if !enabled { pal().muted.gamma_multiply(0.5) } else if reply.hovered() { pal().strong } else { pal().text };
     let stroke = egui::Stroke::new(2.0_f32, ink);
     let c = rect.center();
     // Uma alça comprida e a volta interna, como um clipe visto de frente.
