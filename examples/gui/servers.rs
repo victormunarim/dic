@@ -4,7 +4,7 @@ use clam::sync::LockExt;
 use std::sync::atomic::Ordering;
 
 use clam::server::{Output, Role, ServerId, ServerView};
-use eframe::egui::{self, Color32, CornerRadius, Margin, RichText, vec2};
+use eframe::egui::{self, Color32, CornerRadius, Margin, RichText, Stroke, vec2};
 
 use crate::{conf::*, engine::*, theme::*, ui::{App, Tab}};
 
@@ -96,32 +96,32 @@ impl App {
                     ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                         ui.spacing_mut().item_spacing.y = 14.0;
                         egui::ScrollArea::vertical().scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).auto_shrink([false, false]).show(ui, |ui| {
-                    let on = self.tab == Tab::Contacts;
-                    let people = server_icon(ui, "pessoa", on.then_some(BLURPLE), if on { Color32::WHITE } else { pal().strong });
-                    count_badge(ui.painter(), people.rect, self.shared.chats.lock_unpoisoned().unread_total(), pal().bg);
-                    if people.on_hover_text("Contatos").clicked() {
-                        self.tab = Tab::Contacts;
-                    }
-                    ui.separator();
-                    for v in &views {
-                        // Fora de Contatos o ícone do servidor escolhido segue marcado.
-                        let on = self.tab != Tab::Contacts && self.srv.sel == Some(v.id);
-                        let initial = v.name.chars().next().map_or("?".to_string(), |c| c.to_uppercase().to_string());
-                        let reply = server_icon(ui, &initial, on.then_some(BLURPLE), if on { Color32::WHITE } else { pal().strong });
-                        if reply.on_hover_text(&v.name).clicked() {
-                            self.tab = Tab::Servers;
-                            self.srv.sel = Some(v.id);
-                            self.srv.msg.clear();
-                            self.srv.info.clear();
-                            self.srv.invite_out.clear();
+                        let on = self.tab == Tab::Contacts;
+                        let people = server_icon(ui, "pessoa", on.then_some(BLURPLE), if on { Color32::WHITE } else { pal().strong });
+                        count_badge(ui.painter(), people.rect, self.shared.chats.lock_unpoisoned().unread_total(), pal().bg);
+                        if people.on_hover_text("Contatos").clicked() {
+                            self.tab = Tab::Contacts;
                         }
-                    }
-                    let on = here && self.srv.sel.is_none();
-                    let plus = server_icon(ui, "+", on.then_some(pal().green), if on { Color32::WHITE } else { pal().green });
-                    if plus.on_hover_text("Criar um servidor ou entrar com um convite").clicked() {
-                        self.tab = Tab::Servers;
-                        self.srv.sel = None;
-                    }
+                        ui.separator();
+                        for v in &views {
+                            // Fora de Contatos o ícone do servidor escolhido segue marcado.
+                            let on = self.tab != Tab::Contacts && self.srv.sel == Some(v.id);
+                            let initial = v.name.chars().next().map_or("?".to_string(), |c| c.to_uppercase().to_string());
+                            let reply = server_icon(ui, &initial, on.then_some(BLURPLE), if on { Color32::WHITE } else { pal().strong });
+                            if reply.on_hover_text(&v.name).clicked() {
+                                self.tab = Tab::Servers;
+                                self.srv.sel = Some(v.id);
+                                self.srv.msg.clear();
+                                self.srv.info.clear();
+                                self.srv.invite_out.clear();
+                            }
+                        }
+                        let on = here && self.srv.sel.is_none();
+                        let plus = server_icon(ui, "+", on.then_some(pal().green), if on { Color32::WHITE } else { pal().green });
+                        if plus.on_hover_text("Criar um servidor ou entrar com um convite").clicked() {
+                            self.tab = Tab::Servers;
+                            self.srv.sel = None;
+                        }
                         });
                     });
                 });
@@ -761,11 +761,12 @@ impl App {
 /// (o texto de um botão fica à esquerda quando a coluna é mais larga que ele). Elevado em repouso; o
 /// selecionado (`active` traz a cor) fica afundado.
 fn server_icon(ui: &mut egui::Ui, text: &str, active: Option<Color32>, ink: Color32) -> egui::Response {
-    let (rect, reply) = ui.allocate_exact_size(vec2(52.0, 52.0), egui::Sense::click());
-    match active {
-        Some(fill) => sunken(ui.painter(), rect, 18, fill),
-        None => raised(ui.painter(), rect, 18, if reply.hovered() { pal().hover } else { pal().bg }, 4),
-    }
+    let name = match text {
+        "+" => "Criar um servidor ou entrar com um convite",
+        "pessoa" => "Contatos",
+        inicial => inicial,
+    };
+    let (rect, reply) = rail_tile(ui, active, name);
     if text == "+" {
         draw_plus(ui.painter(), rect.center(), 11.0, ink);
     } else if text == "pessoa" {
@@ -773,17 +774,32 @@ fn server_icon(ui: &mut egui::Ui, text: &str, active: Option<Color32>, ink: Colo
     } else {
         ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, text, egui::FontId::proportional(24.0), ink);
     }
-    reply.on_hover_cursor(egui::CursorIcon::PointingHand)
+    reply
 }
 
 /// Botão do tema no pé do trilho: sol no tema escuro (leva ao claro), lua no claro (volta ao escuro).
 fn theme_toggle(ui: &mut egui::Ui) -> egui::Response {
     let light = is_light();
-    let (rect, reply) = ui.allocate_exact_size(vec2(52.0, 52.0), egui::Sense::click());
-    raised(ui.painter(), rect, 18, if reply.hovered() { pal().hover } else { pal().bg }, 4);
-    theme_icon(ui.painter(), rect, light, if light { pal().strong } else { pal().yellow });
     let tip = if light { "Tema escuro" } else { "Tema claro" };
-    reply.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand)
+    let (rect, reply) = rail_tile(ui, None, tip);
+    theme_icon(ui.painter(), rect, light, if light { pal().strong } else { pal().yellow });
+    reply.on_hover_text(tip)
+}
+
+/// Base dos ícones do trilho: elevado em repouso, afundado ao apertar ou quando marcado, aro do acento
+/// quando o foco vem do teclado. `name` é o que o leitor de tela diz, já que o ícone não tem texto.
+fn rail_tile(ui: &mut egui::Ui, active: Option<Color32>, name: &str) -> (egui::Rect, egui::Response) {
+    let (rect, reply) = ui.allocate_exact_size(vec2(52.0, 52.0), egui::Sense::click());
+    reply.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name));
+    match active {
+        Some(fill) => sunken(ui.painter(), rect, 18, fill),
+        None if reply.is_pointer_button_down_on() => sunken(ui.painter(), rect, 18, pal().bg),
+        None => raised(ui.painter(), rect, 18, if reply.hovered() { pal().hover } else { pal().bg }, 4),
+    }
+    if reply.has_focus() {
+        ui.painter().rect_stroke(rect.expand(3.0), egui::CornerRadius::same(21), Stroke::new(2.0_f32, BLURPLE), egui::StrokeKind::Middle);
+    }
+    (rect, reply.on_hover_cursor(egui::CursorIcon::PointingHand))
 }
 
 /// A chamada da subseção ainda está tocando?
