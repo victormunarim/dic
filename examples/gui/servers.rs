@@ -328,10 +328,10 @@ impl App {
                             Bar::None => {}
                         }
                     } else if let Some(who) = call_bar {
-                        let link = self.shared.link.lock_unpoisoned().clone();
-                        let sub = if ringing.is_some() { "Chamando…".to_string() } else if link.is_empty() { "Chamada".to_string() } else { link };
+                        // A qualidade da linha fica na aba da chamada; a barra pequena não mostra estatística.
+                        let sub = if ringing.is_some() { "Chamando…" } else { "Em chamada" };
                         let tip = if ringing.is_some() { "Cancelar a chamada" } else { "Desligar a chamada" };
-                        match self.session_bar(ui, "📞", &who, &sub, tip, ringing.is_some()) {
+                        match self.session_bar(ui, "📞", &who, sub, tip, ringing.is_some()) {
                             Bar::Share(on) => self.shared.screen.want_share.store(on, Ordering::Relaxed),
                             Bar::Leave => self.shared.hangup.store(true, Ordering::Relaxed),
                             Bar::None => {}
