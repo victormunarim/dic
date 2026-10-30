@@ -65,15 +65,9 @@ impl App {
                 note(ui, format!("Linha: {link}"));
             }
             ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                let muted = self.shared.audio.muted.load(Ordering::Relaxed);
-                if !ringing && icon_button(ui, true, if muted { "🔇" } else { "🎤" }, if muted { "Tirar do mudo" } else { "Silenciar" }, if muted { RED } else { GREY_BUTTON }).clicked() {
-                    self.shared.audio.muted.store(!muted, Ordering::Relaxed);
-                }
-                if hangup_button(ui).on_hover_text(if ringing { "Cancelar a chamada" } else { "Desligar a chamada" }).clicked() {
-                    self.shared.hangup.store(true, Ordering::Relaxed);
-                }
-            });
+            if hangup_button(ui).on_hover_text(if ringing { "Cancelar a chamada" } else { "Desligar a chamada" }).clicked() {
+                self.shared.hangup.store(true, Ordering::Relaxed);
+            }
         });
         if !ringing {
             self.screen_ui(ui);
@@ -116,26 +110,22 @@ impl App {
         let note_text = st.note.lock_unpoisoned().clone();
         let diag = st.diagnostics();
 
-        card(ui, "Compartilhar a minha tela", "O vídeo segue cifrado de ponta a ponta, em um circuito só dele.", |ui| {
-            ui.horizontal(|ui| {
-                let (icon, tip, fill) = if wanted { ("⏹", "Parar de compartilhar", RED) } else { ("🖥", "Compartilhar minha tela", BLURPLE) };
-                if icon_button(ui, true, icon, tip, fill).clicked() {
-                    st.want_share.store(!wanted, Ordering::Relaxed);
-                }
+        // Compartilhar e silenciar ficam na barra do pé da coluna; aqui só o estado e o diagnóstico da transmissão.
+        if sharing || wanted || !diag.is_empty() || !note_text.is_empty() {
+            card(ui, "Sua transmissão", "O vídeo segue cifrado de ponta a ponta, em um circuito só dele.", |ui| {
                 if sharing {
                     ui.colored_label(GREEN, RichText::new("● sua tela está sendo vista").strong());
                 } else if wanted {
                     note(ui, "ligando o circuito de vídeo...");
                 }
+                if !wanted && !sharing && !note_text.is_empty() {
+                    ui.colored_label(Color32::from_rgb(0xf2, 0x7b, 0x7e), note_text);
+                }
+                if !diag.is_empty() {
+                    ui.label(RichText::new(diag).monospace().size(13.0).color(MUTED));
+                }
             });
-            if !wanted && !sharing && !note_text.is_empty() {
-                ui.colored_label(Color32::from_rgb(0xf2, 0x7b, 0x7e), note_text);
-            }
-            if !diag.is_empty() {
-                ui.add_space(4.0);
-                ui.label(RichText::new(diag).monospace().size(13.0).color(MUTED));
-            }
-        });
+        }
 
         let names = self.form.names();
         let mut order: Vec<_> = self.screen_tex.iter().collect();
