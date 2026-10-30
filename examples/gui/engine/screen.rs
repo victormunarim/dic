@@ -212,9 +212,13 @@ pub(crate) async fn share_task(dialer: Dialer, peer: [u8; 32], keys: clam::media
         let mut next = std::time::Instant::now();
         let (mut pushed, mut skipped) = (0u64, 0u64);
         let (mut mark, mut mark_packets, mut rate) = (std::time::Instant::now(), 0u64, 0.0f64);
+        let (mut pushed_in_span, mut fps) = (0u64, 0.0f64);
         while flag.screen.want_share.load(Ordering::Relaxed) && !flag.hangup.load(Ordering::Relaxed) {
             match pump(src.as_mut(), &mut enc, &share) {
-                Ok(true) => pushed += 1,
+                Ok(true) => {
+                    pushed += 1;
+                    pushed_in_span += 1;
+                }
                 Ok(false) => skipped += 1,
                 Err(e) => *flag.screen.note.lock_unpoisoned() = format!("codec: {e}"),
             }
@@ -222,11 +226,13 @@ pub(crate) async fn share_task(dialer: Dialer, peer: [u8; 32], keys: clam::media
             let span = mark.elapsed().as_secs_f64();
             if span >= 1.0 {
                 rate = (t.packets_sent - mark_packets) as f64 / span;
+                fps = pushed_in_span as f64 / span;
+                pushed_in_span = 0;
                 (mark, mark_packets) = (std::time::Instant::now(), t.packets_sent);
             }
             *flag.screen.tx_info.lock_unpoisoned() = format!(
-                "enviados {pushed}, pulados {skipped} ({} pelo codificador, {} adiados com o circuito cheio), descartados na fila {}, saindo {rate:.0} pacotes/s, taxa {} kbps, QP {}, imagem 1/{}, codificar leva {:.0} ms, codificador {}",
-                enc.skipped, enc.held, t.frames_dropped, enc.bitrate() / 1000, enc.qp(), enc.scale(), enc.encode_ms,
+                "enviados {pushed}, pulados {skipped} ({} pelo codificador, {} adiados com o circuito cheio), descartados na fila {}, saindo {rate:.0} pacotes/s, taxa {} kbps, QP {}, imagem 1/{}, codificar leva {:.0} ms, captura leva {:.0} ms, {fps:.0} quadros/s, sem imagem nova {}, imagem igual {}, codificador {}",
+                enc.skipped, enc.held, t.frames_dropped, enc.bitrate() / 1000, enc.qp(), enc.scale(), enc.encode_ms, enc.grab_ms, enc.no_frame, enc.same,
                 match (enc.hardware(), &enc.hw_note) {
                     (Some(name), _) => format!("hardware ({name})"),
                     (None, Some(why)) => format!("openh264 (o hardware parou: {why})"),

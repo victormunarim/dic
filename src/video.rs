@@ -353,6 +353,12 @@ pub struct H264Encoder {
     pub held: u64,
     /// Média móvel, em ms, do tempo gasto em `encode`.
     pub encode_ms: f32,
+    /// Média móvel, em ms, do tempo gasto em `grab` (captura).
+    pub grab_ms: f32,
+    /// Voltas em que a captura não trouxe imagem nova.
+    pub no_frame: u64,
+    /// Voltas em que a imagem era igual à anterior.
+    pub same: u64,
 }
 
 impl H264Encoder {
@@ -405,6 +411,9 @@ impl H264Encoder {
             skipped: 0,
             held: 0,
             encode_ms: 0.0,
+            grab_ms: 0.0,
+            no_frame: 0,
+            same: 0,
         })
     }
 
@@ -593,7 +602,10 @@ impl H264Encoder {
         if !(force_key || self.need_key) && self.peers_roll {
             match self.try_patch(&frame)? {
                 Patched::Sent(f) => return Ok(Some(f)),
-                Patched::Same => return Ok(None),
+                Patched::Same => {
+                    self.same += 1;
+                    return Ok(None);
+                }
                 Patched::No => {}
             }
         }
@@ -926,7 +938,13 @@ pub fn pump_all(source: &mut dyn ScreenSource, encoder: &mut H264Encoder, shares
         encoder.held += 1;
         return Ok(0);
     }
-    let Some(raw) = source.grab() else { return Ok(0) };
+    let started = std::time::Instant::now();
+    let grabbed = source.grab();
+    encoder.grab_ms += (started.elapsed().as_secs_f32() * 1000.0 - encoder.grab_ms) * 0.1;
+    let Some(raw) = grabbed else {
+        encoder.no_frame += 1;
+        return Ok(0);
+    };
     let Some(frame) = encoder.encode(&raw, wanted)? else { return Ok(0) };
     let mut sent = 0;
     for share in shares {
