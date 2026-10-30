@@ -110,8 +110,10 @@ pub struct PortalScreen {
     latest: Arc<Latest>,
     reader: Option<JoinHandle<()>>,
     size: (usize, usize),
-    // O portal fecha a captura quando a sessão acaba.
-    _session: ashpd::desktop::Session<Screencast>,
+    // O portal só para de captura (e some o aviso de "compartilhando" do ambiente) quando a sessão é
+    // fechada com `Close`; largar o valor não fecha, então o `Drop` pede o fechamento.
+    session: Option<ashpd::desktop::Session<Screencast>>,
+    runtime: tokio::runtime::Handle,
 }
 
 impl PortalScreen {
@@ -153,7 +155,7 @@ impl PortalScreen {
         let latest: Arc<Latest> = Arc::new((Mutex::new(None), Condvar::new()));
         let (out, slot) = (child.stdout.take().expect("stdout"), latest.clone());
         let reader = std::thread::spawn(move || read_frames(out, size, &slot));
-        Ok(Self { child, latest, reader: Some(reader), size, _session: session })
+        Ok(Self { child, latest, reader: Some(reader), size, session: Some(session), runtime: tokio::runtime::Handle::current() })
     }
 
     /// Tamanho dos quadros entregues.
@@ -177,6 +179,12 @@ impl Drop for PortalScreen {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        // Pode cair numa thread fora do runtime (a da captura): só agenda o fechamento.
+        if let Some(session) = self.session.take() {
+            self.runtime.spawn(async move {
+                let _ = session.close().await;
+            });
+        }
         if let Some(r) = self.reader.take() {
             let _ = r.join();
         }
