@@ -67,6 +67,7 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
     removals_saved.sort();
     let dialer = node.dialer();
     let mut receiving = super::files::Receiving::default();
+    let mut introduced_back: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
     // Só vale quem ainda é contato (o `Form` já descarta o resto).
     for key in form.trusted_keys() {
         dialer.set_trusted(key, true);
@@ -235,6 +236,7 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
                     node.add_contact(key, relay);
                     // A pessoa adicionada também passa a ter este contato (veja `Node::introduce`).
                     node.introduce(key);
+                    introduced_back.insert(key);
                     save_pending_if_changed(&node, &mut pending_saved, &out);
                     save_removals_if_changed(&node, &mut removals_saved, &out);
                     saver.sync(&book_of(&node), &out);
@@ -396,6 +398,11 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
                 // Quem já era contato e se apresenta é a aceitação do convite que esta pessoa deixou (pela caixa, se estava offline).
                 let accepted = node.is_contact(&i.peer);
                 node.add_contact(i.peer, Some(clam::node::RelayInfo { addr: r.addr.clone(), onion: r.onion, link: r.link }));
+                // Quem já era contato e se apresenta pode ainda não ter o nome desta pessoa (adicionou só pelo código):
+                // uma apresentação de volta por execução, senão as duas pontas ficariam se apresentando para sempre.
+                if introduced_back.insert(i.peer) {
+                    node.introduce(i.peer);
+                }
                 let who = if i.name.is_empty() { "alguém" } else { &i.name };
                 if accepted {
                     out.line(format!("{who} ({}) aceitou o seu convite", &hex(&i.peer)[..8]));

@@ -14,8 +14,8 @@ fn matches_search(name: &str, key: &[u8; 32], needle: &str) -> bool {
 impl App {
     /// Quem se apresentou (o nó já o atende): se é novo, entra na lista e recebe de volta a apresentação desta
     /// pessoa, para ele ter o nome dela; se já era contato sem nome (foi adicionado só pelo código), ganha o nome
-    /// que ele deu a si mesmo. Quem já tinha nome não muda, e não há apresentação de volta (senão as duas pontas
-    /// ficariam se apresentando para sempre).
+    /// que ele deu a si mesmo. Quem já tinha nome não muda. A apresentação de volta sai uma vez por execução, no laço do nó
+    /// (senão as duas pontas ficariam se apresentando para sempre).
     pub(crate) fn absorb_introductions(&mut self) {
         let introduced: Vec<_> = std::mem::take(&mut *self.shared.introduced.lock_unpoisoned());
         let mut added = false;
