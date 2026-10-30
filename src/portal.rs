@@ -64,8 +64,14 @@ pub fn pipeline_args(fd: i32, node: u32, (w, h): (usize, usize), fps: f32) -> Ve
         format!("fd={fd}"),
         format!("path={node}"),
         "do-timestamp=true".into(),
+        // Tela parada não manda quadro: repetir o último a cada 250 ms deixa o codificador ver a imagem
+        // calma e devolver a resolução cheia e a nitidez, em vez de ficar na última imagem de movimento.
+        "keepalive-time=250".into(),
         "!".into(),
+        // Sem `drop-only` o videorate segura cada quadro até chegar o próximo: o Wayland só manda quadro
+        // quando a tela muda, então a última imagem ficava presa e a tela parava para quem assiste.
         "videorate".into(),
+        "drop-only=true".into(),
         "!".into(),
         format!("video/x-raw,framerate={fps}/1"),
         "!".into(),
@@ -195,6 +201,9 @@ mod tests {
         assert!(a.contains(&"fd=7".to_string()) && a.contains(&"path=42".to_string()));
         assert!(a.contains(&"video/x-raw,format=RGBA,width=640,height=360".to_string()));
         assert_eq!(a.last().unwrap(), "fd=1");
+        // Sem isso o último quadro de uma tela que parou de mudar nunca sai do videorate.
+        let rate = a.iter().position(|x| x == "videorate").unwrap();
+        assert_eq!(a[rate + 1], "drop-only=true");
     }
 
     #[test]
