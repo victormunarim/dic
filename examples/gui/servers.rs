@@ -279,8 +279,8 @@ impl App {
                 ui.spacing_mut().item_spacing.y = 6.0;
                 // O perfil ocupa uma altura fixa no pé; a lista de salas rola no espaço que sobra.
                 let footer: f32 = 74.0 + if room_bar.is_some() || call_bar.is_some() { 76.0 } else { 0.0 };
-                // Sem servidor escolhido não há sala para listar: a coluna mostra os contatos.
-                if matches!(self.tab, Tab::Contacts | Tab::Call) || !matches!((&hub, &view), (Some(_), Some(_))) {
+                // As salas só aparecem na aba do servidor; nas demais telas (e sem servidor escolhido) a coluna mostra os contatos.
+                if self.tab != Tab::Servers || !matches!((&hub, &view), (Some(_), Some(_))) {
                     self.contacts_column(ui, footer, offline, in_call);
                 } else if let (Some(hub), Some(v)) = (&hub, &view) {
                     {
