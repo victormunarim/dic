@@ -28,6 +28,9 @@ pub(crate) struct ServersUi {
     pub(crate) chat_draft: String,
     /// O cartão "nova sala" está aceitando o nome.
     pub(crate) adding_room: bool,
+    /// A pessoa voltou ao bate-papo mesmo com uma tela sendo assistida (clicou na sala na barra); zera quando
+    /// a última tela para de ser assistida, para a próxima cobrir o centro de novo.
+    pub(crate) chat_over_screen: bool,
     /// O cartão de convite está aberto.
     pub(crate) inviting: bool,
     pub(crate) msg: String,
@@ -189,6 +192,15 @@ impl App {
             note(ui, "Aguardando o convidante responder para trazer o servidor (ele precisa estar online).");
         }
         let in_this_server = self.shared.room.lock_unpoisoned().at.is_some_and(|(server, _)| server == v.id);
+        if self.screen_tex.is_empty() {
+            self.srv.chat_over_screen = false;
+        }
+        // Assistindo, a tela cobre o centro inteiro e o bate-papo sai; ele volta ao parar de assistir
+        // ou ao clicar na sala na barra.
+        if in_this_server && !self.screen_tex.is_empty() && !self.srv.chat_over_screen {
+            self.screen_cover(ui);
+            return;
+        }
         if in_this_server {
             self.screens_card(ui, v);
         }
@@ -325,6 +337,7 @@ impl App {
                         match self.session_bar(ui, "🔊", room, server, "Sair da sala", false) {
                             Bar::Share(on) => self.send(Cmd::RoomShare(on)),
                             Bar::Leave => self.send(Cmd::LeaveRoom),
+                            Bar::Open => self.srv.chat_over_screen = true,
                             Bar::None => {}
                         }
                     } else if let Some(who) = call_bar {
@@ -334,7 +347,7 @@ impl App {
                         match self.session_bar(ui, "📞", &who, sub, tip, ringing.is_some()) {
                             Bar::Share(on) => self.shared.screen.want_share.store(on, Ordering::Relaxed),
                             Bar::Leave => self.shared.hangup.store(true, Ordering::Relaxed),
-                            Bar::None => {}
+                            Bar::Open | Bar::None => {}
                         }
                     }
                 });
@@ -353,11 +366,14 @@ impl App {
                 ui.spacing_mut().item_spacing.x = 10.0;
                 ui.add_space(6.0);
                 ui.label(RichText::new(glyph).size(24.0).color(GREEN));
-                ui.vertical(|ui| {
+                let name = ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 2.0;
                     ui.label(RichText::new(title).strong().size(17.0).color(GREEN));
                     ui.label(RichText::new(sub).size(13.0).color(MUTED));
                 });
+                if name.response.interact(egui::Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                    out = Bar::Open;
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     ui.add_space(6.0);
@@ -491,6 +507,29 @@ impl App {
             draw_plus(ui.painter(), rect.center(), 8.0, if ghost.hovered() { TEXT } else { MUTED.gamma_multiply(0.6) });
             if ghost.on_hover_text("Nova sala").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                 self.srv.adding_room = true;
+            }
+        }
+    }
+
+    /// Telas assistidas ocupando o centro todo, sem o bate-papo. O ícone de lupa abre a tela cheia
+    /// (a mesma de `zoom_window`).
+    fn screen_cover(&mut self, ui: &mut egui::Ui) {
+        let names = self.form.names();
+        let mut order: Vec<_> = self.screen_tex.iter().map(|(k, (_, tex))| (*k, tex.clone())).collect();
+        order.sort_by_key(|(k, _)| *k);
+        let each = (ui.available_height() / order.len().max(1) as f32 - 8.0).max(120.0);
+        for (who, tex) in order {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(format!("Tela de {}", member_name(&names, &who))).strong());
+                if ui.button("🔍").on_hover_text("Tela cheia (Esc ou o X para sair)").clicked() {
+                    self.zoom = Some(who);
+                }
+                if ui.button(RichText::new("Parar de assistir").color(RED)).clicked() {
+                    crate::engine::follow(&self.shared, who, false);
+                }
+            });
+            if self.zoom != Some(who) {
+                ui.add(egui::Image::new(&tex).max_size(vec2(ui.available_width(), each)).corner_radius(CornerRadius::same(8)).shrink_to_fit());
             }
         }
     }
@@ -718,4 +757,6 @@ enum Bar {
     None,
     Share(bool),
     Leave,
+    /// Clicou no nome da sala: volta ao bate-papo.
+    Open,
 }
