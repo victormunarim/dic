@@ -28,11 +28,12 @@ openh264 = { version = "0.9.9", optional = true }
 openh264-sys2 = { version = "0.9.9", optional = true }
 nnnoiseless = { version = "0.5.2", default-features = false, optional = true }
 opus-pure = "0.2.2"
+# Seletor de arquivos do sistema (portal no Unix, diálogo nativo no Windows e macOS).
+rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"], optional = true }
 
 [target.'cfg(unix)'.dependencies]
 x11rb = { version = "0.14.0", optional = true }
 ashpd = { version = "0.13.13", default-features = false, features = ["tokio", "screencast"], optional = true }
-rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"], optional = true }
 rustix = { version = "1", default-features = false, features = ["std"], optional = true }
 
 [target.'cfg(windows)'.dependencies]
