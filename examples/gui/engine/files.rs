@@ -25,17 +25,6 @@ pub(crate) struct Receiving {
     open: HashMap<([u8; 32], u64), Incoming>,
 }
 
-fn done_line(shared: &Shared, peer: [u8; 32], id: u64, name: &str, mine: bool) {
-    let text = format!("📎 {name}");
-    let mut book = shared.chats.lock_unpoisoned();
-    if mine {
-        book.push_mine(peer, id, text);
-        book.set_state(&peer, id, crate::chats::State::Sent);
-    } else {
-        book.push_received(peer, id, text);
-    }
-}
-
 /// A pessoa escolheu um arquivo: confere, registra a oferta e a manda; o envio só segue com o aceite.
 pub(crate) fn start_send(shared: &std::sync::Arc<Shared>, dialer: &Dialer, out: &Sink, peer: [u8; 32], path: PathBuf) {
     let size = std::fs::metadata(&path).ok().filter(|m| m.is_file()).map(|m| m.len());
@@ -50,10 +39,14 @@ pub(crate) fn start_send(shared: &std::sync::Arc<Shared>, dialer: &Dialer, out: 
     }
     let id = dialer.next_chat_id();
     shared.transfers.lock_unpoisoned().add_out(peer, id, name.clone(), size);
+    // A mensagem do arquivo entra já no histórico; a conversa mostra o carregando ao lado enquanto anda.
+    shared.chats.lock_unpoisoned().push_mine(peer, id, format!("📎 {name}"));
     (out.repaint)();
     let (sh, d, o) = (shared.clone(), dialer.clone(), out.clone());
     tokio::spawn(async move {
         let end = |phase: Phase| {
+            let state = if matches!(phase, Phase::Done(_)) { crate::chats::State::Sent } else { crate::chats::State::Failed };
+            sh.chats.lock_unpoisoned().set_state(&peer, id, state);
             sh.transfers.lock_unpoisoned().phase(&peer, id, true, phase);
             (o.repaint)();
         };
@@ -100,7 +93,6 @@ pub(crate) fn start_send(shared: &std::sync::Arc<Shared>, dialer: &Dialer, out: 
         .await;
         match result {
             Ok(()) => {
-                done_line(&sh, peer, id, &name, true);
                 end(Phase::Done(None));
             }
             Err(transfer::TransferError::Cancelled) => {
@@ -149,10 +141,8 @@ pub(crate) fn on_frames(shared: &std::sync::Arc<Shared>, rx: &mut Receiving, fra
                 if inc.complete() {
                     drop(t);
                     let Some(inc) = rx.open.remove(&(peer, id)) else { continue };
-                    let name = inc.name().to_string();
                     let phase = match inc.finish() {
                         Ok(p) => {
-                            done_line(shared, peer, id, &name, false);
                             Phase::Done(Some(p))
                         }
                         Err(e) => Phase::Failed(e.to_string()),

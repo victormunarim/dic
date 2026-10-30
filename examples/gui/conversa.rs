@@ -42,9 +42,6 @@ impl App {
             });
             note(ui, "Só vai para quem está online. Cada um guarda a sua cópia nesta máquina.");
             ui.add_space(6.0);
-            for x in xfers.iter().rev().take(5).rev() {
-                file_row(ui, x, &mut file_cmds);
-            }
             let height = (ui.clip_rect().bottom() - ui.cursor().top() - 120.0).clamp(160.0, 420.0);
             egui::ScrollArea::vertical().id_salt(("conversa", peer)).max_height(height).min_scrolled_height(height).stick_to_bottom(true).auto_shrink([false, false]).show(ui, |ui| {
                 if msgs.is_empty() {
@@ -56,6 +53,10 @@ impl App {
                         let (who, color) = if m.mine() { ("Você", GREEN) } else { (name.as_str(), Color32::WHITE) };
                         ui.label(RichText::new(format!("{who}:")).strong().color(color));
                         ui.label(RichText::new(&m.text).color(TEXT));
+                        if let Some(x) = xfers.iter().find(|x| x.id == m.id && x.mine == m.mine() && x.phase.live()) {
+                            file_progress(ui, x, &mut file_cmds);
+                            return;
+                        }
                         match m.state {
                             State::Sending => ui.label(RichText::new("enviando…").size(12.0).color(MUTED)),
                             State::Failed => ui.label(RichText::new("não entregue").size(12.0).color(Color32::from_rgb(0xf2, 0x7b, 0x7e))).on_hover_text("O contato não confirmou: estava offline ou sem rota. Não há caixa de correio; envie de novo quando ele voltar."),
@@ -111,52 +112,23 @@ impl App {
     }
 }
 
-/// Uma transferência na conversa: nome e tamanho, e o que a pessoa pode fazer agora.
-fn file_row(ui: &mut egui::Ui, x: &crate::arquivos::Xfer, cmds: &mut Vec<Cmd>) {
-    ui.horizontal(|ui| {
-        let way = if x.mine { "Enviando" } else { "Recebendo" };
-        ui.label(RichText::new(format!("{} ({})", x.name, size_text(x.size))).strong().color(Color32::WHITE));
-        match &x.phase {
-            // Aceito sozinho pelo laço; aqui só aparece no instante entre a oferta e o início.
-            Phase::Asking | Phase::Offering => {
-                ui.label(RichText::new(if x.mine { "esperando o contato…" } else { "começando…" }).color(MUTED));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if close_button(ui, "Cancelar").clicked() {
-                        cmds.push(Cmd::FileCancel(x.peer, x.id, x.mine));
-                    }
-                });
-            }
-            Phase::Active => {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if close_button(ui, "Cancelar").clicked() {
-                        cmds.push(Cmd::FileCancel(x.peer, x.id, x.mine));
-                    }
-                    let frac = x.bytes as f32 / x.size.max(1) as f32;
-                    ui.add(egui::ProgressBar::new(frac).desired_width(ui.available_width().max(60.0)).text(format!("{way} {}%", (frac * 100.0) as u32)).fill(BLURPLE));
-                });
-            }
-            Phase::Done(path) => {
-                let r = ui.label(RichText::new(if x.mine { "enviado" } else { "recebido" }).color(GREEN));
-                if let Some(p) = path {
-                    r.on_hover_text(format!("Salvo em {}", p.display()));
-                }
-            }
-            Phase::Failed(e) => {
-                ui.label(RichText::new("falhou").color(RED)).on_hover_text(e);
-            }
-            Phase::Declined => {
-                ui.label(RichText::new("recusado").color(MUTED));
-            }
-            Phase::Cancelled => {
-                ui.label(RichText::new("cancelado").color(MUTED));
-            }
-        }
-    });
+/// Ao lado da mensagem do arquivo, enquanto ele anda: carregando, porcentagem e X para cancelar.
+fn file_progress(ui: &mut egui::Ui, x: &crate::arquivos::Xfer, cmds: &mut Vec<Cmd>) {
+    ui.add(egui::Spinner::new().size(14.0).color(BLURPLE));
+    let text = match x.phase {
+        Phase::Active => format!("{}% de {}", (x.bytes * 100 / x.size.max(1)).min(100), size_text(x.size)),
+        _ if x.mine => "esperando o contato…".to_string(),
+        _ => "começando…".to_string(),
+    };
+    ui.label(RichText::new(text).size(12.0).color(MUTED));
+    if close_button(ui, "Cancelar").clicked() {
+        cmds.push(Cmd::FileCancel(x.peer, x.id, x.mine));
+    }
 }
 
 /// Clipe de papel desenhado (a fonte pode não ter o glifo): abre o seletor de arquivos do sistema.
 fn attach_button(ui: &mut egui::Ui, enabled: bool) -> egui::Response {
-    let (rect, reply) = ui.allocate_exact_size(vec2(34.0, 34.0), egui::Sense::click());
+    let (rect, reply) = ui.allocate_exact_size(vec2(34.0, 34.0), if enabled { egui::Sense::click() } else { egui::Sense::hover() });
     let ink = if !enabled { MUTED.gamma_multiply(0.5) } else if reply.hovered() { Color32::WHITE } else { TEXT };
     let stroke = egui::Stroke::new(2.0_f32, ink);
     let c = rect.center();
