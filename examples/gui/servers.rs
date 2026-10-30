@@ -92,6 +92,7 @@ impl App {
                 egui::ScrollArea::vertical().scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).auto_shrink([false, false]).show(ui, |ui| {
                     let on = self.tab == Tab::Contacts;
                     let people = server_icon(ui, "👤", on.then_some(BLURPLE), Color32::WHITE);
+                    count_badge(ui.painter(), people.rect, self.shared.chats.lock_unpoisoned().unread_total(), BG);
                     if people.on_hover_text("Contatos").clicked() {
                         self.tab = Tab::Contacts;
                     }

@@ -53,6 +53,11 @@ impl ChatBook {
         self.unread.get(peer).copied().unwrap_or(0)
     }
 
+    /// Não lidas de todas as conversas.
+    pub(crate) fn unread_total(&self) -> usize {
+        self.unread.values().sum()
+    }
+
     pub(crate) fn read(&mut self, peer: &[u8; 32]) {
         self.unread.remove(peer);
     }
@@ -219,6 +224,7 @@ mod tests {
         book.push_received(a, 1, "x".into());
         book.push_received(a, 1, "x".into());
         assert_eq!((book.with(&a).len(), book.unread(&a)), (1, 1));
+        assert_eq!(book.unread_total(), 1);
         book.read(&a);
         assert_eq!(book.unread(&a), 0);
         for i in 2..2 * KEEP as u64 {

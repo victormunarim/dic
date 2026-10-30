@@ -391,6 +391,21 @@ pub(crate) fn avatar(ui: &mut Ui, name: &str, size: f32, dot: Option<Color32>) -
     reply
 }
 
+/// Bolinha com o número de mensagens novas no canto superior direito de `rect`; `ring` é a cor do fundo atrás do ícone.
+/// Desenhada, sem depender de glifo. Zero não desenha nada.
+pub(crate) fn count_badge(painter: &egui::Painter, rect: egui::Rect, n: usize, ring: Color32) {
+    if n == 0 {
+        return;
+    }
+    let text = if n > 99 { "99+".to_string() } else { n.to_string() };
+    let galley = painter.layout_no_wrap(text, FontId::proportional(11.0), Color32::WHITE);
+    let w = (galley.size().x + 8.0).max(18.0);
+    let badge = egui::Rect::from_center_size(rect.right_top() + vec2(-4.0, 4.0), vec2(w, 18.0));
+    painter.rect_filled(badge.expand(2.0), CornerRadius::same(11), ring);
+    painter.rect_filled(badge, CornerRadius::same(9), BLURPLE);
+    painter.galley(badge.center() - galley.size() / 2.0, galley, Color32::WHITE);
+}
+
 /// Ponto de estado seguido do texto.
 pub(crate) fn status_dot(ui: &mut Ui, color: Color32, text: &str) {
     ui.horizontal(|ui| {

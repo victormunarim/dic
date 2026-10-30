@@ -110,12 +110,20 @@ impl App {
         let probed = self.shared.presence.lock_unpoisoned().clone();
         let ringing = *self.shared.ringing.lock_unpoisoned();
         let mut remove = None;
-        for (i, (name, key)) in contacts.iter().enumerate().filter(|(_, (n, k))| matches_search(n, k, &needle)) {
+        // Quem tem mensagem nova vem primeiro (a ordem entre os demais se mantém).
+        let unread: std::collections::HashMap<[u8; 32], usize> = {
+            let book = self.shared.chats.lock_unpoisoned();
+            contacts.iter().map(|(_, k)| (*k, book.unread(k))).collect()
+        };
+        let mut shown: Vec<_> = contacts.iter().enumerate().filter(|(_, (n, k))| matches_search(n, k, &needle)).collect();
+        shown.sort_by_key(|(_, (_, k))| std::cmp::Reverse(unread[k]));
+        for (i, (name, key)) in shown {
             raised_frame(ui, 12, 8, |ui| {
               ui.set_width(ui.available_width());
               ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
-                avatar(ui, name, 32.0, None);
+                let face = avatar(ui, name, 32.0, None);
+                count_badge(ui.painter(), face.rect, unread[key], PANEL);
                 // Adicionado só pelo código: o nome chega quando o contato devolve a apresentação.
                 let pending = *name == hex(key)[..8];
                 ui.add_sized([ui.available_width() - 118.0 - if pending { 22.0 } else { 0.0 }, 32.0], egui::Label::new(RichText::new(name).strong().color(TEXT)).truncate())
@@ -157,7 +165,7 @@ impl App {
                     if call.on_hover_text("Ligar").on_disabled_hover_text(off_tip).clicked() {
                         self.dial(*key);
                     }
-                    let unread = self.shared.chats.lock_unpoisoned().unread(key);
+                    let unread = unread[key];
                     let chat = ui.scope(|ui| {
                         ui.spacing_mut().button_padding = vec2(0.0, 0.0);
                         let ink = if unread > 0 { BLURPLE } else { TEXT };
