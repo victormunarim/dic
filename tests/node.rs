@@ -614,6 +614,25 @@ async fn adding_a_contact_introduces_us_to_it() {
     cb.hangup();
 }
 
+/// A adiciona B só pelo código (sem nome); B se apresenta de volta ao adicionar A e A recebe o nome dele.
+#[tokio::test]
+async fn the_contact_added_by_code_introduces_itself_back_with_its_name() {
+    let (sa, sb) = (key(), key());
+    let (pa, pb) = (*PublicKey::from(&sa).as_bytes(), *PublicKey::from(&sb).as_bytes());
+    let a = Node::start(NodeConfig { updates: false, name: "Ana".into(), ..fixed(sa, free_port(), vec![pb]) }).await.unwrap();
+    let b = Node::start(NodeConfig { updates: false, name: "Beto".into(), ..fixed(sb, free_port(), vec![]) }).await.unwrap();
+    a.add_hint(pb, b.relay_info().unwrap());
+    a.introduce(pb);
+    let got = until("B recebe a apresentação", || Some(b.take_introductions()).filter(|v| !v.is_empty())).await;
+    let relay = a.relay_info().unwrap();
+    assert_eq!(got[0].peer, pa);
+    // Como o app de B: adiciona A e se apresenta de volta.
+    b.add_contact(pa, Some(relay));
+    b.introduce(pa);
+    let back = until("A recebe o nome de B", || Some(a.take_introductions()).filter(|v| !v.is_empty())).await;
+    assert_eq!((back[0].peer, back[0].name.as_str()), (pb, "Beto"));
+}
+
 /// B ainda não está no ar quando A o adiciona: a entrega insiste e chega quando ele sobe.
 #[tokio::test]
 async fn the_introduction_waits_for_the_contact_to_come_online() {

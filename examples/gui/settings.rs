@@ -69,7 +69,7 @@ impl App {
                             self.form.secret = hex(&StaticSecret::random_from_rng(OsRng).to_bytes());
                         }
                     });
-                    card(ui, "Seu nome", "Aparece na lista de contatos de quem você adiciona.", |ui| {
+                    card(ui, "Seu nome", "Aparece na lista de contatos de quem você adiciona. Vazio, os outros veem só o código. Vale a partir da próxima vez que o programa abrir.", |ui| {
                         ui.add(field(&mut self.form.my_name, "seu nome").char_limit(clam::media::update::MAX_NAME));
                         ui.check(&mut self.form.intros, "Aceitar adições e remoções de contatos")
                             .on_hover_text("Quando alguém adiciona o seu código, ele manda uma apresentação cifrada e passa a aparecer na sua lista, para os dois se ligarem. Quando alguém te remove, ele avisa e sai da sua lista também (só vale de quem já é seu contato). Desligado, só entra na lista quem você adicionar e ninguém te tira da lista. Só aceita de quem já tem o seu endereço; no máximo 20 por minuto.");

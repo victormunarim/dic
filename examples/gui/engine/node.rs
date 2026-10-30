@@ -403,7 +403,7 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
                 if introduced_back.insert(i.peer) {
                     node.introduce(i.peer);
                 }
-                let who = if i.name.is_empty() { "alguém" } else { &i.name };
+                let who = if i.name.is_empty() { "alguém (sem nome: a pessoa não preencheu \"seu nome\" nas configurações)" } else { &i.name };
                 if accepted {
                     out.line(format!("{who} ({}) aceitou o seu convite", &hex(&i.peer)[..8]));
                 } else {
