@@ -123,8 +123,8 @@ pub(crate) struct Form {
     /// Chaves bloqueadas, em hex separadas por `;`: não voltam como contato sozinhas, por apresentação ou convite
     /// (veja `Node::block`). Só adicionar a chave de novo, de propósito, desbloqueia.
     pub(crate) blocked: String,
-    /// Tema claro ligado (o escuro é o padrão).
-    pub(crate) light: bool,
+    /// Tema escolhido pela pessoa: `None` segue o do sistema (escuro se o sistema não disser).
+    pub(crate) light: Option<bool>,
     /// Nitidez em vez de fluidez na transmissão da tela: metade dos quadros por segundo, cada um mais fino
     /// (veja `video::Priority`). Desligada (fluidez) de início.
     pub(crate) screen_sharp: bool,
@@ -549,7 +549,11 @@ impl Form {
             screen_private: get("no_screen_privacy") != "1",
             trusted: get("trusted"),
             blocked: get("blocked"),
-            light: get("light") == "1",
+            light: match get("light").as_str() {
+                "1" => Some(true),
+                "0" => Some(false),
+                _ => None,
+            },
             screen_sharp: get("screen_sharp") == "1",
             screen_hardware: get("screen_hardware") == "1",
             // Ligado de início: a chave guarda o "não", então o arquivo antigo, sem ela, também aceita.
@@ -598,7 +602,7 @@ impl Form {
             u8::from(!self.auto_online),
             self.trusted.trim(),
             self.blocked.trim(),
-            u8::from(self.light),
+            self.light.map_or("", |l| if l { "1" } else { "0" }),
             self.audio.to_conf()
         );
         // Contém a chave secreta: só o dono lê.
@@ -888,8 +892,8 @@ mod tests {
     }
 
     #[test]
-    fn the_light_theme_is_off_on_first_run() {
-        assert!(!Form::first_run().light, "escuro é o padrão; o claro é escolha da pessoa");
+    fn the_theme_follows_the_system_until_the_person_chooses() {
+        assert_eq!(Form::first_run().light, None, "sem escolha, quem decide é o sistema");
     }
 
     #[test]

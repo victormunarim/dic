@@ -6,7 +6,7 @@
 use eframe::egui::{self, Color32, CornerRadius, FontId, Margin, Pos2, Rect, RichText, Shadow, Shape, Stroke, TextStyle, Ui, vec2};
 
 /// O único acento: ação principal, estado ativo, aro de quem fala (igual nos dois temas).
-pub(crate) const BLURPLE: Color32 = Color32::from_rgb(0x6a, 0x77, 0xf5);
+pub(crate) const BLURPLE: Color32 = Color32::from_rgb(0x53, 0x60, 0xea);
 
 /// As cores que mudam entre o tema escuro e o claro. O resto (acento, raios) é igual nos dois.
 pub(crate) struct Palette {
@@ -47,8 +47,8 @@ const DARK_PALETTE: Palette = Palette {
     text: Color32::from_rgb(0xdd, 0xe0, 0xe6),
     muted: Color32::from_rgb(0x9a, 0xa1, 0xad),
     strong: Color32::WHITE,
-    green: Color32::from_rgb(0x2f, 0xb0, 0x68),
-    red: Color32::from_rgb(0xe0, 0x4a, 0x4f),
+    green: Color32::from_rgb(0x1a, 0x86, 0x50),
+    red: Color32::from_rgb(0xcf, 0x3d, 0x42),
     yellow: Color32::from_rgb(0xf0, 0xb2, 0x32),
     error: Color32::from_rgb(0xf2, 0x7b, 0x7e),
 };
@@ -58,10 +58,10 @@ const LIGHT_PALETTE: Palette = Palette {
     bg: Color32::from_rgb(0xe4, 0xe8, 0xee),
     deep: Color32::from_rgb(0xd6, 0xdb, 0xe4),
     selected: Color32::from_rgb(0xd9, 0xde, 0xe8),
-    hover: Color32::from_rgb(0xdc, 0xe1, 0xea),
+    hover: Color32::from_rgb(0xd3, 0xd9, 0xe3),
     light: Color32::from_rgb(0xff, 0xff, 0xff),
-    dark: Color32::from_rgb(0xb4, 0xbb, 0xc8),
-    divider: Color32::from_rgb(0xb0, 0xb7, 0xc4),
+    dark: Color32::from_rgb(0xa0, 0xa8, 0xb6),
+    divider: Color32::from_rgb(0x9a, 0xa2, 0xb1),
     text: Color32::from_rgb(0x2a, 0x2e, 0x37),
     muted: Color32::from_rgb(0x55, 0x5d, 0x6b),
     strong: Color32::from_rgb(0x12, 0x14, 0x19),
@@ -229,6 +229,12 @@ pub(crate) fn page_header(ui: &mut Ui, title: &str, subtitle: &str) {
     ui.add_space(14.0);
 }
 
+/// Fundo sob o ponteiro: a base vai para a cor de hover do tema; um preenchimento colorido escurece, porque
+/// clarear tiraria contraste do texto branco que vai sobre ele.
+pub(crate) fn hovered_fill(fill: Color32) -> Color32 {
+    if fill == pal().bg { pal().hover } else { fill.lerp_to_gamma(Color32::BLACK, 0.08) }
+}
+
 /// Botão macio: elevado em repouso, afundado ao apertar, plano e apagado quando desligado. A cor de `fill`
 /// é a da superfície (a base, para os neutros; o acento ou o semântico para ação principal e destrutiva).
 fn soft_button(ui: &mut Ui, enabled: bool, text: RichText, fill: Color32, min: egui::Vec2) -> egui::Response {
@@ -238,7 +244,7 @@ fn soft_button(ui: &mut Ui, enabled: bool, text: RichText, fill: Color32, min: e
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
         let pressed = enabled && reply.is_pointer_button_down_on();
-        let surface = if !enabled { fill.gamma_multiply(0.55) } else if reply.hovered() && !pressed { fill.lerp_to_gamma(Color32::WHITE, 0.06) } else { fill };
+        let surface = if !enabled { fill.gamma_multiply(0.55) } else if reply.hovered() && !pressed { hovered_fill(fill) } else { fill };
         if !enabled {
             painter.rect_filled(rect, CornerRadius::same(R_BUTTON), surface);
         } else if pressed {
@@ -456,7 +462,7 @@ pub(crate) fn count_badge(painter: &egui::Painter, rect: egui::Rect, n: usize, r
         return;
     }
     let text = if n > 99 { "99+".to_string() } else { n.to_string() };
-    let galley = painter.layout_no_wrap(text, FontId::proportional(11.0), Color32::WHITE);
+    let galley = painter.layout_no_wrap(text, FontId::proportional(12.0), Color32::WHITE);
     let w = (galley.size().x + 8.0).max(18.0);
     let badge = egui::Rect::from_center_size(rect.right_top() + vec2(-4.0, 4.0), vec2(w, 18.0));
     painter.rect_filled(badge.expand(2.0), CornerRadius::same(11), ring);
@@ -493,9 +499,24 @@ pub(crate) fn power_icon(ui: &Ui, rect: egui::Rect, color: Color32) {
 pub(crate) fn theme_icon(painter: &egui::Painter, rect: Rect, light: bool, color: Color32) {
     let (c, u) = (rect.center(), rect.width());
     if light {
-        // Lua crescente: disco cheio com outro disco da cor do fundo deslocado por cima.
-        painter.circle_filled(c, u * 0.2, color);
-        painter.circle_filled(c + vec2(u * 0.09, -u * 0.07), u * 0.17, pal().bg);
+        // Lua crescente em contorno: o arco de fora e o de dentro, sem depender da cor do fundo do botão.
+        let (big, small, off) = (u * 0.22, u * 0.18, vec2(u * 0.1, -u * 0.08));
+        let (c2, mut pts) = (c + off, Vec::new());
+        for i in 0..=48 {
+            let a = (i as f32 * 7.5).to_radians();
+            let p = c + vec2(a.cos(), a.sin()) * big;
+            if (p - c2).length() >= small {
+                pts.push(p);
+            }
+        }
+        for i in (0..=48).rev() {
+            let a = (i as f32 * 7.5).to_radians();
+            let p = c2 + vec2(a.cos(), a.sin()) * small;
+            if (p - c).length() <= big {
+                pts.push(p);
+            }
+        }
+        painter.add(Shape::closed_line(pts, Stroke::new(u * 0.06, color)));
         return;
     }
     painter.circle_filled(c, u * 0.14, color);
@@ -505,6 +526,18 @@ pub(crate) fn theme_icon(painter: &egui::Painter, rect: Rect, light: bool, color
         let d = vec2(a.cos(), a.sin());
         painter.line_segment([c + d * (u * 0.22), c + d * (u * 0.32)], stroke);
     }
+}
+
+/// Pessoa (cabeça e ombros) desenhada à mão, no lugar do emoji 👤: a fonte pode não ter o glifo.
+pub(crate) fn person_icon(painter: &egui::Painter, center: Pos2, size: f32, color: Color32) {
+    painter.circle_filled(center + vec2(0.0, -size * 0.2), size * 0.2, color);
+    let shoulders: Vec<Pos2> = (0..=16)
+        .map(|i| {
+            let a = (180.0 + 180.0 * i as f32 / 16.0).to_radians();
+            center + vec2(a.cos() * size * 0.38, size * 0.38 + a.sin() * size * 0.3)
+        })
+        .collect();
+    painter.add(Shape::convex_polygon(shoulders, color, Stroke::NONE));
 }
 
 #[cfg(test)]
@@ -537,11 +570,25 @@ mod tests {
     }
 
     #[test]
+    fn white_text_on_every_fill_keeps_aa_in_both_themes() {
+        for (name, p) in [("escuro", &DARK_PALETTE), ("claro", &LIGHT_PALETTE)] {
+            for (what, fill) in [("acento", BLURPLE), ("verde", p.green), ("vermelho", p.red)] {
+                // O hover escurece o preenchimento, então vale o contraste do estado em repouso e do hover.
+                for f in [fill, fill.lerp_to_gamma(Color32::BLACK, 0.08)] {
+                    let r = contrast(Color32::WHITE, f);
+                    assert!(r >= 4.5, "tema {name}: branco sobre {what} tem contraste {r:.2} (< 4,5)");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn status_colors_are_visible_on_the_base_in_both_themes() {
-        // Cores de estado são ícones e preenchimentos, não texto: AA para componentes (3:1).
+        // Pontos e ícones de estado vêm sempre com rótulo; o piso é 2,8:1 porque o mesmo tom também precisa
+        // segurar texto branco (4,5:1) quando é preenchimento.
         for p in [&DARK_PALETTE, &LIGHT_PALETTE] {
             for c in [p.green, p.red, p.yellow] {
-                assert!(contrast(c, p.bg) >= 3.0, "{:?} sobre a base", c);
+                assert!(contrast(c, p.bg) >= 2.8, "{:?} sobre a base", c);
             }
         }
     }

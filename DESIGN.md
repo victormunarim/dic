@@ -2,7 +2,7 @@
 name: Clam
 description: Chamadas P2P em soft UI silencioso, com relevo de duas sombras e um único acento.
 colors:
-  primary: "#6a77f5"
+  primary: "#5360ea"
   base-dark: "#2b2e35"
   well-dark: "#24272d"
   selected-dark: "#333740"
@@ -13,17 +13,17 @@ colors:
   text-dark: "#dde0e6"
   muted-dark: "#9aa1ad"
   strong-dark: "#ffffff"
-  live-dark: "#2fb068"
-  destructive-dark: "#e04a4f"
+  live-dark: "#1a8650"
+  destructive-dark: "#cf3d42"
   warning-dark: "#f0b232"
   error-dark: "#f27b7e"
   base-light: "#e4e8ee"
   well-light: "#d6dbe4"
   selected-light: "#d9dee8"
-  hover-light: "#dce1ea"
+  hover-light: "#d3d9e3"
   highlight-light: "#ffffff"
-  shade-light: "#b4bbc8"
-  divider-light: "#b0b7c4"
+  shade-light: "#a0a8b6"
+  divider-light: "#9aa2b1"
   text-light: "#2a2e37"
   muted-light: "#555d6b"
   strong-light: "#121419"
@@ -123,19 +123,19 @@ A densidade é média e folgada (margens internas de 22 px nos cartões, espaça
 Paleta sóbria e azulada: um cinza-ardósia (ou cinza-névoa no claro), um acento índigo e dois semânticos. Os tokens `*-dark` e `*-light` são os valores de `Palette` em `examples/gui/theme.rs`; `pal()` escolhe o conjunto.
 
 ### Primary
-- **Índigo do Aro** (#6a77f5): ação principal, item ativo/selecionado, aro de quem fala, seleção de texto. É o único acento e fica igual nos dois temas.
+- **Índigo do Aro** (#5360ea): ação principal, item ativo/selecionado, aro de quem fala, seleção de texto. É o único acento e fica igual nos dois temas.
 
 ### Secondary
-- **Verde Ao Vivo** (#2fb068 escuro, #15723e claro): só "ao vivo/ok" (online, falando, confirmação).
-- **Vermelho Destrutivo** (#e04a4f escuro, #c2343a claro): só remover, desligar, encerrar.
+- **Verde Ao Vivo** (#1a8650 escuro, #15723e claro): só "ao vivo/ok" (online, falando, confirmação).
+- **Vermelho Destrutivo** (#cf3d42 escuro, #c2343a claro): só remover, desligar, encerrar.
 - **Âmbar de Aviso** (#f0b232 escuro, #8f5f00 claro): atenção e o ícone do sol do tema.
 
 ### Neutral
 - **Ardósia Base** (#2b2e35) / **Névoa Base** (#e4e8ee): fundo, trilho, cartões e botões em repouso — o mesmo material.
 - **Poço** (#24272d / #d6dbe4): campos de texto e caixas afundadas.
-- **Selecionado** (#333740 / #d9dee8) e **Hover** (#353942 / #dce1ea): itens de lista e controles sob o ponteiro.
-- **Luz** (#383c45 / #ffffff) e **Sombra** (#1d1f24 / #b4bbc8): o par de sombras do relevo.
-- **Divisor** (#4a4f5a / #b0b7c4): linha fina entre trilho, salas, centro e membros.
+- **Selecionado** (#333740 / #d9dee8) e **Hover** (#353942 / #d3d9e3): itens de lista e controles sob o ponteiro.
+- **Luz** (#383c45 / #ffffff) e **Sombra** (#1d1f24 / #a0a8b6): o par de sombras do relevo.
+- **Divisor** (#4a4f5a / #9aa2b1): linha fina entre trilho, salas, centro e membros.
 - **Texto** (#dde0e6 / #2a2e37), **Texto Apagado** (#9aa1ad / #555d6b), **Texto Forte** (#ffffff / #121419) e **Erro** (#f27b7e / #b0242a).
 
 ### Named Rules

@@ -4,7 +4,7 @@
   "title": "Design System: Clam",
   "extensions": {
     "colorMeta": {
-      "primary": { "role": "primary", "displayName": "Índigo do Aro", "canonical": "#6a77f5", "tonalRamp": ["#1a1e55", "#2a3290", "#3b46c4", "#5360ea", "#6a77f5", "#8e98f8", "#b4bbfb", "#dde0fe"] },
+      "primary": { "role": "primary", "displayName": "Índigo do Aro", "canonical": "#5360ea", "tonalRamp": ["#1a1e55", "#2a3290", "#3b46c4", "#5360ea", "#5360ea", "#8e98f8", "#b4bbfb", "#dde0fe"] },
       "base-dark": { "role": "neutral", "displayName": "Ardósia Base", "canonical": "#2b2e35", "tonalRamp": ["#101215", "#181a1f", "#202329", "#2b2e35", "#3a3e47", "#4a4f5a", "#6a707c", "#9aa1ad"] },
       "base-light": { "role": "neutral", "displayName": "Névoa Base", "canonical": "#e4e8ee", "tonalRamp": ["#555d6b", "#8a92a1", "#b0b7c4", "#cdd2dc", "#e4e8ee", "#eef1f5", "#f6f8fa", "#ffffff"] }
     },
@@ -17,7 +17,7 @@
     "shadows": [
       { "name": "raised-card", "value": "-6px -6px 12px #383c45, 6px 6px 12px #1d1f24", "purpose": "Cartões e janelas (escuro)." },
       { "name": "raised-control", "value": "-4px -4px 8px #383c45, 4px 4px 8px #1d1f24", "purpose": "Botões e ícones do trilho (escuro)." },
-      { "name": "raised-control-light", "value": "-4px -4px 8px #ffffff, 4px 4px 8px #b4bbc8", "purpose": "Botões e ícones do trilho (claro)." }
+      { "name": "raised-control-light", "value": "-4px -4px 8px #ffffff, 4px 4px 8px #a0a8b6", "purpose": "Botões e ícones do trilho (claro)." }
     ],
     "motion": [],
     "breakpoints": [
@@ -32,7 +32,7 @@
       "refersTo": "button",
       "description": "Botão neutro elevado; afunda ao apertar.",
       "html": "<button class=\"ds-btn\">Enviar</button>",
-      "css": ".ds-btn { background: #2b2e35; color: #fff; font-weight: 700; height: 40px; min-width: 110px; padding: 0 16px; border: none; border-radius: 12px; box-shadow: -4px -4px 8px #383c45, 4px 4px 8px #1d1f24; cursor: pointer; } .ds-btn:active { box-shadow: inset -2px -2px 4px #383c45, inset 2px 2px 4px #1d1f24; } .ds-btn:focus-visible { outline: 2px solid #6a77f5; outline-offset: 2px; }"
+      "css": ".ds-btn { background: #2b2e35; color: #fff; font-weight: 700; height: 40px; min-width: 110px; padding: 0 16px; border: none; border-radius: 12px; box-shadow: -4px -4px 8px #383c45, 4px 4px 8px #1d1f24; cursor: pointer; } .ds-btn:active { box-shadow: inset -2px -2px 4px #383c45, inset 2px 2px 4px #1d1f24; } .ds-btn:focus-visible { outline: 2px solid #5360ea; outline-offset: 2px; }"
     },
     {
       "name": "Primary Button",
@@ -40,7 +40,7 @@
       "refersTo": "button-primary",
       "description": "Ação principal com o acento.",
       "html": "<button class=\"ds-btn-primary\">Ligar</button>",
-      "css": ".ds-btn-primary { background: #6a77f5; color: #fff; font-weight: 700; height: 40px; min-width: 110px; padding: 0 16px; border: none; border-radius: 12px; box-shadow: -4px -4px 8px #383c45, 4px 4px 8px #1d1f24; cursor: pointer; } .ds-btn-primary:hover { background: #7683f7; } .ds-btn-primary:active { box-shadow: inset 2px 2px 4px #1d1f24; } .ds-btn-primary:focus-visible { outline: 2px solid #dde0fe; outline-offset: 2px; }"
+      "css": ".ds-btn-primary { background: #5360ea; color: #fff; font-weight: 700; height: 40px; min-width: 110px; padding: 0 16px; border: none; border-radius: 12px; box-shadow: -4px -4px 8px #383c45, 4px 4px 8px #1d1f24; cursor: pointer; } .ds-btn-primary:hover { background: #7683f7; } .ds-btn-primary:active { box-shadow: inset 2px 2px 4px #1d1f24; } .ds-btn-primary:focus-visible { outline: 2px solid #dde0fe; outline-offset: 2px; }"
     },
     {
       "name": "Card",
@@ -56,7 +56,7 @@
       "refersTo": "field",
       "description": "Campo afundado no poço.",
       "html": "<input class=\"ds-field\" placeholder=\"Mensagem\">",
-      "css": ".ds-field { background: #24272d; color: #dde0e6; padding: 10px 12px; border: none; border-radius: 12px; box-shadow: inset 2px 2px 4px #1d1f24, inset -2px -2px 4px #383c45; width: 260px; } .ds-field::placeholder { color: #9aa1ad; } .ds-field:focus-visible { outline: 2px solid #6a77f5; }"
+      "css": ".ds-field { background: #24272d; color: #dde0e6; padding: 10px 12px; border: none; border-radius: 12px; box-shadow: inset 2px 2px 4px #1d1f24, inset -2px -2px 4px #383c45; width: 260px; } .ds-field::placeholder { color: #9aa1ad; } .ds-field:focus-visible { outline: 2px solid #5360ea; }"
     },
     {
       "name": "Rail Icon",

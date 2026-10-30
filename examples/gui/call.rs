@@ -38,7 +38,7 @@ impl App {
             }
             self.dial_card(ui, offline, busy);
             card(ui, "Nenhuma chamada em andamento", "Quando você ligar ou atender, ela aparece aqui, com a tela compartilhada.", |ui| {
-                note(ui, "Para ligar a um contato, use o 📞 ao lado dele na lista de contatos (👤, na coluna da esquerda).");
+                note(ui, "Para ligar a um contato, use o 📞 ao lado dele na lista de contatos (ícone de pessoa, no trilho da esquerda).");
             });
             return;
         }

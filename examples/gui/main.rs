@@ -45,7 +45,7 @@ fn main() -> eframe::Result {
         opts,
         Box::new(|cc| {
             let form = Form::load();
-            theme::set_light(form.light);
+            theme::set_light(form.light.unwrap_or_else(|| cc.egui_ctx.system_theme() == Some(egui::Theme::Light)));
             theme::apply(&cc.egui_ctx);
             let shared = Arc::<engine::Shared>::default();
             shared.audio.set_prefs(form.audio);

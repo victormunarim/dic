@@ -97,7 +97,7 @@ impl App {
                         ui.spacing_mut().item_spacing.y = 14.0;
                         egui::ScrollArea::vertical().scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).auto_shrink([false, false]).show(ui, |ui| {
                     let on = self.tab == Tab::Contacts;
-                    let people = server_icon(ui, "👤", on.then_some(BLURPLE), if on { Color32::WHITE } else { pal().strong });
+                    let people = server_icon(ui, "pessoa", on.then_some(BLURPLE), if on { Color32::WHITE } else { pal().strong });
                     count_badge(ui.painter(), people.rect, self.shared.chats.lock_unpoisoned().unread_total(), pal().bg);
                     if people.on_hover_text("Contatos").clicked() {
                         self.tab = Tab::Contacts;
@@ -126,8 +126,8 @@ impl App {
                     });
                 });
                 if toggle {
-                    self.form.light = !self.form.light;
-                    set_light(self.form.light);
+                    self.form.light = Some(!is_light());
+                    set_light(!is_light());
                     apply(ctx);
                     self.form.save();
                 }
@@ -764,10 +764,12 @@ fn server_icon(ui: &mut egui::Ui, text: &str, active: Option<Color32>, ink: Colo
     let (rect, reply) = ui.allocate_exact_size(vec2(52.0, 52.0), egui::Sense::click());
     match active {
         Some(fill) => sunken(ui.painter(), rect, 18, fill),
-        None => raised(ui.painter(), rect, 18, if reply.hovered() { pal().bg.lerp_to_gamma(Color32::WHITE, 0.06) } else { pal().bg }, 4),
+        None => raised(ui.painter(), rect, 18, if reply.hovered() { pal().hover } else { pal().bg }, 4),
     }
     if text == "+" {
         draw_plus(ui.painter(), rect.center(), 11.0, ink);
+    } else if text == "pessoa" {
+        person_icon(ui.painter(), rect.center(), 30.0, ink);
     } else {
         ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, text, egui::FontId::proportional(24.0), ink);
     }
