@@ -36,6 +36,23 @@ impl App {
             });
             return;
         }
+        let incoming = *self.shared.incoming.lock_unpoisoned();
+        if let Some(who) = incoming {
+            let name = member_name(&self.form.names(), &who);
+            card(ui, "Chamada recebida", "", |ui| {
+                status_dot(ui, YELLOW, &format!("{name} está ligando para você"));
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    if icon_button(ui, true, "📞", "Atender", GREEN).clicked() {
+                        self.shared.answer.store(ANSWER_ACCEPT, Ordering::Relaxed);
+                    }
+                    if hangup_button(ui).on_hover_text("Recusar").clicked() {
+                        self.shared.answer.store(ANSWER_REJECT, Ordering::Relaxed);
+                    }
+                });
+            });
+            return;
+        }
         let ringing = self.shared.ringing.lock_unpoisoned().is_some();
         card(ui, if ringing { "Chamando" } else { "Em chamada" }, "", |ui| {
             if ringing {

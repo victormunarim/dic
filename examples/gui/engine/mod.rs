@@ -76,6 +76,12 @@ pub(crate) enum Cmd {
     RoomShare(bool),
 }
 
+pub(crate) const ANSWER_NONE: u8 = 0;
+pub(crate) const ANSWER_ACCEPT: u8 = 1;
+pub(crate) const ANSWER_REJECT: u8 = 2;
+/// Quanto a chamada toca antes de ser recusada (quem liga desiste antes, em 15 s).
+pub(crate) const RING_SECS: u64 = 30;
+
 /// Estado compartilhado entre a janela e a tarefa do nó.
 #[derive(Default)]
 pub(crate) struct Shared {
@@ -92,6 +98,11 @@ pub(crate) struct Shared {
     /// Para quem se está ligando e ainda não atendeu (vazio fora disso). Enquanto preenchido, a janela mostra
     /// "Chamando…"; `peer` só vale depois que a pessoa atende.
     pub(crate) ringing: Mutex<Option<[u8; 32]>>,
+    /// Quem está ligando para mim e espera eu atender (vazio fora disso). A janela mostra atender/recusar e
+    /// grava a resposta em `answer`.
+    pub(crate) incoming: Mutex<Option<[u8; 32]>>,
+    /// Resposta da pessoa à chamada que toca: `ANSWER_NONE`, `ANSWER_ACCEPT` ou `ANSWER_REJECT`.
+    pub(crate) answer: std::sync::atomic::AtomicU8,
     /// Qualidade da linha na chamada atual (vazio fora de chamada).
     pub(crate) link: Mutex<String>,
     /// Tela: o que a pessoa pediu, o que está rodando e o que chegou do outro lado.

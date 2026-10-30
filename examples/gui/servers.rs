@@ -265,8 +265,9 @@ impl App {
         });
         // Chamada 1:1 (fora de sala): com quem é.
         let ringing = *self.shared.ringing.lock_unpoisoned();
+        let incoming = *self.shared.incoming.lock_unpoisoned();
         let call_bar = (in_call && room_bar.is_none() && my_room.is_none())
-            .then(|| ringing.or(*self.shared.peer.lock_unpoisoned()).map(|k| member_name(&self.form.names(), &k)))
+            .then(|| incoming.or(ringing).or(*self.shared.peer.lock_unpoisoned()).map(|k| member_name(&self.form.names(), &k)))
             .flatten();
         egui::SidePanel::left("salas")
             .show_separator_line(true)
@@ -334,18 +335,21 @@ impl App {
                     });
                     // A sala e a chamada 1:1 têm a mesma subseção: ícone, nome, compartilhar a tela e desligar.
                     if let Some((room, server)) = &room_bar {
-                        match self.session_bar(ui, "🔊", room, server, "Sair da sala", false) {
+                        match self.session_bar(ui, "🔊", room, server, "Sair da sala", Ring::No) {
                             Bar::Share(on) => self.send(Cmd::RoomShare(on)),
                             Bar::Leave => self.send(Cmd::LeaveRoom),
                             Bar::Open => self.srv.chat_over_screen = true,
+                            Bar::Accept => {}
                             Bar::None => {}
                         }
                     } else if let Some(who) = call_bar {
                         // A qualidade da linha fica na aba da chamada; a barra pequena não mostra estatística.
-                        let sub = if ringing.is_some() { "Chamando…" } else { "Em chamada" };
-                        let tip = if ringing.is_some() { "Cancelar a chamada" } else { "Desligar a chamada" };
-                        match self.session_bar(ui, "📞", &who, sub, tip, ringing.is_some()) {
+                        let sub = if incoming.is_some() { "Chamando você…" } else if ringing.is_some() { "Chamando…" } else { "Em chamada" };
+                        let tip = if incoming.is_some() { "Recusar" } else if ringing.is_some() { "Cancelar a chamada" } else { "Desligar a chamada" };
+                        match self.session_bar(ui, "📞", &who, sub, tip, if incoming.is_some() { Ring::In } else if ringing.is_some() { Ring::Out } else { Ring::No }) {
                             Bar::Share(on) => self.shared.screen.want_share.store(on, Ordering::Relaxed),
+                            Bar::Leave if incoming.is_some() => self.shared.answer.store(ANSWER_REJECT, Ordering::Relaxed),
+                            Bar::Accept => self.shared.answer.store(ANSWER_ACCEPT, Ordering::Relaxed),
                             Bar::Leave => self.shared.hangup.store(true, Ordering::Relaxed),
                             Bar::Open | Bar::None => {}
                         }
@@ -356,7 +360,7 @@ impl App {
 
     /// Subseção acima do perfil (sala ou chamada 1:1): `glyph`, `title` e `sub` à esquerda; à direita, compartilhar a
     /// tela e desligar. Devolve o que a pessoa clicou.
-    fn session_bar(&mut self, ui: &mut egui::Ui, glyph: &str, title: &str, sub: &str, leave_tip: &str, calling: bool) -> Bar {
+    fn session_bar(&mut self, ui: &mut egui::Ui, glyph: &str, title: &str, sub: &str, leave_tip: &str, ring: Ring) -> Bar {
         let sharing = self.shared.screen.want_share.load(Ordering::Relaxed);
         let mut out = Bar::None;
         // Mais estreita que o perfil (recuo nos lados), com folga interna.
@@ -382,7 +386,10 @@ impl App {
                     }
                     let tip = if sharing { "Parar de compartilhar a tela" } else { "Compartilhar a minha tela" };
                     // Chamando ainda não há com quem dividir a tela.
-                    if !calling && screen_button(ui, sharing).on_hover_text(tip).clicked() {
+                    if ring == Ring::In && icon_button(ui, true, "📞", "Atender", GREEN).clicked() {
+                        out = Bar::Accept;
+                    }
+                    if ring == Ring::No && screen_button(ui, sharing).on_hover_text(tip).clicked() {
                         out = Bar::Share(!sharing);
                     }
                 });
@@ -752,6 +759,16 @@ fn server_icon(ui: &mut egui::Ui, text: &str, active: Option<Color32>, ink: Colo
     reply.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
+/// A chamada da subseção ainda está tocando?
+#[derive(PartialEq, Clone, Copy)]
+enum Ring {
+    No,
+    /// Eu liguei e espero atenderem.
+    Out,
+    /// Alguém me ligou e espero eu atender.
+    In,
+}
+
 /// O que a pessoa fez na subseção da sala ou da chamada.
 enum Bar {
     None,
@@ -759,4 +776,6 @@ enum Bar {
     Leave,
     /// Clicou no nome da sala: volta ao bate-papo.
     Open,
+    /// Atendeu a chamada que tocava.
+    Accept,
 }

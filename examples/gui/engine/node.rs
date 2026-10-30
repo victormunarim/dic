@@ -85,6 +85,8 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
     let mut mesh: Vec<[u8; 32]> = Vec::new();
     let mut saver = KnownSaver::new(&book_of(&node));
     let (dialed_tx, mut dialed_rx) = mpsc::unbounded_channel::<([u8; 32], u32, Option<Result<ActiveCall, clam::node::DialError>>)>();
+    // Chamada que a pessoa atendeu (ou não) depois de tocar: o toque espera numa tarefa, para o nó seguir vivo.
+    let (answered_tx, mut answered_rx) = mpsc::unbounded_channel::<([u8; 32], Result<ActiveCall, String>)>();
     let (redial_tx, mut redial_rx) = mpsc::unbounded_channel::<([u8; 32], u32)>();
     // Discar demora (endereço guardado, espera de resposta): numa tarefa, para a janela seguir
     // atendendo comandos; "Desligar" cancela.
@@ -132,13 +134,41 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
                     continue;
                 }
                 out.line(format!("chamada de {name}"));
-                shared.hangup.store(false, Ordering::Relaxed);
                 let caller = *inc.caller().as_bytes();
                 // Quem liga escolhe o codec; telefone antigo não diz e fica em G.722.
                 let codec = inc.codec();
                 out.line(format!("codec da chamada: {codec:?}"));
-                match inc.accept(codec.build()).await {
-                    Ok(c) => start_talk(c, 660.0, &shared, &out, &form, None, Peer { key: caller, dialer: dialer.clone() }),
+                // Só conecta quando a pessoa atende: a chamada toca até ela aceitar, recusar ou passar `RING_SECS`.
+                shared.answer.store(ANSWER_NONE, Ordering::Relaxed);
+                *shared.incoming.lock_unpoisoned() = Some(caller);
+                let (sh, tx, out) = (shared.clone(), answered_tx.clone(), out.clone());
+                tokio::spawn(async move {
+                    let deadline = tokio::time::Instant::now() + Duration::from_secs(RING_SECS);
+                    let answer = loop {
+                        let a = sh.answer.load(Ordering::Relaxed);
+                        if a != ANSWER_NONE || tokio::time::Instant::now() >= deadline {
+                            break a;
+                        }
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    };
+                    *sh.incoming.lock_unpoisoned() = None;
+                    sh.answer.store(ANSWER_NONE, Ordering::Relaxed);
+                    let result = if answer == ANSWER_ACCEPT {
+                        inc.accept(codec.build()).await.map_err(|e| e.to_string())
+                    } else {
+                        inc.reject().await;
+                        Err(if answer == ANSWER_REJECT { "recusada".to_string() } else { "ninguém atendeu".to_string() })
+                    };
+                    out.line(format!("chamada recebida: {}", if result.is_ok() { "atendida" } else { "não atendida" }));
+                    let _ = tx.send((caller, result));
+                });
+            }
+            Some((caller, r)) = answered_rx.recv() => {
+                match r {
+                    Ok(c) => {
+                        shared.hangup.store(false, Ordering::Relaxed);
+                        start_talk(c, 660.0, &shared, &out, &form, None, Peer { key: caller, dialer: dialer.clone() });
+                    }
                     Err(e) => {
                         out.line(format!("não atendeu: {e}"));
                         shared.in_call.store(false, Ordering::Relaxed);
