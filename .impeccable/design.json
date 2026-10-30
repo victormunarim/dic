@@ -1,0 +1,85 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-30T12:00:00Z",
+  "title": "Design System: Clam",
+  "extensions": {
+    "colorMeta": {
+      "primary": { "role": "primary", "displayName": "Índigo do Aro", "canonical": "#6a77f5", "tonalRamp": ["#1a1e55", "#2a3290", "#3b46c4", "#5360ea", "#6a77f5", "#8e98f8", "#b4bbfb", "#dde0fe"] },
+      "base-dark": { "role": "neutral", "displayName": "Ardósia Base", "canonical": "#2b2e35", "tonalRamp": ["#101215", "#181a1f", "#202329", "#2b2e35", "#3a3e47", "#4a4f5a", "#6a707c", "#9aa1ad"] },
+      "base-light": { "role": "neutral", "displayName": "Névoa Base", "canonical": "#e4e8ee", "tonalRamp": ["#555d6b", "#8a92a1", "#b0b7c4", "#cdd2dc", "#e4e8ee", "#eef1f5", "#f6f8fa", "#ffffff"] }
+    },
+    "typographyMeta": {
+      "heading": { "displayName": "Heading", "purpose": "Título de página." },
+      "card-title": { "displayName": "Card title", "purpose": "Título de cartão e painel." },
+      "body": { "displayName": "Body", "purpose": "Texto corrente e botões." },
+      "note": { "displayName": "Note", "purpose": "Ajuda curta e subtítulos." }
+    },
+    "shadows": [
+      { "name": "raised-card", "value": "-6px -6px 12px #383c45, 6px 6px 12px #1d1f24", "purpose": "Cartões e janelas (escuro)." },
+      { "name": "raised-control", "value": "-4px -4px 8px #383c45, 4px 4px 8px #1d1f24", "purpose": "Botões e ícones do trilho (escuro)." },
+      { "name": "raised-control-light", "value": "-4px -4px 8px #ffffff, 4px 4px 8px #b4bbc8", "purpose": "Botões e ícones do trilho (claro)." }
+    ],
+    "motion": [],
+    "breakpoints": [
+      { "name": "two-columns", "value": "780px" },
+      { "name": "min-window", "value": "820px" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Button",
+      "kind": "button",
+      "refersTo": "button",
+      "description": "Botão neutro elevado; afunda ao apertar.",
+      "html": "<button class=\"ds-btn\">Enviar</button>",
+      "css": ".ds-btn { background: #2b2e35; color: #fff; font-weight: 700; height: 40px; min-width: 110px; padding: 0 16px; border: none; border-radius: 12px; box-shadow: -4px -4px 8px #383c45, 4px 4px 8px #1d1f24; cursor: pointer; } .ds-btn:active { box-shadow: inset -2px -2px 4px #383c45, inset 2px 2px 4px #1d1f24; } .ds-btn:focus-visible { outline: 2px solid #6a77f5; outline-offset: 2px; }"
+    },
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Ação principal com o acento.",
+      "html": "<button class=\"ds-btn-primary\">Ligar</button>",
+      "css": ".ds-btn-primary { background: #6a77f5; color: #fff; font-weight: 700; height: 40px; min-width: 110px; padding: 0 16px; border: none; border-radius: 12px; box-shadow: -4px -4px 8px #383c45, 4px 4px 8px #1d1f24; cursor: pointer; } .ds-btn-primary:hover { background: #7683f7; } .ds-btn-primary:active { box-shadow: inset 2px 2px 4px #1d1f24; } .ds-btn-primary:focus-visible { outline: 2px solid #dde0fe; outline-offset: 2px; }"
+    },
+    {
+      "name": "Card",
+      "kind": "card",
+      "refersTo": "card",
+      "description": "Cartão elevado com título e subtítulo.",
+      "html": "<div class=\"ds-card\"><div class=\"ds-card-title\">Seu nome</div><div class=\"ds-card-note\">Aparece para os contatos.</div></div>",
+      "css": ".ds-card { background: #2b2e35; color: #dde0e6; padding: 22px; border-radius: 18px; box-shadow: -6px -6px 12px #383c45, 6px 6px 12px #1d1f24; } .ds-card-title { color: #fff; font-weight: 700; font-size: 18px; } .ds-card-note { color: #9aa1ad; font-size: 14px; margin-top: 4px; }"
+    },
+    {
+      "name": "Field",
+      "kind": "input",
+      "refersTo": "field",
+      "description": "Campo afundado no poço.",
+      "html": "<input class=\"ds-field\" placeholder=\"Mensagem\">",
+      "css": ".ds-field { background: #24272d; color: #dde0e6; padding: 10px 12px; border: none; border-radius: 12px; box-shadow: inset 2px 2px 4px #1d1f24, inset -2px -2px 4px #383c45; width: 260px; } .ds-field::placeholder { color: #9aa1ad; } .ds-field:focus-visible { outline: 2px solid #6a77f5; }"
+    },
+    {
+      "name": "Rail Icon",
+      "kind": "nav",
+      "refersTo": "rail-icon",
+      "description": "Ícone do trilho de servidores; ativo afunda e vira acento.",
+      "html": "<div class=\"ds-rail\">A</div>",
+      "css": ".ds-rail { width: 52px; height: 52px; display: grid; place-items: center; background: #2b2e35; color: #fff; font-size: 24px; border-radius: 18px; box-shadow: -4px -4px 8px #383c45, 4px 4px 8px #1d1f24; } .ds-rail:hover { background: #353942; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "A Sala Silenciosa",
+    "overview": "O Clam se comporta como uma sala onde ninguém levanta a voz. Tudo é moldado do mesmo material macio: uma única cor base, relevo dado por duas sombras opostas e quase nenhuma cor. A privacidade é o produto, então a interface não grita.",
+    "keyCharacteristics": ["Uma cor base por tema", "Três estados: elevado, afundado, plano", "Um único acento", "Ícones desenhados com o painter", "Contraste AA nos dois temas"],
+    "rules": [
+      { "name": "The One Voice Rule", "body": "O acento índigo é a única cor viva da tela.", "section": "colors" },
+      { "name": "The Reserved Semantics Rule", "body": "Verde é ao vivo/ok e vermelho é destrutivo, nunca decoração.", "section": "colors" },
+      { "name": "The Not-Shadow-Alone Rule", "body": "Estado importante soma cor, ícone ou rótulo ao relevo.", "section": "colors" },
+      { "name": "The Icon-Before-Text Rule", "body": "Se um ícone resolve, não escreva um parágrafo.", "section": "typography" },
+      { "name": "The Two Shadows Rule", "body": "Todo relevo é o par luz + sombra, sempre opostos.", "section": "elevation" },
+      { "name": "The No-Hot-Path Rule", "body": "Nada de desenhar relevo por quadro de vídeo ou por pacote.", "section": "elevation" }
+    ],
+    "dos": ["Do usar os helpers de theme.rs", "Do ler cores só de pal()", "Do desenhar o ícone importante com o painter", "Do explicar no hover e manter visível o aviso que protege a pessoa"],
+    "donts": ["Don't pintar Frame com cor chapada nem sombra à mão", "Don't criar um segundo acento nem usar vermelho/verde fora do significado", "Don't deixar estado só na sombra", "Don't despejar parágrafo fixo quando um ícone com hover resolve"]
+  }
+}
