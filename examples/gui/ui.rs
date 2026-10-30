@@ -245,30 +245,45 @@ impl App {
         }
     }
 
-    /// Janela própria com a tela de `zoom`, ajustada ao tamanho da janela; fecha sozinha se a tela some.
+    /// Tela cheia da transmissão de `zoom`: a janela do app vai a tela cheia e a imagem ocupa tudo, com a
+    /// proporção mantida. Fecha pelo X no canto ou pelo Esc, e sozinha se a tela some. Fica no mesmo
+    /// viewport: um segundo (outra janela do sistema com contexto GL próprio) travava a janela principal
+    /// no Wayland, que esperava a troca de buffers das duas.
     fn zoom_window(&mut self, ctx: &egui::Context) {
-        let Some(who) = self.zoom else { return };
-        let Some((_, tex)) = self.screen_tex.get(&who) else {
+        let flag = egui::Id::new("tela-cheia");
+        let was = ctx.data_mut(|d| d.get_temp::<bool>(flag)).unwrap_or(false);
+        let tex = self.zoom.and_then(|who| self.screen_tex.get(&who).map(|(_, tex)| tex.clone()));
+        let Some(tex) = tex else {
             self.zoom = None;
+            if was {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+                ctx.data_mut(|d| d.insert_temp(flag, false));
+            }
             return;
         };
-        let title = format!("Tela de {}", member_name(&self.form.names(), &who));
-        let size = tex.size_vec2();
-        // Janela flutuante dentro da janela do app: um segundo viewport (outra janela do sistema com
-        // contexto GL próprio) travava a janela principal no Wayland, que esperava a troca de buffers das duas.
-        let screen = ctx.screen_rect().size();
-        let fit = (screen.x * 0.9 / size.x).min(screen.y * 0.9 / size.y).min(1.0);
-        let mut open = true;
-        egui::Window::new(title)
-            .id(egui::Id::new("tela-ampliada"))
-            .open(&mut open)
-            .resizable(true)
-            .default_size(size * fit)
-            .show(ctx, |ui| {
-                ui.add(egui::Image::new(tex).fit_to_exact_size(ui.available_size()).maintain_aspect_ratio(true));
-            });
-        if !open {
+        if !was {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
+            ctx.data_mut(|d| d.insert_temp(flag, true));
+        }
+        let screen = ctx.screen_rect();
+        let mut close = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+        egui::Area::new(egui::Id::new("tela-ampliada")).order(egui::Order::Foreground).fixed_pos(screen.min).show(ctx, |ui| {
+            // Cobre a interface toda e come os cliques, para nada por baixo reagir.
+            ui.allocate_rect(screen, egui::Sense::click_and_drag());
+            ui.painter().rect_filled(screen, 0.0, Color32::BLACK);
+            let size = tex.size_vec2();
+            let fit = (screen.width() / size.x).min(screen.height() / size.y);
+            let image = egui::Rect::from_center_size(screen.center(), size * fit);
+            ui.put(image, egui::Image::new(&tex).fit_to_exact_size(image.size()));
+            let corner = egui::Rect::from_min_size(egui::pos2(screen.max.x - 48.0, screen.min.y + 12.0), vec2(32.0, 34.0));
+            if ui.put(corner, |ui: &mut egui::Ui| theme::hangup_button(ui)).on_hover_text("Sair da tela cheia (Esc)").clicked() {
+                close = true;
+            }
+        });
+        if close {
             self.zoom = None;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+            ctx.data_mut(|d| d.insert_temp(flag, false));
         }
     }
 

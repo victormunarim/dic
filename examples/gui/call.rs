@@ -125,10 +125,10 @@ impl App {
         order.sort_by_key(|(k, _)| **k);
         for (who, (_, tex)) in order {
             card(ui, &format!("Tela de {}", member_name(&names, who)), "", |ui| {
-                if ui.button("🔍").on_hover_text("Ampliar: abre a tela numa janela maior").clicked() {
+                if ui.button("🔍").on_hover_text("Tela cheia (Esc ou o X para sair)").clicked() {
                     self.zoom = Some(*who);
                 }
-                // Ampliada, a miniatura sai: a imagem só aparece na janela ampliada (e não é desenhada duas vezes).
+                // Em tela cheia a miniatura sai: a imagem não é desenhada duas vezes.
                 if self.zoom != Some(*who) {
                     ui.add(egui::Image::new(tex).max_width(ui.available_width()).corner_radius(CornerRadius::same(8)).shrink_to_fit());
                 }

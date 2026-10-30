@@ -518,7 +518,7 @@ impl App {
                     order.sort_by_key(|(k, _)| **k);
                     for (who, (_, tex)) in order {
                         ui.label(RichText::new(format!("Tela de {}", member_name(&names, who))).strong());
-                        if ui.button("🔍").on_hover_text("Ampliar: abre a tela numa janela maior").clicked() {
+                        if ui.button("🔍").on_hover_text("Tela cheia (Esc ou o X para sair)").clicked() {
                             self.zoom = Some(*who);
                         }
                         if self.zoom != Some(*who) {
