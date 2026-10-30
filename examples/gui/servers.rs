@@ -279,30 +279,11 @@ impl App {
                 ui.spacing_mut().item_spacing.y = 6.0;
                 // O perfil ocupa uma altura fixa no pé; a lista de salas rola no espaço que sobra.
                 let footer: f32 = 74.0 + if room_bar.is_some() || call_bar.is_some() { 76.0 } else { 0.0 };
-                if matches!(self.tab, Tab::Contacts | Tab::Call) {
-                    let count = parse_contacts(&self.form.contacts).len();
-                    ui.add_space(2.0);
-                    ui.horizontal(|ui| {
-                        ui.vertical(|ui| {
-                            ui.spacing_mut().item_spacing.y = 2.0;
-                            ui.label(RichText::new("Contatos").strong().size(17.0).color(Color32::WHITE));
-                            ui.label(RichText::new(match count { 0 => "ninguém ainda".to_string(), 1 => "1 pessoa".to_string(), n => format!("{n} pessoas") }).size(13.0).color(MUTED));
-                        });
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let plus = plus_button(ui, "Novo contato");
-                            // Fecha só ao clicar fora, para dar tempo de colar o código.
-                            egui::Popup::menu(&plus).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| self.new_contact_form(ui));
-                        });
-                    });
-                    ui.add_space(8.0);
-                    let height = (ui.available_height() - footer).max(60.0);
-                    egui::ScrollArea::vertical().scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).max_height(height).auto_shrink([false, false]).show(ui, |ui| {
-                        // Folga lateral e vertical maior que a sombra (5 px + 10 de desfoque pela metade): cortada pela rolagem, a sombra escura virava uma linha reta no limite da coluna.
-                        egui::Frame::new().inner_margin(Margin::symmetric(16, 10)).show(ui, |ui| self.contacts_list(ui, !offline, in_call));
-                    });
-                } else {
-                match (&hub, &view) {
-                    (Some(hub), Some(v)) => {
+                // Sem servidor escolhido não há sala para listar: a coluna mostra os contatos.
+                if matches!(self.tab, Tab::Contacts | Tab::Call) || !matches!((&hub, &view), (Some(_), Some(_))) {
+                    self.contacts_column(ui, footer, offline, in_call);
+                } else if let (Some(hub), Some(v)) = (&hub, &view) {
+                    {
                         ui.add_space(2.0);
                         ui.horizontal(|ui| {
                             ui.vertical(|ui| {
@@ -322,11 +303,6 @@ impl App {
                             egui::Frame::new().inner_margin(Margin::symmetric(16, 10)).show(ui, |ui| self.room_list(ui, hub, v, my_room, in_call));
                         });
                     }
-                    _ => {
-                        ui.add_space(8.0);
-                        note(ui, "Escolha um servidor na coluna da esquerda.");
-                    }
-                }
                 }
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
                     ui.spacing_mut().item_spacing.y = 2.0;
@@ -357,6 +333,30 @@ impl App {
                     }
                 });
             });
+    }
+
+    /// Cabeçalho "Contatos" com o +, e a lista que rola no espaço acima do `footer`.
+    fn contacts_column(&mut self, ui: &mut egui::Ui, footer: f32, offline: bool, in_call: bool) {
+                let count = parse_contacts(&self.form.contacts).len();
+                ui.add_space(2.0);
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 2.0;
+                        ui.label(RichText::new("Contatos").strong().size(17.0).color(Color32::WHITE));
+                        ui.label(RichText::new(match count { 0 => "ninguém ainda".to_string(), 1 => "1 pessoa".to_string(), n => format!("{n} pessoas") }).size(13.0).color(MUTED));
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let plus = plus_button(ui, "Novo contato");
+                        // Fecha só ao clicar fora, para dar tempo de colar o código.
+                        egui::Popup::menu(&plus).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| self.new_contact_form(ui));
+                    });
+                });
+                ui.add_space(8.0);
+                let height = (ui.available_height() - footer).max(60.0);
+                egui::ScrollArea::vertical().scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).max_height(height).auto_shrink([false, false]).show(ui, |ui| {
+                    // Folga lateral e vertical maior que a sombra (5 px + 10 de desfoque pela metade): cortada pela rolagem, a sombra escura virava uma linha reta no limite da coluna.
+                    egui::Frame::new().inner_margin(Margin::symmetric(16, 10)).show(ui, |ui| self.contacts_list(ui, !offline, in_call));
+                });
     }
 
     /// Subseção acima do perfil (sala ou chamada 1:1): `glyph`, `title` e `sub` à esquerda; à direita, compartilhar a
