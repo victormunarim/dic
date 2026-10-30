@@ -129,7 +129,7 @@ impl App {
                 ui.add_sized([ui.available_width() - 118.0 - if pending { 22.0 } else { 0.0 }, 32.0], egui::Label::new(RichText::new(name).strong().color(TEXT)).truncate())
                     .on_hover_text(format!("{}…", &hex(key)[..16]));
                 if pending {
-                    ui.label(RichText::new("❗").size(14.0).color(YELLOW)).on_hover_text("O nome do contato aparecerá assim que você e ele estiverem online ao mesmo tempo.");
+                    ui.label(RichText::new("❗").size(14.0).color(YELLOW)).on_hover_text("Contato pendente: ainda sem nome. Não existe servidor: cada pessoa fala direto com a outra, cifrado. Quando o contato se apresenta, o nome e o endereço dele chegam sozinhos e esta marca some. A apresentação só é entregue com ele ligado, e o programa insiste até conseguir.");
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;
