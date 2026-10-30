@@ -172,28 +172,34 @@ impl App {
             });
             ui.add_space(4.0);
         }
+        // Remover é irreversível (o outro lado também te tira da lista dele): pede confirmação.
         if let Some(i) = remove {
-            let key = contacts[i].1;
-            self.form.contacts = remove_contact(&self.form.contacts, i);
-            // O endereço guardado do contato vai junto (a menos que a mesma chave ainda esteja na lista).
-            if !parse_contacts(&self.form.contacts).iter().any(|(_, k)| *k == key) {
-                // A confiança não volta sozinha se o contato for adicionado de novo.
-                self.form.set_trusted(key, false);
-                // O outro lado é avisado e também tira esta pessoa da lista dele. Offline, o aviso fica na fila
-                // (`.clam-gui.removed`) e o endereço dele continua guardado até a entrega no próximo início.
-                match &self.running {
-                    Some(r) => {
-                        let _ = r.cmds.send(Cmd::Retire(key));
-                    }
-                    None => {
-                        if let Err(e) = mark_pending(key, false).and_then(|()| mark_removal(key, true)) {
-                            self.error = format!("não deu para guardar a remoção do contato em {}: {e}", removals_path().display());
-                        }
+            self.remove_ask = Some(contacts[i].1);
+        }
+    }
+
+    /// Tira o contato da lista, avisa o outro lado e esquece o endereço.
+    fn remove_contact_now(&mut self, key: [u8; 32]) {
+        let Some(i) = parse_contacts(&self.form.contacts).iter().position(|(_, k)| *k == key) else { return };
+        self.form.contacts = remove_contact(&self.form.contacts, i);
+        // O endereço guardado do contato vai junto (a menos que a mesma chave ainda esteja na lista).
+        if !parse_contacts(&self.form.contacts).iter().any(|(_, k)| *k == key) {
+            // A confiança não volta sozinha se o contato for adicionado de novo.
+            self.form.set_trusted(key, false);
+            // O outro lado é avisado e também tira esta pessoa da lista dele. Offline, o aviso fica na fila
+            // (`.clam-gui.removed`) e o endereço dele continua guardado até a entrega no próximo início.
+            match &self.running {
+                Some(r) => {
+                    let _ = r.cmds.send(Cmd::Retire(key));
+                }
+                None => {
+                    if let Err(e) = mark_pending(key, false).and_then(|()| mark_removal(key, true)) {
+                        self.error = format!("não deu para guardar a remoção do contato em {}: {e}", removals_path().display());
                     }
                 }
             }
-            self.form.save();
         }
+        self.form.save();
     }
 
     /// Marca ou desmarca o contato como de confiança, grava e avisa o nó. Quem marca já confirmou o aviso do IP.
@@ -202,6 +208,41 @@ impl App {
         self.form.save();
         if let Some(r) = &self.running {
             let _ = r.cmds.send(Cmd::Trust(key, on));
+        }
+    }
+
+    /// Pergunta antes de remover o contato; só a confirmação remove.
+    pub(crate) fn remove_window(&mut self, ctx: &egui::Context) {
+        let Some(key) = self.remove_ask else { return };
+        if !parse_contacts(&self.form.contacts).iter().any(|(_, k)| *k == key) {
+            self.remove_ask = None;
+            return;
+        }
+        let name = member_name(&self.form.names(), &key);
+        let mut answer = None;
+        egui::Window::new(format!("Remover {name}?"))
+            .id(egui::Id::new("remover-contato"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.set_max_width(420.0);
+                ui.label(format!("{name} sai da sua lista de contatos e é avisado para tirar você da dele. Para voltar a falar, um dos dois precisa adicionar o outro de novo. O histórico do bate-papo fica guardado."));
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if button(ui, true, "Remover", RED).clicked() {
+                        answer = Some(true);
+                    }
+                    if button(ui, true, "Cancelar", GREY_BUTTON).clicked() {
+                        answer = Some(false);
+                    }
+                });
+            });
+        if let Some(yes) = answer {
+            self.remove_ask = None;
+            if yes {
+                self.remove_contact_now(key);
+            }
         }
     }
 

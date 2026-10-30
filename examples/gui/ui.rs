@@ -47,6 +47,8 @@ pub(crate) struct App {
     /// Contato que a pessoa acabou de marcar como de confiança e ainda não confirmou o aviso do IP.
     pub(crate) trust_ask: Option<[u8; 32]>,
     /// Contato cuja conversa 1:1 está aberta no centro, e o texto ainda não enviado.
+    /// Contato que a pessoa pediu para remover e ainda não confirmou.
+    pub(crate) remove_ask: Option<[u8; 32]>,
     pub(crate) chat_with: Option<[u8; 32]>,
     pub(crate) chat_draft: String,
 }
@@ -332,6 +334,7 @@ impl eframe::App for App {
         self.update_screen_textures(ctx);
         self.zoom_window(ctx);
         self.trust_window(ctx);
+        self.remove_window(ctx);
         let offline = self.running.is_none();
         let in_call = self.shared.in_call.load(Ordering::Relaxed);
         let testing = self.shared.mic_test.load(Ordering::Relaxed);

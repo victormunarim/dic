@@ -61,6 +61,7 @@ fn main() -> eframe::Result {
                 screen_tex: Default::default(),
                 zoom: None,
                 trust_ask: None,
+                remove_ask: None,
                 chat_with: None,
                 chat_draft: String::new(),
                 srv: Default::default(),
