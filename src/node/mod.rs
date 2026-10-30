@@ -307,7 +307,9 @@ impl Node {
         }
         let inbox = Inbox::default();
         inbox.blocked.lock_unpoisoned().extend(blocked);
-        for (peer, stamp) in tombstones {
+        // Quem está na lista de contatos foi adicionado depois da remoção (o app só a tira ao remover): a lápide não vale.
+        let listed = phone.contacts().lock_unpoisoned().clone();
+        for (peer, stamp) in tombstones.into_iter().filter(|(p, _)| !listed.contains(p)) {
             inbox.bury(peer, stamp);
         }
         if publishes {

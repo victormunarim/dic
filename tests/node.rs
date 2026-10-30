@@ -651,6 +651,19 @@ async fn a_blocked_key_is_not_introduced_until_added_again() {
     assert_eq!(got[0].peer, pa);
 }
 
+/// A lápide guardada de quem já voltou à lista de contatos não vale no início seguinte.
+#[tokio::test]
+async fn a_saved_tombstone_does_not_block_a_listed_contact() {
+    let (sa, sb) = (key(), key());
+    let (pa, pb) = (*PublicKey::from(&sa).as_bytes(), *PublicKey::from(&sb).as_bytes());
+    let a = Node::start(NodeConfig { updates: false, name: "Ana".into(), ..fixed(sa, free_port(), vec![pb]) }).await.unwrap();
+    let stamp = u64::MAX / 2;
+    let b = Node::start(NodeConfig { updates: false, tombstones: vec![(pa, stamp)], ..fixed(sb, free_port(), vec![pa]) }).await.unwrap();
+    a.add_hint(pb, b.relay_info().unwrap());
+    a.introduce(pb);
+    until("B recebe", || Some(b.take_introductions()).filter(|v| !v.is_empty())).await;
+}
+
 /// B ainda não está no ar quando A o adiciona: a entrega insiste e chega quando ele sobe.
 #[tokio::test]
 async fn the_introduction_waits_for_the_contact_to_come_online() {
