@@ -84,6 +84,8 @@ pub mod timer;
 #[cfg(feature = "video")]
 pub mod hwenc;
 #[cfg(feature = "video")]
+pub mod prefetch;
+#[cfg(feature = "video")]
 pub mod scroll;
 #[cfg(feature = "video")]
 pub mod video;

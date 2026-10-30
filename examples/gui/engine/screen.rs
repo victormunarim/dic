@@ -157,6 +157,8 @@ async fn start_capture(shared: &Arc<Shared>, out: &Sink) -> Result<(Box<dyn Scre
     let (src, mut enc) = started.map_err(|e| format!("não deu para capturar a tela ({e})"))?;
     // Rolagem como mensagem: `pump_all` só a usa quando todos os espectadores anunciaram que a entendem.
     enc.set_scroll(true);
+    // Capturar em paralelo com a codificação: em série, os dois tempos somam e o vídeo cai para metade da taxa.
+    let src: Box<dyn ScreenSource + Send> = Box::new(clam::prefetch::Prefetch::new(src, enc.fps()));
     if st.hardware.load(Ordering::Relaxed) {
         // `detect` roda processos: fora do executor.
         match tokio::task::spawn_blocking(clam::hwenc::detect).await.ok().flatten() {
