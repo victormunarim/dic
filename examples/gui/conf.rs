@@ -120,6 +120,9 @@ pub(crate) struct Form {
     /// Contatos de confiança, chaves em hex separadas por `;`: os únicos para quem a tela sem privacidade vai
     /// direto, mostrando o IP de quem transmite (veja `Dialer::set_trusted`). Quem não é contato não conta.
     pub(crate) trusted: String,
+    /// Chaves bloqueadas, em hex separadas por `;`: não voltam como contato sozinhas, por apresentação ou convite
+    /// (veja `Node::block`). Só adicionar a chave de novo, de propósito, desbloqueia.
+    pub(crate) blocked: String,
     /// Nitidez em vez de fluidez na transmissão da tela: metade dos quadros por segundo, cada um mais fino
     /// (veja `video::Priority`). Desligada (fluidez) de início.
     pub(crate) screen_sharp: bool,
@@ -543,6 +546,7 @@ impl Form {
             // Ligada de início: a chave guarda o "não", então o arquivo antigo, sem ela, também aceita.
             screen_private: get("no_screen_privacy") != "1",
             trusted: get("trusted"),
+            blocked: get("blocked"),
             screen_sharp: get("screen_sharp") == "1",
             screen_hardware: get("screen_hardware") == "1",
             // Ligado de início: a chave guarda o "não", então o arquivo antigo, sem ela, também aceita.
@@ -570,7 +574,7 @@ impl Form {
         let secret = self.secret_to_write(vault_set);
         let secret = secret.as_str();
         let text = format!(
-            "audio={}\nsecret={}\ncontacts={}\npeer={}\npublic_addr={}\nno_dht={}\ndht_circuit={}\nname={}\nintros={}\nno_anchor={}\nno_screen_privacy={}\nscreen_sharp={}\nscreen_hardware={}\nanchors={}\ninput_dev={}\noutput_dev={}\nno_opus={}\nno_auto_online={}\ntrusted={}\n{}",
+            "audio={}\nsecret={}\ncontacts={}\npeer={}\npublic_addr={}\nno_dht={}\ndht_circuit={}\nname={}\nintros={}\nno_anchor={}\nno_screen_privacy={}\nscreen_sharp={}\nscreen_hardware={}\nanchors={}\ninput_dev={}\noutput_dev={}\nno_opus={}\nno_auto_online={}\ntrusted={}\nblocked={}\n{}",
             u8::from(self.use_audio),
             secret,
             self.contacts.trim().replace('\n', ";"),
@@ -590,6 +594,7 @@ impl Form {
             u8::from(!self.voice_opus),
             u8::from(!self.auto_online),
             self.trusted.trim(),
+            self.blocked.trim(),
             self.audio.to_conf()
         );
         // Contém a chave secreta: só o dono lê.
@@ -600,6 +605,26 @@ impl Form {
     pub(crate) fn trusted_keys(&self) -> Vec<[u8; 32]> {
         let contacts = parse_contacts(&self.contacts);
         self.trusted.split(';').filter_map(|k| unhex(k.trim()).ok()).filter(|k| contacts.iter().any(|(_, c)| c == k)).collect()
+    }
+
+    /// Chaves bloqueadas (lixo no arquivo e repetidas não contam).
+    pub(crate) fn blocked_keys(&self) -> Vec<[u8; 32]> {
+        let mut keys: Vec<[u8; 32]> = Vec::new();
+        for k in self.blocked.split(';').filter_map(|k| unhex(k.trim()).ok()) {
+            if !keys.contains(&k) {
+                keys.push(k);
+            }
+        }
+        keys
+    }
+
+    /// Bloqueia ou desbloqueia `key`.
+    pub(crate) fn set_blocked(&mut self, key: [u8; 32], on: bool) {
+        let mut keys: Vec<[u8; 32]> = self.blocked_keys().into_iter().filter(|k| *k != key).collect();
+        if on {
+            keys.push(key);
+        }
+        self.blocked = keys.iter().map(|k| hex(k)).collect::<Vec<_>>().join(";");
     }
 
     pub(crate) fn is_trusted(&self, key: &[u8; 32]) -> bool {
@@ -856,6 +881,20 @@ mod tests {
         // Tirar o contato da lista tira a confiança, mesmo que a chave continue no texto.
         f.contacts = remove_contact(&f.contacts, 1);
         assert!(f.trusted_keys().is_empty());
+    }
+
+    #[test]
+    fn blocking_is_idempotent_and_reversible() {
+        let (a, b) = ([0xab; 32], [0xcd; 32]);
+        let mut f = Form::default();
+        f.set_blocked(a, true);
+        f.set_blocked(a, true);
+        f.set_blocked(b, true);
+        assert_eq!(f.blocked_keys(), vec![a, b]);
+        f.set_blocked(a, false);
+        assert_eq!(f.blocked_keys(), vec![b]);
+        f.blocked = format!("zz;{};{}", hex(&b), hex(&b));
+        assert_eq!(f.blocked_keys(), vec![b], "lixo e repetição não contam");
     }
 
     #[test]

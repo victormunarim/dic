@@ -633,6 +633,24 @@ async fn the_contact_added_by_code_introduces_itself_back_with_its_name() {
     assert_eq!((back[0].peer, back[0].name.as_str()), (pb, "Beto"));
 }
 
+/// Quem B bloqueou não vira contato sozinho por apresentação; adicionar a chave de novo (de propósito) desbloqueia.
+#[tokio::test]
+async fn a_blocked_key_is_not_introduced_until_added_again() {
+    let (sa, sb) = (key(), key());
+    let (pa, pb) = (*PublicKey::from(&sa).as_bytes(), *PublicKey::from(&sb).as_bytes());
+    let a = Node::start(NodeConfig { updates: false, name: "Ana".into(), ..fixed(sa, free_port(), vec![pb]) }).await.unwrap();
+    let b = Node::start(NodeConfig { updates: false, blocked: vec![pa], ..fixed(sb, free_port(), vec![]) }).await.unwrap();
+    a.add_hint(pb, b.relay_info().unwrap());
+    a.introduce(pb);
+    until("A recebe o ack", || a.pending_introductions().is_empty().then_some(())).await;
+    assert!(b.take_introductions().is_empty(), "bloqueado: a apresentação some");
+
+    b.add_contact(pa, None);
+    a.introduce(pb);
+    let got = until("B recebe depois de adicionar A", || Some(b.take_introductions()).filter(|v| !v.is_empty())).await;
+    assert_eq!(got[0].peer, pa);
+}
+
 /// B ainda não está no ar quando A o adiciona: a entrega insiste e chega quando ele sobe.
 #[tokio::test]
 async fn the_introduction_waits_for_the_contact_to_come_online() {

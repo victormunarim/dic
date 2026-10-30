@@ -32,6 +32,7 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
     cfg.servers = load_servers();
     cfg.custody = load_custody();
     cfg.tombstones = load_tombs();
+    cfg.blocked = form.blocked_keys();
     if form.use_dht {
         cfg.dht = Some(clam::rendezvous::DhtOptions { circuit: form.dht_circuit, ..Default::default() });
         if form.dht_circuit {
@@ -240,6 +241,13 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
                     save_pending_if_changed(&node, &mut pending_saved, &out);
                     save_removals_if_changed(&node, &mut removals_saved, &out);
                     saver.sync(&book_of(&node), &out);
+                }
+                Some(Cmd::Block(key, on)) => {
+                    if on {
+                        node.block(key);
+                    } else {
+                        node.unblock(&key);
+                    }
                 }
                 Some(Cmd::Trust(key, on)) => dialer.set_trusted(key, on),
                 Some(Cmd::Chat(peer, text)) => {

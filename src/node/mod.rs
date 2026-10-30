@@ -232,7 +232,7 @@ impl Node {
     }
 
     async fn finish(cfg: NodeConfig, mut phone: Phone, relay: RelayServer, onion: [u8; 32], dht: Services) -> io::Result<Self> {
-        let NodeConfig { secret, public_addr, upnp, known, hints, history, updates, update_retry, dht: dht_options, name, introductions, anchors, servers: saved_servers, custody: saved_custody, mail_poll, tombstones, .. } = cfg;
+        let NodeConfig { secret, public_addr, upnp, known, hints, history, updates, update_retry, dht: dht_options, name, introductions, anchors, servers: saved_servers, custody: saved_custody, mail_poll, tombstones, blocked, .. } = cfg;
         let known: Known = Arc::new(Mutex::new(known.into_iter().collect()));
         let hints: Known = Arc::new(Mutex::new(hints.into_iter().collect()));
         // A lista guarda do mais novo ao mais velho de cada contato; ao reler, a ordem se mantém.
@@ -306,6 +306,7 @@ impl Node {
             background.push(tokio::spawn(server_publisher(dialer.clone(), server_hub.clone(), current.clone())));
         }
         let inbox = Inbox::default();
+        inbox.blocked.lock_unpoisoned().extend(blocked);
         for (peer, stamp) in tombstones {
             inbox.bury(peer, stamp);
         }
@@ -390,12 +391,25 @@ impl Node {
         if let Some(task) = self.retiring.lock_unpoisoned().remove(&peer) {
             task.abort();
         }
+        self.unblock(&peer);
         // Adicionar de propósito vale mais que a lápide de uma remoção antiga (veja `Inbox::unbury`).
         self.inbox.unbury(&peer);
         self.allow(&[peer]);
         if let Some(r) = relay {
             self.add_hint(peer, r);
         }
+    }
+
+    /// Bloqueia `peer`: a apresentação e o convite dele (direto ou da caixa) são descartados, e ele não vira contato
+    /// sozinho. Não remove nem avisa: quem chama usa [`Node::retire`] antes. Adicionar a chave de novo
+    /// ([`Node::add_contact`]) desbloqueia. O app guarda as chaves e as devolve em [`NodeConfig::blocked`].
+    pub fn block(&self, peer: [u8; 32]) {
+        self.inbox.blocked.lock_unpoisoned().insert(peer);
+    }
+
+    /// Desfaz [`Node::block`].
+    pub fn unblock(&self, peer: &[u8; 32]) {
+        self.inbox.blocked.lock_unpoisoned().remove(peer);
     }
 
     /// Apresenta esta pessoa a `peer`, que ela acabou de adicionar: manda, cifrada para ele, a chave (provada pelo

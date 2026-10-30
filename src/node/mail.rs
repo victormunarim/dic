@@ -27,6 +27,8 @@ pub(super) struct Inbox {
     pub(super) introduced: Arc<Mutex<Vec<Introduced>>>,
     pub(super) introducing: Arc<Mutex<HashMap<[u8; 32], tokio::task::JoinHandle<()>>>>,
     pub(super) tombs: Arc<Mutex<HashMap<[u8; 32], u64>>>,
+    /// Quem a pessoa bloqueou: a apresentação ou o convite dessas chaves é descartado, sem lápide nem prazo.
+    pub(super) blocked: Arc<Mutex<std::collections::HashSet<[u8; 32]>>>,
 }
 
 impl Inbox {
@@ -55,6 +57,9 @@ impl Inbox {
     /// velho, de antes de a pessoa ser removida), e é descartada. Se aceita, `peer` já tem este contato: a
     /// apresentação nossa a ele, se ainda estava em entrega, para de insistir.
     pub(super) fn receive(&self, peer: [u8; 32], intro: Intro) -> bool {
+        if self.blocked.lock_unpoisoned().contains(&peer) {
+            return false;
+        }
         if self.tombs.lock_unpoisoned().get(&peer).is_some_and(|stamp| intro.seq <= *stamp) {
             return false;
         }
@@ -350,6 +355,17 @@ mod tests {
         inbox.unbury(&peer);
         assert!(inbox.receive(peer, intro(now - 60_000)));
         assert!(inbox.tombs().is_empty());
+    }
+
+    #[test]
+    fn a_blocked_peer_is_never_introduced_until_unblocked() {
+        let (inbox, peer) = (Inbox::default(), [7; 32]);
+        inbox.blocked.lock_unpoisoned().insert(peer);
+        assert!(!inbox.receive(peer, intro(u64::MAX)), "bloqueio não depende do carimbo");
+        assert!(inbox.introduced.lock_unpoisoned().is_empty());
+        assert!(inbox.receive([8; 32], intro(1)), "só a chave bloqueada");
+        inbox.blocked.lock_unpoisoned().remove(&peer);
+        assert!(inbox.receive(peer, intro(1)));
     }
 
     #[test]

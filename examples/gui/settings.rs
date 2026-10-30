@@ -74,6 +74,21 @@ impl App {
                         ui.check(&mut self.form.intros, "Aceitar adições e remoções de contatos")
                             .on_hover_text("Quando alguém adiciona o seu código, ele manda uma apresentação cifrada e passa a aparecer na sua lista, para os dois se ligarem. Quando alguém te remove, ele avisa e sai da sua lista também (só vale de quem já é seu contato). Desligado, só entra na lista quem você adicionar e ninguém te tira da lista. Só aceita de quem já tem o seu endereço; no máximo 20 por minuto.");
                     });
+                    let blocked = self.form.blocked_keys();
+                    if !blocked.is_empty() {
+                        card(ui, "Bloqueados", "Não voltam à sua lista sozinhos, por apresentação ou convite. Adicionar o código de novo também desbloqueia.", |ui| {
+                            for key in blocked {
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new(&hex(&key)[..8]).color(TEXT));
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        if icon_button(ui, true, "✕", "Desbloquear", TEXT).clicked() {
+                                            self.set_block(key, false);
+                                        }
+                                    });
+                                });
+                            }
+                        });
+                    }
                     card(ui, "Endereço", "Só se o IP que os outros enxergam não serve, como atrás de NAT: ip:porta (a porta precisa estar aberta no roteador; pode ser um nome).", |ui| {
                         ui.add(field(&mut self.form.public_addr, "ip:porta"));
                     });

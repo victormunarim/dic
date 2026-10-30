@@ -210,6 +210,15 @@ impl App {
         self.form.save();
     }
 
+    /// Bloqueia ou desbloqueia `key`, grava e avisa o nó.
+    pub(crate) fn set_block(&mut self, key: [u8; 32], on: bool) {
+        self.form.set_blocked(key, on);
+        self.form.save();
+        if let Some(r) = &self.running {
+            let _ = r.cmds.send(Cmd::Block(key, on));
+        }
+    }
+
     /// Marca ou desmarca o contato como de confiança, grava e avisa o nó. Quem marca já confirmou o aviso do IP.
     pub(crate) fn set_trust(&mut self, key: [u8; 32], on: bool) {
         self.form.set_trusted(key, on);
@@ -235,21 +244,27 @@ impl App {
             .anchor(egui::Align2::CENTER_CENTER, vec2(0.0, 0.0))
             .show(ctx, |ui| {
                 ui.set_max_width(420.0);
-                ui.label(format!("{name} sai da sua lista de contatos e é avisado para tirar você da dele. Para voltar a falar, um dos dois precisa adicionar o outro de novo. O histórico do bate-papo fica guardado."));
+                ui.label(format!("{name} sai da sua lista de contatos e é avisado para tirar você da dele. Para voltar a falar, um dos dois precisa adicionar o outro de novo. O histórico do bate-papo fica guardado.\n\nBloquear também impede {name} de voltar sozinho à sua lista (por apresentação ou convite) até você adicioná-lo de novo ou desbloqueá-lo nas configurações."));
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    if button(ui, true, "Remover", RED).clicked() {
-                        answer = Some(true);
+                    if button(ui, true, "Só remover", RED).clicked() {
+                        answer = Some(Remove::Only);
+                    }
+                    if button(ui, true, "Remover e bloquear", RED).clicked() {
+                        answer = Some(Remove::AndBlock);
                     }
                     if button(ui, true, "Cancelar", GREY_BUTTON).clicked() {
-                        answer = Some(false);
+                        answer = Some(Remove::Cancel);
                     }
                 });
             });
-        if let Some(yes) = answer {
+        if let Some(choice) = answer {
             self.remove_ask = None;
-            if yes {
+            if choice != Remove::Cancel {
                 self.remove_contact_now(key);
+            }
+            if choice == Remove::AndBlock {
+                self.set_block(key, true);
             }
         }
     }
@@ -309,6 +324,10 @@ impl App {
                 }
             }
         }
+        // Adicionar de propósito desbloqueia.
+        if let Some(key) = parse_contacts(&self.form.new_code).first().map(|(_, k)| *k).filter(|k| self.form.blocked_keys().contains(k)) {
+            self.set_block(key, false);
+        }
         if !self.form.contacts.trim().is_empty() {
             self.form.contacts.push('\n');
         }
@@ -317,6 +336,14 @@ impl App {
         self.error.clear();
         self.form.save();
     }
+}
+
+/// A resposta do diálogo de remoção.
+#[derive(Clone, Copy, PartialEq)]
+enum Remove {
+    Only,
+    AndBlock,
+    Cancel,
 }
 
 #[cfg(test)]
