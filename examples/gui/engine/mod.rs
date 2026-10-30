@@ -22,6 +22,7 @@ use tokio::{
 use crate::conf::*;
 
 mod call;
+mod files;
 mod node;
 mod room;
 mod screen;
@@ -76,6 +77,12 @@ pub(crate) enum Cmd {
     RoomShare(bool),
     /// Mensagem de bate-papo 1:1 para o contato (o motor parte o texto em quadros, numera e guarda no histórico).
     Chat([u8; 32], String),
+    /// Oferece o arquivo ao contato (só vai depois que ele aceitar).
+    SendFile([u8; 32], std::path::PathBuf),
+    /// Resposta da pessoa a uma oferta de arquivo do contato (`true` = aceitar).
+    FileAnswer([u8; 32], u64, bool),
+    /// Cancela a transferência (minha ou do contato) ou retira a oferta.
+    FileCancel([u8; 32], u64, bool),
 }
 
 pub(crate) const ANSWER_NONE: u8 = 0;
@@ -125,6 +132,8 @@ pub(crate) struct Shared {
     pub(crate) removed: Mutex<Vec<[u8; 32]>>,
     /// Histórico do bate-papo 1:1 (carregado ao abrir; o laço do nó o grava quando muda).
     pub(crate) chats: Mutex<crate::chats::ChatBook>,
+    /// Arquivos oferecidos, aguardando resposta, andando ou encerrados, para a tela do bate-papo.
+    pub(crate) transfers: Mutex<crate::arquivos::Transfers>,
     /// Os servidores desta pessoa; vazio offline.
     pub(crate) servers: Mutex<Option<clam::server::net::ServerHub>>,
     /// Sala de voz em que está e quem fala.

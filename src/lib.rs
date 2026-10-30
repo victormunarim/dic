@@ -78,6 +78,8 @@ pub mod node;
 #[cfg(feature = "net")]
 pub mod phone;
 #[cfg(feature = "net")]
+pub mod transfer;
+#[cfg(feature = "net")]
 pub mod rendezvous;
 #[cfg(feature = "net")]
 pub mod timer;

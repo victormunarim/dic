@@ -66,6 +66,7 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
     let mut removals_saved = node.pending_removals();
     removals_saved.sort();
     let dialer = node.dialer();
+    let mut receiving = super::files::Receiving::default();
     // Só vale quem ainda é contato (o `Form` já descarta o resto).
     for key in form.trusted_keys() {
         dialer.set_trusted(key, true);
@@ -258,6 +259,9 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
                         }
                     });
                 }
+                Some(Cmd::SendFile(peer, path)) => super::files::start_send(&shared, &dialer, &out, peer, path),
+                Some(Cmd::FileAnswer(peer, id, accept)) => super::files::answer(&shared, &dialer, &out, &mut receiving, peer, id, accept),
+                Some(Cmd::FileCancel(peer, id, mine)) => super::files::cancel(&shared, &dialer, &out, &mut receiving, peer, id, mine),
                 Some(Cmd::Retire(key)) => {
                     node.retire(key);
                     save_pending_if_changed(&node, &mut pending_saved, &out);
@@ -375,6 +379,11 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
                 book.push_received(peer, c.id, c.text);
             }
             drop(book);
+            (out.repaint)();
+        }
+        let files = node.take_files();
+        if !files.is_empty() {
+            super::files::on_frames(&shared, &mut receiving, files);
             (out.repaint)();
         }
         save_chats_if_dirty(&shared, &out);

@@ -3,6 +3,9 @@
 use crate::sync::LockExt;
 use std::time::Duration;
 
+/// Quadros mandados de uma vez antes de esperar o cover esvaziar (a fila dele guarda 16 células).
+const PACE_BURST: usize = 8;
+
 use x25519_dalek::PublicKey;
 
 use crate::{
@@ -76,6 +79,26 @@ impl Dialer {
         self.deliver_confirmed(peer, &frame, id, wait).await
     }
 
+    /// Manda a `peer` um quadro de controle da transferência de arquivo (oferta, resposta, cancelamento) e espera a
+    /// confirmação. Uma tentativa só; `false` se o contato está offline.
+    pub async fn send_file_frame(&self, peer: [u8; 32], frame: &update::FileFrame, wait: Duration) -> bool {
+        let Ok(sealed) = update::seal_file(&self.secret, &PublicKey::from(peer), frame) else { return false };
+        self.deliver_confirmed(peer, &sealed, frame.ack_seq(), wait).await
+    }
+
+    /// Manda os pedaços `chunks` (só `Chunk`) por um circuito só, no ritmo do circuito de tela, e devolve quais o contato
+    /// confirmou. O que não voltou o chamador reenvia numa rodada seguinte.
+    pub async fn send_file_chunks(&self, peer: [u8; 32], chunks: &[update::FileFrame], wait: Duration) -> Vec<bool> {
+        let pk = PublicKey::from(peer);
+        let sealed: Vec<_> = chunks.iter().map(|c| update::seal_file(&self.secret, &pk, c)).collect();
+        if sealed.iter().any(Result::is_err) {
+            return vec![false; chunks.len()];
+        }
+        let frames: Vec<_> = sealed.into_iter().flatten().collect();
+        let seqs: Vec<u64> = chunks.iter().map(update::FileFrame::ack_seq).collect();
+        self.deliver_batch_with(peer, &frames, |i, d| seqs.get(i).is_some_and(|s| update::open_ack(&self.secret, &pk, *s, d)), wait, true, (crate::phone::screen_client_options, crate::phone::SCREEN_SLOT)).await
+    }
+
     /// Avisa `peer` de que esta pessoa o removeu (carimbo `stamp`, milissegundos Unix) e espera a confirmação.
     pub(super) async fn deliver_removal(&self, peer: [u8; 32], stamp: u64, wait: Duration) -> bool {
         let Ok(frame) = update::seal_removal(&self.secret, &PublicKey::from(peer), stamp) else { return false };
@@ -112,12 +135,21 @@ impl Dialer {
     /// ser o guardado. Com `search` falso não procura na DHT nem nas âncoras (quem usa já tem o endereço do membro);
     /// verdadeiro, procura como numa chamada (para um contato que ainda não se falou).
     pub(crate) async fn deliver_batch(&self, peer: [u8; 32], frames: &[crate::media::signal::Frame], acked: impl Fn(usize, &[u8]) -> bool, wait: Duration, search: bool) -> usize {
-        let found = if search { self.reachable_client(&peer, ClientOptions::default).await.0 } else { self.stored_client(&peer, self.stored_for(&peer), ClientOptions::default).await };
-        let Some((mut client, used)) = found else { return 0 };
+        self.deliver_batch_with(peer, frames, acked, wait, search, (ClientOptions::default, Duration::ZERO)).await.iter().filter(|g| **g).count()
+    }
+
+    /// Como [`Dialer::deliver_batch`], com as opções do circuito e o `pace` entre quadros (zero = sem espera) à escolha e o resultado de cada quadro (`true` = confirmado).
+    pub(crate) async fn deliver_batch_with(&self, peer: [u8; 32], frames: &[crate::media::signal::Frame], acked: impl Fn(usize, &[u8]) -> bool, wait: Duration, search: bool, (options, pace): (fn() -> ClientOptions, Duration)) -> Vec<bool> {
+        let found = if search { self.reachable_client(&peer, options).await.0 } else { self.stored_client(&peer, self.stored_for(&peer), options).await };
+        let Some((mut client, used)) = found else { return vec![false; frames.len()] };
         let mut got = vec![false; frames.len()];
-        for f in frames {
+        for (n, f) in frames.iter().enumerate() {
             if client.send(f).await.is_err() {
                 break;
+            }
+            // A fila do cover guarda poucas células e descarta as mais velhas; sem este ritmo, quase todo o lote se perderia.
+            if !pace.is_zero() && n % PACE_BURST == PACE_BURST - 1 {
+                tokio::time::sleep(pace * PACE_BURST as u32).await;
             }
         }
         let _ = tokio::time::timeout(wait, async {
@@ -135,10 +167,9 @@ impl Dialer {
         })
         .await;
         client.stop();
-        let n = got.iter().filter(|g| **g).count();
-        if n > 0 {
+        if got.iter().any(|g| *g) {
             self.remember(&peer, used);
         }
-        n
+        got
     }
 }

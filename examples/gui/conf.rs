@@ -226,6 +226,11 @@ pub(crate) fn conf_path() -> PathBuf {
     home.join(".clam-gui.conf")
 }
 
+/// Onde os arquivos recebidos pelo bate-papo ficam: `~/Downloads/clam`.
+pub(crate) fn downloads_dir() -> PathBuf {
+    conf_path().with_file_name("Downloads").join("clam")
+}
+
 /// Servidores e salas (veja `clam::server`), num arquivo à parte. Leva o segredo de cada servidor: só o dono lê.
 pub(crate) fn servers_path() -> PathBuf {
     conf_path().with_file_name(".clam-gui.servers")

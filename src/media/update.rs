@@ -61,6 +61,7 @@ pub const TAG_ACK: u8 = 5;
 pub const TAG_INTRO: u8 = 7;
 pub const TAG_REMOVAL: u8 = 10;
 pub const TAG_CHAT: u8 = 13;
+pub const TAG_FILE: u8 = 14;
 pub const TAG_CUSTODY: u8 = 11;
 /// Etiqueta do convite de servidor na caixa de correio (não é um quadro de rede: só abre o item da DHT e a custódia).
 pub const TAG_MAIL_INVITE: u8 = 12;
@@ -86,6 +87,13 @@ pub const REMOVAL_WINDOW_MS: u64 = 3_600_000;
 pub const MAX_CHAT: usize = 128;
 /// Conteúdo da mensagem: versão, carimbo, tamanho e o texto preenchido com zeros.
 const CHAT_PLAIN_LEN: usize = 1 + 8 + 1 + MAX_CHAT;
+/// Maior arquivo que o bate-papo transfere (32 MiB): a 500 quadros por segundo são uns 9 minutos, e o receptor guarda só
+/// uma tabela de pedaços (~34 KB) na memória.
+pub const MAX_FILE: u64 = 32 << 20;
+/// Bytes de arquivo em cada quadro `Chunk`: o corpo de 128 menos índice (4) e tamanho (1).
+pub const FILE_CHUNK: usize = MAX_CHAT - 5;
+/// Maior nome de arquivo na oferta (bytes UTF-8): o corpo de 128 menos tamanho (8) e comprimento (1), com folga.
+pub const MAX_FILE_NAME: usize = 100;
 /// Só separa o domínio da cifra do registro guardado na DHT (entra como dado associado, não vai a nenhum quadro).
 const TAG_RECORD: u8 = 6;
 /// Tamanho máximo do endereço (`host:porta`) no registro, o que cabe no quadro.
@@ -479,6 +487,117 @@ pub fn open_chat(my_static: &StaticSecret, frame: &[u8], now_ms: u64) -> Option<
     Some((author, Chat { id, text }))
 }
 
+/// Quadro da transferência de arquivo entre dois contatos. `id` (carimbo em ms do remetente) liga os quadros da
+/// mesma transferência.
+///
+/// ```text
+/// remetente                          destinatário
+///   Offer(nome, tamanho)  ─────────────>   a pessoa decide
+///                         <─────────────   Answer(aceita?)
+///   Chunk(0), Chunk(1) …  ─────────────>   cada um confirmado (ack)
+///   Cancel                <────────────>   qualquer lado desiste
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FileFrame {
+    Offer { id: u64, size: u64, name: String },
+    Answer { id: u64, accept: bool },
+    Chunk { id: u64, index: u32, data: Vec<u8> },
+    Cancel { id: u64 },
+}
+
+impl FileFrame {
+    pub fn id(&self) -> u64 {
+        match self {
+            Self::Offer { id, .. } | Self::Answer { id, .. } | Self::Chunk { id, .. } | Self::Cancel { id } => *id,
+        }
+    }
+
+    /// O `seq` que o ack deste quadro repete: o `id`, ou `id + 1 + índice` no pedaço (assim cada pedaço tem o seu).
+    pub fn ack_seq(&self) -> u64 {
+        match self {
+            Self::Chunk { id, index, .. } => file_chunk_ack(*id, *index),
+            other => other.id(),
+        }
+    }
+}
+
+/// `seq` do ack do pedaço `index` da transferência `id`.
+pub fn file_chunk_ack(id: u64, index: u32) -> u64 {
+    id.wrapping_add(u64::from(index)).wrapping_add(1)
+}
+
+/// Quadro de arquivo de `my_static` para `peer`. Falha se algum campo passa do que cabe (nome, pedaço), se o nome é
+/// vazio ou tem caractere de controle, ou se o tamanho é zero ou passa de [`MAX_FILE`].
+pub fn seal_file(my_static: &StaticSecret, peer: &PublicKey, frame: &FileFrame) -> Result<Frame, MediaError> {
+    let (kind, id, body): (u8, u64, Vec<u8>) = match frame {
+        FileFrame::Offer { id, size, name } => {
+            if *size == 0 || *size > MAX_FILE || !valid_file_name(name) {
+                return Err(MediaError::Malformed);
+            }
+            (0, *id, [&size.to_be_bytes()[..], &[name.len() as u8], name.as_bytes()].concat())
+        }
+        FileFrame::Answer { id, accept } => (1, *id, vec![u8::from(*accept)]),
+        FileFrame::Chunk { id, index, data } => {
+            if data.is_empty() || data.len() > FILE_CHUNK {
+                return Err(MediaError::Malformed);
+            }
+            (2, *id, [&index.to_be_bytes()[..], &[data.len() as u8], data].concat())
+        }
+        FileFrame::Cancel { id } => (3, *id, Vec::new()),
+    };
+    let me = PublicKey::from(my_static);
+    let cipher = cipher(my_static, peer, &me).ok_or(MediaError::BadKey)?;
+    let plain: [u8; CHAT_PLAIN_LEN] = padded(&[&[VERSION, kind], &id.to_be_bytes(), &body]);
+    Ok(seal_after(&cipher, TAG_FILE, me.as_bytes(), &plain))
+}
+
+fn valid_file_name(name: &str) -> bool {
+    !name.is_empty() && name.len() <= MAX_FILE_NAME && !name.chars().any(char::is_control)
+}
+
+/// Abre `frame` como quadro de arquivo para `my_static`. Devolve a chave de quem mandou (provada) e o quadro. `None`:
+/// não é de arquivo para esta chave, ou a oferta tem carimbo a mais de [`REMOVAL_WINDOW_MS`] de `now_ms`, tamanho
+/// fora de `1..=MAX_FILE` ou nome inválido.
+pub fn open_file(my_static: &StaticSecret, frame: &[u8], now_ms: u64) -> Option<([u8; 32], FileFrame)> {
+    let mut head = Reader::new(frame);
+    if frame.len() != PACKET_LEN || head.u8()? != TAG_FILE {
+        return None;
+    }
+    let author: [u8; 32] = head.array()?;
+    let owner = PublicKey::from(author);
+    let cipher = cipher(my_static, &owner, &owner)?;
+    let plain = open_after(&cipher, TAG_FILE, 32, frame, CHAT_PLAIN_LEN)?;
+    let mut r = Reader::new(&plain);
+    if r.u8()? != VERSION {
+        return None;
+    }
+    let kind = r.u8()?;
+    let id = r.u64()?;
+    let parsed = match kind {
+        0 => {
+            let size = r.u64()?;
+            let len = usize::from(r.u8()?);
+            let name = String::from_utf8(r.take(len)?.to_vec()).ok()?;
+            if size == 0 || size > MAX_FILE || !valid_file_name(&name) || id.abs_diff(now_ms) > REMOVAL_WINDOW_MS {
+                return None;
+            }
+            FileFrame::Offer { id, size, name }
+        }
+        1 => FileFrame::Answer { id, accept: match r.u8()? { 0 => false, 1 => true, _ => return None } },
+        2 => {
+            let index = r.u32()?;
+            let len = usize::from(r.u8()?);
+            if len == 0 || len > FILE_CHUNK {
+                return None;
+            }
+            FileFrame::Chunk { id, index, data: r.take(len)?.to_vec() }
+        }
+        3 => FileFrame::Cancel { id },
+        _ => return None,
+    };
+    Some((author, parsed))
+}
+
 /// Um pedaço da custódia: o `id` (o `seq` da apresentação) liga os pedaços do mesmo depósito.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CustodyPart {
@@ -732,6 +851,48 @@ mod tests {
         assert_eq!(open_chat(&b, &frame, 1_000_000 + REMOVAL_WINDOW_MS + 1), None, "quadro velho");
         assert!(open_ack(&a, &pb, 1, &seal_ack(&b, &pa, 1).unwrap()));
         assert!(!frame.windows(3).any(|w| w == b"ol\xc3\xa1"), "o texto não aparece em claro");
+    }
+
+    #[test]
+    fn file_frames_round_trip_only_for_the_recipient() {
+        let (a, b) = ids();
+        let (pa, pb) = (PublicKey::from(&a), PublicKey::from(&b));
+        let frames = [
+            FileFrame::Offer { id: 1_000_000, size: 4_000_000, name: "relatório ção.pdf".into() },
+            FileFrame::Answer { id: 7, accept: true },
+            FileFrame::Answer { id: 7, accept: false },
+            FileFrame::Chunk { id: 7, index: 272_000, data: vec![0xAB; FILE_CHUNK] },
+            FileFrame::Chunk { id: 7, index: 0, data: vec![1] },
+            FileFrame::Cancel { id: 7 },
+        ];
+        for f in frames {
+            let sealed = seal_file(&a, &pb, &f).unwrap();
+            assert_eq!(sealed.len(), PACKET_LEN);
+            assert_eq!(open_file(&b, &sealed, 1_000_500), Some((*pa.as_bytes(), f.clone())));
+            assert_eq!(open_file(&a, &sealed, 1_000_500), None);
+            assert_eq!(open_chat(&b, &sealed, 1_000_500), None, "não se confunde com texto");
+            assert!(open_ack(&a, &pb, f.ack_seq(), &seal_ack(&b, &pa, f.ack_seq()).unwrap()));
+        }
+        let offer = seal_file(&a, &pb, &FileFrame::Offer { id: 1, size: 10, name: "a".into() }).unwrap();
+        assert_eq!(open_file(&b, &offer, 1 + REMOVAL_WINDOW_MS + 1), None, "oferta velha");
+    }
+
+    #[test]
+    fn file_frames_refuse_what_does_not_fit() {
+        let (a, b) = ids();
+        let pb = PublicKey::from(&b);
+        let offer = |size, name: &str| FileFrame::Offer { id: 1, size, name: name.into() };
+        assert!(seal_file(&a, &pb, &offer(1, "a.txt")).is_ok());
+        assert!(seal_file(&a, &pb, &offer(MAX_FILE, &"n".repeat(MAX_FILE_NAME))).is_ok());
+        for bad in [offer(0, "a"), offer(MAX_FILE + 1, "a"), offer(1, ""), offer(1, "a\nb"), offer(1, &"n".repeat(MAX_FILE_NAME + 1))] {
+            assert!(seal_file(&a, &pb, &bad).is_err(), "{bad:?}");
+        }
+        for data in [vec![], vec![0; FILE_CHUNK + 1]] {
+            assert!(seal_file(&a, &pb, &FileFrame::Chunk { id: 1, index: 0, data }).is_err());
+        }
+        // Cada pedaço da mesma transferência tem o seu ack.
+        assert_ne!(file_chunk_ack(5, 0), file_chunk_ack(5, 1));
+        assert_ne!(file_chunk_ack(5, 0), 5);
     }
 
     #[test]

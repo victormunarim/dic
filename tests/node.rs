@@ -1077,3 +1077,61 @@ async fn chat_reaches_an_online_contact_once_and_never_a_stranger() {
     assert!(!c.dialer().send_chat(pb, c.dialer().next_chat_id(), "intruso", Duration::from_secs(3)).await);
     assert!(b.take_chats().is_empty());
 }
+
+/// Arquivo de ponta a ponta: a oferta chega, a resposta volta, os pedaços (mais de um circuito de janela não é
+/// preciso aqui) montam o mesmo conteúdo, e quem não é contato não entrega nem oferta.
+#[tokio::test]
+async fn file_travels_to_an_online_contact_and_never_from_a_stranger() {
+    use clam::{media::update::FileFrame, transfer};
+    let (sa, sb, sc) = (key(), key(), key());
+    let (pa, pb) = (*PublicKey::from(&sa).as_bytes(), *PublicKey::from(&sb).as_bytes());
+    let a = Node::start(fixed(sa, free_port(), vec![pb])).await.unwrap();
+    let b = Node::start(fixed(sb, free_port(), vec![pa])).await.unwrap();
+    a.add_hint(pb, b.relay_info().unwrap());
+    b.add_hint(pa, a.relay_info().unwrap());
+    let dir = std::env::temp_dir().join(format!("clam-file-it-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let content: Vec<u8> = (0..5000u32).map(|i| (i * 13 % 256) as u8).collect();
+    let src = dir.join("origem.bin");
+    std::fs::write(&src, &content).unwrap();
+    let size = content.len() as u64;
+
+    let dialer = a.dialer();
+    let id = dialer.next_chat_id();
+    let offer = FileFrame::Offer { id, size, name: "origem.bin".into() };
+    assert!(dialer.send_file_frame(pb, &offer, Duration::from_secs(8)).await);
+    let mut offers = Vec::new();
+    until("a oferta chega", || {
+        offers.extend(b.take_files());
+        (!offers.is_empty()).then_some(())
+    })
+    .await;
+    assert_eq!(offers[0], (pa, offer.clone()));
+
+    let mut inc = transfer::Incoming::create(&dir.join("recebidos"), id, size, "origem.bin").unwrap();
+    transfer::stream(&dialer, pb, id, &src, size, |_| {}, || false).await.unwrap();
+    let mut chunks = 0u64;
+    until("todos os pedaços chegam", || {
+        for (from, f) in b.take_files() {
+            assert_eq!(from, pa);
+            if let FileFrame::Chunk { index, data, .. } = f
+                && inc.put(index, &data).unwrap()
+            {
+                chunks += 1;
+            }
+        }
+        inc.complete().then_some(())
+    })
+    .await;
+    assert_eq!(chunks, transfer::chunk_count(size));
+    assert_eq!(std::fs::read(inc.finish().unwrap()).unwrap(), content);
+
+    // Estranho: sem confirmação e sem entrega.
+    let c = Node::start(fixed(sc, free_port(), vec![pb])).await.unwrap();
+    c.add_hint(pb, b.relay_info().unwrap());
+    let bad = FileFrame::Offer { id: 1, size: 10, name: "x".into() };
+    assert!(!c.dialer().send_file_frame(pb, &bad, Duration::from_secs(3)).await);
+    assert!(b.take_files().is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}

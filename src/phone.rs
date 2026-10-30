@@ -742,6 +742,7 @@ pub struct Phone {
     accept_intros: Arc<AtomicBool>,
     removals: Option<mpsc::Receiver<([u8; 32], u64)>>,
     chats: Option<mpsc::Receiver<([u8; 32], update::Chat)>>,
+    files: Option<mpsc::Receiver<([u8; 32], update::FileFrame)>>,
     custody: Arc<Mutex<Custody>>,
     servers: ServerSlot,
     room_peers: Contacts,
@@ -824,12 +825,13 @@ impl Phone {
         let accept_intros = Arc::new(AtomicBool::new(true));
         let (removal_tx, removal_rx) = mpsc::channel(64);
         let (chat_tx, chat_rx) = mpsc::channel(256);
+        let (file_tx, file_rx) = mpsc::channel(1024);
         let servers = ServerSlot::default();
         let room_peers = Contacts::default();
         let custody = Arc::new(Mutex::new(Custody::new()));
-        let out = ActorOut { custody: custody.clone(), incoming: inc_tx, updates: upd_tx, introductions: intro_tx, accept_intros: accept_intros.clone(), removals: removal_tx, chats: chat_tx, servers: servers.clone(), room_peers: room_peers.clone(), notice: notice.clone() };
+        let out = ActorOut { custody: custody.clone(), incoming: inc_tx, updates: upd_tx, introductions: intro_tx, accept_intros: accept_intros.clone(), removals: removal_tx, chats: chat_tx, files: file_tx, servers: servers.clone(), room_peers: room_peers.clone(), notice: notice.clone() };
         let actor = tokio::spawn(run_actor(actor_rx, actor_tx.clone(), out, my_static, contacts.clone(), ids.clone()));
-        Ok(Self { addr, incoming: inc_rx, notice, contacts, ids, link_tx: actor_tx, hint: Arc::default(), updates: Some(upd_rx), introductions: Some(intro_rx), accept_intros, removals: Some(removal_rx), chats: Some(chat_rx), custody, servers, room_peers, tasks: vec![accept, actor] })
+        Ok(Self { addr, incoming: inc_rx, notice, contacts, ids, link_tx: actor_tx, hint: Arc::default(), updates: Some(upd_rx), introductions: Some(intro_rx), accept_intros, removals: Some(removal_rx), chats: Some(chat_rx), files: Some(file_rx), custody, servers, room_peers, tasks: vec![accept, actor] })
     }
 
     /// Para registrar neste telefone as chamadas que esta máquina faz ([`call_linked`]).
@@ -898,6 +900,12 @@ impl Phone {
     /// mandou e a mesma mensagem repetida não entra duas vezes). Só de quem é contato. Só se retira uma vez.
     pub fn take_chats(&mut self) -> Option<mpsc::Receiver<([u8; 32], update::Chat)>> {
         self.chats.take()
+    }
+
+    /// Quadros de transferência de arquivo de contatos (oferta, resposta, pedaço, cancelamento), já confirmados a quem
+    /// mandou. A fila é limitada: cheia, o quadro não é confirmado e o remetente reenvia.
+    pub fn take_files(&mut self) -> Option<mpsc::Receiver<([u8; 32], update::FileFrame)>> {
+        self.files.take()
     }
 
     /// Passa a atender os quadros de servidor com `handler` (veja [`ServerHandler`]).
@@ -974,6 +982,9 @@ impl SeenInvites {
 
 /// Mensagens de bate-papo aceitas por minuto, de todos os contatos juntos.
 const CHAT_PER_MINUTE: usize = 600;
+/// Quadros de arquivo aceitos por minuto, de todos os contatos juntos: 500 por segundo é o ritmo do circuito de tela, que
+/// é o de uma transferência.
+const FILE_PER_MINUTE: usize = 40_000;
 
 /// As últimas mensagens de bate-papo entregues, para o reenvio de uma mensagem já recebida (ack perdido) não aparecer duas vezes.
 #[derive(Default)]
@@ -1005,6 +1016,7 @@ struct ActorOut {
     accept_intros: Arc<AtomicBool>,
     removals: mpsc::Sender<([u8; 32], u64)>,
     chats: mpsc::Sender<([u8; 32], update::Chat)>,
+    files: mpsc::Sender<([u8; 32], update::FileFrame)>,
     servers: ServerSlot,
     room_peers: Contacts,
     notice: Arc<Mutex<Option<String>>>,
@@ -1018,9 +1030,10 @@ async fn run_actor(
     contacts: Contacts,
     ids: Arc<AtomicU64>,
 ) {
-    let ActorOut { custody, incoming, updates, introductions, accept_intros, removals, chats, servers, room_peers, notice } = out;
+    let ActorOut { custody, incoming, updates, introductions, accept_intros, removals, chats, files, servers, room_peers, notice } = out;
     let mut chat_window: (Instant, usize) = (Instant::now(), 0);
     let mut chat_seen = SeenChats::default();
+    let mut file_window: (Instant, usize) = (Instant::now(), 0);
     let mut intro_window: (Instant, usize) = (Instant::now(), 0);
     let mut server_window: (Instant, usize) = (Instant::now(), 0);
     let mut writers: HashMap<u64, mpsc::Sender<Vec<u8>>> = HashMap::new();
@@ -1141,6 +1154,24 @@ async fn run_actor(
                                 let _ = chats.try_send((peer, chat));
                             }
                             if let Some(w) = writers.get(&conn) {
+                                let _ = w.try_send(ack.to_vec());
+                            }
+                        }
+                        continue;
+                    }
+                    // Arquivo de um contato: só de quem já é contato, no limite de taxa. O ack sai depois de o quadro entrar
+                    // na fila do app; fila cheia = sem ack, e o remetente reenvia (é o controle de fluxo).
+                    if let Some((peer, frame)) = update::open_file(&secret, &data, unix_millis()) {
+                        if file_window.0.elapsed() >= Duration::from_secs(60) {
+                            file_window = (Instant::now(), 0);
+                        }
+                        file_window.1 += 1;
+                        if file_window.1 <= FILE_PER_MINUTE && contacts.lock_unpoisoned().contains(&peer) {
+                            let seq = frame.ack_seq();
+                            if files.try_send((peer, frame)).is_ok()
+                                && let Ok(ack) = update::seal_ack(&secret, &PublicKey::from(peer), seq)
+                                && let Some(w) = writers.get(&conn)
+                            {
                                 let _ = w.try_send(ack.to_vec());
                             }
                         }

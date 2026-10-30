@@ -72,5 +72,6 @@ Para ligar a alguém: rode o `examples/gui` (veja [docs/GUI.md](docs/GUI.md)) ou
 | `src/video.rs`, `src/hwenc.rs` | codificação da tela: controle de taxa e qualidade, NACK; codificador por hardware opcional (feature `video`) |
 | `src/capture.rs`, `src/portal.rs` | captura da tela: X11 e GDI; portal do desktop (features `capture`, `portal`) |
 | `src/phone.rs` | `Phone`, `IncomingCall`, `call`, `ActiveCall` (feature `net`) |
+| `src/transfer.rs` | Arquivo entre contatos: envio em pedaços, recepção com arquivo parcial, nome seguro (feature `net`) |
 | `src/media/` | `VoiceCall`, `keys` (handshake), `packet` (200 B + AEAD), `jitter`, `signal` (convite/aceite), `update` (aviso de endereço novo, apresentação, custódia e caixa de correio), `screen` (pacotes, NACK e taxa da tela), `codec` (µ-law, G.722, Opus; trait `Codec`) |
 | `src/path.rs` | `PathMode`, `PathRequest`, `PathError` |

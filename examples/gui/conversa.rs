@@ -4,7 +4,7 @@ use clam::sync::LockExt;
 
 use eframe::egui::{self, Color32, RichText, vec2};
 
-use crate::{chats::State, engine::*, theme::*, ui::*};
+use crate::{arquivos::{Phase, size_text}, chats::State, engine::*, theme::*, ui::*};
 
 impl App {
     /// A conversa com `peer`. `online`: o contato está de pé agora (ou em chamada comigo), então dá para enviar.
@@ -14,6 +14,17 @@ impl App {
         self.shared.chats.lock_unpoisoned().read(&peer);
         let sendable = online && self.running.is_some();
         let mut close = false;
+        // Arquivo solto na janela vira oferta ao contato (só com ele online).
+        if sendable {
+            let dropped = ui.ctx().input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect::<Vec<_>>());
+            if let Some(r) = &self.running {
+                for path in dropped {
+                    let _ = r.cmds.send(Cmd::SendFile(peer, path));
+                }
+            }
+        }
+        let xfers = self.shared.transfers.lock_unpoisoned().of(&peer);
+        let mut file_cmds: Vec<Cmd> = Vec::new();
         // Como `card`, mas com o X no fim da linha do título.
         ui.add_space(4.0);
         raised_frame(ui, R_CARD, 22, |ui| {
@@ -31,6 +42,9 @@ impl App {
             });
             note(ui, "Só vai para quem está online. Cada um guarda a sua cópia nesta máquina.");
             ui.add_space(6.0);
+            for x in xfers.iter().rev().take(5).rev() {
+                file_row(ui, x, &mut file_cmds);
+            }
             let height = (ui.clip_rect().bottom() - ui.cursor().top() - 120.0).clamp(160.0, 420.0);
             egui::ScrollArea::vertical().id_salt(("conversa", peer)).max_height(height).min_scrolled_height(height).stick_to_bottom(true).auto_shrink([false, false]).show(ui, |ui| {
                 if msgs.is_empty() {
@@ -52,8 +66,14 @@ impl App {
             });
             ui.add_space(4.0);
             ui.allocate_ui_with_layout(vec2(ui.available_width(), 36.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let ready = sendable && !self.chat_draft.trim().is_empty();
+                let path = std::path::PathBuf::from(self.chat_draft.trim());
+                let is_file = !self.chat_draft.trim().is_empty() && path.is_file();
+                let ready = sendable && !self.chat_draft.trim().is_empty() && !is_file;
                 let sent = button(ui, ready, "Enviar", BLURPLE).clicked();
+                if attach_button(ui, sendable && is_file).clicked() {
+                    self.chat_draft.clear();
+                    file_cmds.push(Cmd::SendFile(peer, path));
+                }
                 let hint = if sendable { "Mensagem" } else { "Contato offline: não dá para enviar" };
                 let reply = ui.add_enabled(sendable, field(&mut self.chat_draft, hint).desired_width(ui.available_width().max(80.0)));
                 let enter = reply.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -67,6 +87,11 @@ impl App {
             });
         });
         ui.add_space(18.0);
+        if let Some(r) = &self.running {
+            for c in file_cmds {
+                let _ = r.cmds.send(c);
+            }
+        }
         if close {
             self.chat_with = None;
         }
@@ -78,4 +103,71 @@ impl App {
         self.chat_draft.clear();
         self.tab = Tab::Call;
     }
+}
+
+/// Uma transferência na conversa: nome e tamanho, e o que a pessoa pode fazer agora.
+fn file_row(ui: &mut egui::Ui, x: &crate::arquivos::Xfer, cmds: &mut Vec<Cmd>) {
+    ui.horizontal(|ui| {
+        let way = if x.mine { "Enviando" } else { "Recebendo" };
+        ui.label(RichText::new(format!("{} ({})", x.name, size_text(x.size))).strong().color(Color32::WHITE));
+        match &x.phase {
+            Phase::Asking => {
+                ui.label(RichText::new("quer enviar este arquivo").color(MUTED));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if close_button(ui, "Recusar").clicked() {
+                        cmds.push(Cmd::FileAnswer(x.peer, x.id, false));
+                    }
+                    if button(ui, true, "Aceitar", GREEN).on_hover_text("Salva em Downloads/clam, na sua pasta pessoal").clicked() {
+                        cmds.push(Cmd::FileAnswer(x.peer, x.id, true));
+                    }
+                });
+            }
+            Phase::Offering => {
+                ui.label(RichText::new("esperando o contato aceitar…").color(MUTED));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if close_button(ui, "Cancelar o envio").clicked() {
+                        cmds.push(Cmd::FileCancel(x.peer, x.id, true));
+                    }
+                });
+            }
+            Phase::Active => {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if close_button(ui, "Cancelar").clicked() {
+                        cmds.push(Cmd::FileCancel(x.peer, x.id, x.mine));
+                    }
+                    let frac = x.bytes as f32 / x.size.max(1) as f32;
+                    ui.add(egui::ProgressBar::new(frac).desired_width(ui.available_width().max(60.0)).text(format!("{way} {}%", (frac * 100.0) as u32)).fill(BLURPLE));
+                });
+            }
+            Phase::Done(path) => {
+                let r = ui.label(RichText::new(if x.mine { "enviado" } else { "recebido" }).color(GREEN));
+                if let Some(p) = path {
+                    r.on_hover_text(format!("Salvo em {}", p.display()));
+                }
+            }
+            Phase::Failed(e) => {
+                ui.label(RichText::new("falhou").color(RED)).on_hover_text(e);
+            }
+            Phase::Declined => {
+                ui.label(RichText::new("recusado").color(MUTED));
+            }
+            Phase::Cancelled => {
+                ui.label(RichText::new("cancelado").color(MUTED));
+            }
+        }
+    });
+}
+
+/// Clipe de papel desenhado (a fonte pode não ter o glifo): anexa o arquivo cujo caminho está no campo.
+fn attach_button(ui: &mut egui::Ui, enabled: bool) -> egui::Response {
+    let (rect, reply) = ui.allocate_exact_size(vec2(34.0, 34.0), egui::Sense::click());
+    let ink = if !enabled { MUTED.gamma_multiply(0.5) } else if reply.hovered() { Color32::WHITE } else { TEXT };
+    let stroke = egui::Stroke::new(2.0_f32, ink);
+    let c = rect.center();
+    // Uma alça comprida e a volta interna, como um clipe visto de frente.
+    let pts = [vec2(-3.0, 8.0), vec2(-6.0, 5.0), vec2(-6.0, -7.0), vec2(0.0, -10.0), vec2(6.0, -7.0), vec2(6.0, 6.0), vec2(2.0, 9.0), vec2(-2.0, 6.0), vec2(-2.0, -4.0)];
+    ui.painter().add(egui::Shape::line(pts.iter().map(|p| c + *p).collect(), stroke));
+    let tip = "Anexar arquivo: arraste-o para a janela, ou cole o caminho dele no campo e clique aqui. O contato precisa aceitar (limite de 32 MB)";
+    let reply = reply.on_hover_text(tip);
+    if enabled { reply.on_hover_cursor(egui::CursorIcon::PointingHand) } else { reply }
 }

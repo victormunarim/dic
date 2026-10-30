@@ -79,6 +79,8 @@ impl RelayInfo {
 pub const HISTORY: usize = 4;
 
 /// Maior espera entre duas tentativas de entrega do endereço novo.
+/// Quadros de arquivo que esperam o app retirá-los; passando disso o nó para de puxar da fila do telefone.
+const MAX_QUEUED_FILES: usize = 4096;
 const UPDATE_MAX_WAIT: Duration = Duration::from_secs(2 * 3600);
 
 /// Depois disto sem confirmação do contato, a entrega do endereço novo é abandonada.
@@ -162,6 +164,8 @@ pub struct Node {
     removed: Arc<Mutex<Vec<[u8; 32]>>>,
     /// Mensagens de bate-papo que contatos mandaram e o app ainda não retirou ([`Node::take_chats`]).
     chats: Arc<Mutex<Vec<(PeerKey, update::Chat)>>>,
+    /// Quadros de transferência de arquivo que contatos mandaram e o app ainda não retirou ([`Node::take_files`]).
+    files: Arc<Mutex<Vec<(PeerKey, update::FileFrame)>>>,
     /// Os servidores desta pessoa (veja [`Node::servers`]).
     servers: ServerHub,
     /// Tarefas de fundo: a que aplica os avisos de endereço dos contatos e a fila de saída dos nossos.
@@ -343,7 +347,20 @@ impl Node {
                 }
             }));
         }
-        Ok(Self { chats, secret, name, retry: update_retry, phone, _relay: relay, renew, reach, note, dialer, known, hints, history, own, update_notice, background, addr: addr_now, inbox, retiring: Arc::default(), removed, servers: server_hub })
+        let files: Arc<Mutex<Vec<(PeerKey, update::FileFrame)>>> = Arc::default();
+        if let Some(mut rx) = phone.take_files() {
+            let files = files.clone();
+            background.push(tokio::spawn(async move {
+                while let Some(item) = rx.recv().await {
+                    // App lento: espera aqui, a fila do telefone enche e ele deixa de confirmar (o remetente reenvia).
+                    while files.lock_unpoisoned().len() >= MAX_QUEUED_FILES {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                    files.lock_unpoisoned().push(item);
+                }
+            }));
+        }
+        Ok(Self { chats, files, secret, name, retry: update_retry, phone, _relay: relay, renew, reach, note, dialer, known, hints, history, own, update_notice, background, addr: addr_now, inbox, retiring: Arc::default(), removed, servers: server_hub })
     }
 
     /// Se `peer` está entre os contatos atendidos agora.
@@ -418,6 +435,13 @@ impl Node {
     #[must_use]
     pub fn take_chats(&self) -> Vec<(PeerKey, update::Chat)> {
         std::mem::take(&mut *self.chats.lock_unpoisoned())
+    }
+
+    /// Os quadros de transferência de arquivo que contatos mandaram desde a última chamada, na ordem de chegada. Cada
+    /// um já foi confirmado a quem mandou; juntar os pedaços e guardar é com o app (veja [`crate::transfer`]).
+    #[must_use]
+    pub fn take_files(&self) -> Vec<(PeerKey, update::FileFrame)> {
+        std::mem::take(&mut *self.files.lock_unpoisoned())
     }
 
     /// Remove o contato `peer` e avisa a ele (cifrado, só ele abre) para que o tire da lista dele também. Deixa de
