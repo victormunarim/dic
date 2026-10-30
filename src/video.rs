@@ -238,9 +238,13 @@ const STILL: f32 = 0.02;
 /// Refinar de um QP a outro numa imagem parada custa um pico de bytes (a imagem toda é refeita). Pico
 /// acima de tantos orçamentos de quadro encerra o refinamento naquele QP até a imagem se mexer de novo.
 const SPIKE: f32 = 8.0;
-/// Quadros grandes seguidos (acima de [`HEAVY`] orçamentos, já no QP mais grosseiro) antes de reduzir a resolução.
-const HEAVY_FRAMES: u32 = 3;
-const HEAVY: f32 = 2.0;
+/// QP a partir do qual o H.264 só dá macroblocos grossos (os "quadrados" de vídeo em movimento). Mantido por
+/// [`BLOCKY_SECONDS`] com a imagem mexendo, a banda não cobre a resolução cheia: reduzir os pixels é melhor que
+/// quantizar mais. É um nível sustentado, não um quadro grande: o controlador assenta o QP onde a banda fecha
+/// (≈ 47 no circuito aberto), com quadros perto do orçamento, e a camada temporal alterna quadros de
+/// tamanhos diferentes, o que zerava qualquer contagem por tamanho.
+const BLOCKY_QP: f32 = 44.0;
+const BLOCKY_SECONDS: f32 = 0.5;
 /// Maior redução extra por movimento.
 const MAX_MOTION_K: usize = 3;
 /// Troca de página: mais que esta fração da amostra mudou e não foi rolagem (texto em fundo claro mexe poucos pixels).
@@ -252,6 +256,10 @@ const PAGE_KEY_SECONDS: f32 = 0.4;
 const STRIP_QP: f32 = 30.0;
 /// Menor fração de pixels mudados considerada na antecipação (evita dividir por zero).
 const MIN_CHANGE: f32 = 0.02;
+/// A referência da antecipação guarda o pico recente e decai por quadro: a amostra de um vídeo oscila de quadro
+/// a quadro, e comparar só com o quadro anterior tomava cada oscilação por início de movimento (salto de QP
+/// a cada poucos quadros, e o QP serrilhava até o máximo). Início de verdade sai de uma imagem calma.
+const CHANGE_DECAY: f32 = 0.9;
 /// Passo, em pixels, da amostragem usada para medir quanto a imagem mudou.
 const SAMPLE_STEP: usize = 4;
 /// Diferença de canal acima da qual um pixel amostrado conta como mudado.
@@ -513,7 +521,7 @@ impl H264Encoder {
     /// Quadro-chave não sobe: já é o quadro de recomeço, e subir o QP à toa o deixaria borrado.
     fn plan_qp(&mut self, changed: f32, key: bool) -> f32 {
         let jump = if key { 0.0 } else { (QP_PER_OCTAVE * (changed.max(MIN_CHANGE) / self.prev_change.max(MIN_CHANGE)).log2()).clamp(0.0, JUMP_UP) };
-        self.prev_change = changed;
+        self.prev_change = changed.max(self.prev_change * CHANGE_DECAY);
         (self.qp + jump).clamp(QP_MIN, QP_MAX)
     }
 
@@ -538,9 +546,9 @@ impl H264Encoder {
         }
         self.calm = 0;
         self.floor = QP_MIN;
-        if used_qp >= QP_MAX - 3.0 && ratio > HEAVY {
+        if used_qp >= BLOCKY_QP {
             self.heavy += 1;
-            if self.heavy >= HEAVY_FRAMES {
+            if self.heavy as f32 >= BLOCKY_SECONDS * self.fps {
                 self.motion_k = (self.scale() + 1).min(MAX_MOTION_K);
                 self.heavy = 0;
             }
@@ -1636,6 +1644,127 @@ mod tests {
             // Troca de página: mudança grande, volta o quadro-chave e o refino.
             for _ in 0..(fps as usize * 5) {
                 run(&mut enc, &mut dec, off + 5000, "trocou ", &mut t, &mut queue);
+            }
+        }
+    }
+
+    #[test]
+    fn a_wobbling_sample_is_not_taken_for_the_start_of_movement() {
+        let mut enc = H264Encoder::new(H264Encoder::bitrate_for(crate::phone::OPEN_SCREEN_SLOT)).unwrap();
+        enc.qp = 36.0;
+        // Imagem calma e, de repente, tudo mexe: é o início de movimento, o QP sobe de uma vez.
+        for _ in 0..4 {
+            enc.plan_qp(0.02, false);
+        }
+        assert!(enc.plan_qp(0.9, false) >= 36.0 + JUMP_UP - 1.0, "salto no início do movimento");
+        // Vídeo tocando: a fração mudada oscila de quadro a quadro, e isso não é movimento novo.
+        for changed in [0.5, 0.9, 0.55, 0.85, 0.6, 0.9] {
+            assert!(enc.plan_qp(changed, false) <= 36.0 + 4.0, "oscilação {changed} não deve saltar o QP");
+        }
+    }
+
+    #[test]
+    fn video_that_keeps_the_qp_blocky_drops_the_resolution_and_the_queue_stays_short() {
+        // Vídeo tocando no circuito privado: todo pixel muda, nada rola. Antes, o QP ficava em 51 com a imagem
+        // cheia e a fila do circuito crescia sem parar; agora a resolução cai e a fila esvazia.
+        let slot = SCREEN_SLOT;
+        let bitrate = H264Encoder::bitrate_for(slot);
+        let mut enc = H264Encoder::new(bitrate).unwrap();
+        let cap = ScreenStream::capacity_bps(slot) as f32 / 8.0;
+        let fps = enc.fps();
+        let mut queue = 0.0f32;
+        let mut late = 0.0f32;
+        let frames = (fps * 6.0) as usize;
+        for i in 0..frames {
+            queue = (queue - cap / fps).max(0.0);
+            if let Some(f) = enc.encode(&footage(1280, 720, i, 31), false).unwrap() {
+                queue += f.data.len() as f32;
+            }
+            if i >= frames - fps as usize {
+                late = late.max(queue / cap);
+            }
+        }
+        assert!(enc.scale() >= 2, "a resolução devia ter caído (k {}, QP {})", enc.scale(), enc.qp());
+        assert!(late < 0.5, "a fila devia ter esvaziado: {late:.2} s de atraso no último segundo");
+    }
+
+    /// Cena de "vídeo": textura de manchas suaves e arestas que desliza `t * 8` px, com grão leve. Todo pixel
+    /// muda a cada quadro, como num vídeo tocando na tela, e nada disso é rolagem vertical.
+    fn footage(w: usize, h: usize, t: usize, grain: u32) -> RawFrame {
+        let hash = |x: usize, y: usize| -> u32 { ((x.wrapping_mul(73856093) ^ y.wrapping_mul(19349663)) as u32).wrapping_mul(2654435761) >> 8 };
+        let mut rgba = Vec::with_capacity(w * h * 4);
+        for y in 0..h {
+            for x in 0..w {
+                let (px, py) = (x + t * 8, y + t * 3);
+                let (cx, cy, fx, fy) = (px / 48, py / 48, (px % 48) as u32, (py % 48) as u32);
+                let at = |i: usize, j: usize, c: u32| (hash(i, j) >> (c * 5)) & 255;
+                let mut px4 = [0u8, 0, 0, 255];
+                for c in 0..3u32 {
+                    let top = at(cx, cy, c) * (48 - fx) + at(cx + 1, cy, c) * fx;
+                    let bot = at(cx, cy + 1, c) * (48 - fx) + at(cx + 1, cy + 1, c) * fx;
+                    let v = (top * (48 - fy) + bot * fy) / (48 * 48);
+                    let edge = if (px / 160 + py / 120) % 2 == 0 { 24 } else { 0 };
+                    let grain = hash(x + t * 5, y) & grain;
+                    px4[c as usize] = (v / 2 + edge + grain + 40).min(255) as u8;
+                }
+                rgba.extend_from_slice(&px4);
+            }
+        }
+        RawFrame::new(w, h, rgba).unwrap()
+    }
+
+    /// PSNR (dB) entre a fonte e a imagem decodificada, esticada ao tamanho da fonte se veio reduzida.
+    fn psnr_against(out: &RawFrame, src: &RawFrame) -> f32 {
+        let mut sq = 0u64;
+        for y in 0..src.height {
+            let oy = (y * out.height / src.height).min(out.height - 1);
+            for x in 0..src.width {
+                let ox = (x * out.width / src.width).min(out.width - 1);
+                for c in 0..3 {
+                    let d = src.rgba[(y * src.width + x) * 4 + c] as i64 - out.rgba[(oy * out.width + ox) * 4 + c] as i64;
+                    sq += (d * d) as u64;
+                }
+            }
+        }
+        10.0 * (255.0f32 * 255.0 / (sq as f32 / (src.width * src.height * 3) as f32).max(1e-3)).log10()
+    }
+
+    /// Medição (não é teste): vídeo tocando na tela (todo pixel muda, sem rolagem) em 1080p. Mostra, por
+    /// segundo, QP médio, escala, bytes por quadro enviado e PSNR contra a fonte.
+    /// `cargo test --release --features video --lib -- --ignored --nocapture video_playback`
+    #[test]
+    #[ignore]
+    fn video_playback() {
+        for (label, slot, grain) in [("aberto 0,5 ms, grão 7", crate::phone::OPEN_SCREEN_SLOT, 7), ("aberto 0,5 ms, grão 15", crate::phone::OPEN_SCREEN_SLOT, 15), ("aberto 0,5 ms, grão 31", crate::phone::OPEN_SCREEN_SLOT, 31), ("privado 2 ms, grão 7", SCREEN_SLOT, 7), ("privado 2 ms, grão 15", SCREEN_SLOT, 15)] {
+            let bitrate = H264Encoder::bitrate_for(slot);
+            let mut enc = H264Encoder::new(bitrate).unwrap();
+            enc.set_scroll(true);
+            let mut dec = ScreenDecoder::new().unwrap();
+            let (w, h) = (1920, 1080);
+            let fps = Priority::Smoothness.fps(bitrate) as usize;
+            let cap = ScreenStream::capacity_bps(slot) as f32 / 8.0;
+            println!("\n== {label}: {bitrate} bps, {fps} fps, circuito {:.0} kB/s", cap / 1000.0);
+            let mut queue = 0.0f32;
+            let (mut qps, mut bytes, mut sent, mut db, mut shown, mut peak) = (0.0f32, 0usize, 0usize, 0.0f32, 0usize, 0.0f32);
+            for i in 0..fps * 6 {
+                let src = footage(w, h, i, grain);
+                queue = (queue - cap / fps as f32).max(0.0);
+                if let Some(f) = enc.encode(&src, false).unwrap() {
+                    queue += f.data.len() as f32;
+                    peak = peak.max(queue / cap * 1000.0);
+                    bytes += f.data.len();
+                    sent += 1;
+                    qps += enc.qp() as f32;
+                    if let Some(o) = dec.decode(&f.data).unwrap() {
+                        db += psnr_against(&o, &src);
+                        shown += 1;
+                    }
+                }
+                if (i + 1) % fps == 0 {
+                    let n = sent.max(1) as f32;
+                    println!("t={}s enviados {sent:2}/{fps} qp {:4.1} k {} {:6.0} B/quadro  PSNR {:4.1} dB  atraso máx. {peak:4.0} ms", (i + 1) / fps, qps / n, enc.scale(), bytes as f32 / n, db / shown.max(1) as f32);
+                    (qps, bytes, sent, db, shown, peak) = (0.0, 0, 0, 0.0, 0, 0.0);
+                }
             }
         }
     }
