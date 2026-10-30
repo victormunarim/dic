@@ -14,13 +14,23 @@ impl App {
         self.shared.chats.lock_unpoisoned().read(&peer);
         let sendable = online && self.running.is_some();
         let mut close = false;
-        card(ui, &format!("Bate-papo com {name}"), "", |ui| {
+        // Como `card`, mas com o X no fim da linha do título.
+        ui.add_space(4.0);
+        raised_frame(ui, R_CARD, 22, |ui| {
+            ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
-                if !self.shared.in_call.load(std::sync::atomic::Ordering::Relaxed) && close_button(ui, "Fechar a conversa").clicked() {
-                    close = true;
+                ui.label(RichText::new(format!("Bate-papo com {name}")).strong().size(18.0).color(Color32::WHITE));
+                // Em chamada a conversa é a da linha: fechar não faz sentido.
+                if !self.shared.in_call.load(std::sync::atomic::Ordering::Relaxed) {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if close_button(ui, "Fechar a conversa").clicked() {
+                            close = true;
+                        }
+                    });
                 }
-                note(ui, "Só vai para quem está online. Cada um guarda a sua cópia nesta máquina.");
             });
+            note(ui, "Só vai para quem está online. Cada um guarda a sua cópia nesta máquina.");
+            ui.add_space(6.0);
             let height = (ui.clip_rect().bottom() - ui.cursor().top() - 120.0).clamp(160.0, 420.0);
             egui::ScrollArea::vertical().id_salt(("conversa", peer)).max_height(height).min_scrolled_height(height).stick_to_bottom(true).auto_shrink([false, false]).show(ui, |ui| {
                 if msgs.is_empty() {
@@ -56,6 +66,7 @@ impl App {
                 }
             });
         });
+        ui.add_space(18.0);
         if close {
             self.chat_with = None;
         }

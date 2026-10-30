@@ -31,7 +31,7 @@ pub(crate) const YELLOW: Color32 = Color32::from_rgb(0xf0, 0xb2, 0x32);
 pub(crate) const GREY_BUTTON: Color32 = BG;
 
 /// Raios de canto, um por categoria.
-const R_CARD: u8 = 18;
+pub(crate) const R_CARD: u8 = 18;
 const R_BUTTON: u8 = 12;
 
 /// Sombras de um relevo de `depth` px: a clara sobe para a esquerda, a escura desce para a direita.
