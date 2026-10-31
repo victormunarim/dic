@@ -62,31 +62,15 @@ impl App {
             return;
         }
         let ringing = self.shared.ringing.lock_unpoisoned().is_some();
-        card(ui, if ringing { "Chamando" } else { "Em chamada" }, "", |ui| {
-            if ringing {
-                status_dot(ui, pal().yellow, "Chamando… aguardando a pessoa atender");
-            } else {
-                ui.horizontal(|ui| {
-                    status_dot(ui, pal().green, "Conversando agora");
-                    privacy_badge(ui, "Privacidade da chamada", "Circuito de 2 saltos, cifrado em camadas, com tráfego constante: quem observa a rede não vê quando você fala. O primeiro salto é o relay de quem liga, então o contato vê o IP dele.");
-                });
-            }
-            let link = self.shared.link.lock_unpoisoned().clone();
-            if !link.is_empty() {
-                note(ui, format!("Linha: {link}"));
-            }
-            ui.add_space(4.0);
-            if hangup_button(ui, if ringing { "Cancelar a chamada" } else { "Desligar a chamada" }).clicked() {
-                self.shared.hangup.store(true, Ordering::Relaxed);
-            }
-        });
+        self.call_bar(ui, ringing);
         if !ringing {
+            // A tela vem antes da conversa: é o que a pessoa foi ver; o bate-papo fica logo abaixo.
+            self.screens_ui(ui);
             // Na chamada a conversa é com quem está na linha, e dá para escrever sem checar presença.
             let peer = *self.shared.peer.lock_unpoisoned();
             if let Some(peer) = peer {
                 self.chat_panel(ui, peer, true);
             }
-            self.screen_ui(ui);
         }
     }
 
@@ -141,46 +125,87 @@ impl App {
         }
     }
 
-    /// Compartilhar a própria tela e ver a dos outros, na chamada.
-    pub(crate) fn screen_ui(&mut self, ui: &mut egui::Ui) {
+    /// Barra única da chamada: estado e privacidade à esquerda; som da tela e desligar à direita. Quem transmite vê aqui,
+    /// numa linha, que a tela está sendo vista; o diagnóstico fica recolhido. Nada disso ganha cartão próprio.
+    fn call_bar(&mut self, ui: &mut egui::Ui, ringing: bool) {
         let st = &self.shared.screen;
         let (wanted, sharing) = (st.want_share.load(Ordering::Relaxed), st.sharing.load(Ordering::Relaxed));
         let note_text = st.note.lock_unpoisoned().clone();
         let diag = st.diagnostics();
-
-        // Compartilhar e silenciar ficam na barra do pé da coluna; aqui só o estado e o diagnóstico da transmissão.
-        if sharing || wanted || !diag.is_empty() || !note_text.is_empty() {
-            card(ui, "Sua transmissão", "O vídeo segue cifrado de ponta a ponta, em um circuito só dele.", |ui| {
-                if sharing {
-                    ui.colored_label(pal().green, RichText::new("● sua tela está sendo vista").strong());
-                } else if wanted {
-                    note(ui, "ligando o circuito de vídeo...");
+        let link = self.shared.link.lock_unpoisoned().clone();
+        ui.add_space(4.0);
+        raised_frame(ui, R_CARD, 16, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                let state = if ringing { status_dot(ui, pal().yellow, "Chamando…") } else { status_dot(ui, pal().green, "Em chamada") };
+                if !link.is_empty() {
+                    state.on_hover_text(format!("Linha: {link}"));
                 }
-                if !wanted && !sharing && !note_text.is_empty() {
-                    ui.colored_label(pal().error, note_text);
+                if !ringing {
+                    privacy_badge(ui, "Privacidade da chamada", "Circuito de 2 saltos, cifrado em camadas, com tráfego constante: quem observa a rede não vê quando você fala. O primeiro salto é o relay de quem liga, então o contato vê o IP dele.");
                 }
-                if !diag.is_empty() {
-                    ui.label(RichText::new(diag).monospace().size(13.0).color(pal().muted));
-                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if hangup_button(ui, if ringing { "Cancelar a chamada" } else { "Desligar a chamada" }).clicked() {
+                        self.shared.hangup.store(true, Ordering::Relaxed);
+                    }
+                    if !ringing {
+                        // Sempre à vista, com ou sem tela rodando: as duas chaves começam ligadas e a pessoa precisa
+                        // ver onde estão antes de a transmissão começar. Em ordem de leitura: enviar, ouvir.
+                        // Layout explícito: dentro de um right_to_left o `horizontal` herdaria a direção e inverteria a ordem.
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| self.screen_sound_toggles(ui, true, true));
+                    }
+                });
             });
-        }
+            if sharing {
+                // Ponto desenhado: o "●" da fonte não existe e saía como um quadrado vazio.
+                ui.horizontal(|ui| {
+                    let (rect, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+                    ui.painter().circle_filled(rect.center(), 4.0, pal().green);
+                    ui.label(RichText::new("sua tela está sendo vista").strong().color(pal().green));
+                });
+            } else if wanted {
+                note(ui, "ligando o circuito de vídeo...");
+            }
+            if !wanted && !sharing && !note_text.is_empty() {
+                ui.colored_label(pal().error, note_text);
+            }
+            if !diag.is_empty() {
+                // Id fixo: o texto muda a cada segundo e não pode ser a chave do estado aberto/fechado.
+                egui::CollapsingHeader::new(RichText::new("Detalhes da transmissão").size(14.0).color(pal().muted))
+                    .id_salt("detalhes-transmissao")
+                    .icon(chevron)
+                    .show(ui, |ui| {
+                        ui.label(RichText::new(diag).monospace().size(13.0).color(pal().muted));
+                    });
+            }
+        });
+        ui.add_space(14.0);
+    }
 
+    /// As telas de quem transmite para você: o nome e a tela cheia na mesma linha, e a imagem logo abaixo.
+    fn screens_ui(&mut self, ui: &mut egui::Ui) {
         let names = self.form.names();
-        // Sempre à vista na chamada, com ou sem tela rodando: as duas chaves começam ligadas e a pessoa precisa ver
-        // onde estão antes de a transmissão começar (quem assiste só recebe imagem depois).
-        card(ui, "Som da tela", "Enviar o som do computador a quem assiste e ouvir o som das telas que você assiste.", |ui| self.screen_sound_toggles(ui, true, true));
         let mut order: Vec<_> = self.screen_tex.iter().collect();
         order.sort_by_key(|(k, _)| **k);
         for (who, (_, tex)) in order {
-            card(ui, &format!("Tela de {}", member_name(&names, who)), "", |ui| {
-                if magnifier_button(ui, "Tela cheia (Esc ou o X para sair)").clicked() {
-                    self.zoom = Some(*who);
-                }
+            ui.add_space(4.0);
+            raised_frame(ui, R_CARD, 16, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(format!("Tela de {}", member_name(&names, who))).strong().size(16.0).color(pal().strong));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if magnifier_button(ui, "Tela cheia (Esc ou o X para sair)").clicked() {
+                            self.zoom = Some(*who);
+                        }
+                    });
+                });
                 // Em tela cheia a miniatura sai: a imagem não é desenhada duas vezes.
                 if self.zoom != Some(*who) {
+                    ui.add_space(8.0);
                     ui.add(egui::Image::new(tex).max_width(ui.available_width()).corner_radius(CornerRadius::same(8)).shrink_to_fit());
                 }
             });
+            ui.add_space(14.0);
         }
     }
 }

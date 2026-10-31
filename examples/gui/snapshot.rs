@@ -15,6 +15,7 @@ use eframe::egui::{self, epaint, Color32, Pos2, Rect, vec2};
 
 use crate::conf::Form;
 use crate::engine::Shared;
+use clam::sync::LockExt;
 use crate::theme;
 use crate::ui::{App, Tab};
 
@@ -191,6 +192,31 @@ fn shot(tab: Tab, size: egui::Vec2) -> Frame {
     render(size, theme::pal().bg, |ctx| eframe::App::update(&mut app, ctx, &mut eframe::Frame::_new_kittest()))
 }
 
+/// Chamada em andamento com a tela de um contato chegando (um degradê no lugar do vídeo) e o diagnóstico de quem
+/// transmite: o quadro que mostra a barra única, a tela e a conversa.
+fn shot_in_call(size: egui::Vec2) -> Frame {
+    use std::sync::atomic::Ordering;
+    let mut app = sample_app(Tab::Contacts);
+    let peer = [0xab_u8; 32];
+    app.shared.in_call.store(true, Ordering::Relaxed);
+    *app.shared.peer.lock_unpoisoned() = Some(peer);
+    app.shared.screen.sharing.store(true, Ordering::Relaxed);
+    let (w, h) = (320, 180);
+    let rgba: Vec<u8> = (0..w * h).flat_map(|i| [(i % w * 255 / w) as u8, (i / w * 255 / h) as u8, 140, 255]).collect();
+    app.shared.screen.images.lock_unpoisoned().insert(peer, (1, clam::video::RawFrame { width: w, height: h, rgba }));
+    let mut made = false;
+    render(size, theme::pal().bg, |ctx| {
+        if !made {
+            let (w, h) = (320, 180);
+            let px: Vec<Color32> = (0..w * h).map(|i| Color32::from_rgb((i % w * 255 / w) as u8, (i / w * 255 / h) as u8, 140)).collect();
+            let tex = ctx.load_texture("tela-teste", egui::ColorImage::new([w, h], px), egui::TextureOptions::LINEAR);
+            app.screen_tex.insert(peer, (1, tex));
+            made = true;
+        }
+        eframe::App::update(&mut app, ctx, &mut eframe::Frame::_new_kittest());
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,6 +251,7 @@ mod tests {
             for (tab, name) in tabs {
                 shot(tab, vec2(1280.0, 800.0)).save(&dir.join(format!("{name}-{theme_name}.png")));
             }
+            shot_in_call(vec2(1280.0, 800.0)).save(&dir.join(format!("chamada-ativa-{theme_name}.png")));
             // A página inteira de Configurações: a rolagem corta o que não cabe em 800 px.
             shot(Tab::Settings, vec2(1280.0, 1700.0)).save(&dir.join(format!("configuracoes-completa-{theme_name}.png")));
             shot(Tab::Settings, vec2(820.0, 560.0)).save(&dir.join(format!("configuracoes-estreita-{theme_name}.png")));

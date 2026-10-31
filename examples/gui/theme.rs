@@ -329,7 +329,7 @@ pub(crate) fn details(ui: &mut Ui, title: &str, text: &str) {
 
 /// Seta do bloco recolhido, desenhada: aponta para a direita fechada e gira para baixo ao abrir (`openness` de 0 a 1).
 /// A seta padrão do egui vem da fonte e destoa dos outros ícones do tema.
-fn chevron(ui: &mut Ui, openness: f32, response: &egui::Response) {
+pub(crate) fn chevron(ui: &mut Ui, openness: f32, response: &egui::Response) {
     let ink = if response.hovered() { pal().strong } else { pal().muted };
     let c = response.rect.center();
     let a = openness * std::f32::consts::FRAC_PI_2;
@@ -688,12 +688,13 @@ pub(crate) fn count_badge(painter: &egui::Painter, rect: egui::Rect, n: usize, r
 }
 
 /// Ponto de estado seguido do texto.
-pub(crate) fn status_dot(ui: &mut Ui, color: Color32, text: &str) {
+pub(crate) fn status_dot(ui: &mut Ui, color: Color32, text: &str) -> egui::Response {
     ui.horizontal(|ui| {
         let (rect, _) = ui.allocate_exact_size(vec2(12.0, 12.0), egui::Sense::hover());
         ui.painter().circle_filled(rect.center(), 6.0, color);
         ui.label(RichText::new(text).strong().size(18.0).color(pal().strong));
-    });
+    })
+    .response
 }
 
 /// Símbolo de ligar/desligar (arco aberto em cima e um traço), desenhado à mão para não depender de fonte.
