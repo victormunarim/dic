@@ -116,22 +116,26 @@ impl App {
         }
     }
 
-    /// As duas chaves do som da tela, à mão na própria transmissão: `send` (estou transmitindo) mostra "Enviar o
+    /// As duas chaves do som da tela, em ícones à mão na própria transmissão: `send` (estou transmitindo) mostra "Enviar o
     /// som do computador"; `hear` (estou assistindo alguém) mostra "Ouvir o som das telas". Valem na hora e ficam salvas.
     pub(crate) fn screen_sound_toggles(&mut self, ui: &mut egui::Ui, send: bool, hear: bool) {
         let mut changed = false;
-        if send {
-            changed |= ui
-                .check(&mut self.form.screen_audio, "Enviar o som do computador")
-                .on_hover_text("Quem assiste ouve o que toca no seu computador (música, jogo, vídeo, notificações), menos o que o próprio programa toca: a voz do contato e o som de tela de outros. A exclusão não é perfeita, sobra um resto fraco da voz do contato; com fones some. Usa cerca de 10% da banda do vídeo (2,5% sem privacidade) e, sem privacidade, quem observa a rede vê quando há som. Só no Linux (precisa de gstreamer1.0-tools e pactl). Vale na hora; a imagem se ajusta à banda na próxima transmissão.")
-                .changed();
-        }
-        if hear {
-            changed |= ui
-                .check(&mut self.form.screen_hear, "Ouvir o som das telas")
-                .on_hover_text("Toca o som que vem junto das telas que você assiste, no volume do alto-falante. Desmarcado, o som é descartado e não é nem decodificado. Vale na hora.")
-                .changed();
-        }
+        ui.horizontal(|ui| {
+            if send {
+                let on = self.form.screen_audio;
+                if sound_toggle(ui, on, true, "Enviar o som do computador", "Enviar o som do computador. Quem assiste ouve o que toca no seu computador (música, jogo, vídeo, notificações), menos o que o próprio programa toca: a voz do contato e o som de tela de outros. A exclusão não é perfeita, sobra um resto fraco da voz do contato; com fones some. Usa cerca de 10% da banda do vídeo (2,5% sem privacidade) e, sem privacidade, quem observa a rede vê quando há som. Só no Linux (precisa de gstreamer1.0-tools e pactl). Vale na hora; a imagem se ajusta à banda na próxima transmissão.") {
+                    self.form.screen_audio = !on;
+                    changed = true;
+                }
+            }
+            if hear {
+                let on = self.form.screen_hear;
+                if sound_toggle(ui, on, false, "Ouvir o som das telas", "Ouvir o som das telas. Toca o som que vem junto das telas que você assiste, no volume do alto-falante. Desligado, o som é descartado e não é nem decodificado. Vale na hora.") {
+                    self.form.screen_hear = !on;
+                    changed = true;
+                }
+            }
+        });
         if changed {
             self.form.save();
         }

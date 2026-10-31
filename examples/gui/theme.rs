@@ -812,6 +812,32 @@ pub(crate) fn speaker_icon(painter: &egui::Painter, center: Pos2, size: f32, col
     }
 }
 
+/// Botão de ícone que liga e desliga o som da tela. `send` desenha o alto-falante com a seta de saída (o som do
+/// computador vai para quem assiste); sem ele, o alto-falante comum (ouvir o som das telas). Ligado: placa afundada e
+/// ícone no acento; desligado: ícone apagado e riscado. O estado nunca fica só na sombra (cor, relevo e risco juntos).
+/// Devolve se foi clicado: quem chama inverte a chave.
+pub(crate) fn sound_toggle(ui: &mut Ui, on: bool, send: bool, name: &str, tip: &str) -> bool {
+    let state = format!("{name}: {}", if on { "ligado" } else { "desligado" });
+    let draw = move |p: &egui::Painter, c: Pos2, size: f32, color: Color32| {
+        if send {
+            speaker_icon(p, c + vec2(-size * 0.12, 0.0), size * 0.9, color);
+            let u = |x: f32, y: f32| c + vec2(x * size, y * size);
+            let ink = Stroke::new(size * 0.085, color);
+            p.line_segment([u(0.3, 0.3), u(0.3, -0.3)], ink);
+            p.line_segment([u(0.3, -0.3), u(0.18, -0.16)], ink);
+            p.line_segment([u(0.3, -0.3), u(0.42, -0.16)], ink);
+        } else {
+            speaker_icon(p, c, size, color);
+        }
+        if !on {
+            let (from, to) = (c + vec2(-size * 0.5, size * 0.5), c + vec2(size * 0.5, -size * 0.5));
+            p.line_segment([from, to], Stroke::new(size * 0.25, pal().bg));
+            p.line_segment([from, to], Stroke::new(size * 0.095, color));
+        }
+    };
+    bare_button_state(ui, vec2(34.0, 34.0), &state, tip, on, |h| if h { pal().strong } else { pal().muted }, 22.0, draw).clicked()
+}
+
 /// Balão de conversa (bate-papo), desenhado: contorno arredondado com a ponta para baixo à esquerda.
 pub(crate) fn chat_icon(painter: &egui::Painter, center: Pos2, size: f32, color: Color32) {
     let u = |x: f32, y: f32| center + vec2(x * size, y * size);
