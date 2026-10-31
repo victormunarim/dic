@@ -176,6 +176,11 @@ fn open_loopback(queue: Arc<Mutex<VecDeque<i16>>>) -> Result<Loopback, AudioErro
                 }
             },
             move |e| {
+                // Xrun (descontinuidade do loopback, comum quando o mixer pára e volta) e troca de rota são
+                // avisos: o stream segue vivo. Tratá-los como morte congelava a captura no primeiro aviso.
+                if matches!(e.kind(), cpal::ErrorKind::Xrun | cpal::ErrorKind::DeviceChanged) {
+                    return;
+                }
                 *dead.1.lock_unpoisoned() = e.to_string();
                 dead.0.store(true, Ordering::Relaxed);
             },
