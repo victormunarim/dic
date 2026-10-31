@@ -216,7 +216,7 @@ impl App {
                 let in_server = self.srv.sel.is_some() && !offline;
                 let muted_now = self.shared.audio.muted.load(Ordering::Relaxed);
                 let menu = egui::Popup::menu(&gear).show(|ui| {
-                    ui.set_min_width(280.0);
+                    ui.set_min_width(theme::MENU_WIDTH);
                     type Icon = fn(&egui::Painter, egui::Pos2, f32, egui::Color32);
                     let mic: Icon = |p, c, s, k| mic_icon(p, c, s, k, false);
                     for (tab, icon, label) in [

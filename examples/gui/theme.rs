@@ -742,6 +742,10 @@ pub(crate) fn menu_item(ui: &mut Ui, selected: bool, tint: Option<Color32>, labe
     menu_row(ui, None, selected, tint, label, None, draw)
 }
 
+/// Largura mínima de todo menu (engrenagem, confirmações, membro, convite): um só tamanho, para o menu não mudar de
+/// largura de um gatilho para outro.
+pub(crate) const MENU_WIDTH: f32 = 280.0;
+
 /// Linha de menu completa. `blocked` com motivo apaga a linha (sem relevo nem clique) e leva o motivo ao hover e ao
 /// nome acessível, para teclado e leitor de tela não ficarem com um item mudo; `shortcut` aparece à direita, na mesma
 /// linha da ação a que pertence.
@@ -749,7 +753,7 @@ pub(crate) fn menu_row(ui: &mut Ui, blocked: Option<&str>, selected: bool, tint:
     let enabled = blocked.is_none();
     // Apagado continua alcançável pelo Tab (sem clicar), senão o motivo só existiria para o mouse.
     let sense = if enabled { egui::Sense::click() } else { egui::Sense::focusable_noninteractive() };
-    let (rect, reply) = ui.allocate_exact_size(vec2(ui.available_width().max(190.0), 30.0), sense);
+    let (rect, reply) = ui.allocate_exact_size(vec2(ui.available_width().max(MENU_WIDTH), 30.0), sense);
     let name = menu_row_name(label, blocked);
     reply.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, name.clone()));
     let painter = ui.painter();
@@ -790,13 +794,25 @@ fn menu_row_name(label: &str, blocked: Option<&str>) -> String {
 /// o menu fecha por fora.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn confirm_item(ui: &mut Ui, id: egui::Id, label: &str, hint: &str, question: &str, effect: &str, confirm: &str, draw: impl FnOnce(&egui::Painter, Pos2, f32, Color32)) -> bool {
-    ui.set_min_width(230.0);
+    ui.set_min_width(MENU_WIDTH);
+    let focus_cancel = id.with("foco-cancelar");
+    let focus_item = id.with("foco-item");
     if !ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(false) {
-        if menu_item(ui, false, Some(pal().error), label, draw).on_hover_text(hint).clicked() {
-            ui.data_mut(|d| d.insert_temp(id, true));
+        let item = menu_item(ui, false, Some(pal().error), label, draw).on_hover_text(hint);
+        // Voltou da pergunta (Cancelar ou Esc): o foco do teclado volta ao item de onde saiu.
+        if ui.data_mut(|d| d.remove_temp::<bool>(focus_item)).unwrap_or(false) {
+            item.request_focus();
+        }
+        if item.clicked() {
+            ui.data_mut(|d| {
+                d.insert_temp(id, true);
+                d.insert_temp(focus_cancel, true);
+            });
         }
         return false;
     }
+    // Esc desfaz a pergunta em vez de fechar o menu todo; o segundo Esc fecha.
+    let esc = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
     ui.add(egui::Label::new(RichText::new(question).strong().color(pal().strong)).wrap());
     ui.add(egui::Label::new(RichText::new(effect).size(13.0).color(pal().text)).wrap());
     let mut done = false;
@@ -804,15 +820,25 @@ pub(crate) fn confirm_item(ui: &mut Ui, id: egui::Id, label: &str, hint: &str, q
         done = true;
         reset_confirm(ui, id);
     }
-    if menu_item(ui, false, None, "Cancelar", close_icon).clicked() {
+    let cancel = menu_item(ui, false, None, "Cancelar", close_icon);
+    // O item que tinha o foco sumiu; o foco vai ao padrão seguro, não ao destrutivo.
+    if ui.data_mut(|d| d.remove_temp::<bool>(focus_cancel)).unwrap_or(false) {
+        cancel.request_focus();
+    }
+    if esc || cancel.clicked() {
         reset_confirm(ui, id);
+        ui.data_mut(|d| d.insert_temp(focus_item, true));
     }
     done
 }
 
 /// Volta o item de `confirm_item` ao começo (menu fechado por fora, ou resposta dada).
 pub(crate) fn reset_confirm(ui: &Ui, id: egui::Id) {
-    ui.data_mut(|d| d.remove_temp::<bool>(id));
+    ui.data_mut(|d| {
+        d.remove_temp::<bool>(id);
+        d.remove_temp::<bool>(id.with("foco-cancelar"));
+        d.remove_temp::<bool>(id.with("foco-item"));
+    });
 }
 
 /// Devolve o foco ao botão que abriu o menu quando ele fecha pelo teclado (Esc, Enter num item). Com o mouse o foco
@@ -903,6 +929,25 @@ mod tests {
             });
         }
         width
+    }
+
+    #[test]
+    fn resetting_a_confirmation_drops_the_question_and_its_pending_focus() {
+        let ctx = egui::Context::default();
+        let id = egui::Id::new("confirmar");
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.data_mut(|d| {
+                    d.insert_temp(id, true);
+                    d.insert_temp(id.with("foco-cancelar"), true);
+                    d.insert_temp(id.with("foco-item"), true);
+                });
+                reset_confirm(ui, id);
+                for key in [id, id.with("foco-cancelar"), id.with("foco-item")] {
+                    assert_eq!(ui.data(|d| d.get_temp::<bool>(key)), None);
+                }
+            });
+        });
     }
 
     #[test]

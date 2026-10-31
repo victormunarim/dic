@@ -35,9 +35,8 @@ pub(crate) struct ServersUi {
     pub(crate) inviting: bool,
     /// Escolha da pessoa para a coluna de membros; `None` segue a largura da janela (`members_fit`).
     pub(crate) members_open: Option<bool>,
-    /// Resposta do menu de convite (erro ou envio feito), mostrada nele e não no topo da aba.
+    /// Erro do menu de convite, mostrado nele; o envio feito vai para `info`, no pé da aba.
     pub(crate) invite_msg: String,
-    pub(crate) invite_info: String,
     pub(crate) msg: String,
     /// Resultado que deu certo (aparece em verde).
     pub(crate) info: String,
@@ -63,7 +62,6 @@ impl ServersUi {
     fn close_invite(&mut self) {
         self.inviting = false;
         self.invite_msg.clear();
-        self.invite_info.clear();
     }
 
     /// Abre o menu de convite do cabeçalho do servidor.
@@ -706,7 +704,7 @@ impl App {
                             // isso só fecha por clique fora ou por uma resposta.
                             let ask = egui::Id::new(("remover-membro", m.id));
                             let menu = egui::Popup::menu(&dots).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
-                                ui.set_min_width(230.0);
+                                ui.set_min_width(MENU_WIDTH);
                                 let asking = ui.data(|d| d.get_temp::<bool>(ask)).unwrap_or(false);
                                 if v.my_role == Some(Role::Owner) && !asking {
                                     let (label, to) = if m.role == Role::Admin { ("Rebaixar", Role::Member) } else { ("Promover", Role::Admin) };
@@ -741,7 +739,7 @@ impl App {
     fn invite_form(&mut self, ui: &mut egui::Ui, hub: &clam::server::net::ServerHub, v: &ServerView) {
         let contacts = parse_contacts(&self.form.contacts);
         {
-            ui.set_width(300.0);
+            ui.set_width(MENU_WIDTH);
             ui.label(RichText::new("Convidar alguém").strong().color(pal().strong)).on_hover_text("O convite chega pela rede, cifrado, e só o contato escolhido consegue abri-lo. Qualquer membro pode convidar.");
             let shown = self.srv.pick.map_or("escolha um contato".to_string(), |k| member_name(&contacts, &k));
             egui::ComboBox::from_id_salt("convidar").selected_text(shown).width(260.0).show_ui(ui, |ui| {
@@ -760,14 +758,13 @@ impl App {
             if button(ui, ready, "Enviar convite", BLURPLE).on_disabled_hover_text("Escolha um contato e marque o aviso do IP para liberar").clicked() {
                 let key = self.srv.pick.expect("botão só liga com contato escolhido");
                 match hub.try_act(|s, now| s.invite_send(&v.id, key, now)) {
+                    // O resultado vai ao pé da aba, que sobrevive ao fechamento do menu.
                     Ok(()) => {
                         self.srv.invite_msg.clear();
-                        self.srv.invite_info = format!("Convite enviado a {}. Se ele estiver offline, o programa tenta de novo até ele receber.", member_name(&contacts, &key));
+                        self.srv.info = format!("Convite enviado a {}. Se ele estiver offline, o programa tenta de novo até ele receber.", member_name(&contacts, &key));
+                        ui.close();
                     }
-                    Err(e) => {
-                        self.srv.invite_info.clear();
-                        self.srv.invite_msg = e.to_string();
-                    }
+                    Err(e) => self.srv.invite_msg = e.to_string(),
                 }
             }
             // Gerar o texto para mandar por fora é raro: fica no menu, e o aviso do IP continua valendo.
@@ -789,9 +786,6 @@ impl App {
             });
             menu_focus_back(ui, &dots, menu.is_some());
             });
-            if !self.srv.invite_info.is_empty() {
-                ui.colored_label(pal().green, &self.srv.invite_info);
-            }
             if !self.srv.invite_msg.is_empty() {
                 ui.colored_label(pal().error, &self.srv.invite_msg);
             }
@@ -964,13 +958,12 @@ mod tests {
     }
 
     #[test]
-    fn closing_the_invite_drops_its_feedback() {
+    fn closing_the_invite_drops_its_error() {
         let mut srv = ServersUi::default();
         srv.start_invite();
         srv.invite_msg = "erro".into();
-        srv.invite_info = "enviado".into();
         srv.close_invite();
-        assert!(!srv.inviting && srv.invite_msg.is_empty() && srv.invite_info.is_empty());
+        assert!(!srv.inviting && srv.invite_msg.is_empty());
     }
 
     #[test]
