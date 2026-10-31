@@ -193,7 +193,9 @@ impl RelayDescriptor {
 }
 
 /// `host:porta` com porta ≠ 0. Literais de IP loopback, privados, locais de
-/// link, não especificados ou multicast só passam com `allow_private`.
+/// link, não especificados ou multicast só passam com `allow_private`; o nome
+/// `localhost` também, com ponto final (`localhost.`) ou como sufixo
+/// (`x.localhost`, RFC 6761), que resolvem para o loopback do mesmo jeito.
 fn address_ok(addr: &str, allow_private: bool) -> bool {
     let Some((host, port)) = addr.rsplit_once(':') else { return false };
     if host.is_empty() || !matches!(port.parse::<u16>(), Ok(p) if p != 0) {
@@ -205,8 +207,14 @@ fn address_ok(addr: &str, allow_private: bool) -> bool {
     }
     match host.parse::<IpAddr>() {
         Ok(ip) => allow_private || is_public(ip),
-        Err(_) => allow_private || !host.eq_ignore_ascii_case("localhost"),
+        Err(_) => allow_private || !is_localhost_name(host),
     }
+}
+
+fn is_localhost_name(host: &str) -> bool {
+    let host = host.trim_end_matches('.');
+    host.eq_ignore_ascii_case("localhost")
+        || host.len().checked_sub(".localhost".len()).and_then(|i| host.get(i..)).is_some_and(|t| t.eq_ignore_ascii_case(".localhost"))
 }
 
 fn is_public(ip: IpAddr) -> bool {
@@ -214,6 +222,8 @@ fn is_public(ip: IpAddr) -> bool {
         IpAddr::V4(v) => {
             !(v.is_loopback() || v.is_private() || v.is_link_local() || v.is_unspecified() || v.is_multicast() || v.is_broadcast())
         }
+        // `::ffff:a.b.c.d` chega ao mesmo destino que o IPv4 `a.b.c.d`.
+        IpAddr::V6(v) if v.to_ipv4_mapped().is_some() => v.to_ipv4_mapped().is_some_and(|m| is_public(IpAddr::V4(m))),
         IpAddr::V6(v) => {
             let seg0 = v.segments()[0];
             !(v.is_loopback()
@@ -446,9 +456,29 @@ mod tests {
         }
         strict.insert(desc(&key(), "relay.exemplo.org:4001", NOW), NOW).unwrap();
         strict.insert(desc(&key(), "[2001:db8::1]:4001", NOW), NOW).unwrap();
+        strict.insert(desc(&key(), "[::ffff:203.0.113.9]:4001", NOW), NOW).unwrap();
+        strict.insert(desc(&key(), "notlocalhost.exemplo.org:4001", NOW), NOW).unwrap();
 
         let mut lab = RelayDirectory::new(DirectoryConfig { allow_private_addrs: true, ..Default::default() });
         lab.insert(desc(&key(), "127.0.0.1:4001", NOW), NOW).unwrap();
+    }
+
+    #[test]
+    fn localhost_variants_and_mapped_ipv6_are_refused() {
+        for a in [
+            "localhost.:4001",
+            "LocalHost:4001",
+            "x.localhost:4001",
+            "a.b.LOCALHOST.:4001",
+            "[::ffff:127.0.0.1]:4001",
+            "[::ffff:10.0.0.1]:4001",
+            "[::ffff:192.168.1.1]:4001",
+            "[::ffff:169.254.0.1]:4001",
+            "[::ffff:0.0.0.0]:4001",
+        ] {
+            assert!(!address_ok(a, false), "{a} deveria ser recusado");
+            assert!(address_ok(a, true), "{a} deveria passar com allow_private");
+        }
     }
 
     #[test]
