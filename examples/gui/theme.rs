@@ -852,8 +852,44 @@ pub(crate) fn ghost_card(ui: &mut Ui, tip: &str) -> bool {
     ghost.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
 }
 
+/// Roda `add` num filho com o tamanho exato do que sobra no painel, cortando o que passar. Sem isso, um conteúdo mais
+/// largo que o painel (nome longo, linha sem quebra) alarga o quadro do painel, e o `SidePanel` usa o retângulo do
+/// quadro para posicionar o resto: a coluna de salas e contatos mudava de largura conforme o conteúdo.
+pub(crate) fn confined<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
+    let rect = ui.available_rect_before_wrap();
+    ui.allocate_rect(rect, egui::Sense::hover());
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(*ui.layout()));
+    child.set_clip_rect(rect.intersect(ui.clip_rect()));
+    add(&mut child)
+}
+
 #[cfg(test)]
 mod tests {
+    /// Largura da coluna esquerda depois de desenhar `wide` de largura de conteúdo, com ou sem `confined`.
+    fn panel_width(wide: f32, confine: bool) -> f32 {
+        let ctx = egui::Context::default();
+        let mut width = 0.0;
+        for _ in 0..3 {
+            let _ = ctx.run(egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 600.0))), ..Default::default() }, |ctx| {
+                let out = egui::SidePanel::left("p").exact_width(300.0).resizable(false).frame(egui::Frame::new().inner_margin(Margin::symmetric(12, 14))).show(ctx, |ui| {
+                    let body = |ui: &mut Ui| {
+                        ui.allocate_exact_size(vec2(wide, 10.0), egui::Sense::hover());
+                    };
+                    if confine { confined(ui, body) } else { body(ui) }
+                });
+                width = out.response.rect.width();
+            });
+        }
+        width
+    }
+
+    #[test]
+    fn a_confined_panel_keeps_its_width_whatever_the_content() {
+        assert_eq!(panel_width(100.0, true), 300.0);
+        assert_eq!(panel_width(700.0, true), 300.0);
+        assert!(panel_width(700.0, false) > 300.0, "sem confined o quadro cresce");
+    }
+
     use super::*;
 
     fn luminance(c: Color32) -> f32 {

@@ -272,11 +272,11 @@ impl App {
             .exact_width(340.0)
             .resizable(false)
             .frame(egui::Frame::new().fill(pal().bg).inner_margin(Margin::symmetric(14, 26)))
-            .show(ctx, |ui| {
+            .show(ctx, |ui| confined(ui, |ui| {
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                     self.members_card(ui, &hub, &v);
                 });
-            });
+            }));
     }
 
     /// Bate-papo da sala em que estou, ocupando o centro. Quem está na sala, compartilhar e assistir tela ficam
@@ -339,7 +339,7 @@ impl App {
             .exact_width(300.0)
             .resizable(false)
             .frame(egui::Frame::new().fill(pal().bg).inner_margin(Margin::symmetric(12, 14)))
-            .show(ctx, |ui| {
+            .show(ctx, |ui| confined(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 6.0;
                 // O perfil ocupa uma altura fixa no pé; a lista de salas rola no espaço que sobra.
                 let footer: f32 = 74.0 + if room_bar.is_some() || call_bar.is_some() { 76.0 } else { 0.0 };
@@ -410,7 +410,7 @@ impl App {
                         }
                     }
                 });
-            });
+            }));
     }
 
     /// Cabeçalho "Contatos" com o +, e a lista que rola no espaço acima do `footer`.
