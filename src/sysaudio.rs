@@ -10,10 +10,12 @@
 
 use std::{
     collections::VecDeque,
-    io::Read,
-    process::{Child, Command, Stdio},
+    process::Child,
     sync::{Arc, Mutex},
 };
+
+#[cfg(unix)]
+use std::{io::Read, process::{Command, Stdio}};
 
 use crate::{
     audio::{AudioError, SpeakerReference},
@@ -25,6 +27,7 @@ pub const RATE: u32 = 16_000;
 /// Amostras de um quadro de 20 ms.
 pub const FRAME: usize = (RATE / 50) as usize;
 /// Áudio capturado e ainda não lido: mais que 1 s é atraso que ninguém quer ouvir, o mais antigo cai.
+#[cfg(unix)]
 const MAX_QUEUED: usize = RATE as usize;
 
 /// Filtros de 200 ms: cobrem o atraso entre o programa escrever na placa e o monitor devolver o som.
@@ -120,6 +123,7 @@ pub struct SystemAudio {
 }
 
 /// Argumentos do `gst-launch-1.0` que leem o monitor `source` e escrevem PCM de 16 bits no stdout.
+#[cfg(unix)]
 fn gst_args(source: &str) -> Vec<String> {
     format!("-q pulsesrc device={source} ! audioconvert ! audioresample ! audio/x-raw,format=S16LE,rate={RATE},channels=1 ! fdsink fd=1")
         .split_whitespace()
@@ -284,6 +288,7 @@ mod tests {
         assert!((0.7..1.3).contains(&ratio), "o nível mudou sem nada a tirar: {ratio:.2}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn gst_pipeline_asks_for_16k_mono_s16() {
         let a = gst_args("alto.monitor").join(" ");
