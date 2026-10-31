@@ -186,6 +186,7 @@ impl App {
                 let spot = egui::Rect::from_center_size(at, vec2(2.0 * r + 6.0, 2.0 * r + 6.0));
                 let dot = ui.interact(spot, ui.id().with("bolinha-presenca"), egui::Sense::click());
                 let tip = if hidden { "Invisível para os membros dos servidores. Clique para aparecer online" } else { "Aparecendo online para os membros dos servidores. Clique para ficar invisível" };
+                dot.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, !hidden, tip));
                 if dot.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                     hub.run(|s, now| s.set_visible(hidden, now));
                 }

@@ -541,7 +541,7 @@ impl App {
                     ui.add_space(26.0);
                     let who = if m.name.is_empty() { member_name(&contacts, &m.key) } else { m.name.clone() };
                     avatar(ui, &who, 22.0, speaking.then_some(pal().green));
-                    ui.label(RichText::new(who).size(14.0).color(if speaking { pal().green } else { pal().muted }));
+                    ui.label(RichText::new(&who).size(14.0).color(if speaking { pal().green } else { pal().muted }));
                     // Quem transmite mostra o mesmo monitor do botão de compartilhar; na sala em que estou, clicar assiste.
                     if m.sharing {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -549,7 +549,10 @@ impl App {
                             ui.add_space(14.0);
                             let on = live.watching.contains(&m.key);
                             if here && !m.is_me {
-                                if screen_icon(ui, pal().green, on, egui::Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(if on { "Parar de assistir" } else { "Assistir à tela" }).clicked() {
+                                let watch = if on { "Parar de assistir" } else { "Assistir à tela" };
+                                let icon = screen_icon(ui, pal().green, on, egui::Sense::click());
+                                icon.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, on, format!("{watch} de {who}")));
+                                if icon.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(watch).clicked() {
                                     action = Some((m.key, !on));
                                 }
                             } else {
