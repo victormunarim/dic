@@ -62,6 +62,8 @@ Tudo fica na pasta pessoal (`~` no Unix, `%USERPROFILE%` no Windows), gravado po
 
 **Arquivos por circuito (etiqueta 14).** Durante a transferência o circuito de 2 saltos usa o ritmo de tela (célula a cada 2 ms) em vez do cover de 20 ms: um observador da rede vê uma rajada constante e estima o tamanho do arquivo pela duração; conteúdo, nome e destino seguem escondidos. Perde-se, só durante o envio, a constância do cover comum. Detalhes e limites em [CHAMADAS.md](CHAMADAS.md#arquivos-no-bate-papo-11-mediaupdate-etiqueta-14-transfer).
 
+**Baixar mídia.** O ícone de baixar só copia (`fs::copy`) o arquivo já guardado para o caminho que a pessoa escolheu no diálogo do sistema; nada vai à rede.
+
 **Anexo na sala.** Mandar um arquivo na sala abre uma transferência 1:1 por contato presente, em paralelo: um observador vê uma rajada por destinatário (e, pelo número delas, quantos contatos estavam na sala). A linha "📎 nome" vai a toda a sala, inclusive a quem não é contato, e revela o nome do arquivo a eles; o conteúdo só chega a contatos.
 
 Quem lê estes arquivos conhece com quem você fala e o seu relay; trate-os como dados pessoais.

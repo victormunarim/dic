@@ -20,6 +20,7 @@ mod call;
 mod arquivos;
 mod atalhos;
 mod chats;
+mod anexo;
 mod conversa;
 mod midia;
 mod contacts;

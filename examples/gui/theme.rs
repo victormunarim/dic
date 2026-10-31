@@ -582,6 +582,26 @@ pub(crate) fn close_icon(painter: &egui::Painter, c: Pos2, size: f32, color: Col
     painter.line_segment([c + vec2(-h, h), c + vec2(h, -h)], ink);
 }
 
+/// Seta para baixo sobre uma bandeja (baixar, salvar uma cópia), desenhada.
+pub(crate) fn download_icon(painter: &egui::Painter, c: Pos2, size: f32, color: Color32) {
+    let u = |x: f32, y: f32| c + vec2(x * size, y * size);
+    let ink = Stroke::new((size * 0.12).max(1.5), color);
+    painter.line_segment([u(0.0, -0.36), u(0.0, 0.14)], ink);
+    painter.add(Shape::line(vec![u(-0.22, -0.08), u(0.0, 0.14), u(0.22, -0.08)], ink));
+    painter.add(Shape::line(vec![u(-0.36, 0.14), u(-0.36, 0.36), u(0.36, 0.36), u(0.36, 0.14)], ink));
+}
+
+/// Botão redondo sobre uma mídia (imagem, vídeo), no canto de cima à direita de `media`. O fundo escuro fixo garante o
+/// contraste do ícone claro sobre qualquer imagem, nos dois temas. `draw` pinta o ícone.
+pub(crate) fn media_corner_button(ui: &mut Ui, media: Rect, slot: usize, name: &str, draw: impl FnOnce(&egui::Painter, Pos2, f32, Color32)) -> egui::Response {
+    let rect = Rect::from_min_size(egui::pos2(media.right() - 34.0 - slot as f32 * 34.0, media.top() + 6.0), vec2(28.0, 28.0));
+    let reply = ui.interact(rect, ui.id().with(("media-botao", name, slot, media.min.x.to_bits(), media.min.y.to_bits())), egui::Sense::click());
+    ui.painter().circle_filled(rect.center(), 14.0, Color32::from_black_alpha(if reply.hovered() { 215 } else { 160 }));
+    draw(ui.painter(), rect.center(), 16.0, Color32::WHITE);
+    reply.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name));
+    reply.on_hover_text(name).on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 /// Fone deitado em botão vermelho e em relevo (desligar, recusar), do mesmo tamanho do de atender: sem moldura o vermelho
 /// do tema não passa de 3:1 sobre a base escura, e um fone cinza some ao lado do verde. Branco sobre o vermelho já
 /// vale 4,5:1 nos dois temas. Quem chama decide o que acontece ao clicar; `name` é o que o leitor de tela diz.

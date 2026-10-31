@@ -14,13 +14,11 @@ impl App {
         self.shared.chats.lock_unpoisoned().read(&peer);
         let sendable = online && self.running.is_some();
         let mut close = false;
-        // Arquivo solto na janela vira oferta ao contato (só com ele online).
+        // Arquivo solto na janela fica em espera até o Enviar (só com o contato online).
         if sendable {
             let dropped = ui.ctx().input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect::<Vec<_>>());
-            if let Some(r) = &self.running {
-                for path in dropped {
-                    let _ = r.cmds.send(Cmd::SendFile(peer, path));
-                }
+            for path in dropped {
+                crate::anexo::stage(ui.ctx(), ("conversa", peer), path);
             }
         }
         let xfers = self.shared.transfers.lock_unpoisoned().of(&peer);
@@ -80,27 +78,26 @@ impl App {
                             State::Sent | State::Received => ui.label(""),
                         };
                     });
-                    // Imagem à vista e vídeo com play, quando o arquivo já está no disco.
+                    // Imagem à vista, vídeo com play e cartão com baixar, quando o arquivo já está no disco.
                     if let Some(x) = xfers.iter().find(|x| x.id == m.id && x.mine == m.mine() && x.media_path().is_some())
                         && let Some(path) = x.media_path()
                     {
-                        crate::midia::show(ui, &x.name, path);
+                        crate::midia::show(ui, &x.name, x.size, path);
                     }
                 }
             });
             ui.add_space(4.0);
+            crate::anexo::chips(ui, ("conversa", peer));
             ui.allocate_ui_with_layout(vec2(ui.available_width(), 36.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let ready = sendable && !self.chat_draft.trim().is_empty();
+                let waiting = crate::anexo::count(ui.ctx(), ("conversa", peer)) > 0;
+                let ready = sendable && (!self.chat_draft.trim().is_empty() || waiting);
                 let sent = button(ui, ready, "Enviar", BLURPLE).clicked();
-                if attach_button(ui, sendable, ATTACH_TIP).clicked()
-                    && let Some(r) = &self.running
-                {
-                    // O diálogo do sistema bloqueia: roda fora da janela e devolve o caminho como comando.
-                    let (tx, repaint) = (r.cmds.clone(), ui.ctx().clone());
+                if attach_button(ui, sendable, ATTACH_TIP).clicked() {
+                    // O diálogo do sistema bloqueia: roda fora da janela e deixa o arquivo em espera até o Enviar.
+                    let repaint = ui.ctx().clone();
                     std::thread::spawn(move || {
-                        if let Some(path) = rfd::FileDialog::new().set_title("Enviar arquivo").pick_file() {
-                            let _ = tx.send(Cmd::SendFile(peer, path));
-                            repaint.request_repaint();
+                        if let Some(path) = rfd::FileDialog::new().set_title("Anexar arquivo").pick_file() {
+                            crate::anexo::stage(&repaint, ("conversa", peer), path);
                         }
                     });
                 }
@@ -108,9 +105,15 @@ impl App {
                 let reply = ui.add_enabled(sendable, field(&mut self.chat_draft, hint).desired_width(field_beside(ui, 0.0).max(80.0)));
                 let enter = reply.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 if (sent || enter) && ready {
-                    let text = std::mem::take(&mut self.chat_draft);
                     if let Some(r) = &self.running {
-                        let _ = r.cmds.send(Cmd::Chat(peer, text));
+                        // Os arquivos saem primeiro e entram na conversa já com o "carregando" até o contato receber.
+                        for path in crate::anexo::take(ui.ctx(), ("conversa", peer)) {
+                            let _ = r.cmds.send(Cmd::SendFile(peer, path));
+                        }
+                        let text = std::mem::take(&mut self.chat_draft);
+                        if !text.trim().is_empty() {
+                            let _ = r.cmds.send(Cmd::Chat(peer, text));
+                        }
                     }
                     reply.request_focus();
                 }
@@ -149,7 +152,7 @@ fn file_progress(ui: &mut egui::Ui, x: &crate::arquivos::Xfer, cmds: &mut Vec<Cm
     }
 }
 
-pub(crate) const ATTACH_TIP: &str = "Anexar arquivo: abre as pastas do computador (ou arraste o arquivo para a janela). Limite de 32 MB";
+pub(crate) const ATTACH_TIP: &str = "Anexar arquivo: abre as pastas do computador (ou arraste o arquivo para a janela). O arquivo só sai quando você clica em Enviar. Limite de 32 MB";
 
 /// Clipe de papel desenhado (a fonte pode não ter o glifo): abre o seletor de arquivos do sistema.
 pub(crate) fn attach_button(ui: &mut egui::Ui, enabled: bool, tip: &str) -> egui::Response {

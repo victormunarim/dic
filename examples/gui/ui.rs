@@ -415,6 +415,7 @@ impl eframe::App for App {
         self.absorb_removals();
         self.update_screen_textures(ctx);
         self.zoom_window(ctx);
+        crate::midia::overlay(ctx);
         self.trust_window(ctx);
         self.share_window(ctx);
         let offline = self.running.is_none();

@@ -741,11 +741,12 @@ impl App {
         let contacts = parse_contacts(&self.form.contacts);
         ui.add_space(6.0);
         let recipients = room_recipients(v, room, &contacts);
-        // Arquivo solto na janela vira anexo da sala (vai só aos contatos que estão nela).
+        let key = ("sala", room.id);
+        // Arquivo solto na janela fica em espera até o Enviar (vai só aos contatos que estão na sala).
         if !recipients.is_empty() {
             let dropped = ui.ctx().input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect::<Vec<_>>());
             for path in dropped {
-                self.send(Cmd::RoomFile(v.id, recipients.clone(), path));
+                crate::anexo::stage(ui.ctx(), key, path);
             }
         }
         // O conteúdo central rola, então não há "altura disponível": a lista de mensagens sempre vai até o pé da janela, menos a linha de envio e a folga da sombra do botão. Assim o campo fica embaixo e a página só rola se a janela for baixa demais; poucas mensagens não criam rolagem.
@@ -764,36 +765,67 @@ impl App {
                 });
             }
         });
+        self.room_uploads(ui, &recipients);
+        crate::anexo::chips(ui, key);
         // O botão é medido primeiro (da direita para a esquerda) e o campo ocupa só o que sobra: com largura
         // fixa para o campo, o botão passava da borda e a coluna de membros o cobria.
         // Altura fixa: `with_layout` ocuparia toda a altura que sobra e criaria rolagem na página.
         ui.allocate_ui_with_layout(vec2(ui.available_width(), 36.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let ready = !self.srv.chat_draft.trim().is_empty();
+            let waiting = crate::anexo::count(ui.ctx(), key) > 0;
+            let ready = !self.srv.chat_draft.trim().is_empty() || waiting;
             let sent = button(ui, ready, "Enviar", BLURPLE).clicked();
             let tip = format!("{} O arquivo vai só aos contatos que estão na sala agora ({}); quem não é contato vê o aviso e não o recebe.", crate::conversa::ATTACH_TIP, recipients.len());
             if crate::conversa::attach_button(ui, !recipients.is_empty(), &tip).clicked() {
-                // O diálogo do sistema bloqueia: roda fora da janela e devolve o caminho como comando.
-                if let Some(r) = &self.running {
-                    let (tx, repaint, id, to) = (r.cmds.clone(), ui.ctx().clone(), v.id, recipients.clone());
-                    std::thread::spawn(move || {
-                        if let Some(path) = rfd::FileDialog::new().set_title("Enviar arquivo à sala").pick_file() {
-                            let _ = tx.send(Cmd::RoomFile(id, to, path));
-                            repaint.request_repaint();
-                        }
-                    });
-                }
+                // O diálogo do sistema bloqueia: roda fora da janela e deixa o arquivo em espera até o Enviar.
+                let repaint = ui.ctx().clone();
+                std::thread::spawn(move || {
+                    if let Some(path) = rfd::FileDialog::new().set_title("Anexar arquivo à sala").pick_file() {
+                        crate::anexo::stage(&repaint, key, path);
+                    }
+                });
             }
             let reply = ui.add(field(&mut self.srv.chat_draft, "Mensagem para a sala").desired_width(field_beside(ui, 0.0).max(80.0)));
             let enter = reply.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if (sent || enter) && !self.srv.chat_draft.trim().is_empty() {
+            if (sent || enter) && ready {
+                for path in crate::anexo::take(ui.ctx(), key) {
+                    if !recipients.is_empty() {
+                        self.send(Cmd::RoomFile(v.id, recipients.clone(), path));
+                    }
+                }
                 let text = std::mem::take(&mut self.srv.chat_draft);
-                if let Err(e) = hub.try_act(|s, now| s.say(&v.id, &text, now)) {
+                if !text.trim().is_empty()
+                    && let Err(e) = hub.try_act(|s, now| s.say(&v.id, &text, now))
+                {
                     self.srv.msg = e.to_string();
                 }
                 reply.request_focus();
             }
         });
         ui.add_space(16.0);
+    }
+
+    /// Enquanto um anexo ainda não chegou a todos, uma linha com o carregando: a sala só mostra o aviso "📎 nome", e sem
+    /// isto não se veria que o envio segue em andamento.
+    fn room_uploads(&self, ui: &mut egui::Ui, recipients: &[[u8; 32]]) {
+        let mut live: Vec<(String, usize)> = Vec::new();
+        {
+            let t = self.shared.transfers.lock_unpoisoned();
+            for peer in recipients {
+                for x in t.of(peer).into_iter().filter(|x| x.mine && x.phase.live()) {
+                    match live.iter_mut().find(|(n, _)| *n == x.name) {
+                        Some((_, n)) => *n += 1,
+                        None => live.push((x.name.clone(), 1)),
+                    }
+                }
+            }
+        }
+        for (name, n) in live {
+            ui.horizontal(|ui| {
+                ui.add(egui::Spinner::new().size(14.0).color(BLURPLE));
+                let who = if n == 1 { "1 contato".to_string() } else { format!("{n} contatos") };
+                ui.label(RichText::new(format!("Enviando {name} para {who}…")).size(12.0).color(pal().muted));
+            });
+        }
     }
 
     pub(crate) fn send(&self, c: Cmd) {
