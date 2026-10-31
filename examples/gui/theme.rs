@@ -292,6 +292,12 @@ pub(crate) fn big_button(ui: &mut Ui, text: &str, fill: Color32) -> egui::Respon
     soft_button(ui, true, RichText::new(text).strong().size(17.0).color(Color32::WHITE), fill, vec2(180.0, 48.0))
 }
 
+/// Bloco recolhido com o texto longo de uma opção: a tela mostra só o título, e quem quer saber mais abre. O texto
+/// não fica fixo ocupando a tela (privacidade e limites se explicam aqui, não em parágrafos soltos).
+pub(crate) fn details(ui: &mut Ui, title: &str, text: &str) {
+    egui::CollapsingHeader::new(RichText::new(title).size(13.0).color(pal().muted)).show(ui, |ui| note(ui, text));
+}
+
 /// Botão de tamanho normal, que pode ficar desligado.
 pub(crate) fn button(ui: &mut Ui, enabled: bool, text: &str, fill: Color32) -> egui::Response {
     soft_button(ui, enabled, RichText::new(text).strong().color(Color32::WHITE), fill, vec2(110.0, 40.0))

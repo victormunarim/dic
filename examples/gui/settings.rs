@@ -3,10 +3,15 @@
 use clam::sync::LockExt;
 use std::sync::atomic::Ordering;
 
-use eframe::egui::{self, Margin, RichText, vec2};
+use eframe::egui::{self, Margin, RichText};
 use clam::{rand_core::OsRng, x25519_dalek::StaticSecret};
 
 use crate::{conf::*, theme::*, ui::*};
+
+/// Chave secreta nova (64 hex). A troca só acontece depois da confirmação no menu da identidade.
+fn fresh_secret() -> String {
+    hex(&StaticSecret::random_from_rng(OsRng).to_bytes())
+}
 
 impl App {
     pub(crate) fn settings_tab(&mut self, ctx: &egui::Context, ui: &mut egui::Ui, offline: bool, in_call: bool, status: &str) {
@@ -21,7 +26,7 @@ impl App {
                 if big_button(ui, "Ficar online", pal().green).clicked() {
                     self.go_online(ctx);
                 }
-            } else if ui.add_enabled(!in_call, egui::Button::new(RichText::new("Ficar offline").strong().size(17.0)).min_size(vec2(180.0, 46.0))).clicked()
+            } else if button(ui, !in_call, "Ficar offline", pal().bg).on_disabled_hover_text("Desligue a chamada antes de ficar offline").clicked()
                 && let Some(r) = &self.running
             {
                 r.stop.store(true, Ordering::Relaxed);
@@ -37,8 +42,9 @@ impl App {
                 format!("Configuração: {} ({})", conf_path().display(), if self.form.loaded { "lida ao abrir" } else { "não encontrada ao abrir; será criada" }),
             );
         });
+        let locked = "Fique offline para mudar estes ajustes.";
         if !offline {
-            note(ui, "Fique offline para mudar estes ajustes.");
+            note(ui, locked);
         }
         card(ui, "Meu código de contato", "Envie este código a quem vai ligar para você.", |ui| {
             let relay = self.shared.relay.lock_unpoisoned().clone();
@@ -57,20 +63,34 @@ impl App {
                 }
             }
         });
-        ui.add_enabled_ui(offline, |ui| {
+        let group = ui.add_enabled_ui(offline, |ui| {
             split(ui, |ui, side| {
                 if side == 0 {
                     card(ui, "Identidade", "A chave secreta (64 hex) é você. Não compartilhe com ninguém.", |ui| {
                         if self.form.keyring_lost && self.form.secret.trim().is_empty() {
                             note(ui, "A identidade está no chaveiro do sistema e ele não respondeu. Destrave-o e reabra o programa: a configuração segue apontando para ela. Gerar outra ou colar uma chave aqui a substitui.");
                         }
-                        ui.add(field(&mut self.form.secret, "chave secreta").password(true));
-                        if ui.button("Gerar nova identidade").on_hover_text("O seu código de contato muda e os outros precisarão do novo.").clicked() {
-                            self.form.secret = hex(&StaticSecret::random_from_rng(OsRng).to_bytes());
-                        }
+                        ui.horizontal(|ui| {
+                            ui.add(field(&mut self.form.secret, "chave secreta").password(true).desired_width((ui.available_width() - 44.0).max(120.0)));
+                            // Trocar a chave muda o código de contato: fica num menu que pergunta e escreve o efeito.
+                            let dots = dots_button(ui, "Mais ações da identidade").on_hover_text("Mais ações");
+                            let ask = egui::Id::new("gerar-identidade");
+                            let menu = egui::Popup::menu(&dots).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+                                let effect = "O seu código de contato muda e os outros precisarão do novo. A chave atual se perde se você não a tiver guardado.";
+                                if confirm_item(ui, ask, "Gerar nova identidade", "Pede confirmação antes de trocar a chave", "Gerar uma nova identidade?", effect, "Gerar", |p, c, s, k| shield_icon(p, c, s, k, false)) {
+                                    self.form.secret = fresh_secret();
+                                    ui.close();
+                                }
+                            });
+                            if menu.is_none() {
+                                reset_confirm(ui, ask);
+                            }
+                            menu_focus_back(ui, &dots, menu.is_some());
+                        });
                     });
-                    card(ui, "Seu nome", "Aparece na lista de contatos de quem você adiciona. Vazio, os outros veem só o código. Vale a partir da próxima vez que o programa abrir.", |ui| {
-                        ui.add(field(&mut self.form.my_name, "seu nome").char_limit(clam::media::update::MAX_NAME));
+                    card(ui, "Seu nome", "Como os outros veem você na lista deles.", |ui| {
+                        ui.add(field(&mut self.form.my_name, "seu nome").char_limit(clam::media::update::MAX_NAME))
+                            .on_hover_text("Vazio, os outros veem só o código. Vale a partir da próxima vez que o programa abrir.");
                         ui.check(&mut self.form.intros, "Aceitar adições e remoções de contatos")
                             .on_hover_text("Quando alguém adiciona o seu código, ele manda uma apresentação cifrada e passa a aparecer na sua lista, para os dois se ligarem. Quando alguém te remove, ele avisa e sai da sua lista também (só vale de quem já é seu contato). Desligado, só entra na lista quem você adicionar e ninguém te tira da lista. Só aceita de quem já tem o seu endereço; no máximo 20 por minuto.");
                     });
@@ -89,46 +109,43 @@ impl App {
                             }
                         });
                     }
-                    card(ui, "Endereço", "Só se o IP que os outros enxergam não serve, como atrás de NAT: ip:porta (a porta precisa estar aberta no roteador; pode ser um nome).", |ui| {
-                        ui.add(field(&mut self.form.public_addr, "ip:porta"));
+                    card(ui, "Endereço", "Só se o IP que os outros enxergam não serve, como atrás de NAT.", |ui| {
+                        ui.add(field(&mut self.form.public_addr, "ip:porta"))
+                            .on_hover_text("ip:porta; a porta precisa estar aberta no roteador, e o endereço pode ser um nome.");
                     });
                 } else {
-                    card(ui, "Encontrar contatos", "Quando um contato muda de endereço (IP novo, outra rede), o programa avisa direto. Se vocês dois mudarem enquanto estavam separados, o aviso não chega, e o reencontro usa a DHT, as âncoras ou as duas. Não existe servidor: o que é guardado vai cifrado e só o contato lê.", |ui| {
-                        // A DHT vem ligada: a caixa é para desligá-la.
-                        let mut no_dht = !self.form.use_dht;
-                        let off = ui
-                            .check(&mut no_dht, "Não usar a DHT (BitTorrent) para reencontrar contatos")
+                    card(ui, "Encontrar contatos", "Como reencontrar um contato que mudou de endereço.", |ui| {
+                        details(ui, "Como funciona", "Quando um contato muda de endereço (IP novo, outra rede), o programa avisa direto. Se vocês dois mudarem enquanto estavam separados, o aviso não chega, e o reencontro usa a DHT, as âncoras ou as duas. Não existe servidor: o que é guardado vai cifrado e só o contato lê.");
+                        // Ligada por padrão; desligar perde só o reencontro pela DHT.
+                        ui.check(&mut self.form.use_dht, "Usar a DHT (BitTorrent) para reencontrar contatos")
                             .on_hover_text("A DHT do BitTorrent é uma rede pública e descentralizada de milhões de computadores. Seu nó guarda nela o endereço atual dele, cifrado para cada contato, e consulta o dos contatos ao ligar. Serve quando você e um contato mudam de endereço ao mesmo tempo. Só o contato lê o conteúdo, mas quem opera nós da DHT vê o seu IP (a opção abaixo esconde). Ligada, seu nó também atende a DHT para circuitos de outros nós. Desligada, sobram o aviso direto e as âncoras.");
-                        if off.changed() {
-                            self.form.use_dht = !no_dht;
-                        }
                         ui.add_enabled_ui(self.form.use_dht, |ui| {
                             ui.check(&mut self.form.dht_circuit, "Falar com a DHT pelos relays dos contatos (esconde o seu IP)")
                                 .on_hover_text("Em vez de falar com a DHT do seu IP, o pedido vai por um circuito de dois relays de contatos: o primeiro vê o seu IP mas não o pedido, o segundo vê o pedido mas não o seu IP, e a DHT só vê o IP do segundo. Precisa de ao menos dois contatos com endereço guardado; sem eles a DHT fica parada, e nunca cai para o acesso direto. Um pouco mais lento.");
                         });
                     });
-                    card(ui, "Âncoras", "Uma âncora é um computador com endereço fixo que guarda o seu endereço atual, cifrado para cada contato, para eles o acharem quando a DHT está bloqueada ou não basta. Escolha âncoras de pessoas em quem você confia: elas veem o IP de quem as usa, mas não o conteúdo.", |ui| {
-                        // Servir de âncora vem ligado: a caixa é para não servir.
-                        let mut no_anchor = !self.form.anchor;
-                        let off = ui
-                            .check(&mut no_anchor, "Não servir de âncora para os registros de endereço dos outros")
+                    card(ui, "Âncoras", "Computadores de pessoas de confiança que guardam o seu endereço.", |ui| {
+                        details(ui, "Como funciona", "Uma âncora é um computador com endereço fixo que guarda o seu endereço atual, cifrado para cada contato, para eles o acharem quando a DHT está bloqueada ou não basta. Escolha âncoras de pessoas em quem você confia: elas veem o IP de quem as usa, mas não o conteúdo.");
+                        // Servir de âncora vem ligado; desligar só tira o seu computador da rede de âncoras dos outros.
+                        ui.check(&mut self.form.anchor, "Servir de âncora para os registros de endereço dos outros")
                             .on_hover_text("Seu computador guarda, só em memória, o endereço cifrado de quem o usa como âncora, para os contatos dessa pessoa a acharem. Não lê o conteúdo nem forja item. Precisa de um endereço que os outros alcancem. Quem usa a sua âncora vê o IP do seu relay; o código da sua âncora aparece abaixo, para você passar a quem quiser.");
-                        if off.changed() {
-                            self.form.anchor = !no_anchor;
-                        }
                         ui.label("Âncoras que você usa (uma por linha, no código que o dono da âncora te passa: ip:porta#chave-do-circuito#chave-do-link):");
                         ui.add(egui::TextEdit::multiline(&mut self.form.anchors).desired_rows(3).desired_width(f32::INFINITY).margin(Margin::symmetric(12, 10)));
                     });
                 }
             });
         });
+        if !offline {
+            group.response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, false, locked));
+            group.response.on_hover_text(locked);
+        }
         if self.form.anchor
             && let Some(r) = self.shared.relay.lock_unpoisoned().clone()
         {
             card(ui, "Código da sua âncora", "", |ui| {
                 ui.horizontal(|ui| {
                     ui.monospace(format!("{}...", &anchor_code(&r)[..24]));
-                    if ui.button("Copiar").clicked() {
+                    if button(ui, true, "Copiar", BLURPLE).clicked() {
                         ui.ctx().copy_text(anchor_code(&r));
                     }
                 });
@@ -149,5 +166,18 @@ impl App {
                 }
             });
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_fresh_secret_is_64_hex_and_never_repeats() {
+        let a = fresh_secret();
+        assert_eq!(a.len(), 64);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(a, fresh_secret());
     }
 }

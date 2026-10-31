@@ -93,7 +93,7 @@ item   = cifrado(registro de endereço), assinado por sk, no alvo (pk, sal)
 - A tarefa de gravação escreve o item de cada contato (até 32) ao subir, quando o endereço muda, quando entra contato novo, quando o dia vira e a cada hora; uma gravação que falha é refeita em 1 min. Cada gravação leva um `seq` de DHT novo (hora em ms), porque a DHT recusa o mesmo `seq` com outro valor e cada cifra sai com nonce novo.
 - A leitura é sob demanda, só ao discar (não em segundo plano para todos): depois dos endereços guardados, `Dialer` consulta o dia anterior, o atual e o seguinte ao mesmo tempo, fica com o registro de maior `seq`, aplica como um aviso da camada 1 (o endereço antigo vai para o histórico) e tenta o relay. Vale também para compartilhar a tela.
 - Os testes usam `mainline::Testnet` em loopback (`tests/node.rs`: `both_contacts_changed_address_and_find_each_other_through_the_dht`: os dois começam com o endereço velho um do outro, sem fila de saída, e se acham pela DHT).
-- Na GUI é a caixa "Não usar a DHT (BitTorrent) para reencontrar contatos" (aba Configurações), desmarcada de início, ou seja, a DHT vem ligada; marcá-la grava `no_dht=1`.
+- Na GUI é a caixa "Usar a DHT (BitTorrent) para reencontrar contatos" (aba Configurações), marcada de início; desmarcá-la grava `no_dht=1`.
 
 ### Consultas pelo circuito (fase 3)
 
@@ -108,7 +108,7 @@ O relay de saída atual só abre fluxo para o telefone do destino e a DHT fala U
 
 ## Camada 3: âncoras (fase 4)
 
-Para quem a DHT está bloqueada ou não basta, um nó com endereço estável (IP fixo ou DNS) pode guardar os registros dos outros: a *âncora* (`NodeConfig::anchor`, na GUI a caixa "Não servir de âncora…", desmarcada de início). É um depósito voluntário e federado: cada pessoa escolhe em quais âncoras confia para estar no ar (`NodeConfig::anchors`, na GUI "Âncoras que você usa", uma por linha, `ip:porta#chave-do-circuito#chave-do-link`), e quem opera uma não precisa ser ninguém especial.
+Para quem a DHT está bloqueada ou não basta, um nó com endereço estável (IP fixo ou DNS) pode guardar os registros dos outros: a *âncora* (`NodeConfig::anchor`, na GUI a caixa "Servir de âncora…", marcada de início). É um depósito voluntário e federado: cada pessoa escolhe em quais âncoras confia para estar no ar (`NodeConfig::anchors`, na GUI "Âncoras que você usa", uma por linha, `ip:porta#chave-do-circuito#chave-do-link`), e quem opera uma não precisa ser ninguém especial.
 
 - **Mesmo item, outro depósito.** O dono grava em cada âncora que usa o mesmo item assinado que grava na DHT (mesmo alvo, mesma cifra: só o contato abre) e as renova a cada hora junto com a DHT (`rendezvous_publisher`). Quem quer ligar lê os mesmos três dias (anterior, atual e seguinte) em todas as âncoras e fica com o registro de maior `seq`. As várias âncoras são as réplicas: basta uma estar no ar. A ordem ao ligar passa a ser: endereço guardado, DHT e âncoras (ao mesmo tempo).
 - **Protocolo.** O mesmo do gateway da DHT (`rendezvous::Remote`), no destino `anchor:9` da política de saída do relay, por um circuito até o relay da âncora. A âncora implementa `Store` com um depósito em memória (`Anchor`) em vez da DHT; o gateway e a âncora usam o mesmo código de atendimento.
