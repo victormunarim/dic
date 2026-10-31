@@ -41,8 +41,22 @@ pub enum PortalError {
     Gstreamer(String),
 }
 
-fn portal_err(e: impl std::fmt::Display) -> PortalError {
-    PortalError::Portal(e.to_string())
+fn portal_err(e: ashpd::Error) -> PortalError {
+    PortalError::Portal(portal_msg(&e))
+}
+
+/// Texto em português para o erro do portal: o da biblioteca vem em inglês e chega até a janela.
+fn portal_msg(e: &ashpd::Error) -> String {
+    use ashpd::{Error, desktop::ResponseError};
+    match e {
+        Error::Response(ResponseError::Cancelled) => "pedido cancelado".into(),
+        Error::Response(_) => "o pedido não foi concluído".into(),
+        Error::NoResponse => "o portal não respondeu".into(),
+        Error::PortalNotFound(_) => "nenhum portal de captura instalado (instale o xdg-desktop-portal do seu ambiente)".into(),
+        Error::Portal(e) => format!("o pedido falhou: {e}"),
+        Error::Zbus(e) => format!("erro de D-Bus: {e}"),
+        e => e.to_string(),
+    }
 }
 
 /// Tamanho enviado para uma tela de `w`×`h`: no máximo `MAX_WIDTH` de largura, proporção mantida, pares.
@@ -194,6 +208,14 @@ impl Drop for PortalScreen {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn portal_errors_reach_the_window_in_portuguese() {
+        use ashpd::{Error, desktop::ResponseError};
+        assert_eq!(portal_err(Error::Response(ResponseError::Cancelled)).to_string(), "portal de captura: pedido cancelado");
+        assert_eq!(portal_msg(&Error::Response(ResponseError::Other)), "o pedido não foi concluído");
+        assert_eq!(portal_msg(&Error::NoResponse), "o portal não respondeu");
+    }
 
     #[test]
     fn target_size_caps_the_width_keeps_the_ratio_and_stays_even() {
