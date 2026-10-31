@@ -13,7 +13,7 @@ impl App {
         card(ui, "Ligar para um código", "Cole o código de contato de alguém, ou o nome de um contato.", |ui| {
             let live = !offline && !busy;
             ui.add_enabled(live, field(&mut self.form.peer, "código de contato ou nome de um contato"));
-            if icon_button(ui, live, "📞", "Ligar", pal().green).clicked() {
+            if phone_button(ui, live, "Ligar", pal().green).clicked() {
                 match self.form.target() {
                     Ok(k) => {
                         self.form.save();
@@ -49,7 +49,7 @@ impl App {
                 status_dot(ui, pal().yellow, &format!("{name} está ligando para você"));
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    if icon_button(ui, true, "📞", "Atender", pal().green).clicked() {
+                    if phone_button(ui, true, "Atender", pal().green).clicked() {
                         self.shared.answer.store(ANSWER_ACCEPT, Ordering::Relaxed);
                     }
                     if hangup_button(ui).on_hover_text("Recusar").clicked() {
@@ -143,7 +143,7 @@ impl App {
         order.sort_by_key(|(k, _)| **k);
         for (who, (_, tex)) in order {
             card(ui, &format!("Tela de {}", member_name(&names, who)), "", |ui| {
-                if ui.button("🔍").on_hover_text("Tela cheia (Esc ou o X para sair)").clicked() {
+                if magnifier_button(ui, "Tela cheia (Esc ou o X para sair)").clicked() {
                     self.zoom = Some(*who);
                 }
                 // Em tela cheia a miniatura sai: a imagem não é desenhada duas vezes.

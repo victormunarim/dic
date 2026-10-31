@@ -240,10 +240,22 @@ pub(crate) fn hovered_fill(fill: Color32) -> Color32 {
 fn soft_button(ui: &mut Ui, enabled: bool, text: RichText, fill: Color32, min: egui::Vec2) -> egui::Response {
     let galley = egui::WidgetText::from(text).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, TextStyle::Button);
     let size = (galley.size() + ui.spacing().button_padding * 2.0).max(min);
+    let (reply, rect, pressed) = soft_surface(ui, enabled, fill, size);
+    if ui.is_rect_visible(rect) {
+        let color = if enabled { galley.job.sections.first().map_or(Color32::WHITE, |s| s.format.color) } else { pal().muted };
+        let at = egui::Align2::CENTER_CENTER.align_size_within_rect(galley.size(), rect).min + if pressed { vec2(0.0, 1.0) } else { egui::Vec2::ZERO };
+        ui.painter().galley(at, galley, color);
+    }
+    reply
+}
+
+/// A superfície do botão macio (relevo, hover, apertado, desligado) sem o conteúdo. Devolve a resposta, o
+/// retângulo e se está apertado, para quem desenha o rótulo ou o ícone por cima.
+fn soft_surface(ui: &mut Ui, enabled: bool, fill: Color32, size: egui::Vec2) -> (egui::Response, Rect, bool) {
     let (rect, reply) = ui.allocate_exact_size(size, if enabled { egui::Sense::click() } else { egui::Sense::hover() });
+    let pressed = enabled && reply.is_pointer_button_down_on();
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
-        let pressed = enabled && reply.is_pointer_button_down_on();
         let surface = if !enabled { fill.gamma_multiply(0.55) } else if reply.hovered() && !pressed { hovered_fill(fill) } else { fill };
         if !enabled {
             painter.rect_filled(rect, CornerRadius::same(R_BUTTON), surface);
@@ -252,11 +264,8 @@ fn soft_button(ui: &mut Ui, enabled: bool, text: RichText, fill: Color32, min: e
         } else {
             raised(painter, rect, R_BUTTON, surface, 4);
         }
-        let color = if enabled { galley.job.sections.first().map_or(Color32::WHITE, |s| s.format.color) } else { pal().muted };
-        let at = egui::Align2::CENTER_CENTER.align_size_within_rect(galley.size(), rect).min + if pressed { vec2(0.0, 1.0) } else { egui::Vec2::ZERO };
-        painter.galley(at, galley, color);
     }
-    reply
+    (reply, rect, pressed)
 }
 
 /// Botão grande e cheio de cor (as ações principais).
@@ -272,6 +281,13 @@ pub(crate) fn button(ui: &mut Ui, enabled: bool, text: &str, fill: Color32) -> e
 /// Botão quadrado só com ícone; o nome da ação aparece ao passar o mouse.
 pub(crate) fn icon_button(ui: &mut Ui, enabled: bool, icon: &str, tip: &str, fill: Color32) -> egui::Response {
     soft_button(ui, enabled, RichText::new(icon).size(18.0).color(Color32::WHITE), fill, vec2(44.0, 40.0)).on_hover_text(tip)
+}
+
+/// Botão quadrado com o fone desenhado (ligar, atender); a dica diz a ação. Desenhado: a fonte pode não ter o emoji.
+pub(crate) fn phone_button(ui: &mut Ui, enabled: bool, tip: &str, fill: Color32) -> egui::Response {
+    let (reply, rect, pressed) = soft_surface(ui, enabled, fill, vec2(44.0, 40.0));
+    phone_icon(ui.painter(), rect.center() + if pressed { vec2(0.0, 1.0) } else { egui::Vec2::ZERO }, 22.0, if enabled { Color32::WHITE } else { pal().muted });
+    reply.on_hover_text(tip)
 }
 
 /// Caixa de marcar com a caixinha visível: no tema neomórfico o `checkbox` padrão some no fundo (mesma cor
@@ -540,6 +556,62 @@ pub(crate) fn person_icon(painter: &egui::Painter, center: Pos2, size: f32, colo
     painter.add(Shape::convex_polygon(shoulders, color, Stroke::NONE));
 }
 
+/// Fone de telefone (ligar), desenhado: um arco grosso com os dois bocais voltados para dentro.
+pub(crate) fn phone_icon(painter: &egui::Painter, center: Pos2, size: f32, color: Color32) {
+    let (mid, r) = (center + vec2(size * 0.18, -size * 0.18), size * 0.5);
+    let arc: Vec<Pos2> = (0..=12)
+        .map(|i| {
+            let a = (90.0 + 90.0 * i as f32 / 12.0).to_radians();
+            mid + vec2(a.cos(), a.sin()) * r
+        })
+        .collect();
+    let (earpiece, mouthpiece) = (arc[0], arc[12]);
+    painter.add(Shape::line(arc, Stroke::new(size * 0.14, color)));
+    let stub = Stroke::new(size * 0.24, color);
+    painter.line_segment([earpiece, earpiece + vec2(0.0, -size * 0.2)], stub);
+    painter.line_segment([mouthpiece, mouthpiece + vec2(size * 0.2, 0.0)], stub);
+}
+
+/// Alto-falante com duas ondas (sala de voz), desenhado: a fonte pode não ter o emoji.
+pub(crate) fn speaker_icon(painter: &egui::Painter, center: Pos2, size: f32, color: Color32) {
+    let u = |x: f32, y: f32| center + vec2(x * size, y * size);
+    painter.add(Shape::convex_polygon(vec![u(-0.38, -0.12), u(-0.22, -0.12), u(-0.02, -0.3), u(-0.02, 0.3), u(-0.22, 0.12), u(-0.38, 0.12)], color, Stroke::NONE));
+    let wave = Stroke::new(size * 0.075, color);
+    for r in [0.2_f32, 0.36] {
+        let pts: Vec<Pos2> = (0..=8)
+            .map(|i| {
+                let a = (-45.0 + 90.0 * i as f32 / 8.0).to_radians();
+                u(0.02, 0.0) + vec2(a.cos(), a.sin()) * (r * size)
+            })
+            .collect();
+        painter.add(Shape::line(pts, wave));
+    }
+}
+
+/// Lupa (tela cheia), desenhada: aro e cabo.
+pub(crate) fn magnifier_icon(painter: &egui::Painter, center: Pos2, size: f32, color: Color32) {
+    let ink = Stroke::new(size * 0.1, color);
+    painter.circle_stroke(center + vec2(-size * 0.08, -size * 0.08), size * 0.26, ink);
+    painter.line_segment([center + vec2(size * 0.12, size * 0.12), center + vec2(size * 0.34, size * 0.34)], Stroke::new(size * 0.14, color));
+}
+
+/// Botão só com a lupa, sem moldura (tela cheia). A dica diz a ação.
+pub(crate) fn magnifier_button(ui: &mut Ui, tip: &str) -> egui::Response {
+    let (rect, reply) = ui.allocate_exact_size(vec2(32.0, 34.0), egui::Sense::click());
+    magnifier_icon(ui.painter(), rect.center(), 22.0, if reply.hovered() { pal().strong } else { pal().muted });
+    reply.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Cartão fantasma com o +: o lugar de uma coisa nova (sala, convite). O sinal usa o `muted` cheio, que passa
+/// de 3:1 sobre a base nos dois temas, e sobe para o texto ao passar o mouse. Devolve se foi clicado.
+pub(crate) fn ghost_card(ui: &mut Ui, tip: &str) -> bool {
+    let (rect, ghost) = ui.allocate_exact_size(vec2(ui.available_width(), 52.0), egui::Sense::click());
+    ghost.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tip));
+    raised(ui.painter(), rect, 12, pal().bg, 3);
+    draw_plus(ui.painter(), rect.center(), 8.0, if ghost.hovered() { pal().text } else { pal().muted });
+    ghost.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -555,6 +627,14 @@ mod tests {
     fn contrast(a: Color32, b: Color32) -> f32 {
         let (x, y) = (luminance(a), luminance(b));
         (x.max(y) + 0.05) / (x.min(y) + 0.05)
+    }
+
+    #[test]
+    fn ghost_card_sign_is_visible_on_the_base_in_both_themes() {
+        // O + dos cartões fantasmas usa `muted` cheio; sem a opacidade de antes ele passa de 3:1 nos dois temas.
+        for (name, p) in [("escuro", &DARK_PALETTE), ("claro", &LIGHT_PALETTE)] {
+            assert!(contrast(p.muted, p.bg) >= 3.0, "o + dos cartões fantasmas some no tema {name}");
+        }
     }
 
     #[test]

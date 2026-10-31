@@ -33,9 +33,20 @@ pub(crate) struct ServersUi {
     pub(crate) chat_over_screen: bool,
     /// O cartão de convite está aberto.
     pub(crate) inviting: bool,
+    /// Escolha da pessoa para a coluna de membros; `None` segue a largura da janela (`members_fit`).
+    pub(crate) members_open: Option<bool>,
     pub(crate) msg: String,
     /// Resultado que deu certo (aparece em verde).
     pub(crate) info: String,
+}
+
+/// Largura da janela a partir da qual a coluna de membros cabe sem esmagar o centro: trilho (76) + salas (300) +
+/// membros (340) deixam ~380 px para o bate-papo e as telas.
+const MEMBERS_FIT_WIDTH: f32 = 1100.0;
+
+/// A coluna de membros aparece? A escolha da pessoa vale; sem ela, só em janela larga.
+fn members_shown(choice: Option<bool>, window_width: f32) -> bool {
+    choice.unwrap_or(window_width >= MEMBERS_FIT_WIDTH)
 }
 
 fn role_name(r: Role) -> &'static str {
@@ -224,7 +235,7 @@ impl App {
 
     /// Coluna dos membros, à direita e de ponta a ponta da janela; o convite fica recolhido no fim do cartão de membros.
     pub(crate) fn members_panel(&mut self, ctx: &egui::Context, offline: bool) {
-        if self.tab != Tab::Servers || offline {
+        if self.tab != Tab::Servers || offline || !members_shown(self.srv.members_open, ctx.screen_rect().width()) {
             return;
         }
         let Some(hub) = self.shared.servers.lock_unpoisoned().clone() else { return };
@@ -251,7 +262,11 @@ impl App {
             });
             return;
         };
-        ui.label(RichText::new(format!("🔊  {}", room.name)).strong().size(18.0).color(pal().strong));
+        ui.horizontal(|ui| {
+            let (rect, _) = ui.allocate_exact_size(vec2(22.0, 24.0), egui::Sense::hover());
+            speaker_icon(ui.painter(), rect.center(), 22.0, pal().strong);
+            ui.label(RichText::new(&room.name).strong().size(18.0).color(pal().strong));
+        });
         self.chat_box(ui, hub, v, room);
     }
 
@@ -308,6 +323,10 @@ impl App {
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 let exit = exit_button(ui).on_hover_text("Sair do servidor");
                                 egui::Popup::menu(&exit).show(|ui| self.server_menu(ui, hub, v));
+                                let shown = members_shown(self.srv.members_open, ctx.screen_rect().width());
+                                if members_toggle(ui, shown).on_hover_text(if shown { "Esconder os membros" } else { "Mostrar os membros" }).clicked() {
+                                    self.srv.members_open = Some(!shown);
+                                }
                             });
                         });
                         ui.add_space(8.0);
@@ -326,7 +345,7 @@ impl App {
                     });
                     // A sala e a chamada 1:1 têm a mesma subseção: ícone, nome, compartilhar a tela e desligar.
                     if let Some((room, server)) = &room_bar {
-                        match self.session_bar(ui, "🔊", room, server, "Sair da sala", Ring::No) {
+                        match self.session_bar(ui, Glyph::Speaker, room, server, "Sair da sala", Ring::No) {
                             Bar::Share(on) => self.send(Cmd::RoomShare(on)),
                             Bar::Leave => self.send(Cmd::LeaveRoom),
                             Bar::Open => self.srv.chat_over_screen = true,
@@ -337,7 +356,7 @@ impl App {
                         // A qualidade da linha fica na aba da chamada; a barra pequena não mostra estatística.
                         let sub = if incoming.is_some() { "Chamando você…" } else if ringing.is_some() { "Chamando…" } else { "Em chamada" };
                         let tip = if incoming.is_some() { "Recusar" } else if ringing.is_some() { "Cancelar a chamada" } else { "Desligar a chamada" };
-                        match self.session_bar(ui, "📞", &who, sub, tip, if incoming.is_some() { Ring::In } else if ringing.is_some() { Ring::Out } else { Ring::No }) {
+                        match self.session_bar(ui, Glyph::Phone, &who, sub, tip, if incoming.is_some() { Ring::In } else if ringing.is_some() { Ring::Out } else { Ring::No }) {
                             Bar::Share(on) => self.shared.screen.want_share.store(on, Ordering::Relaxed),
                             Bar::Leave if incoming.is_some() => self.shared.answer.store(ANSWER_REJECT, Ordering::Relaxed),
                             Bar::Accept => self.shared.answer.store(ANSWER_ACCEPT, Ordering::Relaxed),
@@ -373,9 +392,9 @@ impl App {
                 });
     }
 
-    /// Subseção acima do perfil (sala ou chamada 1:1): `glyph`, `title` e `sub` à esquerda; à direita, compartilhar a
+    /// Subseção acima do perfil (sala ou chamada 1:1): o ícone (`glyph`), `title` e `sub` à esquerda; à direita, compartilhar a
     /// tela e desligar. Devolve o que a pessoa clicou.
-    fn session_bar(&mut self, ui: &mut egui::Ui, glyph: &str, title: &str, sub: &str, leave_tip: &str, ring: Ring) -> Bar {
+    fn session_bar(&mut self, ui: &mut egui::Ui, glyph: Glyph, title: &str, sub: &str, leave_tip: &str, ring: Ring) -> Bar {
         let sharing = self.shared.screen.want_share.load(Ordering::Relaxed);
         let mut out = Bar::None;
         // Mais estreita que o perfil (recuo nos lados), com folga interna.
@@ -384,7 +403,11 @@ impl App {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 10.0;
                 ui.add_space(6.0);
-                ui.label(RichText::new(glyph).size(24.0).color(pal().green));
+                let (rect, _) = ui.allocate_exact_size(vec2(26.0, 28.0), egui::Sense::hover());
+                match glyph {
+                    Glyph::Speaker => speaker_icon(ui.painter(), rect.center(), 26.0, pal().green),
+                    Glyph::Phone => phone_icon(ui.painter(), rect.center(), 24.0, pal().green),
+                }
                 let name = ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 2.0;
                     ui.label(RichText::new(title).strong().size(17.0).color(pal().green));
@@ -401,7 +424,7 @@ impl App {
                     }
                     let tip = if sharing { "Parar de compartilhar a tela" } else { "Compartilhar a minha tela" };
                     // Chamando ainda não há com quem dividir a tela.
-                    if ring == Ring::In && icon_button(ui, true, "📞", "Atender", pal().green).clicked() {
+                    if ring == Ring::In && phone_button(ui, true, "Atender", pal().green).clicked() {
                         out = Bar::Accept;
                     }
                     if ring == Ring::No && screen_button(ui, sharing).on_hover_text(tip).clicked() {
@@ -423,7 +446,9 @@ impl App {
             raised_frame(ui, 12, 8, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
-                let title = RichText::new(format!("🔊  {}", room.name)).strong().color(if here { pal().strong } else { pal().text });
+                let title = RichText::new(&room.name).strong().color(if here { pal().strong } else { pal().text });
+                let (icon, _) = ui.allocate_exact_size(vec2(20.0, 32.0), egui::Sense::hover());
+                speaker_icon(ui.painter(), icon.center(), 20.0, if here { pal().strong } else { pal().muted });
                 let width = ui.available_width() - if manages { 34.0 } else { 0.0 };
                 let entry = egui::Button::new((title, egui::Atom::grow())).fill(if here { pal().selected } else { Color32::TRANSPARENT }).min_size(vec2(width, 32.0));
                 let reply = ui.add_enabled(blocked.is_none(), entry).on_hover_text("Entrar na sala").on_disabled_hover_text(blocked.unwrap_or_default());
@@ -524,10 +549,7 @@ impl App {
                 ui.data_mut(|d| d.insert_temp(egui::Id::new("foco-nova-sala"), false));
             }
         } else {
-            let (rect, ghost) = ui.allocate_exact_size(vec2(ui.available_width(), 52.0), egui::Sense::click());
-            raised(ui.painter(), rect, 12, pal().bg, 3);
-            draw_plus(ui.painter(), rect.center(), 8.0, if ghost.hovered() { pal().text } else { pal().muted.gamma_multiply(0.6) });
-            if ghost.on_hover_text("Nova sala").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+            if ghost_card(ui, "Nova sala") {
                 self.srv.adding_room = true;
             }
         }
@@ -543,10 +565,10 @@ impl App {
         for (who, tex) in order {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(format!("Tela de {}", member_name(&names, &who))).strong());
-                if ui.button("🔍").on_hover_text("Tela cheia (Esc ou o X para sair)").clicked() {
+                if magnifier_button(ui, "Tela cheia (Esc ou o X para sair)").clicked() {
                     self.zoom = Some(who);
                 }
-                if ui.button(RichText::new("Parar de assistir").color(pal().red)).clicked() {
+                if hangup_button(ui).on_hover_text("Parar de assistir").clicked() {
                     crate::engine::follow(&self.shared, who, false);
                 }
             });
@@ -565,9 +587,10 @@ impl App {
             if wanted || !self.screen_tex.is_empty() || !note_text.is_empty() {
                 let names = self.form.names();
                 let diag = self.shared.screen.diagnostics();
-                card(ui, "Telas da sala", "Cada espectador abre um circuito de vídeo próprio, cifrado, direto com quem transmite (até 3 por transmissão).", |ui| {
+                card(ui, "Telas da sala", "Vídeo cifrado, direto com quem transmite.", |ui| {
                     if wanted {
-                        ui.colored_label(pal().green, if sharing { "● sua tela está sendo vista" } else { "Sua tela está disponível: quem está na sala vê o botão Assistir ao lado do seu nome." });
+                        ui.colored_label(pal().green, if sharing { "● sua tela está sendo vista" } else { "Sua tela está disponível" })
+                            .on_hover_text("Quem está na sala vê o botão de assistir ao lado do seu nome. Cada espectador abre um circuito de vídeo próprio, cifrado, direto com você (até 3 por transmissão).");
                     }
                     if !wanted && !note_text.is_empty() {
                         ui.colored_label(pal().error, note_text);
@@ -579,7 +602,7 @@ impl App {
                     order.sort_by_key(|(k, _)| **k);
                     for (who, (_, tex)) in order {
                         ui.label(RichText::new(format!("Tela de {}", member_name(&names, who))).strong());
-                        if ui.button("🔍").on_hover_text("Tela cheia (Esc ou o X para sair)").clicked() {
+                        if magnifier_button(ui, "Tela cheia (Esc ou o X para sair)").clicked() {
                             self.zoom = Some(*who);
                         }
                         if self.zoom != Some(*who) {
@@ -642,10 +665,7 @@ impl App {
         let contacts = parse_contacts(&self.form.contacts);
         // Como o cartão "nova sala": um cartão apagado com + que, ao clicar, vira o formulário no próprio lugar.
         if !self.srv.inviting {
-            let (rect, ghost) = ui.allocate_exact_size(vec2(ui.available_width(), 52.0), egui::Sense::click());
-            raised(ui.painter(), rect, 12, pal().bg, 3);
-            draw_plus(ui.painter(), rect.center(), 8.0, if ghost.hovered() { pal().text } else { pal().muted.gamma_multiply(0.6) });
-            if ghost.on_hover_text("Convidar alguém para o servidor").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+            if ghost_card(ui, "Convidar alguém para o servidor") {
                 self.srv.inviting = true;
             }
             return;
@@ -654,14 +674,13 @@ impl App {
           raised_frame(ui, 12, 12, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Convidar alguém").strong().color(pal().strong));
+                ui.label(RichText::new("Convidar alguém").strong().color(pal().strong)).on_hover_text("O convite chega pela rede, cifrado, e só o contato escolhido consegue abri-lo. Qualquer membro pode convidar.");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.add(egui::Button::new(RichText::new("✖").color(pal().muted)).frame(false)).on_hover_text("Fechar").clicked() {
+                    if close_button(ui, "Fechar").clicked() {
                         self.srv.inviting = false;
                     }
                 });
             });
-            note(ui, "O convite chega pela rede, cifrado, e só o contato escolhido consegue abri-lo. Qualquer membro pode convidar.");
             let shown = self.srv.pick.map_or("escolha um contato".to_string(), |k| member_name(&contacts, &k));
             egui::ComboBox::from_id_salt("convidar").selected_text(shown).width(260.0).show_ui(ui, |ui| {
                 for (name, key) in &contacts {
@@ -689,16 +708,21 @@ impl App {
                     }
                 }
             }
-            if button(ui, ready, "Gerar só o texto", pal().bg).on_disabled_hover_text("Escolha um contato e marque o aviso do IP para liberar").clicked() {
-                let key = self.srv.pick.expect("botão só liga com contato escolhido");
-                match hub.try_run(|s, now| s.invite(&v.id, key, now).map(|t| (t, Output::default()))) {
-                    Ok(text) => {
-                        self.srv.invite_out = text;
-                        self.srv.msg.clear();
+            // Gerar o texto para mandar por fora é raro: fica no menu, e o aviso do IP continua valendo.
+            let dots = dots_button(ui);
+            egui::Popup::menu(&dots).show(|ui| {
+                if ui.add_enabled(ready, egui::Button::new("Gerar o convite como texto")).on_hover_text("Para mandar por onde preferir, sem passar pela rede").on_disabled_hover_text("Escolha um contato e marque o aviso do IP para liberar").clicked() {
+                    let key = self.srv.pick.expect("item só liga com contato escolhido");
+                    match hub.try_run(|s, now| s.invite(&v.id, key, now).map(|t| (t, Output::default()))) {
+                        Ok(text) => {
+                            self.srv.invite_out = text;
+                            self.srv.msg.clear();
+                        }
+                        Err(e) => self.srv.msg = e.to_string(),
                     }
-                    Err(e) => self.srv.msg = e.to_string(),
+                    ui.close();
                 }
-            }
+            });
             });
             if !self.srv.invite_out.is_empty() {
                 ui.add(egui::Label::new(RichText::new(&self.srv.invite_out).monospace().size(12.0)).wrap());
@@ -786,6 +810,16 @@ fn theme_toggle(ui: &mut egui::Ui) -> egui::Response {
     reply.on_hover_text(tip)
 }
 
+/// Botão que mostra ou esconde a coluna de membros: duas pessoas, desenhadas; cheio quando a coluna está aberta.
+fn members_toggle(ui: &mut egui::Ui, shown: bool) -> egui::Response {
+    let (rect, reply) = ui.allocate_exact_size(vec2(32.0, 34.0), egui::Sense::click());
+    let ink = if shown { pal().strong } else if reply.hovered() { pal().text } else { pal().muted };
+    person_icon(ui.painter(), rect.center() + vec2(4.0, 1.0), 16.0, ink.gamma_multiply(0.7));
+    person_icon(ui.painter(), rect.center() + vec2(-3.0, 2.0), 20.0, ink);
+    reply.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Membros"));
+    reply.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 /// Base dos ícones do trilho: elevado em repouso, afundado ao apertar ou quando marcado, aro do acento
 /// quando o foco vem do teclado. `name` é o que o leitor de tela diz, já que o ícone não tem texto.
 fn rail_tile(ui: &mut egui::Ui, active: Option<Color32>, name: &str) -> (egui::Rect, egui::Response) {
@@ -812,6 +846,13 @@ enum Ring {
     In,
 }
 
+/// Ícone da subseção da sala ou da chamada.
+#[derive(Clone, Copy)]
+enum Glyph {
+    Speaker,
+    Phone,
+}
+
 /// O que a pessoa fez na subseção da sala ou da chamada.
 enum Bar {
     None,
@@ -821,4 +862,17 @@ enum Bar {
     Open,
     /// Atendeu a chamada que tocava.
     Accept,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn members_column_follows_the_window_until_the_person_chooses() {
+        assert!(!members_shown(None, 820.0), "no mínimo da janela o centro não pode ser esmagado");
+        assert!(members_shown(None, MEMBERS_FIT_WIDTH));
+        assert!(members_shown(Some(true), 820.0));
+        assert!(!members_shown(Some(false), 1920.0));
+    }
 }
