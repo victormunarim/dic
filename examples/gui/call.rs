@@ -152,12 +152,6 @@ impl App {
                     if hangup_button(ui, if ringing { "Cancelar a chamada" } else { "Desligar a chamada" }).clicked() {
                         self.shared.hangup.store(true, Ordering::Relaxed);
                     }
-                    if !ringing {
-                        // Só o envio: ouvir é por tela aberta (ver `zoom_window`). Sempre à vista, com ou sem tela rodando: as duas chaves começam ligadas e a pessoa precisa
-                        // ver onde estão antes de a transmissão começar. Em ordem de leitura: enviar, ouvir.
-                        // Layout explícito: dentro de um right_to_left o `horizontal` herdaria a direção e inverteria a ordem.
-                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| self.screen_sound_toggles(ui, true, false));
-                    }
                 });
             });
             if sharing {

@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering;
 use clam::server::{Output, Role, ServerId, ServerView};
 use eframe::egui::{self, Color32, CornerRadius, Margin, RichText, vec2};
 
-use crate::{conf::*, engine::*, theme::*, ui::{App, Tab, INVITE_KEY, MEMBERS_KEY}};
+use crate::{contacts::ask_share, conf::*, engine::*, theme::*, ui::{App, Tab, INVITE_KEY, MEMBERS_KEY}};
 
 /// O que a aba lembra entre um quadro e outro.
 #[derive(Default)]
@@ -404,7 +404,8 @@ impl App {
                     // A sala e a chamada 1:1 têm a mesma subseção: ícone, nome, compartilhar a tela e desligar.
                     if let Some((room, server)) = &room_bar {
                         match self.session_bar(ui, Glyph::Speaker, room, server, "Sair da sala", Ring::No) {
-                            Bar::Share(on) => self.send(Cmd::RoomShare(on)),
+                            Bar::Share(true) => ask_share(ui.ctx(), true),
+                            Bar::Share(false) => self.send(Cmd::RoomShare(false)),
                             Bar::Leave => self.send(Cmd::LeaveRoom),
                             Bar::Open => self.srv.chat_over_screen = true,
                             Bar::Accept => {}
@@ -415,7 +416,8 @@ impl App {
                         let sub = if incoming.is_some() { "Chamando você…" } else if ringing.is_some() { "Chamando…" } else { "Em chamada" };
                         let tip = if incoming.is_some() { "Recusar" } else if ringing.is_some() { "Cancelar a chamada" } else { "Desligar a chamada" };
                         match self.session_bar(ui, Glyph::Phone, &who, sub, tip, if incoming.is_some() { Ring::In } else if ringing.is_some() { Ring::Out } else { Ring::No }) {
-                            Bar::Share(on) => self.shared.screen.want_share.store(on, Ordering::Relaxed),
+                            Bar::Share(true) => ask_share(ui.ctx(), false),
+                            Bar::Share(false) => self.shared.screen.want_share.store(false, Ordering::Relaxed),
                             Bar::Leave if incoming.is_some() => self.shared.answer.store(ANSWER_REJECT, Ordering::Relaxed),
                             Bar::Accept => self.shared.answer.store(ANSWER_ACCEPT, Ordering::Relaxed),
                             Bar::Leave => self.shared.hangup.store(true, Ordering::Relaxed),
@@ -625,8 +627,8 @@ impl App {
         let names = self.form.names();
         let mut order: Vec<_> = self.screen_tex.iter().map(|(k, (_, tex))| (*k, tex.clone())).collect();
         order.sort_by_key(|(k, _)| *k);
-        let sending = self.shared.screen.want_share.load(Ordering::Relaxed);
-        ui.horizontal(|ui| self.screen_sound_toggles(ui, sending, true));
+        // O envio do som é perguntado ao começar a transmitir (`share_window`), não fica numa chave aqui.
+        ui.horizontal(|ui| self.screen_sound_toggles(ui, false, true));
         let each = (ui.available_height() / order.len().max(1) as f32 - 8.0).max(120.0);
         for (who, tex) in order {
             ui.horizontal(|ui| {
@@ -661,7 +663,7 @@ impl App {
                     if !wanted && !note_text.is_empty() {
                         ui.colored_label(pal().error, note_text);
                     }
-                    self.screen_sound_toggles(ui, true, true);
+                    self.screen_sound_toggles(ui, false, true);
                     if !diag.is_empty() {
                         ui.label(RichText::new(diag).monospace().size(13.0).color(pal().muted));
                     }
@@ -846,7 +848,7 @@ impl App {
         ui.add_space(16.0);
     }
 
-    fn send(&self, c: Cmd) {
+    pub(crate) fn send(&self, c: Cmd) {
         if let Some(r) = &self.running {
             let _ = r.cmds.send(c);
         }

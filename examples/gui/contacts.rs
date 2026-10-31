@@ -1,5 +1,6 @@
 //! Contatos: lista na coluna da esquerda, adicionar por código, confiança para a tela e apresentações recebidas.
 
+use std::sync::atomic::Ordering;
 use clam::sync::LockExt;
 
 use eframe::egui::{self, RichText, vec2};
@@ -466,6 +467,48 @@ impl App {
         }
     }
 
+    /// Pergunta, ao começar a transmitir, se o som do computador vai junto. É o único lugar onde se escolhe: o som só
+    /// viaja com a tela, então a decisão é por transmissão. Cancelar não transmite.
+    pub(crate) fn share_window(&mut self, ctx: &egui::Context) {
+        let Some(room) = ctx.data(|d| d.get_temp::<bool>(share_ask_id())) else { return };
+        let mut answer: Option<Option<bool>> = None;
+        egui::Window::new("Transmitir a tela")
+            .id(egui::Id::new("transmitir-tela"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.set_max_width(420.0);
+                ui.label("Enviar também o som do computador?");
+                ui.add_space(4.0);
+                ui.label(RichText::new("Quem assiste ouve o que toca aí (música, jogo, vídeo, notificações), menos a voz do contato. Usa cerca de 10% da banda do vídeo (2,5% sem privacidade) e, sem privacidade, quem observa a rede vê quando há som. No Linux precisa de gstreamer1.0-tools com o plugin do PulseAudio.").size(13.0).color(pal().muted));
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if button(ui, true, "Com som", BLURPLE).clicked() {
+                        answer = Some(Some(true));
+                    }
+                    if button(ui, true, "Sem som", pal().bg).clicked() {
+                        answer = Some(Some(false));
+                    }
+                    if button(ui, true, "Cancelar", pal().bg).clicked() {
+                        answer = Some(None);
+                    }
+                });
+            });
+        let Some(choice) = answer else { return };
+        ctx.data_mut(|d| d.remove_temp::<bool>(share_ask_id()));
+        if let Some(sound) = choice {
+            self.form.screen_audio = sound;
+            self.form.save();
+            self.shared.screen.audio.store(sound, Ordering::Relaxed);
+            if room {
+                self.send(Cmd::RoomShare(true));
+            } else {
+                self.shared.screen.want_share.store(true, Ordering::Relaxed);
+            }
+        }
+    }
+
     /// Aviso de que o contato de confiança vê o IP de quem transmite; a confiança só vale depois do "Confiar".
     pub(crate) fn trust_window(&mut self, ctx: &egui::Context) {
         let Some(key) = self.trust_ask else { return };
@@ -533,6 +576,16 @@ impl App {
         self.error.clear();
         self.form.save();
     }
+}
+
+/// Chave da pergunta "com som?" pendente: guarda se a transmissão é na sala (`true`) ou na chamada (`false`).
+fn share_ask_id() -> egui::Id {
+    egui::Id::new("pergunta-som-transmissao")
+}
+
+/// Abre a pergunta do som; a transmissão só começa depois da resposta (`App::share_window`).
+pub(crate) fn ask_share(ctx: &egui::Context, room: bool) {
+    ctx.data_mut(|d| d.insert_temp(share_ask_id(), room));
 }
 
 #[cfg(test)]

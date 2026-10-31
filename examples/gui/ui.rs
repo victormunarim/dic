@@ -367,6 +367,7 @@ impl eframe::App for App {
         self.update_screen_textures(ctx);
         self.zoom_window(ctx);
         self.trust_window(ctx);
+        self.share_window(ctx);
         let offline = self.running.is_none();
         let in_call = self.shared.in_call.load(Ordering::Relaxed);
         let testing = self.shared.mic_test.load(Ordering::Relaxed);
