@@ -88,17 +88,18 @@ impl Dialer {
         self.deliver_confirmed(peer, &sealed, frame.ack_seq(), wait).await
     }
 
-    /// Manda os pedaços `chunks` (só `Chunk`) por um circuito só, no ritmo do circuito de tela, e devolve quais o contato
-    /// confirmou. O que não voltou o chamador reenvia numa rodada seguinte.
-    pub async fn send_file_chunks(&self, peer: [u8; 32], chunks: &[update::FileFrame], wait: Duration) -> Vec<bool> {
-        let pk = PublicKey::from(peer);
-        let sealed: Vec<_> = chunks.iter().map(|c| update::seal_file(&self.secret, &pk, c)).collect();
-        if sealed.iter().any(Result::is_err) {
-            return vec![false; chunks.len()];
-        }
-        let frames: Vec<_> = sealed.into_iter().flatten().collect();
-        let seqs: Vec<u64> = chunks.iter().map(update::FileFrame::ack_seq).collect();
-        self.deliver_batch_with(peer, &frames, |i, d| seqs.get(i).is_some_and(|s| update::open_ack(&self.secret, &pk, *s, d)), wait, true, (crate::phone::screen_client_options, crate::phone::SCREEN_SLOT)).await
+    /// Abre o circuito de tela que leva um arquivo a `peer`: um só para a transferência inteira, para não pagar a montagem
+    /// nem a espera pelos últimos acks a cada janela. `None` se o contato não foi alcançado.
+    pub async fn open_file_pipe(&self, peer: [u8; 32]) -> Option<FilePipe> {
+        let (found, _) = self.reachable_client(&peer, crate::phone::screen_client_options).await;
+        let (client, used) = found?;
+        Some(FilePipe { client, used, secret: self.secret.clone(), pk: PublicKey::from(peer), next_slot: tokio::time::Instant::now() })
+    }
+
+    /// Guarda `used` como o endereço que funcionou para `peer` (o arquivo chegou).
+    pub fn remember_file_route(&self, peer: &[u8; 32], pipe: FilePipe) {
+        self.remember(peer, pipe.used);
+        pipe.client.stop();
     }
 
     /// Avisa `peer` de que esta pessoa o removeu (carimbo `stamp`, milissegundos Unix) e espera a confirmação.
@@ -183,5 +184,49 @@ impl Dialer {
             self.remember(&peer, used);
         }
         got
+    }
+}
+
+/// O circuito do arquivo caiu (ou o quadro não pôde ser cifrado): quem envia abre outro.
+#[derive(Debug)]
+pub struct PipeClosed;
+
+/// Circuito de tela aberto para um arquivo: manda pedaços no ritmo do cover e devolve os acks que chegam enquanto isso.
+pub struct FilePipe {
+    client: crate::transport::CircuitClient,
+    used: RelayInfo,
+    secret: x25519_dalek::StaticSecret,
+    pk: PublicKey,
+    /// Quando o próximo lote pode sair. Conta por prazo, não por espera fixa: o tempo gasto lendo o disco ou tratando
+    /// acks não pode atrasar o ritmo (nem deixar a fila do cover esvaziar).
+    next_slot: tokio::time::Instant,
+}
+
+impl FilePipe {
+    /// Manda `chunks` (no máximo [`PACE_BURST`] por vez, a fila do cover guarda 16 células) e espera até o próximo
+    /// espaço do ritmo, recolhendo os acks que chegam. `Err`: o circuito caiu.
+    pub async fn push(&mut self, chunks: &[update::FileFrame]) -> Result<Vec<u64>, PipeClosed> {
+        for c in chunks {
+            let frame = update::seal_file(&self.secret, &self.pk, c).map_err(|_| PipeClosed)?;
+            self.client.send(&frame).await.map_err(|_| PipeClosed)?;
+        }
+        let step = crate::phone::SCREEN_SLOT * chunks.len().clamp(1, PACE_BURST) as u32;
+        let now = tokio::time::Instant::now();
+        // Atrasado mais que um lote: recomeça do agora em vez de despachar uma rajada para "compensar".
+        self.next_slot = if self.next_slot + step < now { now + step } else { self.next_slot + step };
+        self.collect(self.next_slot).await
+    }
+
+    /// Recolhe acks até `until`.
+    pub async fn collect(&mut self, until: tokio::time::Instant) -> Result<Vec<u64>, PipeClosed> {
+        let mut acks = Vec::new();
+        loop {
+            match tokio::time::timeout_at(until, self.client.next_event()).await {
+                Ok(Some(Event::Data(d))) => acks.extend(update::ack_seq_of(&self.secret, &self.pk, &d)),
+                Ok(Some(_)) => {}
+                Ok(None) => return Err(PipeClosed),
+                Err(_) => return Ok(acks),
+            }
+        }
     }
 }

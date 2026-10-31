@@ -795,6 +795,13 @@ pub fn seal_ack(my_static: &StaticSecret, peer: &PublicKey, seq: u64) -> Result<
     Ok(seal(&cipher, TAG_ACK, &seq.to_be_bytes()))
 }
 
+/// O `seq` que a confirmação `frame` de `peer` repete, se ela abre. Serve para achar de uma vez a qual pedaço o
+/// ack pertence, sem tentar abrir contra cada pedaço em voo.
+pub fn ack_seq_of(my_static: &StaticSecret, peer: &PublicKey, frame: &[u8]) -> Option<u64> {
+    let plain = cipher(my_static, peer, peer).and_then(|c| open(&c, TAG_ACK, frame, 8))?;
+    Some(u64::from_be_bytes(plain.as_slice().try_into().ok()?))
+}
+
 /// `true` se `frame` é a confirmação de `peer` para o registro `seq`.
 pub fn open_ack(my_static: &StaticSecret, peer: &PublicKey, seq: u64, frame: &[u8]) -> bool {
     cipher(my_static, peer, peer)
@@ -805,6 +812,16 @@ pub fn open_ack(my_static: &StaticSecret, peer: &PublicKey, seq: u64, frame: &[u
 #[cfg(test)]
 #[allow(clippy::indexing_slicing, clippy::unwrap_used)]
 mod tests {
+    #[test]
+    fn an_ack_tells_which_seq_it_confirms_only_to_its_peer() {
+        let (a, b) = (StaticSecret::from([1u8; 32]), StaticSecret::from([2u8; 32]));
+        let (pa, pb) = (PublicKey::from(&a), PublicKey::from(&b));
+        let ack = seal_ack(&b, &pa, 4242).unwrap();
+        assert_eq!(ack_seq_of(&a, &pb, &ack), Some(4242));
+        assert_eq!(ack_seq_of(&a, &PublicKey::from([9u8; 32]), &ack), None, "outro contato");
+        assert_eq!(ack_seq_of(&a, &pb, &ack[1..]), None);
+    }
+
     #[test]
     fn a_server_record_opens_only_with_the_servers_secret_for_that_owner() {
         let (secret, server, owner) = ([1u8; 32], [2u8; 16], [3u8; 32]);

@@ -18,6 +18,7 @@ mod reach;
 mod util;
 
 pub use config::{DEFAULT_RELAY_PORT, NodeConfig, RelayKeys, UPDATE_RETRY};
+pub use deliver::{FilePipe, PipeClosed};
 pub use dialer::{DialError, Dialer};
 use mail::{Inbox, Introducer, mail_keeper, mail_reader};
 use publish::{outbox, rendezvous_publisher, server_publisher};

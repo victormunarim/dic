@@ -1,5 +1,5 @@
 //! Transferência de arquivo entre dois contatos online: quem envia lê o arquivo em pedaços e os manda por circuitos
-//! de 2 saltos (`Dialer::send_file_chunks`); quem recebe junta os pedaços num arquivo parcial e, completo, dá o nome
+//! de 2 saltos (`Dialer::open_file_pipe`); quem recebe junta os pedaços num arquivo parcial e, completo, dá o nome
 //! final. Os quadros estão em [`crate::media::update::FileFrame`]; a decisão de aceitar é da pessoa (o app).
 //!
 //! - **Só contato, só online, só se a pessoa aceita.** A oferta não escreve nada no disco; o arquivo parcial só nasce
@@ -19,11 +19,17 @@ use std::{
 
 use crate::media::update::{FILE_CHUNK, FileFrame, MAX_FILE, MAX_FILE_NAME};
 
-/// Pedaços por circuito: ~126 KB, uns 2 s no ritmo do circuito de tela. Mais que isso aumenta o custo de reenviar uma
-/// janela inteira; menos gasta o tempo em montar circuitos.
+/// Pedaços em voo ao mesmo tempo (~126 KB, uns 2 s no ritmo do circuito de tela): limita a memória e quanto se
+/// reenvia se o circuito cair.
 pub const WINDOW: usize = 1024;
-/// Rodadas de reenvio do que não foi confirmado antes de desistir.
-const ROUNDS: usize = 6;
+/// Circuitos novos seguidos, sem nenhum ack, antes de desistir do contato.
+const ROUNDS: usize = 3;
+/// Pedaços por lote: a fila do cover guarda 16 células, então 8 de cada vez, no ritmo dele.
+const BURST: usize = 8;
+/// Um pedaço sem ack por este tempo sai de novo (o cover descarta ~1% das células quando a fila enche).
+const RESEND: Duration = Duration::from_millis(3000);
+/// Sem ack algum por este tempo, o circuito é dado como morto e outro é aberto.
+const STALL: Duration = Duration::from_secs(10);
 
 /// Por que uma transferência parou.
 #[derive(Debug, PartialEq, Eq)]
@@ -52,59 +58,103 @@ pub fn chunk_count(size: u64) -> u64 {
 }
 
 /// Manda o arquivo `path` (de `size` bytes, já combinado com o contato) em pedaços, na transferência `id`. `progress`
-/// recebe os bytes já confirmados; `cancelled` é consultado antes de cada rodada.
+/// recebe os bytes já confirmados; `cancelled` é consultado a cada lote (alguns milissegundos).
+///
+/// Um circuito só leva o arquivo inteiro, no ritmo constante do circuito de tela: o que um observador vê é o mesmo de
+/// uma tela sendo transmitida. Os pedaços ficam "em voo" até o ack voltar (no máximo [`WINDOW`], o que também limita a
+/// memória); o que não voltou em [`RESEND`] sai de novo no meio do fluxo, sem parar para esperar uma janela acabar.
 #[cfg(feature = "net")]
 pub async fn stream(dialer: &crate::node::Dialer, peer: [u8; 32], id: u64, path: &Path, size: u64, progress: impl Fn(u64), cancelled: impl Fn() -> bool) -> Result<(), TransferError> {
+    use std::{collections::BTreeMap, time::Instant};
+
+    use crate::{media::update::file_chunk_ack, node::FilePipe};
+
     if size == 0 || size > MAX_FILE {
         return Err(TransferError::Read("tamanho fora do limite".into()));
     }
     let mut file = File::open(path).map_err(|e| TransferError::Read(e.to_string()))?;
     let total = chunk_count(size);
     let mut next: u64 = 0;
-    let mut sent_bytes: u64 = 0;
-    while next < total {
-        let upto = (next + WINDOW as u64).min(total);
-        let mut pending: Vec<FileFrame> = Vec::with_capacity((upto - next) as usize);
-        file.seek(SeekFrom::Start(next * FILE_CHUNK as u64)).map_err(|e| TransferError::Read(e.to_string()))?;
-        for index in next..upto {
-            let want = (size - index * FILE_CHUNK as u64).min(FILE_CHUNK as u64) as usize;
-            let mut data = vec![0u8; want];
-            file.read_exact(&mut data).map_err(|e| TransferError::Read(e.to_string()))?;
-            pending.push(FileFrame::Chunk { id, index: index as u32, data });
+    let mut done: u64 = 0;
+    // Em voo: ack esperado -> (pedaço, quando saiu pela última vez).
+    let mut flying: BTreeMap<u64, (FileFrame, Instant)> = BTreeMap::new();
+    let mut pipe: Option<FilePipe> = None;
+    let mut last_ack = Instant::now();
+    let mut reopened = 0usize;
+    while done < total {
+        if cancelled() {
+            return Err(TransferError::Cancelled);
         }
-        for _ in 0..ROUNDS {
-            if cancelled() {
-                return Err(TransferError::Cancelled);
+        let Some(p) = pipe.as_mut() else {
+            if reopened > ROUNDS {
+                return Err(TransferError::Unreachable);
             }
-            // O cancelamento vale no meio da janela (que leva segundos): soltar o envio fecha o circuito.
-            let done = {
-                let send = dialer.send_file_chunks(peer, &pending, Duration::from_secs(20));
-                tokio::pin!(send);
-                loop {
-                    tokio::select! {
-                        done = &mut send => break done,
-                        () = tokio::time::sleep(Duration::from_millis(100)) => {
-                            if cancelled() {
-                                return Err(TransferError::Cancelled);
-                            }
-                        }
-                    }
+            reopened += 1;
+            // Abrir o circuito leva segundos: o cancelamento vale durante.
+            let open = dialer.open_file_pipe(peer);
+            tokio::pin!(open);
+            pipe = loop {
+                tokio::select! {
+                    p = &mut open => break p,
+                    () = tokio::time::sleep(Duration::from_millis(100)) => if cancelled() {
+                        return Err(TransferError::Cancelled);
+                    },
                 }
             };
-            let mut keep = done.iter();
-            pending.retain(|_| !keep.next().copied().unwrap_or(false));
-            if pending.is_empty() {
-                break;
+            last_ack = Instant::now();
+            // O que estava em voo foi com o circuito antigo: vale reenviar já.
+            let past = Instant::now().checked_sub(RESEND).unwrap_or_else(Instant::now);
+            flying.values_mut().for_each(|(_, at)| *at = past);
+            continue;
+        };
+        // Lote: primeiro o que passou do prazo do ack, depois pedaços novos enquanto couber na janela.
+        let mut batch: Vec<FileFrame> = Vec::with_capacity(BURST);
+        let now = Instant::now();
+        for (frame, at) in flying.values_mut().filter(|(_, at)| now.duration_since(*at) >= RESEND).take(BURST) {
+            *at = now;
+            batch.push(frame.clone());
+        }
+        while batch.len() < BURST && next < total && flying.len() + batch.len() < WINDOW {
+            let want = (size - next * FILE_CHUNK as u64).min(FILE_CHUNK as u64) as usize;
+            let mut data = vec![0u8; want];
+            file.read_exact(&mut data).map_err(|e| TransferError::Read(e.to_string()))?;
+            batch.push(FileFrame::Chunk { id, index: next as u32, data });
+            next += 1;
+        }
+        let sent_now = Instant::now();
+        let fresh: Vec<(u64, FileFrame)> = batch.iter().filter_map(|f| if let FileFrame::Chunk { index, .. } = f { Some((file_chunk_ack(id, *index), f.clone())) } else { None }).collect();
+        match p.push(&batch).await {
+            Ok(acks) => {
+                for (seq, frame) in fresh {
+                    flying.entry(seq).or_insert((frame, sent_now));
+                }
+                let before = done;
+                for seq in acks {
+                    if flying.remove(&seq).is_some() {
+                        done += 1;
+                    }
+                }
+                if done != before {
+                    last_ack = Instant::now();
+                    reopened = 0;
+                    progress((done * FILE_CHUNK as u64).min(size));
+                }
+                // Sem nenhum ack por muito tempo, o circuito morreu sem avisar: abre outro.
+                if !flying.is_empty() && last_ack.elapsed() >= STALL {
+                    pipe = None;
+                }
+            }
+            Err(_) => {
+                for (seq, frame) in fresh {
+                    flying.entry(seq).or_insert((frame, sent_now));
+                }
+                pipe = None;
             }
         }
-        if !pending.is_empty() {
-            return Err(TransferError::Unreachable);
-        }
-        sent_bytes = (upto * FILE_CHUNK as u64).min(size);
-        progress(sent_bytes);
-        next = upto;
     }
-    debug_assert_eq!(sent_bytes, size);
+    if let Some(p) = pipe {
+        dialer.remember_file_route(&peer, p);
+    }
     Ok(())
 }
 
