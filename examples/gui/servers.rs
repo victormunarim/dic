@@ -750,7 +750,8 @@ impl App {
             }
         }
         // O conteúdo central rola, então não há "altura disponível": a lista de mensagens sempre vai até o pé da janela, menos a linha de envio e a folga da sombra do botão. Assim o campo fica embaixo e a página só rola se a janela for baixa demais; poucas mensagens não criam rolagem.
-        let room_height = (ui.clip_rect().bottom() - ui.cursor().top() - 84.0).max(160.0);
+        let uploads = self.live_uploads(&recipients);
+        let room_height = (ui.clip_rect().bottom() - ui.cursor().top() - 84.0 - crate::anexo::height(ui.ctx(), key) - 20.0 * uploads.len() as f32).max(160.0);
         egui::ScrollArea::vertical().id_salt(("bate-papo", room.id)).max_height(room_height).min_scrolled_height(room_height).stick_to_bottom(true).auto_shrink([false, false]).show(ui, |ui| {
             if room.chat.is_empty() {
                 ui.label(RichText::new("Sem mensagens. A conversa some quando a sala fica vazia.").size(13.0).color(pal().muted));
@@ -765,7 +766,7 @@ impl App {
                 });
             }
         });
-        self.room_uploads(ui, &recipients);
+        Self::show_uploads(ui, uploads);
         crate::anexo::chips(ui, key);
         // O botão é medido primeiro (da direita para a esquerda) e o campo ocupa só o que sobra: com largura
         // fixa para o campo, o botão passava da borda e a coluna de membros o cobria.
@@ -806,7 +807,7 @@ impl App {
 
     /// Enquanto um anexo ainda não chegou a todos, uma linha com o carregando: a sala só mostra o aviso "📎 nome", e sem
     /// isto não se veria que o envio segue em andamento.
-    fn room_uploads(&self, ui: &mut egui::Ui, recipients: &[[u8; 32]]) {
+    fn live_uploads(&self, recipients: &[[u8; 32]]) -> Vec<(String, usize)> {
         let mut live: Vec<(String, usize)> = Vec::new();
         {
             let t = self.shared.transfers.lock_unpoisoned();
@@ -819,6 +820,10 @@ impl App {
                 }
             }
         }
+        live
+    }
+
+    fn show_uploads(ui: &mut egui::Ui, live: Vec<(String, usize)>) {
         for (name, n) in live {
             ui.horizontal(|ui| {
                 ui.add(egui::Spinner::new().size(14.0).color(BLURPLE));

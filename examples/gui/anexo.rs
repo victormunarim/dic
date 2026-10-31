@@ -31,6 +31,11 @@ pub(crate) fn count(ctx: &egui::Context, key: impl Hash) -> usize {
     ctx.data(|d| d.get_temp::<Pending>(id(key)).map_or(0, |l| l.len()))
 }
 
+/// Altura que as etiquetas ocupam: quem calcula a altura da lista de mensagens a desconta, para o campo não descer.
+pub(crate) fn height(ctx: &egui::Context, key: impl Hash) -> f32 {
+    if count(ctx, key) > 0 { 32.0 } else { 0.0 }
+}
+
 /// Retira os arquivos da espera, para enviar.
 pub(crate) fn take(ctx: &egui::Context, key: impl Hash) -> Vec<PathBuf> {
     ctx.data_mut(|d| d.remove_temp::<Pending>(id(key))).unwrap_or_default().into_iter().map(|(p, _)| p).collect()
