@@ -214,7 +214,7 @@ pub(crate) fn sunken_frame<R>(ui: &mut Ui, radius: u8, margin: i8, add: impl FnO
 /// Cartão da área de conteúdo: título, subtítulo opcional e o corpo, ocupando a largura da coluna.
 pub(crate) fn card(ui: &mut Ui, title: &str, subtitle: &str, add: impl FnOnce(&mut Ui)) {
     ui.add_space(4.0);
-    raised_frame(ui, R_CARD, 22, |ui| {
+    let out = raised_frame(ui, R_CARD, 22, |ui| {
         ui.set_width(ui.available_width());
         ui.label(RichText::new(title).strong().size(18.0).color(pal().strong));
         if !subtitle.is_empty() {
@@ -223,7 +223,17 @@ pub(crate) fn card(ui: &mut Ui, title: &str, subtitle: &str, add: impl FnOnce(&m
         ui.add_space(6.0);
         add(ui);
     });
+    #[cfg(test)]
+    CARD_RECTS.with(|r| r.borrow_mut().push((title.to_string(), out.response.rect)));
+    #[cfg(not(test))]
+    let _ = out;
     ui.add_space(18.0);
+}
+
+// Retângulo de cada cartão desenhado, para os testes de layout conferirem que nenhum passa por cima de outro.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static CARD_RECTS: std::cell::RefCell<Vec<(String, Rect)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Cabeçalho da página: título grande e uma linha de explicação.
@@ -408,6 +418,12 @@ impl CheckExt for egui::Ui {
 /// Campo de texto de uma linha, alto e largo.
 pub(crate) fn field<'t>(text: &'t mut String, hint: &str) -> egui::TextEdit<'t> {
     egui::TextEdit::singleline(text).hint_text(hint).margin(Margin::symmetric(12, 10)).desired_width(f32::INFINITY)
+}
+
+/// Largura do campo que divide a linha com um controle de `taken` px à direita. O `desired_width` do egui não conta a
+/// margem interna do campo (12 px de cada lado) nem o espaço entre os dois: sem descontá-los a linha passa da coluna.
+pub(crate) fn field_beside(ui: &Ui, taken: f32) -> f32 {
+    (ui.available_width() - taken - ui.spacing().item_spacing.x - 24.0).max(120.0)
 }
 
 /// Sinal de mais desenhado (duas barras), porque a fonte pode não ter o glifo e mostrar um quadrado.

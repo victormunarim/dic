@@ -90,7 +90,7 @@ impl App {
                     let shown_id = show_secret_id();
                     let shown = ui.data(|d| d.get_temp::<bool>(shown_id)).unwrap_or(false);
                     ui.horizontal(|ui| {
-                        ui.add_enabled(offline, field(&mut self.form.secret, "chave secreta").password(!shown).desired_width((ui.available_width() - 44.0).max(120.0)))
+                        ui.add_enabled(offline, field(&mut self.form.secret, "chave secreta").password(!shown).desired_width(field_beside(ui, 34.0)))
                             .on_disabled_hover_text(locked);
                         // Mostrar e copiar só leem a chave e valem online; trocar muda o código de contato e fica
                         // num menu que pergunta e escreve o efeito.
@@ -135,7 +135,7 @@ impl App {
                 card(ui, "Seu nome", "Como os outros veem você na lista deles.", |ui| {
                     lock(ui, offline, locked, |ui| {
                         ui.horizontal(|ui| {
-                            ui.add(field(&mut self.form.my_name, "seu nome").char_limit(clam::media::update::MAX_NAME).desired_width((ui.available_width() - 32.0).max(120.0)))
+                            ui.add(field(&mut self.form.my_name, "seu nome").char_limit(clam::media::update::MAX_NAME).desired_width(field_beside(ui, 24.0)))
                                 .on_hover_text("Vazio, os outros veem só o código.");
                             reopen_mark(ui);
                         });
@@ -253,5 +253,59 @@ mod tests {
             });
         }
         assert_eq!(seen, vec![(true, true, true), (false, false, true)], "só o corpo trava; o menu da chave ao lado segue valendo");
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+    use crate::{theme::CARD_RECTS, ui::Tab};
+
+    fn app() -> App {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+        App {
+            rt,
+            form: Default::default(),
+            log: Default::default(),
+            shared: Default::default(),
+            running: None,
+            done: Default::default(),
+            error: String::new(),
+            tab: Tab::Settings,
+            audio_dirty: false,
+            screen_tex: Default::default(),
+            zoom: None,
+            trust_ask: None,
+            chat_with: None,
+            chat_draft: String::new(),
+            srv: Default::default(),
+            devs: Default::default(),
+        }
+    }
+
+    #[test]
+    fn settings_cards_never_overlap() {
+        for width in [620.0_f32, 900.0, 1300.0] {
+            for offline in [true, false] {
+                let mut app = app();
+                let ctx = egui::Context::default();
+                crate::theme::apply(&ctx);
+                CARD_RECTS.with(|r| r.borrow_mut().clear());
+                for _ in 0..3 {
+                    CARD_RECTS.with(|r| r.borrow_mut().clear());
+                    let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 1400.0))), ..Default::default() };
+                    let _ = ctx.run(input, |ctx| {
+                        egui::CentralPanel::default().show(ctx, |ui| app.settings_tab(ctx, ui, offline, false, ""));
+                    });
+                }
+                let rects = CARD_RECTS.with(|r| r.borrow().clone());
+                assert!(rects.len() >= 3, "largura {width}: só {} cartões", rects.len());
+                for (i, (a, ra)) in rects.iter().enumerate() {
+                    for (b, rb) in &rects[i + 1..] {
+                        assert!(!ra.intersects(*rb), "largura {width}, offline {offline}: '{a}' {ra:?} sobrepõe '{b}' {rb:?}");
+                    }
+                }
+            }
+        }
     }
 }
