@@ -210,7 +210,6 @@ impl App {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let gear = glyph_button(ui, "Menu", "Chamada, vídeo, áudio, configurações e atividade", None, gear_icon);
                 let calling_1to1 = in_call && !in_room;
-                let muted_now = self.shared.audio.muted.load(Ordering::Relaxed);
                 let menu = theme::menu(&gear).show(|ui| {
                     ui.set_min_width(theme::MENU_WIDTH);
                     type Icon = fn(&egui::Painter, egui::Pos2, f32, egui::Color32);
@@ -229,13 +228,6 @@ impl App {
                             self.tab = tab;
                             ui.close();
                         }
-                    }
-                    ui.separator();
-                    let keys = |k: &egui::KeyboardShortcut| ctx.format_shortcut(k);
-                    let mute_label = if muted_now { "Voltar a falar" } else { "Microfone mudo" };
-                    if menu_row(ui, None, false, None, mute_label, Some(&keys(&MUTE_KEY)), move |p, c, s, k| mic_icon(p, c, s, k, !muted_now)).clicked() {
-                        self.shared.audio.muted.store(!muted_now, Ordering::Relaxed);
-                        ui.close();
                     }
                 });
                 theme::menu_focus_back(ui, &gear, menu.is_some());
