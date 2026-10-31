@@ -489,29 +489,28 @@ impl App {
             .anchor(egui::Align2::CENTER_CENTER, vec2(0.0, 0.0))
             .show(ctx, |ui| {
                 ui.set_max_width(420.0);
-                ui.label("Enviar também o som do computador?");
-                ui.add_space(4.0);
-                ui.label(RichText::new("Quem assiste ouve o que toca aí, menos a voz do contato.").size(13.0).color(pal().muted));
-                // Só vale sem a privacidade da transmissão: com ela ligada o ritmo é constante e o som não aparece.
+                ui.label("Enviar o som do computador?");
+                // Sem a privacidade da transmissão o ritmo não é constante: o aviso protege e fica à vista.
                 if !private {
                     ui.add_space(4.0);
                     note(ui, "Sem privacidade na transmissão, quem observa a rede vê quando há som.");
                 }
                 ui.add_space(8.0);
-                let mut details = String::from("Usa cerca de 10% da banda do vídeo (2,5% sem privacidade).");
+                let mut with_sound = String::from("Com o som do computador: quem assiste ouve o que toca aí, menos a voz do contato. Usa cerca de 10% da banda do vídeo (2,5% sem privacidade).");
                 if cfg!(target_os = "linux") {
-                    details.push_str(" No Linux precisa de gstreamer1.0-tools com o plugin do PulseAudio; se a captura falhar, o motivo aparece em Atividade.");
+                    with_sound.push_str(" No Linux precisa de gstreamer1.0-tools com o plugin do PulseAudio; se a captura falhar, o motivo aparece em Atividade.");
                 }
-                // O botão do padrão salvo leva o acento e responde ao Enter; o outro fica neutro.
+                // O padrão salvo leva o acento e responde ao Enter; os três são ícones, o nome fica no hover.
                 ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 12.0;
                     let (with_fill, without_fill) = if default_sound { (BLURPLE, pal().bg) } else { (pal().bg, BLURPLE) };
-                    if button(ui, true, "Com som do PC", with_fill).on_hover_text(&details).clicked() {
+                    if choice_button(ui, "Com som do computador", &with_sound, with_fill, send_sound_icon).clicked() {
                         answer = Some(Some(true));
                     }
-                    if button(ui, true, "Só imagem", without_fill).clicked() {
+                    if choice_button(ui, "Só imagem, sem som", "Só imagem, sem o som do computador", without_fill, monitor_icon).clicked() {
                         answer = Some(Some(false));
                     }
-                    if button(ui, true, "Cancelar", pal().bg).clicked() {
+                    if choice_button(ui, "Cancelar", "Cancelar (Esc): não transmitir agora", pal().bg, close_icon).clicked() {
                         answer = Some(None);
                     }
                 });

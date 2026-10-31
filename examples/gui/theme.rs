@@ -804,6 +804,25 @@ pub(crate) fn speaker_icon(painter: &egui::Painter, center: Pos2, size: f32, col
     }
 }
 
+/// Alto-falante com a seta de saída: o som do computador vai para quem assiste.
+pub(crate) fn send_sound_icon(p: &egui::Painter, c: Pos2, size: f32, color: Color32) {
+    speaker_icon(p, c + vec2(-size * 0.12, 0.0), size * 0.9, color);
+    let u = |x: f32, y: f32| c + vec2(x * size, y * size);
+    let ink = Stroke::new(size * 0.085, color);
+    p.line_segment([u(0.3, 0.3), u(0.3, -0.3)], ink);
+    p.line_segment([u(0.3, -0.3), u(0.18, -0.16)], ink);
+    p.line_segment([u(0.3, -0.3), u(0.42, -0.16)], ink);
+}
+
+/// Botão grande de ícone para uma escolha numa pergunta: em relevo, no acento quando é o padrão (`fill`), e o nome
+/// da ação no hover e para o leitor de tela.
+pub(crate) fn choice_button(ui: &mut Ui, name: &str, tip: &str, fill: Color32, draw: impl FnOnce(&egui::Painter, Pos2, f32, Color32)) -> egui::Response {
+    let (reply, rect, pressed) = soft_surface(ui, true, fill, vec2(64.0, 48.0));
+    reply.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name));
+    draw(ui.painter(), rect.center() + if pressed { vec2(0.0, 1.0) } else { egui::Vec2::ZERO }, 28.0, ink_on(fill));
+    reply.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 /// Botão de ícone que liga e desliga o som da tela. `send` desenha o alto-falante com a seta de saída (o som do
 /// computador vai para quem assiste); sem ele, o alto-falante comum (ouvir o som das telas). Ligado: placa afundada e
 /// ícone no acento; desligado: ícone apagado e riscado. O estado nunca fica só na sombra (cor, relevo e risco juntos).
@@ -812,12 +831,7 @@ pub(crate) fn sound_toggle(ui: &mut Ui, on: bool, send: bool, name: &str, tip: &
     let state = format!("{name}: {}", if on { "ligado" } else { "desligado" });
     let draw = move |p: &egui::Painter, c: Pos2, size: f32, color: Color32| {
         if send {
-            speaker_icon(p, c + vec2(-size * 0.12, 0.0), size * 0.9, color);
-            let u = |x: f32, y: f32| c + vec2(x * size, y * size);
-            let ink = Stroke::new(size * 0.085, color);
-            p.line_segment([u(0.3, 0.3), u(0.3, -0.3)], ink);
-            p.line_segment([u(0.3, -0.3), u(0.18, -0.16)], ink);
-            p.line_segment([u(0.3, -0.3), u(0.42, -0.16)], ink);
+            send_sound_icon(p, c, size, color);
         } else {
             speaker_icon(p, c, size, color);
         }
@@ -1595,6 +1609,7 @@ mod tests {
             ("n:Apagar a sala", |ui| trash_button(ui, "n:Apagar a sala")),
             ("n:Menu", |ui| glyph_button(ui, "n:Menu", "dica", None, gear_icon)),
             ("n:Bate-papo", |ui| glyph_button(ui, "n:Bate-papo", "dica", Some(BLURPLE), chat_icon)),
+            ("n:Só imagem", |ui| choice_button(ui, "n:Só imagem", "dica", BLURPLE, monitor_icon)),
         ];
         for (want, draw) in buttons {
             let heard = heard(draw);
