@@ -47,8 +47,6 @@ pub(crate) struct App {
     /// Contato que a pessoa acabou de marcar como de confiança e ainda não confirmou o aviso do IP.
     pub(crate) trust_ask: Option<[u8; 32]>,
     /// Contato cuja conversa 1:1 está aberta no centro, e o texto ainda não enviado.
-    /// Contato que a pessoa pediu para remover e ainda não confirmou.
-    pub(crate) remove_ask: Option<[u8; 32]>,
     pub(crate) chat_with: Option<[u8; 32]>,
     pub(crate) chat_draft: String,
 }

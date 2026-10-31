@@ -12,11 +12,6 @@ pub(crate) fn focus_search_id() -> egui::Id {
     egui::Id::new("focar-busca")
 }
 
-/// Linha a que o foco volta depois de cancelar a remoção.
-fn back_focus_id() -> egui::Id {
-    egui::Id::new("foco-de-volta")
-}
-
 /// Clicável com o mouse, mas fora da ordem do Tab: avatar e nome abrem o mesmo bate-papo do botão da linha, que é a parada.
 const NO_TAB_STOP: egui::Sense = egui::Sense::CLICK;
 
@@ -222,9 +217,6 @@ impl App {
     /// mostra o escudo cheio na própria linha (expõe o IP: não pode ficar escondido). No alto, a busca.
     pub(crate) fn contacts_list(&mut self, ui: &mut egui::Ui, online: bool, in_call: bool) {
         let contacts = parse_contacts(&self.form.contacts);
-        if self.remove_ask.is_some_and(|k| !contacts.iter().any(|(_, c)| *c == k)) {
-            self.remove_ask = None;
-        }
         // O texto da busca vive na memória temporária da janela: não vai para o disco nem precisa de campo em `App`.
         let search_id = egui::Id::new("busca-contatos");
         let mut query = ui.data_mut(|d| d.get_temp::<String>(search_id)).unwrap_or_default();
@@ -294,11 +286,6 @@ impl App {
                 head.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, format!("{title} contatos")));
                 focus_ring(ui, &head, 4);
             }
-            if self.remove_ask == Some(*key) {
-                self.remove_row(ui, name, *key);
-                ui.add_space(4.0);
-                continue;
-            }
             raised_frame(ui, 12, 8, |ui| {
               ui.set_width(ui.available_width());
               ui.horizontal(|ui| {
@@ -347,12 +334,10 @@ impl App {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;
                     let dots = dots_button(ui, &format!("Mais ações de {name}"));
-                    // Cancelar a remoção devolve o foco ao menu desta linha, de onde a pessoa partiu.
-                    if ui.data(|d| d.get_temp::<[u8; 32]>(back_focus_id())) == Some(*key) {
-                        dots.request_focus();
-                        ui.data_mut(|d| d.remove_temp::<[u8; 32]>(back_focus_id()));
-                    }
-                    let menu = menu(&dots).show(|ui| {
+                    let ask = egui::Id::new(("remover-contato", key));
+                    let block_id = ask.with("bloquear");
+                    // Fecha só ao clicar fora (ou Esc): o primeiro clique em *Remover contato* troca o item pela pergunta.
+                    let menu = menu(&dots).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
                         let tip = if trusted {
                             "A sua tela vai direto a ele, sem relay, e ele vê o seu IP."
                         } else {
@@ -368,11 +353,23 @@ impl App {
                             }
                             ui.close();
                         }
-                        if menu_item(ui, false, Some(pal().error), "Remover contato", trash_icon).on_hover_text("Pede confirmação antes de remover").clicked() {
-                            remove = Some(i);
+                        // Remover é irreversível (o outro lado também te tira da lista dele): o menu pergunta e escreve o efeito.
+                        let effect = format!("{name} sai da sua lista e é avisado para tirar você da dele. O histórico do bate-papo fica guardado.");
+                        let block_tip = format!("Impede {name} de voltar sozinho à sua lista (por apresentação ou convite) até você adicioná-lo de novo ou desbloqueá-lo nas configurações.");
+                        let extra = |ui: &mut egui::Ui| {
+                            let mut block = ui.data(|d| d.get_temp::<bool>(block_id)).unwrap_or(false);
+                            ui.check(&mut block, "Bloquear também").on_hover_text(block_tip);
+                            ui.data_mut(|d| d.insert_temp(block_id, block));
+                        };
+                        if confirm_item_with(ui, ask, "Remover contato", "Pede confirmação antes de remover", &format!("Remover {name}?"), &effect, "Remover", trash_icon, extra) {
+                            remove = Some((i, ui.data(|d| d.get_temp::<bool>(block_id)).unwrap_or(false)));
                             ui.close();
                         }
                     });
+                    if menu.is_none() {
+                        reset_confirm(ui, ask);
+                        ui.data_mut(|d| d.remove_temp::<bool>(block_id));
+                    }
                     menu_focus_back(ui, &dots, menu.is_some());
                     let unread = unread[key];
                     // Leitor de tela e teclado não passam pelo hover do avatar: o estado do contato vai no nome do botão.
@@ -407,9 +404,10 @@ impl App {
             d.insert_temp(hover_id, over);
             d.insert_temp(order_id, order);
         });
-        // Remover é irreversível (o outro lado também te tira da lista dele): pede confirmação.
-        if let Some(i) = remove {
-            self.remove_ask = Some(contacts[i].1);
+        if let Some((i, block)) = remove
+            && let Some((name, key)) = contacts.get(i)
+        {
+            self.remove_confirmed(ui, name, *key, block);
         }
     }
 
@@ -455,53 +453,16 @@ impl App {
         }
     }
 
-    /// Pergunta antes de remover o contato, na própria linha: sem janela modal, e só a confirmação remove. Esc cancela.
-    fn remove_row(&mut self, ui: &mut egui::Ui, name: &str, key: [u8; 32]) {
-        let mut answer = None;
-        raised_frame(ui, 12, 8, |ui| {
-            ui.set_width(ui.available_width());
-            ui.label(RichText::new(format!("Remover {name}?")).strong().color(pal().strong));
-            ui.label(RichText::new(format!("{name} sai da sua lista e é avisado para tirar você da dele. O histórico do bate-papo fica guardado.")).size(13.0).color(pal().text));
-            let block_id = egui::Id::new("remover-e-bloquear");
-            let mut block = ui.data(|d| d.get_temp::<bool>(block_id)).unwrap_or(false);
-            ui.check(&mut block, "Bloquear também").on_hover_text(format!("Impede {name} de voltar sozinho à sua lista (por apresentação ou convite) até você adicioná-lo de novo ou desbloqueá-lo nas configurações."));
-            ui.data_mut(|d| d.insert_temp(block_id, block));
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                if button(ui, true, "Remover", pal().red).clicked() {
-                    answer = Some(if block { Remove::AndBlock } else { Remove::Only });
-                }
-                let cancel = button(ui, true, "Cancelar", pal().bg);
-                // O foco entra pelo padrão seguro: quem usa teclado cai na pergunta, e Enter não remove.
-                let asked = egui::Id::new("remover-foco");
-                if ui.data(|d| d.get_temp::<bool>(asked)).is_none() {
-                    cancel.request_focus();
-                    ui.data_mut(|d| d.insert_temp(asked, true));
-                }
-                if cancel.clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                    answer = Some(Remove::Cancel);
-                }
-            });
-        });
-        if let Some(choice) = answer {
-            self.remove_ask = None;
-            ui.data_mut(|d| {
-                d.remove::<bool>(egui::Id::new("remover-e-bloquear"));
-                d.remove::<bool>(egui::Id::new("remover-foco"));
-            });
-            if choice == Remove::Cancel {
-                ui.data_mut(|d| d.insert_temp(back_focus_id(), key));
-            } else {
-                self.remove_contact_now(key);
-                // A linha some e levaria o foco junto: ele vai para a busca (que só existe com contatos na lista).
-                if !parse_contacts(&self.form.contacts).is_empty() {
-                    ui.data_mut(|d| d.insert_temp(focus_search_id(), true));
-                }
-            }
-            if choice == Remove::AndBlock {
-                self.form.set_blocked_as(key, Some(name), true);
-                self.set_block(key, true);
-            }
+    /// Depois da confirmação no menu: tira o contato (e o bloqueia, se pedido). A linha some e levaria o foco junto,
+    /// então ele vai para a busca (que só existe com contatos na lista).
+    fn remove_confirmed(&mut self, ui: &mut egui::Ui, name: &str, key: [u8; 32], block: bool) {
+        self.remove_contact_now(key);
+        if !parse_contacts(&self.form.contacts).is_empty() {
+            ui.data_mut(|d| d.insert_temp(focus_search_id(), true));
+        }
+        if block {
+            self.form.set_blocked_as(key, Some(name), true);
+            self.set_block(key, true);
         }
     }
 
@@ -572,14 +533,6 @@ impl App {
         self.error.clear();
         self.form.save();
     }
-}
-
-/// A resposta do diálogo de remoção.
-#[derive(Clone, Copy, PartialEq)]
-enum Remove {
-    Only,
-    AndBlock,
-    Cancel,
 }
 
 #[cfg(test)]

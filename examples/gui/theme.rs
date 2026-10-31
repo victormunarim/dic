@@ -809,6 +809,16 @@ pub(crate) fn menu_item(ui: &mut Ui, selected: bool, tint: Option<Color32>, labe
 /// largura de um gatilho para outro.
 pub(crate) const MENU_WIDTH: f32 = 280.0;
 
+/// Texto de uma linha que cabe em `max_width`: o que passa vira "…".
+fn fit_one_line(painter: &egui::Painter, text: &str, font: FontId, color: Color32, max_width: f32) -> std::sync::Arc<egui::Galley> {
+    let mut job = egui::text::LayoutJob::simple_singleline(text.to_string(), font, color);
+    job.wrap.max_width = max_width.max(0.0);
+    job.wrap.max_rows = 1;
+    job.wrap.break_anywhere = true;
+    job.wrap.overflow_character = Some('…');
+    painter.layout_job(job)
+}
+
 /// Linha de menu completa. `blocked` com motivo apaga a linha (sem relevo nem clique) e leva o motivo ao hover e ao
 /// nome acessível, para teclado e leitor de tela não ficarem com um item mudo; `shortcut` aparece à direita, na mesma
 /// linha da ação a que pertence.
@@ -816,7 +826,8 @@ pub(crate) fn menu_row(ui: &mut Ui, blocked: Option<&str>, selected: bool, tint:
     let enabled = blocked.is_none();
     // Apagado continua alcançável pelo Tab (sem clicar), senão o motivo só existiria para o mouse.
     let sense = if enabled { egui::Sense::click() } else { egui::Sense::focusable_noninteractive() };
-    let (rect, reply) = ui.allocate_exact_size(vec2(ui.available_width().max(MENU_WIDTH), 30.0), sense);
+    // Apagada, a linha cresce e mostra o motivo sob o rótulo: sem hover (teclado, toque) ele continua à vista.
+    let (rect, reply) = ui.allocate_exact_size(vec2(ui.available_width().max(MENU_WIDTH), if enabled { 30.0 } else { 44.0 }), sense);
     let name = menu_row_name(label, blocked);
     // O foco antes do `widget_info`: o nome só é anunciado no quadro em que o controle ganha o foco.
     if enabled && take_menu_focus(ui.ctx()) {
@@ -834,13 +845,27 @@ pub(crate) fn menu_row(ui: &mut Ui, blocked: Option<&str>, selected: bool, tint:
     } else {
         tint.unwrap_or(if selected || reply.hovered() { pal().strong } else { pal().text })
     };
-    draw(painter, rect.left_center() + vec2(18.0, 0.0), 18.0, ink);
-    painter.text(rect.left_center() + vec2(36.0, 0.0), egui::Align2::LEFT_CENTER, label, TextStyle::Button.resolve(ui.style()), ink);
-    if let Some(keys) = shortcut {
-        painter.text(rect.right_center() - vec2(12.0, 0.0), egui::Align2::RIGHT_CENTER, keys, FontId::proportional(12.0), pal().muted);
+    let label_y = if enabled { rect.center().y } else { rect.top() + 15.0 };
+    draw(painter, egui::pos2(rect.left() + 18.0, label_y), 18.0, ink);
+    // O atalho e o ponto do item atual ficam à direita; o rótulo ganha o que sobra e termina em "…" em vez de passar por cima.
+    let keys = shortcut.map(|k| painter.layout_no_wrap(k.to_string(), FontId::proportional(12.0), pal().muted));
+    let right = match &keys {
+        Some(g) => g.size().x + 24.0,
+        None if enabled && selected => 28.0,
+        None => 12.0,
+    };
+    let text_x = rect.left() + 36.0;
+    let name_galley = fit_one_line(painter, label, TextStyle::Button.resolve(ui.style()), ink, rect.right() - right - text_x);
+    painter.galley(egui::pos2(text_x, label_y - name_galley.size().y / 2.0), name_galley, ink);
+    if let Some(why) = blocked {
+        let g = fit_one_line(painter, why, FontId::proportional(12.0), pal().muted, rect.right() - 12.0 - text_x);
+        painter.galley(egui::pos2(text_x, rect.top() + 32.0 - g.size().y / 2.0), g, pal().muted);
+    }
+    if let Some(g) = keys {
+        painter.galley(egui::pos2(rect.right() - 12.0 - g.size().x, label_y - g.size().y / 2.0), g, pal().muted);
     } else if enabled && selected {
         // O item atual não pode depender só do fundo: o ponto de acento diz "você está aqui" também sem o relevo.
-        painter.circle_filled(rect.right_center() - vec2(16.0, 0.0), 4.0, pal().focus);
+        painter.circle_filled(egui::pos2(rect.right() - 16.0, label_y), 4.0, pal().focus);
     }
     focus_ring(ui, &reply, 8);
     match blocked {
@@ -892,6 +917,13 @@ fn menu_row_name(label: &str, blocked: Option<&str>) -> String {
 /// o menu fecha por fora.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn confirm_item(ui: &mut Ui, id: egui::Id, label: &str, hint: &str, question: &str, effect: &str, confirm: &str, draw: impl FnOnce(&egui::Painter, Pos2, f32, Color32)) -> bool {
+    confirm_item_with(ui, id, label, hint, question, effect, confirm, draw, |_| {})
+}
+
+/// Como [`confirm_item`], com `extra` desenhado entre o efeito e os botões (uma opção que vale só para esta
+/// confirmação, como *Bloquear também*). Quem guarda o estado da opção também o limpa quando o menu fecha.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn confirm_item_with(ui: &mut Ui, id: egui::Id, label: &str, hint: &str, question: &str, effect: &str, confirm: &str, draw: impl FnOnce(&egui::Painter, Pos2, f32, Color32), extra: impl FnOnce(&mut Ui)) -> bool {
     ui.set_min_width(MENU_WIDTH);
     let focus_cancel = id.with("foco-cancelar");
     let focus_item = id.with("foco-item");
@@ -913,6 +945,7 @@ pub(crate) fn confirm_item(ui: &mut Ui, id: egui::Id, label: &str, hint: &str, q
     let esc = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
     ui.add(egui::Label::new(RichText::new(question).strong().color(pal().strong)).wrap());
     ui.add(egui::Label::new(RichText::new(effect).size(13.0).color(pal().text)).wrap());
+    extra(ui);
     let mut done = false;
     if menu_item(ui, false, Some(pal().error), confirm, trash_icon).clicked() {
         done = true;
@@ -1022,6 +1055,29 @@ pub(crate) fn confined<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
 
 #[cfg(test)]
 mod tests {
+    /// Um rótulo comprido numa linha de menu termina em "…" dentro da largura, em vez de passar por cima do atalho; a
+    /// linha apagada cresce para mostrar o motivo.
+    #[test]
+    fn menu_row_elides_long_label_and_grows_when_blocked() {
+        let ctx = egui::Context::default();
+        let mut heights = (0.0, 0.0);
+        let mut fitted = (f32::MAX, false);
+        for _ in 0..3 {
+            let _ = ctx.run(egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 600.0))), ..Default::default() }, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let long = "Um rótulo muito comprido que não cabe na largura mínima do menu";
+                    heights.0 = menu_row(ui, None, false, None, long, Some("Ctrl+Shift+I"), invite_icon).rect.height();
+                    heights.1 = menu_row(ui, Some("Abra um servidor para usar"), false, None, "Convidar", None, invite_icon).rect.height();
+                    let galley = fit_one_line(ui.painter(), long, FontId::proportional(14.0), Color32::WHITE, 120.0);
+                    fitted = (galley.size().x, galley.elided);
+                });
+            });
+        }
+        assert_eq!(heights, (30.0, 44.0));
+        assert!(fitted.0 <= 120.0 + 0.5, "largura {}", fitted.0);
+        assert!(fitted.1, "o rótulo comprido devia ser cortado");
+    }
+
     /// Largura da coluna esquerda depois de desenhar `wide` de largura de conteúdo, com ou sem `confined`.
     fn panel_width(wide: f32, confine: bool) -> f32 {
         let ctx = egui::Context::default();
