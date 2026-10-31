@@ -25,9 +25,9 @@ impl App {
         }
         let xfers = self.shared.transfers.lock_unpoisoned().of(&peer);
         let mut file_cmds: Vec<Cmd> = Vec::new();
-        // Como `card`, mas com o X no fim da linha do título.
+        // Sem cartão, como o bate-papo da sala: título, mensagens até o pé da janela e a linha de envio embaixo.
         ui.add_space(4.0);
-        raised_frame(ui, R_CARD, 22, |ui| {
+        ui.scope(|ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 ui.label(RichText::new(format!("Bate-papo com {name}")).strong().size(18.0).color(pal().strong));
@@ -42,7 +42,7 @@ impl App {
             });
             note(ui, "Só vai para quem está online. Cada um guarda a sua cópia nesta máquina.");
             ui.add_space(6.0);
-            let height = (ui.clip_rect().bottom() - ui.cursor().top() - 92.0).max(160.0);
+            let height = (ui.clip_rect().bottom() - ui.cursor().top() - 84.0).max(160.0);
             egui::ScrollArea::vertical().id_salt(("conversa", peer)).max_height(height).min_scrolled_height(height).stick_to_bottom(true).auto_shrink([false, false]).show(ui, |ui| {
                 if msgs.is_empty() {
                     note(ui, "Sem mensagens ainda.");
@@ -110,7 +110,7 @@ impl App {
                 }
             });
         });
-        ui.add_space(18.0);
+        ui.add_space(16.0);
         if let Some(r) = &self.running {
             for c in file_cmds {
                 let _ = r.cmds.send(c);
