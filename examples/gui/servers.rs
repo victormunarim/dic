@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering;
 use clam::server::{Output, Role, ServerId, ServerView};
 use eframe::egui::{self, Color32, CornerRadius, Margin, RichText, vec2};
 
-use crate::{conf::*, engine::*, theme::*, ui::{App, Tab}};
+use crate::{conf::*, engine::*, theme::*, ui::{App, Tab, INVITE_KEY, MEMBERS_KEY}};
 
 /// O que a aba lembra entre um quadro e outro.
 #[derive(Default)]
@@ -47,6 +47,14 @@ const MEMBERS_FIT_WIDTH: f32 = 1100.0;
 /// A coluna de membros aparece? A escolha da pessoa vale; sem ela, só em janela larga.
 fn members_shown(choice: Option<bool>, window_width: f32) -> bool {
     choice.unwrap_or(window_width >= MEMBERS_FIT_WIDTH)
+}
+
+impl ServersUi {
+    /// Abre o cartão de convite e a coluna de membros, onde ele mora, mesmo em janela estreita.
+    fn start_invite(&mut self) {
+        self.inviting = true;
+        self.members_open = Some(true);
+    }
 }
 
 fn role_name(r: Role) -> &'static str {
@@ -324,8 +332,14 @@ impl App {
                                 let exit = exit_button(ui).on_hover_text("Sair do servidor");
                                 egui::Popup::menu(&exit).show(|ui| self.server_menu(ui, hub, v));
                                 let shown = members_shown(self.srv.members_open, ctx.screen_rect().width());
-                                if members_toggle(ui, shown).on_hover_text(if shown { "Esconder os membros e o convite" } else { "Mostrar os membros e o convite" }).clicked() {
+                                let members_tip = format!("{} os membros ({})", if shown { "Esconder" } else { "Mostrar" }, ctx.format_shortcut(&MEMBERS_KEY));
+                                if members_toggle(ui, shown).on_hover_text(members_tip).clicked() || ctx.input_mut(|i| i.consume_shortcut(&MEMBERS_KEY)) {
                                     self.srv.members_open = Some(!shown);
+                                }
+                                // Convidar fora da coluna: em janela estreita ela fica escondida e o convite com ela.
+                                let invite_tip = format!("Convidar alguém ({})", ctx.format_shortcut(&INVITE_KEY));
+                                if glyph_button(ui, "Convidar alguém", None, invite_icon).on_hover_text(invite_tip).clicked() || ctx.input_mut(|i| i.consume_shortcut(&INVITE_KEY)) {
+                                    self.srv.start_invite();
                                 }
                             });
                         });
@@ -670,6 +684,11 @@ impl App {
             }
             return;
         }
+        // Esc fecha o cartão, a menos que a tecla esteja fechando a lista de contatos aberta.
+        if !egui::Popup::is_any_open(ui.ctx()) && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+            self.srv.inviting = false;
+            return;
+        }
         {
           raised_frame(ui, 12, 12, |ui| {
             ui.set_width(ui.available_width());
@@ -876,5 +895,22 @@ mod tests {
         assert!(members_shown(None, MEMBERS_FIT_WIDTH));
         assert!(members_shown(Some(true), 820.0));
         assert!(!members_shown(Some(false), 1920.0));
+    }
+
+    #[test]
+    fn inviting_opens_the_members_column_even_in_a_narrow_window() {
+        let mut srv = ServersUi::default();
+        srv.start_invite();
+        assert!(srv.inviting);
+        assert!(members_shown(srv.members_open, 820.0), "o convite mora na coluna de membros");
+    }
+
+    #[test]
+    fn shortcuts_do_not_collide() {
+        use crate::ui::MUTE_KEY;
+        let keys = [MUTE_KEY, INVITE_KEY, MEMBERS_KEY];
+        for (i, a) in keys.iter().enumerate() {
+            assert!(keys.iter().skip(i + 1).all(|b| a != b), "atalho repetido: {a:?}");
+        }
     }
 }

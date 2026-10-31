@@ -81,7 +81,7 @@ impl App {
                                 ui.horizontal(|ui| {
                                     ui.label(RichText::new(&hex(&key)[..8]).color(pal().text));
                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                        if icon_button(ui, true, "✕", "Desbloquear", pal().text).clicked() {
+                                        if close_button(ui, "Desbloquear").clicked() {
                                             self.set_block(key, false);
                                         }
                                     });

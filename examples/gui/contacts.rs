@@ -98,7 +98,7 @@ impl App {
         // O texto da busca vive na memória temporária da janela: não vai para o disco nem precisa de campo em `App`.
         let search_id = egui::Id::new("busca-contatos");
         let mut query = ui.data_mut(|d| d.get_temp::<String>(search_id)).unwrap_or_default();
-        ui.add(field(&mut query, "🔍 Buscar contato"));
+        ui.add(field(&mut query, "Buscar contato"));
         ui.data_mut(|d| d.insert_temp(search_id, query.clone()));
         let needle = query.trim().to_lowercase();
         if contacts.is_empty() {
@@ -129,7 +129,9 @@ impl App {
                 ui.add_sized([ui.available_width() - 118.0 - if pending { 22.0 } else { 0.0 }, 32.0], egui::Label::new(RichText::new(name).strong().color(pal().text)).truncate())
                     .on_hover_text(format!("{}…", &hex(key)[..16]));
                 if pending {
-                    ui.label(RichText::new("❗").size(14.0).color(pal().yellow)).on_hover_text("Contato pendente: ainda sem nome. Não existe servidor: cada pessoa fala direto com a outra, cifrado. Quando o contato se apresenta, o nome e o endereço dele chegam sozinhos e esta marca some. A apresentação só é entregue com ele ligado, e o programa insiste até conseguir.");
+                    let (mark, _) = ui.allocate_exact_size(vec2(18.0, 18.0), egui::Sense::hover());
+                    alert_icon(ui.painter(), mark.center(), 16.0, pal().yellow);
+                    ui.interact(mark, egui::Id::new(("pendente", key)), egui::Sense::hover()).on_hover_text("Contato pendente: ainda sem nome. Não existe servidor: cada pessoa fala direto com a outra, cifrado. Quando o contato se apresenta, o nome e o endereço dele chegam sozinhos e esta marca some. A apresentação só é entregue com ele ligado, e o programa insiste até conseguir.");
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;
@@ -150,11 +152,8 @@ impl App {
                             self.trust_ask = Some(*key);
                         }
                     }
-                    // Os três ícones têm a mesma largura e ficam colados: o 📞 é texto, então sem o enchimento do botão.
-                    let call = ui.scope(|ui| {
-                        ui.spacing_mut().button_padding = vec2(0.0, 0.0);
-                        ui.add_enabled(online && !in_call && online_keys.contains(key), egui::Button::new(RichText::new("📞").size(16.0)).frame(false).min_size(vec2(28.0, 34.0)))
-                    }).inner;
+                    // Os três ícones têm a mesma largura e ficam colados.
+                    let call = ui.add_enabled_ui(online && !in_call && online_keys.contains(key), |ui| glyph_button(ui, "Ligar", None, phone_icon)).inner;
                     let off_tip = if ringing == Some(*key) {
                         "Chamando…"
                     } else if online && !in_call {
@@ -166,11 +165,7 @@ impl App {
                         self.dial(*key);
                     }
                     let unread = unread[key];
-                    let chat = ui.scope(|ui| {
-                        ui.spacing_mut().button_padding = vec2(0.0, 0.0);
-                        let ink = if unread > 0 { BLURPLE } else { pal().text };
-                        ui.add(egui::Button::new(RichText::new("💬").size(16.0).color(ink)).frame(false).min_size(vec2(28.0, 34.0)))
-                    }).inner;
+                    let chat = glyph_button(ui, "Bate-papo", (unread > 0).then_some(pal().focus), chat_icon);
                     let tip = if unread > 0 { format!("Bate-papo ({unread} nova(s))") } else { "Bate-papo".to_string() };
                     if chat.on_hover_text(tip).clicked() {
                         self.open_chat(*key);

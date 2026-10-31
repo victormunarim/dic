@@ -292,6 +292,7 @@ pub(crate) fn button(ui: &mut Ui, enabled: bool, text: &str, fill: Color32) -> e
 }
 
 /// Botão quadrado só com ícone; o nome da ação aparece ao passar o mouse.
+#[allow(dead_code)] // vocabulário do tema: os ícones agora são desenhados (`glyph_button`), mas o botão de texto continua útil
 pub(crate) fn icon_button(ui: &mut Ui, enabled: bool, icon: &str, tip: &str, fill: Color32) -> egui::Response {
     soft_button(ui, enabled, RichText::new(icon).size(18.0).color(Color32::WHITE), fill, vec2(44.0, 40.0)).on_hover_text(tip)
 }
@@ -625,6 +626,103 @@ pub(crate) fn speaker_icon(painter: &egui::Painter, center: Pos2, size: f32, col
             .collect();
         painter.add(Shape::line(pts, wave));
     }
+}
+
+/// Balão de conversa (bate-papo), desenhado: contorno arredondado com a ponta para baixo à esquerda.
+pub(crate) fn chat_icon(painter: &egui::Painter, center: Pos2, size: f32, color: Color32) {
+    let u = |x: f32, y: f32| center + vec2(x * size, y * size);
+    let ink = Stroke::new(size * 0.085, color);
+    painter.rect_stroke(Rect::from_min_max(u(-0.4, -0.34), u(0.4, 0.14)), CornerRadius::same((size * 0.14) as u8), ink, egui::StrokeKind::Middle);
+    painter.add(Shape::line(vec![u(-0.2, 0.14), u(-0.28, 0.38), u(0.0, 0.14)], ink));
+}
+
+/// Engrenagem (menu de páginas), desenhada: anel, miolo e oito dentes.
+pub(crate) fn gear_icon(painter: &egui::Painter, center: Pos2, size: f32, color: Color32) {
+    painter.circle_stroke(center, size * 0.28, Stroke::new(size * 0.1, color));
+    painter.circle_filled(center, size * 0.08, color);
+    let tooth = Stroke::new(size * 0.14, color);
+    for i in 0..8 {
+        let d = vec2((i as f32 * 45.0).to_radians().cos(), (i as f32 * 45.0).to_radians().sin());
+        painter.line_segment([center + d * (size * 0.34), center + d * (size * 0.44)], tooth);
+    }
+}
+
+/// Microfone, desenhado: cápsula, concha e haste. `off` risca o ícone (mudo).
+pub(crate) fn mic_icon(painter: &egui::Painter, center: Pos2, size: f32, color: Color32, off: bool) {
+    let u = |x: f32, y: f32| center + vec2(x * size, y * size);
+    let ink = Stroke::new(size * 0.085, color);
+    painter.rect_stroke(Rect::from_min_max(u(-0.12, -0.4), u(0.12, 0.05)), CornerRadius::same((size * 0.12) as u8), ink, egui::StrokeKind::Middle);
+    let cup: Vec<Pos2> = (0..=12).map(|i| { let a = (180.0 * i as f32 / 12.0).to_radians(); u(0.0, -0.02) + vec2(a.cos(), a.sin()) * (size * 0.26) }).collect();
+    painter.add(Shape::line(cup, ink));
+    painter.line_segment([u(0.0, 0.24), u(0.0, 0.4)], ink);
+    painter.line_segment([u(-0.12, 0.4), u(0.12, 0.4)], ink);
+    if off {
+        painter.line_segment([u(-0.36, -0.36), u(0.36, 0.36)], Stroke::new(size * 0.1, color));
+    }
+}
+
+/// Monitor pequeno (página de vídeo no menu), desenhado.
+pub(crate) fn monitor_icon(painter: &egui::Painter, center: Pos2, size: f32, color: Color32) {
+    let u = |x: f32, y: f32| center + vec2(x * size, y * size);
+    let ink = Stroke::new(size * 0.085, color);
+    painter.rect_stroke(Rect::from_min_max(u(-0.4, -0.3), u(0.4, 0.14)), CornerRadius::same((size * 0.08) as u8), ink, egui::StrokeKind::Middle);
+    painter.line_segment([u(0.0, 0.14), u(0.0, 0.32)], ink);
+    painter.line_segment([u(-0.2, 0.34), u(0.2, 0.34)], ink);
+}
+
+/// Folha com linhas (atividade, o registro do programa), desenhada.
+pub(crate) fn log_icon(painter: &egui::Painter, center: Pos2, size: f32, color: Color32) {
+    let u = |x: f32, y: f32| center + vec2(x * size, y * size);
+    let ink = Stroke::new(size * 0.085, color);
+    painter.rect_stroke(Rect::from_min_max(u(-0.28, -0.4), u(0.28, 0.4)), CornerRadius::same((size * 0.08) as u8), ink, egui::StrokeKind::Middle);
+    for y in [-0.2_f32, 0.0, 0.2] {
+        painter.line_segment([u(-0.14, y), u(0.14, y)], ink);
+    }
+}
+
+/// Pessoa com um sinal de mais (convidar), desenhada.
+pub(crate) fn invite_icon(painter: &egui::Painter, center: Pos2, size: f32, color: Color32) {
+    person_icon(painter, center + vec2(-size * 0.1, size * 0.04), size * 0.9, color);
+    draw_plus(painter, center + vec2(size * 0.3, -size * 0.2), size * 0.15, color);
+}
+
+/// Triângulo com exclamação (aviso, contato pendente), desenhado.
+pub(crate) fn alert_icon(painter: &egui::Painter, center: Pos2, size: f32, color: Color32) {
+    let u = |x: f32, y: f32| center + vec2(x * size, y * size);
+    let ink = Stroke::new(size * 0.1, color);
+    painter.add(Shape::closed_line(vec![u(0.0, -0.4), u(0.42, 0.34), u(-0.42, 0.34)], ink));
+    painter.line_segment([u(0.0, -0.1), u(0.0, 0.1)], ink);
+    painter.circle_filled(u(0.0, 0.22), size * 0.05, color);
+}
+
+/// Botão só com um ícone desenhado, sem moldura (lista de contatos, painel do usuário). `draw` pinta o ícone;
+/// `name` é o que o leitor de tela diz; `color` fixa a tinta (sem ela: texto, e forte ao passar o mouse). Num
+/// `Ui` desligado o ícone apaga e não clica.
+pub(crate) fn glyph_button(ui: &mut Ui, name: &str, color: Option<Color32>, draw: impl FnOnce(&egui::Painter, Pos2, f32, Color32)) -> egui::Response {
+    let enabled = ui.is_enabled();
+    let (rect, reply) = ui.allocate_exact_size(vec2(28.0, 34.0), egui::Sense::click());
+    reply.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, name));
+    let ink = if !enabled { pal().muted.gamma_multiply(0.5) } else { color.unwrap_or(if reply.hovered() { pal().strong } else { pal().text }) };
+    draw(ui.painter(), rect.center(), 20.0, ink);
+    focus_ring(ui, &reply, 8);
+    reply.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Linha de menu com ícone desenhado à esquerda; `selected` afunda a linha como o item atual.
+pub(crate) fn menu_item(ui: &mut Ui, selected: bool, label: &str, draw: impl FnOnce(&egui::Painter, Pos2, f32, Color32)) -> egui::Response {
+    let (rect, reply) = ui.allocate_exact_size(vec2(ui.available_width().max(190.0), 30.0), egui::Sense::click());
+    reply.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+    let painter = ui.painter();
+    if selected {
+        painter.rect_filled(rect, CornerRadius::same(8), pal().selected);
+    } else if reply.hovered() {
+        painter.rect_filled(rect, CornerRadius::same(8), pal().hover);
+    }
+    let ink = if selected || reply.hovered() { pal().strong } else { pal().text };
+    draw(painter, rect.left_center() + vec2(18.0, 0.0), 18.0, ink);
+    painter.text(rect.left_center() + vec2(36.0, 0.0), egui::Align2::LEFT_CENTER, label, TextStyle::Button.resolve(ui.style()), ink);
+    focus_ring(ui, &reply, 8);
+    reply.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// Lupa (tela cheia), desenhada: aro e cabo.

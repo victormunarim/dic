@@ -6,7 +6,7 @@ use std::{sync::{
     atomic::{AtomicBool, Ordering},
 }, time::Duration};
 
-use eframe::egui::{self, Color32, Margin, RichText, vec2};
+use eframe::egui::{self, Color32, Margin, vec2};
 use tokio::sync::mpsc;
 
 use crate::{conf::*, engine::*, theme::{self, *}};
@@ -90,6 +90,12 @@ pub(crate) fn devices_ui(ui: &mut egui::Ui, form: &mut Form, devs: &mut (Vec<Str
         *devs = clam::audio::devices();
     }
 }
+
+/// Atalhos de teclado (Ctrl; Cmd no macOS). Entrar numa sala não tem atalho de propósito: é o gesto que mostra o
+/// IP aos membros, e uma tecla perdida não pode fazer isso.
+pub(crate) const MUTE_KEY: egui::KeyboardShortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::M);
+pub(crate) const INVITE_KEY: egui::KeyboardShortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::I);
+pub(crate) const MEMBERS_KEY: egui::KeyboardShortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::B);
 
 impl App {
     pub(crate) fn go_online(&mut self, ctx: &egui::Context) {
@@ -203,26 +209,29 @@ impl App {
             // Sair da sala e desligar a chamada 1:1 ficam na subseção acima deste painel.
             // Engrenagem e mudo ficam juntos na ponta direita da linha (a engrenagem por último, na borda).
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let gear = egui::Button::new(RichText::new("⚙").size(19.0).color(pal().text)).frame(false).min_size(vec2(34.0, 36.0));
-                let gear = ui.add(gear).on_hover_text("Chamada, vídeo, áudio, configurações e atividade");
+                let gear = glyph_button(ui, "Menu", None, gear_icon).on_hover_text("Chamada, vídeo, áudio, configurações e atividade");
                 let calling_1to1 = in_call && !in_room;
                 egui::Popup::menu(&gear).show(|ui| {
+                    type Icon = fn(&egui::Painter, egui::Pos2, f32, egui::Color32);
+                    let mic: Icon = |p, c, s, k| mic_icon(p, c, s, k, false);
                     for (tab, icon, label) in [
-                        (Tab::Call, "📞", if calling_1to1 { "Chamada ●" } else { "Chamada" }),
-                        (Tab::Video, "🖥", "Vídeo"),
-                        (Tab::Audio, "🎤", "Áudio"),
-                        (Tab::Settings, "⚙", "Configurações"),
-                        (Tab::Log, "📜", "Atividade"),
+                        (Tab::Call, phone_icon as Icon, if calling_1to1 { "Chamada ●" } else { "Chamada" }),
+                        (Tab::Video, monitor_icon as Icon, "Vídeo"),
+                        (Tab::Audio, mic, "Áudio"),
+                        (Tab::Settings, gear_icon as Icon, "Configurações"),
+                        (Tab::Log, log_icon as Icon, "Atividade"),
                     ] {
-                        if ui.selectable_label(self.tab == tab, format!("{icon}  {label}")).clicked() {
+                        if menu_item(ui, self.tab == tab, label, icon).clicked() {
                             self.tab = tab;
                             ui.close();
                         }
                     }
                 });
                 let muted = self.shared.audio.muted.load(Ordering::Relaxed);
-                let mic = egui::Button::new(RichText::new(if muted { "🔇" } else { "🎤" }).size(19.0).color(if muted { pal().red } else { pal().text })).frame(false).min_size(vec2(34.0, 36.0));
-                if ui.add(mic).on_hover_text(if muted { "Você está no mudo: clique para voltar a falar" } else { "Silenciar o microfone" }).clicked() {
+                let mic = glyph_button(ui, "Microfone", muted.then_some(pal().red), |p, c, s, k| mic_icon(p, c, s, k, muted));
+                let shortcut = ctx.format_shortcut(&MUTE_KEY);
+                let tip = if muted { format!("Você está no mudo: clique para voltar a falar ({shortcut})") } else { format!("Silenciar o microfone ({shortcut})") };
+                if mic.on_hover_text(tip).clicked() || ctx.input_mut(|i| i.consume_shortcut(&MUTE_KEY)) {
                     self.shared.audio.muted.store(!muted, Ordering::Relaxed);
                 }
             });
