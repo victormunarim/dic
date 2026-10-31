@@ -481,48 +481,54 @@ impl App {
     pub(crate) fn share_window(&mut self, ctx: &egui::Context) {
         let Some(room) = ctx.data(|d| d.get_temp::<bool>(share_ask_id())) else { return };
         let mut answer: Option<Option<bool>> = None;
-        let default_sound = self.form.screen_audio;
         let private = self.form.screen_private;
-        egui::Window::new("Som da transmissão")
+        // O som começa ligado a cada transmissão; a chave só vale nesta janela.
+        let sound_id = egui::Id::new("transmitir-tela-som");
+        let mut sound = ctx.data(|d| d.get_temp::<bool>(sound_id)).unwrap_or(true);
+        egui::Window::new("Transmitir a tela")
             .id(egui::Id::new("transmitir-tela"))
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, vec2(0.0, 0.0))
             .show(ctx, |ui| {
                 ui.set_max_width(420.0);
-                ui.label("Enviar o som do computador?");
+                let mut tip = String::from("Som do computador: quem assiste ouve o que toca aí, menos a voz do contato. Usa cerca de 10% da banda do vídeo (2,5% sem privacidade).");
+                if cfg!(target_os = "linux") {
+                    tip.push_str(" No Linux precisa de gstreamer1.0-tools com o plugin do PulseAudio; se a captura falhar, o motivo aparece em Atividade.");
+                }
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 12.0;
+                    if sound_toggle(ui, sound, false, "Som do computador", &tip) {
+                        sound = !sound;
+                    }
+                    ui.label(if sound { "Com o som do computador" } else { "Só a imagem" });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // Enter transmite com o que está marcado; Esc cancela.
+                        if choice_button(ui, "Transmitir", "Transmitir a tela (Enter)", BLURPLE, monitor_icon).clicked() {
+                            answer = Some(Some(sound));
+                        }
+                        if choice_button(ui, "Cancelar", "Cancelar (Esc): não transmitir agora", pal().bg, close_icon).clicked() {
+                            answer = Some(None);
+                        }
+                    });
+                });
                 // Sem a privacidade da transmissão o ritmo não é constante: o aviso protege e fica à vista.
-                if !private {
+                if sound && !private {
                     ui.add_space(4.0);
                     note(ui, "Sem privacidade na transmissão, quem observa a rede vê quando há som.");
                 }
-                ui.add_space(8.0);
-                let mut with_sound = String::from("Com o som do computador: quem assiste ouve o que toca aí, menos a voz do contato. Usa cerca de 10% da banda do vídeo (2,5% sem privacidade).");
-                if cfg!(target_os = "linux") {
-                    with_sound.push_str(" No Linux precisa de gstreamer1.0-tools com o plugin do PulseAudio; se a captura falhar, o motivo aparece em Atividade.");
-                }
-                // O padrão salvo leva o acento e responde ao Enter; os três são ícones, o nome fica no hover.
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 12.0;
-                    let (with_fill, without_fill) = if default_sound { (BLURPLE, pal().bg) } else { (pal().bg, BLURPLE) };
-                    if choice_button(ui, "Com som do computador", &with_sound, with_fill, speaker_icon).clicked() {
-                        answer = Some(Some(true));
-                    }
-                    if choice_button(ui, "Só imagem, sem som", "Só imagem, sem o som do computador", without_fill, speaker_off_icon).clicked() {
-                        answer = Some(Some(false));
-                    }
-                    if choice_button(ui, "Cancelar", "Cancelar (Esc): não transmitir agora", pal().bg, close_icon).clicked() {
-                        answer = Some(None);
-                    }
-                });
                 if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                     answer = Some(None);
                 } else if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                    answer = Some(Some(default_sound));
+                    answer = Some(Some(sound));
                 }
             });
+        ctx.data_mut(|d| d.insert_temp(sound_id, sound));
         let Some(choice) = answer else { return };
-        ctx.data_mut(|d| d.remove_temp::<bool>(share_ask_id()));
+        ctx.data_mut(|d| {
+            d.remove_temp::<bool>(share_ask_id());
+            d.remove_temp::<bool>(sound_id);
+        });
         if let Some(sound) = choice {
             self.form.screen_audio = sound;
             self.form.save();
