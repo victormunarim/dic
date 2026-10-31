@@ -78,8 +78,12 @@ mod real {
         }
 
         /// Codifica o que a captura juntou e entrega cada quadro a `push`. Devolve `false` se a captura morreu.
-        pub(crate) fn pump(&mut self, mut push: impl FnMut(&[u8])) -> bool {
+        pub(crate) fn pump(&mut self, st: &ScreenState, mut push: impl FnMut(&[u8])) -> bool {
             while let Some(pcm) = self.sys.frame() {
+                st.audio_cap.fetch_add(1, Ordering::Relaxed);
+                if !is_silent(&pcm) {
+                    st.audio_loud.fetch_add(1, Ordering::Relaxed);
+                }
                 if self.gate.pass(&pcm)
                     && let Ok(data) = self.opus.encode(&pcm)
                 {
@@ -100,11 +104,12 @@ impl AudioTx {
     pub(crate) fn open(shared: &Shared, out: &Sink) -> Option<Self> {
         if shared.screen.audio.load(Ordering::Relaxed) {
             out.line("tela: sem som do computador (compilado sem a feature audio); só a imagem");
+            *shared.screen.note.lock_unpoisoned() = "sem som do computador: este programa foi compilado sem a feature audio".into();
         }
         None
     }
 
-    pub(crate) fn pump(&mut self, _: impl FnMut(&[u8])) -> bool {
+    pub(crate) fn pump(&mut self, _: &ScreenState, _: impl FnMut(&[u8])) -> bool {
         match *self {}
     }
 }

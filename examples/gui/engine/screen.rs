@@ -50,6 +50,9 @@ pub(crate) struct ScreenState {
     /// Contadores do som da tela, para o diagnóstico: quadros enviados (quem transmite), recebidos e tocados (quem
     /// assiste). Sem eles, "o som não sai" não diz de que lado parou.
     audio_tx: AtomicU64,
+    /// Quadros que a captura entregou e quantos tinham som (o resto é silêncio, que não sai).
+    pub(crate) audio_cap: AtomicU64,
+    pub(crate) audio_loud: AtomicU64,
     audio_rx: AtomicU64,
     audio_played: AtomicU64,
     /// O que o alto-falante do programa tocou, para tirar do som do computador (`None` sem áudio aberto).
@@ -144,19 +147,20 @@ impl ScreenState {
             }
             out.push_str(&format!("recebidos {} quadros, {} viraram imagem, {} com erro, {} perdidos no caminho", n(0), n(1), n(2), n(3)));
         }
+        let (cap, loud) = (self.audio_cap.load(Ordering::Relaxed), self.audio_loud.load(Ordering::Relaxed));
         let (sent, got, played) = (self.audio_tx.load(Ordering::Relaxed), self.audio_rx.load(Ordering::Relaxed), self.audio_played.load(Ordering::Relaxed));
-        if sent + got > 0 {
+        if cap + sent + got > 0 {
             if !out.is_empty() {
                 out.push_str(" · ");
             }
-            out.push_str(&format!("som: {sent} quadros enviados, {got} recebidos, {played} tocados"));
+            out.push_str(&format!("som: capturados {cap} ({loud} com som), enviados {sent}, recebidos {got}, tocados {played}"));
         }
         out
     }
 
     /// Fim da chamada: somem as imagens e a transmissão é interrompida.
     pub(crate) fn reset(&self) {
-        for c in self.rx.iter().chain([&self.audio_tx, &self.audio_rx, &self.audio_played]) {
+        for c in self.rx.iter().chain([&self.audio_cap, &self.audio_loud, &self.audio_tx, &self.audio_rx, &self.audio_played]) {
             c.store(0, Ordering::Relaxed);
         }
         self.want_share.store(false, Ordering::Relaxed);
@@ -347,7 +351,7 @@ pub(crate) async fn share_task(dialer: Dialer, peer: [u8; 32], keys: clam::media
             nap_until(next, || {
                 follow_audio_switch(&mut audio, &mut audio_gave_up, &flag, &audio_out);
                 if let Some(a) = audio.as_mut()
-                    && !a.pump(|d| {
+                    && !a.pump(&flag.screen, |d| {
                         let _ = share.push_audio(d);
                         flag.screen.audio_tx.fetch_add(1, Ordering::Relaxed);
                     })
@@ -432,7 +436,7 @@ pub(crate) async fn start_room_capture(shared: Arc<Shared>, out: Sink) -> Option
                 // Ninguém assiste: o som capturado é jogado fora, para não chegar velho a quem entrar.
                 follow_audio_switch(&mut audio, &mut audio_gave_up, &shared, &audio_out);
                 if let Some(a) = audio.as_mut() {
-                    a.pump(|_| {});
+                    a.pump(&shared.screen, |_| {});
                 }
                 std::thread::sleep(Duration::from_millis(50));
                 next = std::time::Instant::now();
@@ -452,7 +456,7 @@ pub(crate) async fn start_room_capture(shared: Arc<Shared>, out: Sink) -> Option
             nap_until(next, || {
                 follow_audio_switch(&mut audio, &mut audio_gave_up, &shared, &audio_out);
                 if let Some(a) = audio.as_mut()
-                    && !a.pump(|d| {
+                    && !a.pump(&shared.screen, |d| {
                         for s in shares.values() {
                             let _ = s.push_audio(d);
                         }
