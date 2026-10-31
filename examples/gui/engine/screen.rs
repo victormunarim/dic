@@ -47,6 +47,11 @@ pub(crate) struct ScreenState {
     /// A pessoa não quer ouvir o som das telas que assiste (o padrão é ouvir, por isso a chave é a negação); a
     /// janela copia a escolha da configuração a cada quadro.
     pub(crate) silenced: AtomicBool,
+    /// Contadores do som da tela, para o diagnóstico: quadros enviados (quem transmite), recebidos e tocados (quem
+    /// assiste). Sem eles, "o som não sai" não diz de que lado parou.
+    audio_tx: AtomicU64,
+    audio_rx: AtomicU64,
+    audio_played: AtomicU64,
     /// O que o alto-falante do programa tocou, para tirar do som do computador (`None` sem áudio aberto).
     pub(crate) speaker: Mutex<Option<Speaker>>,
     /// Som de tela recebido, por quem transmite, esperando a vez de tocar.
@@ -76,6 +81,7 @@ impl ScreenState {
             m.clear();
             return;
         }
+        self.audio_rx.fetch_add(1, Ordering::Relaxed);
         let h = m.entry(who).or_insert_with(Heard::new);
         let missing = h.last.map_or(0, |l| a.seq.wrapping_sub(l).wrapping_sub(1));
         // Lacuna grande é reinício do outro lado, não perda: não vale esconder centenas de quadros.
@@ -103,6 +109,7 @@ impl ScreenState {
                 continue;
             }
             let f: Vec<i16> = h.pcm.drain(..Heard::FRAME).collect();
+            self.audio_played.fetch_add(1, Ordering::Relaxed);
             match &mut out {
                 None => out = Some(f),
                 Some(o) => {
@@ -137,12 +144,19 @@ impl ScreenState {
             }
             out.push_str(&format!("recebidos {} quadros, {} viraram imagem, {} com erro, {} perdidos no caminho", n(0), n(1), n(2), n(3)));
         }
+        let (sent, got, played) = (self.audio_tx.load(Ordering::Relaxed), self.audio_rx.load(Ordering::Relaxed), self.audio_played.load(Ordering::Relaxed));
+        if sent + got > 0 {
+            if !out.is_empty() {
+                out.push_str(" · ");
+            }
+            out.push_str(&format!("som: {sent} quadros enviados, {got} recebidos, {played} tocados"));
+        }
         out
     }
 
     /// Fim da chamada: somem as imagens e a transmissão é interrompida.
     pub(crate) fn reset(&self) {
-        for c in &self.rx {
+        for c in self.rx.iter().chain([&self.audio_tx, &self.audio_rx, &self.audio_played]) {
             c.store(0, Ordering::Relaxed);
         }
         self.want_share.store(false, Ordering::Relaxed);
@@ -335,6 +349,7 @@ pub(crate) async fn share_task(dialer: Dialer, peer: [u8; 32], keys: clam::media
                 if let Some(a) = audio.as_mut()
                     && !a.pump(|d| {
                         let _ = share.push_audio(d);
+                        flag.screen.audio_tx.fetch_add(1, Ordering::Relaxed);
                     })
                 {
                     *flag.screen.note.lock_unpoisoned() = "o som do computador parou de ser capturado".into();
@@ -441,6 +456,7 @@ pub(crate) async fn start_room_capture(shared: Arc<Shared>, out: Sink) -> Option
                         for s in shares.values() {
                             let _ = s.push_audio(d);
                         }
+                        shared.screen.audio_tx.fetch_add(1, Ordering::Relaxed);
                     })
                 {
                     *shared.screen.note.lock_unpoisoned() = "o som do computador parou de ser capturado".into();

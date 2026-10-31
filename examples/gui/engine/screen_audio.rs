@@ -70,6 +70,8 @@ mod real {
                 }
                 Err(e) => {
                     out.line(format!("tela: sem som do computador ({e}); só a imagem"));
+                    // Também na janela: só no log, quem transmite achava que o som ia e ninguém ouvia nada.
+                    *shared.screen.note.lock_unpoisoned() = format!("sem som do computador: {e}");
                     None
                 }
             }
