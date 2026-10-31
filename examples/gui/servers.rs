@@ -471,7 +471,10 @@ impl App {
                     ui.label(RichText::new(title).strong().size(17.0).color(pal().green));
                     ui.label(RichText::new(sub).size(13.0).color(pal().muted));
                 });
-                if name.response.interact(egui::Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                let open = name.response.interact(egui::Sense::click());
+                open.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("Abrir {title}, {sub}")));
+                focus_ring(ui, &open, 8);
+                if open.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                     out = Bar::Open;
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
