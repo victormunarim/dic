@@ -1,4 +1,5 @@
 //! Lado do relay: escuta links, repassa células e abre os fluxos de saída.
+#![deny(clippy::indexing_slicing, clippy::unwrap_used)]
 
 use crate::sync::LockExt;
 use super::*;

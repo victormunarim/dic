@@ -4,7 +4,7 @@ Chamadas de voz e de tela P2P em Rust (crate `clam`), sem servidor nem diretóri
 
 ## Stack
 
-- Rust, edition 2024 (1.85+). Crate de biblioteca `clam` + exemplos (`examples/gui`, `call`, `measure`).
+- Rust, edition 2024 (1.88+). Crate de biblioteca `clam` + exemplos (`examples/gui`, `call`, `measure`).
 - Runtime: `tokio`. Rede: TCP próprio (relay na porta 4001), link Noise NK (`snow`), DHT BitTorrent (`mainline`), `libp2p` na camada de presença, UPnP (`igd-next`).
 - Criptografia: `chacha20poly1305`, `x25519-dalek`, `ed25519-dalek`, `hkdf`, `hmac`, `sha2`, `subtle`, `zeroize`.
 - Mídia: `opus-pure`, `sonora` (AEC/AGC), `nnnoiseless`, `openh264`, `cpal`; captura X11/Wayland (portal)/GDI.

@@ -28,6 +28,7 @@
 //! - Fechar um link não derruba na hora os circuitos que passavam por ele; o
 //!   relay os expira por ociosidade e o cliente os detecta por silêncio.
 //! - Células inválidas fecham o link (violação de protocolo).
+#![deny(clippy::indexing_slicing, clippy::unwrap_used)]
 
 use std::{
     collections::{HashMap, HashSet},

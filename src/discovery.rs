@@ -30,6 +30,7 @@
 //! - Um cliente sem nenhum vizinho no GossipSub não descobre nada: mantenha
 //!   ao menos um `bootstrap` ou sementes.
 //! - Sybil: veja [`crate::descriptor`].
+#![deny(clippy::indexing_slicing, clippy::unwrap_used)]
 
 use crate::sync::LockExt;
 use std::{

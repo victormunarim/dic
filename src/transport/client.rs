@@ -1,4 +1,5 @@
 //! Lado do cliente: conecta aos primeiros relays e dirige o gerente de circuitos.
+#![deny(clippy::indexing_slicing, clippy::unwrap_used)]
 
 use super::*;
 

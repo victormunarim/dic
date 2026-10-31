@@ -12,7 +12,7 @@ cargo run --example quickstart   # fluxo completo, ponta a ponta
 cargo doc --open                 # documentação da API
 ```
 
-Requer Rust com edition 2024 (1.85+).
+Requer Rust com edition 2024 (1.88+, o `rust-version` do Cargo.toml).
 O crate reexporta `ed25519_dalek`, `x25519_dalek` e `rand_core` (`clam::ed25519_dalek` etc.), para você usar as mesmas versões das chaves que ele espera.
 
 ## Conceitos da camada de biblioteca

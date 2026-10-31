@@ -8,6 +8,7 @@
 //!   quem envia lê uma janela por vez.
 //! - **Nome seguro.** O nome que o contato manda nunca vira caminho: [`safe_name`] tira separadores, controles e pontos
 //!   do começo, e [`Incoming::finish`] nunca sobrescreve um arquivo que já existe.
+#![deny(clippy::indexing_slicing, clippy::unwrap_used)]
 
 use std::{
     fs::{File, OpenOptions},

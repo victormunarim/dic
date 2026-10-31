@@ -23,6 +23,7 @@
 //! circuito até o telefone de quem assiste ([`share_screen`]); quem assiste recebe
 //! [`ScreenEvent`] em [`ActiveCall::next_screen`]. A chamada que ligou também precisa estar
 //! registrada no telefone da própria máquina ([`PhoneLink`]) para receber esse circuito.
+#![deny(clippy::indexing_slicing, clippy::unwrap_used)]
 
 use crate::mailbox::Custody;
 use crate::sync::LockExt;

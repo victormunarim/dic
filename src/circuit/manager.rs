@@ -18,6 +18,7 @@
 //! - `dead_after_ms` precisa superar a ida e volta do circuito mais o intervalo
 //!   de ping (com 4 travessias de ~50 ms, 350 ms é folgado). Com latências bem
 //!   maiores, aumente `dead_after_ms` (o silêncio no failover cresce junto).
+#![deny(clippy::indexing_slicing, clippy::unwrap_used)]
 
 use std::collections::{HashMap, HashSet, VecDeque};
 

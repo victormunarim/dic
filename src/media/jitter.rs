@@ -50,9 +50,12 @@ impl JitterBuffer {
         JitterStats { delay_ms: self.delay_ms, ..self.stats }
     }
 
-    fn deadline(&self, seq: u32) -> u64 {
-        let (a_seq, a_at) = self.anchor.expect("âncora definida");
-        a_at + u64::from(seq - a_seq) * self.frame_ms + self.delay_ms
+    /// Instante em que `seq` vence, ou `None` sem âncora. `seq` vem do par: a conta é saturada para que um
+    /// número de sequência hostil não estoure nem derrube o laço de reprodução.
+    fn deadline(&self, seq: u32) -> Option<u64> {
+        let (a_seq, a_at) = self.anchor?;
+        let ahead = u64::from(seq.saturating_sub(a_seq)).saturating_mul(self.frame_ms);
+        Some(a_at.saturating_add(ahead).saturating_add(self.delay_ms))
     }
 
     /// Entrega um quadro recebido em `now`.
@@ -73,8 +76,7 @@ impl JitterBuffer {
 
     /// Próximo quadro vencido em `now`, ou `None` se ainda não é hora. Chame em laço.
     pub fn poll(&mut self, now: u64) -> Option<Playout> {
-        self.anchor?;
-        if now < self.deadline(self.next) {
+        if now < self.deadline(self.next)? {
             return None;
         }
         let out = match self.frames.remove(&self.next) {
@@ -87,7 +89,14 @@ impl JitterBuffer {
                 Playout::Lost
             }
         };
-        self.next += 1;
+        match self.next.checked_add(1) {
+            Some(n) => self.next = n,
+            // Sequência esgotou (só com par hostil ou defeituoso): recomeça no próximo quadro, como no silêncio.
+            None => {
+                self.frames.clear();
+                self.anchor = None;
+            }
+        }
         self.calm += 1;
         if self.calm >= CALM_FRAMES {
             self.calm = 0;
@@ -113,6 +122,16 @@ mod tests {
         assert!(drain(&mut j, 1039).is_empty());
         assert_eq!(drain(&mut j, 1040), vec![Playout::Frame(vec![0])]);
         assert_eq!(drain(&mut j, 1060), vec![Playout::Frame(vec![1])]);
+    }
+
+    #[test]
+    fn sequence_at_u32_max_does_not_overflow_and_reanchors() {
+        let mut j = JitterBuffer::new(20, 40, 200);
+        j.push(1000, u32::MAX, vec![9]);
+        assert_eq!(drain(&mut j, 1040), vec![Playout::Frame(vec![9])]);
+        assert!(j.poll(5000).is_none(), "sem âncora não toca nada");
+        j.push(6000, 0, vec![1]);
+        assert_eq!(drain(&mut j, 6040), vec![Playout::Frame(vec![1])]);
     }
 
     #[test]
