@@ -120,7 +120,7 @@ pub(crate) struct Form {
     /// Contatos de confiança, chaves em hex separadas por `;`: os únicos para quem a tela sem privacidade vai
     /// direto, mostrando o IP de quem transmite (veja `Dialer::set_trusted`). Quem não é contato não conta.
     pub(crate) trusted: String,
-    /// Chaves bloqueadas, em hex separadas por `;`: não voltam como contato sozinhas, por apresentação ou convite
+    /// Chaves bloqueadas, em hex (com `=nome` opcional) separadas por `;`: não voltam como contato sozinhas, por apresentação ou convite
     /// (veja `Node::block`). Só adicionar a chave de novo, de propósito, desbloqueia.
     pub(crate) blocked: String,
     /// Tema escolhido pela pessoa: `None` segue o do sistema (escuro se o sistema não disser).
@@ -618,7 +618,7 @@ impl Form {
     /// Chaves bloqueadas (lixo no arquivo e repetidas não contam).
     pub(crate) fn blocked_keys(&self) -> Vec<[u8; 32]> {
         let mut keys: Vec<[u8; 32]> = Vec::new();
-        for k in self.blocked.split(';').filter_map(|k| unhex(k.trim()).ok()) {
+        for (k, _) in self.blocked_entries() {
             if !keys.contains(&k) {
                 keys.push(k);
             }
@@ -626,13 +626,40 @@ impl Form {
         keys
     }
 
-    /// Bloqueia ou desbloqueia `key`.
+    /// Entradas de `blocked`: `chave` ou `chave=nome` (o nome que o contato tinha ao ser bloqueado). Lixo é ignorado.
+    fn blocked_entries(&self) -> Vec<([u8; 32], Option<String>)> {
+        self.blocked
+            .split(';')
+            .filter_map(|e| {
+                let (k, name) = e.split_once('=').map_or((e, None), |(k, n)| (k, Some(n.trim().to_string()).filter(|n| !n.is_empty())));
+                Some((unhex(k.trim()).ok()?, name))
+            })
+            .collect()
+    }
+
+    /// Nome que `key` tinha ao ser bloqueada, se foi guardado: o contato já saiu da lista, e só o hex não diz quem era.
+    pub(crate) fn blocked_name(&self, key: &[u8; 32]) -> Option<String> {
+        self.blocked_entries().into_iter().find(|(k, _)| k == key).and_then(|(_, n)| n)
+    }
+
+    /// Bloqueia ou desbloqueia `key`. Bloquear de novo mantém o nome já guardado.
     pub(crate) fn set_blocked(&mut self, key: [u8; 32], on: bool) {
-        let mut keys: Vec<[u8; 32]> = self.blocked_keys().into_iter().filter(|k| *k != key).collect();
-        if on {
-            keys.push(key);
+        let name = self.blocked_name(&key);
+        self.set_blocked_as(key, on.then_some(name).flatten().as_deref(), on);
+    }
+
+    /// Como [`set_blocked`](Self::set_blocked), guardando `name` junto da chave (sem `;`, `=` nem quebra de linha).
+    pub(crate) fn set_blocked_as(&mut self, key: [u8; 32], name: Option<&str>, on: bool) {
+        let mut entries: Vec<([u8; 32], Option<String>)> = Vec::new();
+        for (k, n) in self.blocked_entries() {
+            if k != key && !entries.iter().any(|(e, _)| *e == k) {
+                entries.push((k, n));
+            }
         }
-        self.blocked = keys.iter().map(|k| hex(k)).collect::<Vec<_>>().join(";");
+        if on {
+            entries.push((key, name.map(|n| n.replace([';', '=', '\n', '\r'], " ").trim().to_string()).filter(|n| !n.is_empty())));
+        }
+        self.blocked = entries.iter().map(|(k, n)| n.as_ref().map_or_else(|| hex(k), |n| format!("{}={n}", hex(k)))).collect::<Vec<_>>().join(";");
     }
 
     pub(crate) fn is_trusted(&self, key: &[u8; 32]) -> bool {
@@ -908,6 +935,24 @@ mod tests {
         assert_eq!(f.blocked_keys(), vec![b]);
         f.blocked = format!("zz;{};{}", hex(&b), hex(&b));
         assert_eq!(f.blocked_keys(), vec![b], "lixo e repetição não contam");
+    }
+
+    #[test]
+    fn a_blocked_key_remembers_the_name_it_had() {
+        let (a, b) = ([0xab; 32], [0xcd; 32]);
+        let mut f = Form::default();
+        f.set_blocked_as(a, Some("Ana; =\nSilva"), true);
+        f.set_blocked(b, true);
+        assert_eq!(f.blocked_name(&a).as_deref(), Some("Ana    Silva"), "separadores viram espaço");
+        assert_eq!(f.blocked_name(&b), None);
+        assert_eq!(f.blocked_keys(), vec![a, b]);
+        f.set_blocked(a, true);
+        assert_eq!(f.blocked_name(&a).as_deref(), Some("Ana    Silva"), "bloquear de novo mantém o nome");
+        f.set_blocked(a, false);
+        assert_eq!(f.blocked_keys(), vec![b]);
+        assert_eq!(f.blocked_name(&a), None);
+        f.blocked = format!("{}=;{}=Zé", hex(&a), hex(&b));
+        assert_eq!((f.blocked_name(&a), f.blocked_name(&b).as_deref()), (None, Some("Zé")));
     }
 
     #[test]

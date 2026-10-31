@@ -8,6 +8,11 @@ use clam::{rand_core::OsRng, x25519_dalek::StaticSecret};
 
 use crate::{conf::*, theme::*, ui::*};
 
+/// Marca (em dado temporário da interface, nunca em arquivo) de que a chave secreta está à mostra no campo.
+pub(crate) fn show_secret_id() -> egui::Id {
+    egui::Id::new("mostrar-chave")
+}
+
 /// Chave secreta nova (64 hex). A troca só acontece depois da confirmação no menu da identidade.
 fn fresh_secret() -> String {
     hex(&StaticSecret::random_from_rng(OsRng).to_bytes())
@@ -70,12 +75,33 @@ impl App {
                         if self.form.keyring_lost && self.form.secret.trim().is_empty() {
                             note(ui, "A identidade está no chaveiro do sistema e ele não respondeu. Destrave-o e reabra o programa: a configuração segue apontando para ela. Gerar outra ou colar uma chave aqui a substitui.");
                         }
+                        let shown_id = show_secret_id();
+                        let shown = ui.data(|d| d.get_temp::<bool>(shown_id)).unwrap_or(false);
                         ui.horizontal(|ui| {
-                            ui.add(field(&mut self.form.secret, "chave secreta").password(true).desired_width((ui.available_width() - 44.0).max(120.0)));
+                            ui.add(field(&mut self.form.secret, "chave secreta").password(!shown).desired_width((ui.available_width() - 44.0).max(120.0)));
                             // Trocar a chave muda o código de contato: fica num menu que pergunta e escreve o efeito.
                             let dots = dots_button(ui, "Mais ações da identidade").on_hover_text("Mais ações");
                             let ask = egui::Id::new("gerar-identidade");
                             let menu = egui::Popup::menu(&dots).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+                                ui.set_min_width(MENU_WIDTH);
+                                let have = !self.form.secret.trim().is_empty();
+                                let blocked = (!have).then_some("Não há chave para mostrar");
+                                let label = if shown { "Esconder a chave" } else { "Mostrar a chave" };
+                                if menu_row(ui, blocked, false, None, label, None, |p, c, s, k| shield_icon(p, c, s, k, shown))
+                                    .on_hover_text("Quem vê a chave vira você: mostre só onde ninguém olha, e não grave a tela com ela aberta.")
+                                    .clicked()
+                                {
+                                    ui.data_mut(|d| d.insert_temp(shown_id, !shown));
+                                    ui.close();
+                                }
+                                let blocked = (!have).then_some("Não há chave para copiar");
+                                if menu_row(ui, blocked, false, None, "Copiar a chave", None, |p, c, s, k| shield_icon(p, c, s, k, false))
+                                    .on_hover_text("Guarda a chave num lugar seguro (gerenciador de senhas). A área de transferência pode ser lida por outros programas: cole e copie outra coisa em seguida.")
+                                    .clicked()
+                                {
+                                    ui.ctx().copy_text(self.form.secret.trim().to_string());
+                                    ui.close();
+                                }
                                 let effect = "O seu código de contato muda e os outros precisarão do novo. A chave atual se perde se você não a tiver guardado.";
                                 if confirm_item(ui, ask, "Gerar nova identidade", "Pede confirmação antes de trocar a chave", "Gerar uma nova identidade?", effect, "Gerar", |p, c, s, k| shield_icon(p, c, s, k, false)) {
                                     self.form.secret = fresh_secret();
@@ -90,7 +116,8 @@ impl App {
                     });
                     card(ui, "Seu nome", "Como os outros veem você na lista deles.", |ui| {
                         ui.add(field(&mut self.form.my_name, "seu nome").char_limit(clam::media::update::MAX_NAME))
-                            .on_hover_text("Vazio, os outros veem só o código. Vale a partir da próxima vez que o programa abrir.");
+                            .on_hover_text("Vazio, os outros veem só o código.");
+                        reopen_hint(ui);
                         ui.check(&mut self.form.intros, "Aceitar adições e remoções de contatos")
                             .on_hover_text("Quando alguém adiciona o seu código, ele manda uma apresentação cifrada e passa a aparecer na sua lista, para os dois se ligarem. Quando alguém te remove, ele avisa e sai da sua lista também (só vale de quem já é seu contato). Desligado, só entra na lista quem você adicionar e ninguém te tira da lista. Só aceita de quem já tem o seu endereço; no máximo 20 por minuto.");
                     });
@@ -99,7 +126,12 @@ impl App {
                         card(ui, "Bloqueados", "Não voltam à sua lista sozinhos, por apresentação ou convite. Adicionar o código de novo também desbloqueia.", |ui| {
                             for key in blocked {
                                 ui.horizontal(|ui| {
-                                    ui.label(RichText::new(&hex(&key)[..8]).color(pal().text));
+                                    let code = hex(&key);
+                                    let short = code.get(..8).unwrap_or(&code);
+                                    match self.form.blocked_name(&key) {
+                                        Some(name) => ui.label(RichText::new(name).color(pal().text)).on_hover_text(format!("Código {code}")),
+                                        None => ui.label(RichText::new(short).color(pal().text)).on_hover_text(format!("Código {code}")),
+                                    };
                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                         if close_button(ui, "Desbloquear").clicked() {
                                             self.set_block(key, false);
@@ -131,6 +163,7 @@ impl App {
                             .on_hover_text("Seu computador guarda, só em memória, o endereço cifrado de quem o usa como âncora, para os contatos dessa pessoa a acharem. Não lê o conteúdo nem forja item. Precisa de um endereço que os outros alcancem. Quem usa a sua âncora vê o IP do seu relay; o código da sua âncora aparece abaixo, para você passar a quem quiser.");
                         ui.label("Âncoras que você usa (uma por linha, no código que o dono da âncora te passa: ip:porta#chave-do-circuito#chave-do-link):");
                         ui.add(egui::TextEdit::multiline(&mut self.form.anchors).desired_rows(3).desired_width(f32::INFINITY).margin(Margin::symmetric(12, 10)));
+                        reopen_hint(ui);
                     });
                 }
             });

@@ -499,6 +499,7 @@ impl App {
                 }
             }
             if choice == Remove::AndBlock {
+                self.form.set_blocked_as(key, Some(name), true);
                 self.set_block(key, true);
             }
         }

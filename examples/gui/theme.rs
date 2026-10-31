@@ -295,7 +295,24 @@ pub(crate) fn big_button(ui: &mut Ui, text: &str, fill: Color32) -> egui::Respon
 /// Bloco recolhido com o texto longo de uma opção: a tela mostra só o título, e quem quer saber mais abre. O texto
 /// não fica fixo ocupando a tela (privacidade e limites se explicam aqui, não em parágrafos soltos).
 pub(crate) fn details(ui: &mut Ui, title: &str, text: &str) {
-    egui::CollapsingHeader::new(RichText::new(title).size(13.0).color(pal().muted)).show(ui, |ui| note(ui, text));
+    egui::CollapsingHeader::new(RichText::new(title).size(13.0).color(pal().muted)).icon(chevron).show(ui, |ui| note(ui, text));
+}
+
+/// Seta do bloco recolhido, desenhada: aponta para a direita fechada e gira para baixo ao abrir (`openness` de 0 a 1).
+/// A seta padrão do egui vem da fonte e destoa dos outros ícones do tema.
+fn chevron(ui: &mut Ui, openness: f32, response: &egui::Response) {
+    let ink = if response.hovered() { pal().strong } else { pal().muted };
+    let c = response.rect.center();
+    let a = openness * std::f32::consts::FRAC_PI_2;
+    let (sin, cos) = a.sin_cos();
+    let turn = |x: f32, y: f32| c + vec2(x * cos - y * sin, x * sin + y * cos);
+    ui.painter().add(egui::Shape::convex_polygon(vec![turn(-2.5, -4.0), turn(3.5, 0.0), turn(-2.5, 4.0)], ink, Stroke::NONE));
+}
+
+/// Aviso discreto de que o ajuste de cima só vale quando o programa abrir de novo; sem ele a pessoa muda o campo e
+/// não vê efeito nenhum.
+pub(crate) fn reopen_hint(ui: &mut Ui) {
+    ui.label(RichText::new("Vale ao reabrir o programa.").size(12.0).color(pal().muted));
 }
 
 /// Botão de tamanho normal, que pode ficar desligado.
