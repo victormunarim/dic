@@ -8,6 +8,7 @@ Garantias e limites, limitações conhecidas e chaveiro.
 
 - Contra contatos e observadores comuns: ninguém fora do par descobre que você está online, nem liga seus endereços entre períodos.
 - **Não** promete anonimato diante de quem monitora a rede inteira (adversário global). Diga isso aos usuários.
+- O IP de cada lado é conhecido do outro (o código de contato, o registro de presença e os convites levam o endereço do relay) e de quem está no caminho do tráfego (cabeçalho IP em claro, entre você e o relay do contato). Os 2 saltos escondem o conteúdo, o ritmo e a chave do destino, não esse par de IPs. A opção "2 relays", que esconderia o IP dos dois lados, está só em desenho: [DOIS-RELAYS.md](DOIS-RELAYS.md).
 - O modo direto expõe o seu IP ao contato; o código exige confiança e aviso confirmado, mas o aviso na interface é responsabilidade do app. A GUI o usa só na tela sem privacidade, para os contatos marcados "de confiança" (o aviso aparece ao marcar); `Dialer::screen_path` aplica `PathRequest::resolve` a cada espectador.
 - O relógio é passado como argumento (`agora_unix`); use um relógio confiável. Defasagem maior que uma época faz a busca falhar.
 - Não há proteção contra replay de um registro antigo dentro da janela de três épocas. (No aplicativo o registro de endereço leva um `seq` que só cresce, e o contato descarta o que não for mais novo.)

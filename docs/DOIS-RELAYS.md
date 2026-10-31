@@ -1,0 +1,161 @@
+# Opção "2 relays": nenhum lado sabe o IP do outro (desenho)
+
+**Estado: proposto. Nada disto está implementado.** Este documento descreve o que a opção faria, o que ela custa e o que ela não promete, para ser revisado antes de qualquer código. Não existe a opção em Configurações, e nenhuma tela ou doc deve dizer que o IP fica escondido dos dois lados até a última etapa do plano estar pronta e testada.
+
+[← Voltar ao README](../README.md) · veja também [COMUNICACAO.md](COMUNICACAO.md), [CIRCUITO.md](CIRCUITO.md), [ENCONTRO.md](ENCONTRO.md) e [SEGURANCA.md](SEGURANCA.md).
+
+## O pedido
+
+Uma opção **2 relays** em Configurações, **desligada** por padrão:
+
+- **Desligada:** o comportamento de hoje. O conteúdo é cifrado de ponta a ponta e o caminho é de 2 saltos com cover.
+- **Ligada:** a chamada, a tela, o bate-papo, os arquivos e os convites passam por **2 relays reais**, de terceiros, e **quem liga nunca fica sabendo o IP de quem atende, nem o contrário**, inclusive nos convites.
+
+## O que a opção desligada cobre de verdade
+
+O pedido diz que, desligada, o IP fica "coberto para agentes externos". Isso é verdade só em parte, e a interface não deve prometer mais do que isto:
+
+- Cobre quem **não está no caminho** (nó da DHT, âncora, outro contato, quem só lê a rede de longe): o conteúdo vai cifrado e o ritmo é constante.
+- **Não** cobre quem está no caminho. O 1º salto é o seu relay por loopback e o 2º é o relay do contato, então o provedor, o dono do Wi-Fi e os roteadores do trajeto veem os cabeçalhos IP: o seu IP falando com o IP do relay do contato.
+- Como cada pessoa é o relay de si mesma, o IP do relay do contato é o IP do contato. A chave do contato dentro das camadas, portanto, esconde pouco de quem vê o fio: o destino se deduz do IP.
+- O contato vê o seu IP (o 1º salto é o seu relay). Está em "Limites conhecidos" de [COMUNICACAO.md](COMUNICACAO.md).
+
+## Onde o IP aparece hoje
+
+| Lugar | Quem vê o IP | Observação |
+|---|---|---|
+| Código de contato direto | quem recebe o código | leva a chave e o relay (`RelayInfo`: `addr`, `onion`, `link`) |
+| Registro de presença/endereço (`AddressRecord`, `src/media/update.rs`) | o contato que o abre; o nó da DHT vê o IP de quem grava e de quem lê | `addr` de até 60 B, cifrado para o par |
+| Apresentação (tag 7) e aviso de endereço novo | o contato | cifrados para o par |
+| Convite de servidor (`Reach`, `src/server/invite.rs`) | o convidado | cifrado para ele; guardiões da caixa veem só as chaves |
+| Convite de chamada | quem atende | relay de quem liga, cifrado junto da identidade |
+| Dicas e `known`/`history` (`~/.clam-gui.known`) | quem tem o arquivo | uma linha por endereço de relay de contato |
+| Chamada, tela, arquivos | o contato e o relay dele | o 1º salto (você) liga ao relay do contato |
+
+A ligação direta entre "contato" e "IP" é do desenho atual: o destino de saída `<8 B da chave em hex>:9` (`dest_for`, `src/node/mod.rs`) só existe no relay da própria pessoa.
+
+Também hoje não há relay de terceiro no caminho: em `Dialer::client_with` a lista de candidatos de 1º salto passa vazia e o único 1º salto é o seu relay (`127.0.0.1:<porta>`, o "último recurso" do código). O gerente de circuitos já sabe escolher entre vários relays (`CircuitManager`), mas ninguém o alimenta com relays de terceiros.
+
+## Metas e não-metas
+
+Metas, com a opção ligada:
+
+1. O destinatário não aprende o IP de quem liga, e quem liga não aprende o do destinatário. Vale para chamada, tela, bate-papo, arquivo, presença e convite.
+2. Nenhum relay sozinho liga as duas pontas.
+3. Sem queda silenciosa: se não houver relays suficientes, a chamada **falha com um motivo claro**. Nunca cai para o seu relay, para a conexão direta nem para a DHT em claro (mesmo princípio de `dht_circuit`).
+4. O conteúdo continua cifrado de ponta a ponta com as chaves dos contatos, que nenhum relay vê.
+
+Não-metas (limites que a opção **não** remove):
+
+- Adversário que vê a rede toda e correlaciona entrada e saída. Continua sem promessa de anonimato global.
+- Uma única pessoa que controle os dois relays do mesmo circuito (ou o relay de encontro e os dois de entrada).
+- Esconder a **chave** do contato de quem já a tem. A opção esconde o endereço de rede, não a identidade criptográfica.
+- Esconder o seu IP do **1º relay** do seu próprio circuito: ele precisa dele para responder.
+
+## Desenho
+
+O desenho em três camadas, da mais simples à mais cara. Cada uma é útil sozinha, e só a terceira cumpre a promessa de "nenhum lado sabe o IP do outro".
+
+### Camada A: dois relays de terceiros no caminho
+
+Com a opção ligada, o circuito deixa de usar o seu relay como 1º salto. Ele passa a ter dois relays reais, escolhidos entre os relays de **outros contatos** (nunca o seu, nem o do par com quem se fala):
+
+```text
+você ──> relay R1 (contato X) ──> relay R2 (contato Y) ──> destino
+```
+
+- R1 vê o seu IP, não o destino. R2 vê o destino (e o IP de R1), não o seu IP.
+- **Quem pode ser relay de terceiro:** só contatos marcados "de confiança" (a marca que já existe), que expõem o relay e aceitam servir. Quem serve passa a ser conhecido pelo IP de quem o usa; por isso o pool é pequeno e escolhido, não aberto.
+- **Seleção:** o gerente sorteia entre os de maior pontuação, em grupos diferentes (`intro.rs` e `reputation.rs` já têm a política de diversidade e de saúde), sem repetir o par, sem usar o próprio nó. Se faltarem relays, devolve erro: `PathMode` ganha um modo novo (nome provisório `Hidden`), e `PathRequest::resolve` não o rebaixa nunca.
+- **O que A resolve:** o destinatário deixa de ver o IP de quem liga (ele vê o de R2). **O que A não resolve:** quem liga ainda conhece o IP do destinatário, porque o `Extend` do circuito precisa do endereço do relay do destino.
+
+### Camada B: pontos de introdução e de encontro
+
+Para quem liga não aprender o IP do destinatário, o destinatário não pode ter um endereço publicado. Segue o molde dos serviços ocultos, reaproveitando o que o relay já faz para a DHT e a âncora: **destinos de saída** (`dht:9`, `anchor:9`) atendidos por um serviço local do relay.
+
+Dois destinos novos, `intro:9` e `rv:9`. Pedido e resposta no mesmo formato do gateway (`u16 BE tamanho ‖ corpo`, em pedaços por célula), para manter a célula de 256 B e o ritmo de 20 ms.
+
+1. **Pontos de introdução.** O destinatário D mantém, por um circuito de 2 relays (camada A), uma conexão de espera com 3 relays `I1..I3`. Em cada um manda `ESTABLISH(chave pública, prova de posse)`. O `I` guarda "a chave de D se alcança por este circuito" e **não** sabe o IP de D (vê R2 de D).
+2. **Registro de presença.** No lugar do `addr`, o registro cifrado para o par (e o item da DHT) leva os pontos de introdução `I1..I3` (endereço e chaves de cada um). O registro ganha uma versão nova; o tamanho fixo continua, porque ele é a regra contra análise de tamanho.
+3. **Introdução.** Quem liga (C) escolhe um relay de encontro `M`, cria `ESTABLISH_RV(cookie)` em `M` por um circuito de 2 relays, e manda a `I` por outro circuito de 2 relays: `INTRODUCE(chave de D, M, cookie, quadro cifrado só para D)`. O quadro cifrado carrega a prova de autoria do convite (já existe) e o `cookie`. `I` repassa a D pela conexão de espera; não lê o quadro.
+4. **Encontro.** D abre um circuito de 2 relays até `M` e manda `JOIN(cookie)`. `M` liga os dois fluxos e copia os quadros de um para o outro. C e D falam a chamada normal por cima (as mesmas chaves de ponta a ponta, o mesmo telefone), sem que nenhum veja o IP do outro.
+5. **Cover.** Cada circuito mantém o ritmo constante de hoje (uma célula a cada 20 ms nos dois sentidos). `M` só repassa o que chega.
+
+Cada lado usa os seus 2 relays, e os dois circuitos se encontram em `M`. Nenhum lado fala direto com o outro.
+
+### Camada C: endereçamento sem IP
+
+Sem esta camada, o IP volta pelo texto. Ela toca todo lugar da tabela "Onde o IP aparece hoje":
+
+- **Código de contato:** só a chave (e, opcional, os pontos de introdução). Sem `addr`. Quem adiciona alguém não aprende o IP.
+- **Presença:** o registro versão 2 (camada B, passo 2).
+- **Apresentação, aviso de endereço novo, `Reach` do convite de servidor, dicas e `known`:** passam a carregar pontos de introdução em vez de `addr`. O convite de chamada leva, no lugar do relay de quem liga, os seus pontos de introdução.
+- **Convites na caixa de correio e na custódia:** o item da DHT segue igual; só muda o conteúdo cifrado.
+- **O relay de cada pessoa:** quem usa a opção ligada deve ter um relay **separado do endereço dela**. Um relay que serve a terceiros (camada A) revela o IP de quem o opera aos contatos que o usam; para que isso não vire "o IP da pessoa X", o relay anunciado não pode carregar a chave de contato nem o destino `<chave>:9`.
+- **Bônus:** quem recebe só abre conexões de saída (para os pontos de introdução e para `M`). Não precisa de porta aberta nem de UPnP para ser alcançado; hoje a falta de porta alcançável impede receber chamadas.
+
+## Fluxo de uma chamada, com a opção ligada
+
+1. C lê o registro de D (item da DHT ou aviso direto) e obtém `I1..I3`. Nenhum IP de D.
+2. C monta 2 circuitos de 2 relays: um até `M` e outro até `I1`.
+3. C manda `ESTABLISH_RV(cookie)` a `M` e `INTRODUCE(...)` a `I1`.
+4. `I1` repassa a D, que confere a prova de autoria e que C é contato (como hoje: chave fora da lista não recebe resposta).
+5. D monta um circuito de 2 relays até `M` e manda `JOIN(cookie)`.
+6. `M` junta os dois fluxos. A chamada (convite, resposta, mídia) corre por cima, com as chaves de ponta a ponta.
+7. O failover do gerente de circuitos vale para cada lado de forma independente: um circuito reserva por lado, os mesmos 350 ms.
+
+## O que cada parte vê, com a opção ligada
+
+| Quem | Vê | Não vê |
+|---|---|---|
+| Quem liga (C) | a chave de D, que há uma chamada | o IP de D, os relays de D |
+| Quem atende (D) | a chave de C, que há uma chamada | o IP de C, os relays de C |
+| R1 de C | o IP de C, que há um circuito | o destino, o conteúdo |
+| R2 de C, `M` | o IP de R1, o `cookie` (em `M`) | o IP de C ou de D, o conteúdo |
+| `I` (ponto de introdução) | a chave de D e que alguém pediu para falar com ela | o IP de D, o IP de C, o conteúdo |
+| Provedor de C ou de D | tráfego constante entre a pessoa e o R1 dela | com quem fala, quando fala |
+| Nó da DHT | o IP de quem grava e de quem lê o item (via circuito, só o IP da saída) | os pontos de introdução, o IP |
+| Quem vê a rede toda | pode correlacionar entrada e saída | — (**sem** promessa de anonimato global) |
+
+## Custos
+
+- **Latência:** o caminho passa de 2 para cerca de 5 relays efetivos (R1 e R2 de C, `M`, R2 e R1 de D). Soma-se a introdução: vários segundos para estabelecer a chamada. O alvo de voz (200 ms em 2 saltos) tende a ficar acima, e deve ser medido com `examples/measure` antes de ser prometido.
+- **Banda:** cada circuito consome ≈ 100 kbps por sentido (célula de 256 B a cada 20 ms). Uma chamada tem 2 circuitos, mais os 3 de espera de D, ≈ 300 kbps contínuos enquanto D está online.
+- **Relays de terceiros:** quem serve gasta banda e abre-se a abuso. Os limites de `RelayConfig` (256 circuitos, 800 kB/s por circuito, 2 MB/s no relay, 20 criações/s) valem, e o destino de saída é restrito a `dht:9`, `anchor:9`, `intro:9` e `rv:9`: nunca vira proxy aberto.
+- **Disponibilidade:** com poucos contatos de confiança online, não há relays suficientes. O erro é explícito.
+
+## Ameaças e limites
+
+- **Mesmo adversário em dois pontos.** Quem controla R1 e R2 do mesmo circuito liga as pontas; quem controla `M` e os dois R2 liga C a D. Como o pool vem de contatos de confiança, isso exige que a mesma pessoa controle vários deles. Documentado como limite.
+- **Correlação de tempo.** O cover constante reduz a correlação por volume, mas não impede um adversário que vê as duas pontas.
+- **Ponto de introdução hostil.** Pode negar o serviço (não repassa) ou contar quantas vezes D é procurado. Por isso são 3, em grupos diferentes.
+- **Relay de encontro hostil.** Vê o `cookie` e os dois R2. Um `cookie` repetido por quem o observa deve ser recusado (uso único, com prazo curto).
+- **DoS de introdução.** `I` limita pedidos por D e por origem, como o gateway da DHT, que já tem limite de pedidos por minuto.
+- **Convites de servidor.** Quem convida e quem é convidado não aprendem o IP um do outro; o `Join` ao servidor passa a ir por introdução + encontro, não mais direto ao relay de quem convidou.
+- **Relay antigo e contato antigo.** Um relay de versão anterior não entende `intro:9` nem `rv:9` e recusa o destino; o contato com versão antiga não abre o registro versão 2. Com a opção desligada nada muda; com ela ligada, esses contatos ficam inalcançáveis e o app avisa em vez de cair para outro caminho.
+- **Tela sem privacidade para contato de confiança.** Hoje vai direto ao relay do contato e mostra o IP. Com a opção ligada ela fica **desativada**: a tela segue sempre privada e por circuito.
+
+## Interface proposta
+
+- Em Configurações, uma caixa **2 relays**, desligada, com a dica (hover) explicando em uma frase o efeito e o custo, e o aviso de que exige contatos de confiança online.
+- Ligar a opção mostra o que muda: latência maior, tempo de estabelecer a chamada, e que contatos com versão antiga não serão alcançados.
+- Enquanto a opção está ligada, a interface mostra um estado discreto (ícone) quando há relays suficientes, e o motivo exato quando não há. A opção **nunca** muda o caminho sozinha.
+- A tela sem privacidade fica apagada, com o motivo na dica.
+- O código de contato gerado com a opção ligada não leva endereço; o texto avisa que o contato só se alcança por introdução.
+
+## Plano de etapas
+
+Cada etapa é um commit com testes e docs; a frase "nenhum lado sabe o IP do outro" só entra na interface depois da etapa 5.
+
+1. **Relays de terceiros no caminho (camada A).** `PathMode::Hidden`, pool de contatos de confiança, seleção sem o próprio nó e sem o par, falha sem queda silenciosa. Testes: gerente com relays simulados (sans-IO); integração em loopback com 4 nós (você, 2 terceiros, destino) verificando que o destino não vê o IP de quem liga. A opção em Configurações nasce aqui, mas a dica diz só o que esta etapa cumpre.
+2. **Destinos `intro:9` e `rv:9` no relay** (formato, limites, exigência de contato, cookie de uso único). Alvos de fuzz novos, 60 s cada ao mudar. Testes sans-IO do serviço.
+3. **Introdução e encontro ponta a ponta.** O destinatário mantém os pontos de espera; quem liga encontra D por introdução e encontro. Testes de integração: a chamada completa sem que nenhum lado tenha o IP do outro em memória, em arquivo ou em log.
+4. **Registro de presença versão 2 e código de contato sem endereço.** Tamanho fixo preservado. Compatibilidade com a opção desligada.
+5. **Convites, apresentação, caixa de correio, servidores, bate-papo, arquivos e tela sem IP.** Cada fluxo que hoje usa `reachable_client` passa pelo mesmo ponto de decisão; sem queda silenciosa. Medir latência e banda reais e atualizar este doc e os orçamentos de [COMUNICACAO.md](COMUNICACAO.md) e [CIRCUITO.md](CIRCUITO.md).
+
+## Perguntas em aberto
+
+- **Quem serve de relay?** Só contatos de confiança, ou qualquer contato que aceite? O primeiro é mais seguro e mais escasso.
+- **O relay de quem usa a opção ligada.** Separar a chave do relay da de contato (proposto acima) exige que o `known`/`history` e os avisos de endereço passem a guardar duas identidades.
+- **Pontos de introdução de longa duração.** Três circuitos contínuos custam ≈ 300 kbps. Dá para manter um só em ritmo reduzido, aceitando que o ritmo passa a identificar "este é um ponto de espera"?
+- **Servidores grandes.** A malha da sala conecta todos com todos; com encontro, cada par precisa de um `M`. O custo de uma sala de muita gente precisa ser medido antes de a opção valer para salas.

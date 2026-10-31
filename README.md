@@ -37,6 +37,7 @@ Valem para os módulos `pairing`, `presence`, `service`, `circle`, `intro` e `re
 | [docs/GUI.md](docs/GUI.md) | A janela: abas, contatos, áudio, tela, opções |
 | [docs/ENCONTRO.md](docs/ENCONTRO.md) | Reencontrar contatos sem servidor: aviso de endereço novo e ponto de encontro na DHT, âncoras e contato de duas vias |
 | [docs/SERVIDORES.md](docs/SERVIDORES.md) | Servidores e salas de voz com presença, tela na sala e reencontro por servidor, tudo P2P |
+| [docs/DOIS-RELAYS.md](docs/DOIS-RELAYS.md) | Desenho (não implementado) da opção "2 relays": nenhum lado sabe o IP do outro |
 | [docs/SEGURANCA.md](docs/SEGURANCA.md) | Garantias, limites, chaveiro |
 | [docs/LINUX.md](docs/LINUX.md) / [docs/WINDOWS.md](docs/WINDOWS.md) | Instalação por sistema |
 

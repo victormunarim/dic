@@ -118,7 +118,7 @@ O endereço de um relay muda (IP novo, outra porta). Para o código antigo não 
 
 | Quem | Vê | Não vê |
 |---|---|---|
-| Seu provedor / quem olha seu cabo | tráfego constante entre você e seu relay e o relay do contato | quando você fala, o conteúdo, com quem fala (o destino está dentro das camadas) |
+| Seu provedor / quem olha seu cabo | tráfego constante entre você e seu relay e o relay do contato | quando você fala, o conteúdo. **Com quem fala** só fica escondido na chave: o IP do relay do contato é o IP do contato, então quem vê o fio deduz o destino |
 | Seu relay (1º salto) | que há um circuito e a cadência dele | o destino, o conteúdo |
 | Relay do contato (saída) | o seu IP, que há um convite, o destino `contato:9` | quem liga (a identidade vai cifrada), o conteúdo |
 | O contato | seu IP (o 1º salto é o seu relay) e quem você é | — |
@@ -129,6 +129,7 @@ O endereço de um relay muda (IP novo, outra porta). Para o código antigo não 
 ## Limites conhecidos
 
 - O primeiro salto é o seu relay (menos na tela sem privacidade para um contato de confiança, que vai direto ao relay dele): o contato vê o seu IP. O circuito esconde o conteúdo e o destino de quem observa, mas não o seu IP do contato.
+- Quem está no caminho (provedor, Wi-Fi, roteadores) vê o seu IP falando com o IP do relay do contato, que é o IP do contato: os 2 saltos escondem conteúdo, ritmo e a chave do destino, não o par de IPs. Esconder o IP de um lado do outro exige relays de terceiros e pontos de introdução e de encontro; o desenho está em [DOIS-RELAYS.md](DOIS-RELAYS.md) e **não está implementado**.
 - Sem CGNAT/porta alcançável não se recebe chamada. Não há furo de NAT.
 - Quem controla o primeiro salto e a saída do mesmo circuito liga as pontas. Como os relays são os dos próprios contatos, isso exige que ambos sejam o mesmo adversário.
 - A tela sem privacidade revela quando a imagem se mexe. Para um contato de confiança vai direto ao relay dele, sem relay no meio, e um contato de confiança com versão antiga não abre essa tela. Para quem não é de confiança segue por 2 saltos.
