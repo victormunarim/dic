@@ -340,6 +340,9 @@ impl App {
             .resizable(false)
             .frame(egui::Frame::new().fill(pal().bg).inner_margin(Margin::symmetric(12, 14)))
             .show(ctx, |ui| confined(ui, |ui| {
+                // Conteúdo mais largo que a coluna alarga o `max_rect` do egui; o perfil e a barra de sessão, que
+                // pegam `available_width`, passariam a variar entre Contatos e Salas. A largura é fixada antes.
+                let full = ui.available_width();
                 ui.spacing_mut().item_spacing.y = 6.0;
                 // O perfil ocupa uma altura fixa no pé; a lista de salas rola no espaço que sobra.
                 let footer: f32 = 74.0 + if room_bar.is_some() || call_bar.is_some() { 76.0 } else { 0.0 };
@@ -397,6 +400,7 @@ impl App {
                     }
                 }
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+                    ui.set_max_width(full);
                     ui.spacing_mut().item_spacing.y = 2.0;
                     sunken_frame(ui, 12, 8, |ui| {
                         ui.set_width(ui.available_width());

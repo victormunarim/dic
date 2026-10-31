@@ -883,6 +883,34 @@ mod tests {
         width
     }
 
+    /// Largura do quadro de baixo (como o perfil) depois de conteúdo de `wide` de largura, com ou sem fixar a largura.
+    fn footer_width(wide: f32, pin: bool) -> f32 {
+        let ctx = egui::Context::default();
+        let mut width = 0.0;
+        for _ in 0..3 {
+            let _ = ctx.run(egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 600.0))), ..Default::default() }, |ctx| {
+                egui::SidePanel::left("p").exact_width(300.0).resizable(false).frame(egui::Frame::new().inner_margin(Margin::symmetric(12, 14))).show(ctx, |ui| confined(ui, |ui| {
+                    let full = ui.available_width();
+                    ui.allocate_exact_size(vec2(wide, 10.0), egui::Sense::hover());
+                    ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+                        if pin {
+                            ui.set_max_width(full);
+                        }
+                        let r = sunken_frame(ui, 12, 8, |ui| ui.set_width(ui.available_width()));
+                        width = r.response.rect.width();
+                    });
+                }));
+            });
+        }
+        width
+    }
+
+    #[test]
+    fn the_footer_keeps_its_width_whatever_the_content_above() {
+        assert_eq!(footer_width(100.0, true), footer_width(700.0, true));
+        assert!(footer_width(700.0, false) > footer_width(100.0, false), "sem fixar, o rodapé acompanha o conteúdo");
+    }
+
     #[test]
     fn a_confined_panel_keeps_its_width_whatever_the_content() {
         assert_eq!(panel_width(100.0, true), 300.0);
