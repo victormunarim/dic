@@ -35,6 +35,9 @@ pub(crate) struct ServersUi {
     pub(crate) inviting: bool,
     /// Escolha da pessoa para a coluna de membros; `None` segue a largura da janela (`members_fit`).
     pub(crate) members_open: Option<bool>,
+    /// Resposta do cartão de convite (erro ou envio feito), mostrada nele e não no topo da aba.
+    pub(crate) invite_msg: String,
+    pub(crate) invite_info: String,
     pub(crate) msg: String,
     /// Resultado que deu certo (aparece em verde).
     pub(crate) info: String,
@@ -51,6 +54,12 @@ fn members_shown(choice: Option<bool>, window_width: f32) -> bool {
 
 impl ServersUi {
     /// Abre o cartão de convite e a coluna de membros, onde ele mora, mesmo em janela estreita.
+    fn close_invite(&mut self) {
+        self.inviting = false;
+        self.invite_msg.clear();
+        self.invite_info.clear();
+    }
+
     fn start_invite(&mut self) {
         self.inviting = true;
         self.members_open = Some(true);
@@ -686,7 +695,7 @@ impl App {
         }
         // Esc fecha o cartão, a menos que a tecla esteja fechando a lista de contatos aberta.
         if !egui::Popup::is_any_open(ui.ctx()) && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
-            self.srv.inviting = false;
+            self.srv.close_invite();
             return;
         }
         {
@@ -696,7 +705,7 @@ impl App {
                 ui.label(RichText::new("Convidar alguém").strong().color(pal().strong)).on_hover_text("O convite chega pela rede, cifrado, e só o contato escolhido consegue abri-lo. Qualquer membro pode convidar.");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if close_button(ui, "Fechar").clicked() {
-                        self.srv.inviting = false;
+                        self.srv.close_invite();
                     }
                 });
             });
@@ -718,12 +727,12 @@ impl App {
                 let key = self.srv.pick.expect("botão só liga com contato escolhido");
                 match hub.try_act(|s, now| s.invite_send(&v.id, key, now)) {
                     Ok(()) => {
-                        self.srv.msg.clear();
-                        self.srv.info = format!("Convite enviado a {}. Se ele estiver offline, o programa tenta de novo até ele receber.", member_name(&contacts, &key));
+                        self.srv.invite_msg.clear();
+                        self.srv.invite_info = format!("Convite enviado a {}. Se ele estiver offline, o programa tenta de novo até ele receber.", member_name(&contacts, &key));
                     }
                     Err(e) => {
-                        self.srv.info.clear();
-                        self.srv.msg = e.to_string();
+                        self.srv.invite_info.clear();
+                        self.srv.invite_msg = e.to_string();
                     }
                 }
             }
@@ -735,14 +744,20 @@ impl App {
                     match hub.try_run(|s, now| s.invite(&v.id, key, now).map(|t| (t, Output::default()))) {
                         Ok(text) => {
                             self.srv.invite_out = text;
-                            self.srv.msg.clear();
+                            self.srv.invite_msg.clear();
                         }
-                        Err(e) => self.srv.msg = e.to_string(),
+                        Err(e) => self.srv.invite_msg = e.to_string(),
                     }
                     ui.close();
                 }
             });
             });
+            if !self.srv.invite_info.is_empty() {
+                ui.colored_label(pal().green, &self.srv.invite_info);
+            }
+            if !self.srv.invite_msg.is_empty() {
+                ui.colored_label(pal().error, &self.srv.invite_msg);
+            }
             if !self.srv.invite_out.is_empty() {
                 ui.add(egui::Label::new(RichText::new(&self.srv.invite_out).monospace().size(12.0)).wrap());
                 if button(ui, true, "Copiar o convite", pal().green).clicked() {
@@ -903,6 +918,16 @@ mod tests {
         srv.start_invite();
         assert!(srv.inviting);
         assert!(members_shown(srv.members_open, 820.0), "o convite mora na coluna de membros");
+    }
+
+    #[test]
+    fn closing_the_invite_drops_its_feedback() {
+        let mut srv = ServersUi::default();
+        srv.start_invite();
+        srv.invite_msg = "erro".into();
+        srv.invite_info = "enviado".into();
+        srv.close_invite();
+        assert!(!srv.inviting && srv.invite_msg.is_empty() && srv.invite_info.is_empty());
     }
 
     #[test]

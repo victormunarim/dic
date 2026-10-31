@@ -126,7 +126,7 @@ impl App {
                 count_badge(ui.painter(), face.rect, unread[key], pal().bg);
                 // Adicionado só pelo código: o nome chega quando o contato devolve a apresentação.
                 let pending = *name == hex(key)[..8];
-                ui.add_sized([ui.available_width() - 118.0 - if pending { 22.0 } else { 0.0 }, 32.0], egui::Label::new(RichText::new(name).strong().color(pal().text)).truncate())
+                ui.add_sized([ui.available_width() - 142.0 - if pending { 22.0 } else { 0.0 }, 32.0], egui::Label::new(RichText::new(name).strong().color(pal().text)).truncate())
                     .on_hover_text(format!("{}…", &hex(key)[..16]));
                 if pending {
                     let (mark, _) = ui.allocate_exact_size(vec2(18.0, 18.0), egui::Sense::hover());

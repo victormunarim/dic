@@ -226,6 +226,12 @@ impl App {
                             ui.close();
                         }
                     }
+                    // Os atalhos ficam à vista aqui, além da dica de cada botão.
+                    ui.separator();
+                    for (keys, what) in [(&INVITE_KEY, "Convidar para o servidor"), (&MEMBERS_KEY, "Mostrar ou esconder os membros"), (&MUTE_KEY, "Microfone mudo")] {
+                        ui.label(egui::RichText::new(format!("{}  {what}", ctx.format_shortcut(keys))).size(12.0).color(pal().muted));
+                    }
+                    ui.label(egui::RichText::new("Esc  Fechar o convite").size(12.0).color(pal().muted));
                 });
                 let muted = self.shared.audio.muted.load(Ordering::Relaxed);
                 let mic = glyph_button(ui, "Microfone", muted.then_some(pal().red), |p, c, s, k| mic_icon(p, c, s, k, muted));

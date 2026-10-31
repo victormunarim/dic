@@ -239,6 +239,12 @@ pub(crate) fn hovered_fill(fill: Color32) -> Color32 {
     if fill == pal().bg { pal().hover } else { fill.lerp_to_gamma(Color32::BLACK, 0.08) }
 }
 
+/// Deslocamento de 1 px para baixo enquanto o ícone sem moldura está apertado: o "afundar" dos controles que
+/// não têm relevo para afundar.
+fn press_nudge(reply: &egui::Response) -> egui::Vec2 {
+    if reply.is_pointer_button_down_on() { vec2(0.0, 1.0) } else { egui::Vec2::ZERO }
+}
+
 /// Aro de foco do teclado, o mesmo em todos os controles desenhados à mão (que não ganham o do egui). Só
 /// aparece com o foco; o raio acompanha o do controle.
 pub(crate) fn focus_ring(ui: &Ui, reply: &egui::Response, radius: u8) {
@@ -339,16 +345,16 @@ pub(crate) fn draw_plus(painter: &egui::Painter, center: Pos2, half: f32, color:
 /// Botão só com o sinal de mais, sem moldura. A dica diz o que ele cria.
 pub(crate) fn plus_button(ui: &mut Ui, tip: &str) -> egui::Response {
     let (rect, reply) = ui.allocate_exact_size(vec2(34.0, 34.0), egui::Sense::click());
-    draw_plus(ui.painter(), rect.center(), 8.0, if reply.hovered() { pal().strong } else { pal().text });
+    draw_plus(ui.painter(), rect.center() + press_nudge(&reply), 8.0, if reply.hovered() { pal().strong } else { pal().text });
     focus_ring(ui, &reply, 8);
     reply.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// Botão só com um X, sem moldura (fechar). Desenhado: a fonte pode não ter o glifo "✕".
 pub(crate) fn close_button(ui: &mut Ui, tip: &str) -> egui::Response {
-    let (rect, reply) = ui.allocate_exact_size(vec2(28.0, 28.0), egui::Sense::click());
+    let (rect, reply) = ui.allocate_exact_size(vec2(34.0, 34.0), egui::Sense::click());
     let ink = Stroke::new(2.0_f32, if reply.hovered() { pal().strong } else { pal().text });
-    let (c, h) = (rect.center(), 6.0);
+    let (c, h) = ((rect.center() + press_nudge(&reply)), 6.0);
     let p = ui.painter();
     p.line_segment([c + vec2(-h, -h), c + vec2(h, h)], ink);
     p.line_segment([c + vec2(-h, h), c + vec2(h, -h)], ink);
@@ -359,10 +365,10 @@ pub(crate) fn close_button(ui: &mut Ui, tip: &str) -> egui::Response {
 /// Três pontos um acima do outro (menu de ações), desenhados: a fonte pode não ter o glifo "⋮". Quem chama
 /// abre o menu com `egui::Popup::menu(&resposta)`.
 pub(crate) fn dots_button(ui: &mut Ui) -> egui::Response {
-    let (rect, reply) = ui.allocate_exact_size(vec2(28.0, 34.0), egui::Sense::click());
+    let (rect, reply) = ui.allocate_exact_size(vec2(34.0, 34.0), egui::Sense::click());
     let ink = if reply.hovered() { pal().strong } else { pal().muted };
     for dy in [-6.0, 0.0, 6.0] {
-        ui.painter().circle_filled(rect.center() + vec2(0.0, dy), 2.0, ink);
+        ui.painter().circle_filled((rect.center() + press_nudge(&reply)) + vec2(0.0, dy), 2.0, ink);
     }
     focus_ring(ui, &reply, 8);
     reply.on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -370,8 +376,8 @@ pub(crate) fn dots_button(ui: &mut Ui) -> egui::Response {
 
 /// Escudo desenhado (confiança): cheio e verde quando ligado, só o contorno quando desligado.
 pub(crate) fn shield_button(ui: &mut Ui, on: bool) -> egui::Response {
-    let (rect, reply) = ui.allocate_exact_size(vec2(28.0, 34.0), egui::Sense::click());
-    let c = rect.center();
+    let (rect, reply) = ui.allocate_exact_size(vec2(34.0, 34.0), egui::Sense::click());
+    let c = rect.center() + press_nudge(&reply);
     let pts = [vec2(-7.0, -8.0), vec2(7.0, -8.0), vec2(7.0, 1.0), vec2(0.0, 9.0), vec2(-7.0, 1.0)].map(|d| c + d).to_vec();
     if on {
         ui.painter().add(egui::Shape::convex_polygon(pts, pal().green, Stroke::NONE));
@@ -389,8 +395,8 @@ pub(crate) fn shield_button(ui: &mut Ui, on: bool) -> egui::Response {
 
 /// Lixeira desenhada (remover): tampa, alça e corpo; vermelha ao passar o mouse.
 pub(crate) fn trash_button(ui: &mut Ui) -> egui::Response {
-    let (rect, reply) = ui.allocate_exact_size(vec2(28.0, 34.0), egui::Sense::click());
-    let c = rect.center();
+    let (rect, reply) = ui.allocate_exact_size(vec2(34.0, 34.0), egui::Sense::click());
+    let c = rect.center() + press_nudge(&reply);
     let ink = Stroke::new(1.6_f32, if reply.hovered() { pal().red } else { pal().muted });
     let p = ui.painter();
     p.line_segment([c + vec2(-7.0, -5.0), c + vec2(7.0, -5.0)], ink);
@@ -406,8 +412,8 @@ pub(crate) fn trash_button(ui: &mut Ui) -> egui::Response {
 
 /// Porta com seta para fora (sair), desenhada; vermelha ao passar o mouse. Quem chama decide a confirmação.
 pub(crate) fn exit_button(ui: &mut Ui) -> egui::Response {
-    let (rect, reply) = ui.allocate_exact_size(vec2(28.0, 34.0), egui::Sense::click());
-    let c = rect.center();
+    let (rect, reply) = ui.allocate_exact_size(vec2(34.0, 34.0), egui::Sense::click());
+    let c = rect.center() + press_nudge(&reply);
     let ink = Stroke::new(1.6_f32, if reply.hovered() { pal().red } else { pal().muted });
     let p = ui.painter();
     // Batente aberto à direita, para a seta sair por ali.
@@ -425,7 +431,7 @@ pub(crate) fn exit_button(ui: &mut Ui) -> egui::Response {
 /// mouse; quem chama decide o que acontece ao clicar.
 pub(crate) fn hangup_button(ui: &mut Ui) -> egui::Response {
     let (rect, reply) = ui.allocate_exact_size(vec2(32.0, 34.0), egui::Sense::click());
-    let c = rect.center();
+    let c = rect.center() + press_nudge(&reply);
     let ink = Stroke::new(1.8_f32, if reply.hovered() { pal().red } else { pal().muted });
     let p = ui.painter();
     p.circle_stroke(c, 9.0, ink);
@@ -700,10 +706,10 @@ pub(crate) fn alert_icon(painter: &egui::Painter, center: Pos2, size: f32, color
 /// `Ui` desligado o ícone apaga e não clica.
 pub(crate) fn glyph_button(ui: &mut Ui, name: &str, color: Option<Color32>, draw: impl FnOnce(&egui::Painter, Pos2, f32, Color32)) -> egui::Response {
     let enabled = ui.is_enabled();
-    let (rect, reply) = ui.allocate_exact_size(vec2(28.0, 34.0), egui::Sense::click());
+    let (rect, reply) = ui.allocate_exact_size(vec2(34.0, 34.0), egui::Sense::click());
     reply.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, name));
     let ink = if !enabled { pal().muted.gamma_multiply(0.5) } else { color.unwrap_or(if reply.hovered() { pal().strong } else { pal().text }) };
-    draw(ui.painter(), rect.center(), 20.0, ink);
+    draw(ui.painter(), rect.center() + press_nudge(&reply), 20.0, ink);
     focus_ring(ui, &reply, 8);
     reply.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
@@ -735,7 +741,7 @@ pub(crate) fn magnifier_icon(painter: &egui::Painter, center: Pos2, size: f32, c
 /// Botão só com a lupa, sem moldura (tela cheia). A dica diz a ação.
 pub(crate) fn magnifier_button(ui: &mut Ui, tip: &str) -> egui::Response {
     let (rect, reply) = ui.allocate_exact_size(vec2(32.0, 34.0), egui::Sense::click());
-    magnifier_icon(ui.painter(), rect.center(), 22.0, if reply.hovered() { pal().strong } else { pal().muted });
+    magnifier_icon(ui.painter(), rect.center() + press_nudge(&reply), 22.0, if reply.hovered() { pal().strong } else { pal().muted });
     focus_ring(ui, &reply, 8);
     reply.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand)
 }
