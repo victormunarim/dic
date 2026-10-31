@@ -366,7 +366,7 @@ impl App {
                                 let shown = members_shown(self.srv.members_open, ctx.screen_rect().width());
                                 let members_tip = format!("{} os membros ({})", if shown { "Esconder" } else { "Mostrar" }, ctx.format_shortcut(&MEMBERS_KEY));
                                 if members_toggle(ui, shown).on_hover_text(members_tip).clicked() || ctx.input_mut(|i| i.consume_shortcut(&MEMBERS_KEY)) {
-                                    self.srv.members_open = Some(!shown);
+                                    self.srv.toggle_members(ctx.screen_rect().width());
                                 }
                                 // Convidar fora da coluna: em janela estreita ela fica escondida e o convite com ela.
                                 let invite_tip = format!("Convidar alguém ({})", ctx.format_shortcut(&INVITE_KEY));
@@ -374,7 +374,7 @@ impl App {
                                 let shortcut = ctx.input_mut(|i| i.consume_shortcut(&INVITE_KEY));
                                 let was_open = self.srv.inviting;
                                 if shortcut {
-                                    self.srv.inviting = true;
+                                    self.srv.start_invite();
                                 }
                                 // Fecha só ao clicar fora (ou Esc), para dar tempo de escolher o contato e marcar o aviso.
                                 let mut open = self.srv.inviting;

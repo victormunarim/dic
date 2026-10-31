@@ -210,8 +210,6 @@ impl App {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let gear = glyph_button(ui, "Menu", "Chamada, vídeo, áudio, configurações e atividade", None, gear_icon);
                 let calling_1to1 = in_call && !in_room;
-                // Atalhos nas linhas das ações a que pertencem; fora de um servidor, convidar e membros ficam apagados.
-                let in_server = self.srv.sel.is_some() && !offline;
                 let muted_now = self.shared.audio.muted.load(Ordering::Relaxed);
                 let menu = theme::menu(&gear).show(|ui| {
                     ui.set_min_width(theme::MENU_WIDTH);
@@ -234,23 +232,6 @@ impl App {
                     }
                     ui.separator();
                     let keys = |k: &egui::KeyboardShortcut| ctx.format_shortcut(k);
-                    let members_label = if crate::servers::members_shown(self.srv.members_open, ctx.screen_rect().width()) { "Esconder os membros" } else { "Mostrar os membros" };
-                    let need_server = "Abra um servidor para usar";
-                    let invite = menu_row(ui, (!in_server).then_some(need_server), false, None, "Convidar para o servidor", Some(&keys(&INVITE_KEY)), invite_icon);
-                    if invite.clicked() {
-                        self.srv.start_invite();
-                        ui.close();
-                    }
-                    let members = menu_row(ui, (!in_server).then_some(need_server), false, None, members_label, Some(&keys(&MEMBERS_KEY)), person_icon);
-                    if members.clicked() {
-                        self.srv.toggle_members(ctx.screen_rect().width());
-                        ui.close();
-                    }
-                    if menu_row(ui, None, false, None, "Buscar contato", Some(&keys(&SEARCH_KEY)), magnifier_icon).clicked() {
-                        self.tab = Tab::Contacts;
-                        ctx.data_mut(|d| d.insert_temp(crate::contacts::focus_search_id(), true));
-                        ui.close();
-                    }
                     let mute_label = if muted_now { "Voltar a falar" } else { "Microfone mudo" };
                     if menu_row(ui, None, false, None, mute_label, Some(&keys(&MUTE_KEY)), move |p, c, s, k| mic_icon(p, c, s, k, !muted_now)).clicked() {
                         self.shared.audio.muted.store(!muted_now, Ordering::Relaxed);
