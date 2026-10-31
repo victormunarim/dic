@@ -1596,7 +1596,7 @@ mod tests {
     #[test]
     fn every_icon_button_has_an_accessible_name() {
         type Draw = fn(&mut Ui) -> egui::Response;
-        let buttons: [(&str, Draw); 12] = [
+        let buttons: [(&str, Draw); 13] = [
             ("n:Novo contato", |ui| plus_button(ui, "n:Novo contato")),
             ("n:Fechar", |ui| close_button(ui, "n:Fechar")),
             ("n:Desligar", |ui| hangup_button(ui, "n:Desligar")),
