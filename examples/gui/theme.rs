@@ -712,15 +712,6 @@ pub(crate) fn power_icon(ui: &Ui, rect: egui::Rect, color: Color32) {
     ui.painter().line_segment([c - vec2(0.0, r * 1.25), c - vec2(0.0, r * 0.1)], stroke);
 }
 
-/// Selo só de leitura (sem clique, sem mão): escudo com a explicação no hover. O estado vai no texto da dica e no nome
-/// acessível, não só no desenho.
-pub(crate) fn privacy_badge(ui: &mut Ui, name: &str, tip: &str) -> egui::Response {
-    let (rect, reply) = ui.allocate_exact_size(vec2(24.0, 24.0), egui::Sense::hover());
-    reply.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, name));
-    shield_icon(ui.painter(), rect.center(), 20.0, pal().text, false);
-    reply.on_hover_text(tip)
-}
-
 /// Sol (ou lua, no tema claro) desenhado à mão: o botão que troca o tema. O raio do disco e os raios de luz
 /// seguem a largura de `rect`.
 pub(crate) fn theme_icon(painter: &egui::Painter, rect: Rect, light: bool, color: Color32) {

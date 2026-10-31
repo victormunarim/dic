@@ -63,7 +63,6 @@ fn main() -> eframe::Result {
                 tab: Tab::Contacts,
                 audio_dirty: false,
                 screen_tex: Default::default(),
-        screen_thumb: Default::default(),
                 zoom: None,
                 trust_ask: None,
                 chat_with: None,

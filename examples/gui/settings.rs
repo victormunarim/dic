@@ -212,7 +212,31 @@ impl App {
         }
     }
 
+    /// Estado e diagnóstico da transmissão de tela (taxa, QP, som...), que não ocupam mais a tela da chamada.
+    fn broadcast_card(&self, ui: &mut egui::Ui) {
+        let st = &self.shared.screen;
+        let diag = st.diagnostics();
+        let note_text = st.note.lock_unpoisoned().clone();
+        let (wanted, sharing) = (st.want_share.load(Ordering::Relaxed), st.sharing.load(Ordering::Relaxed));
+        if diag.is_empty() && note_text.is_empty() && !wanted && !sharing {
+            return;
+        }
+        card(ui, "Transmissão da tela", "", |ui| {
+            if sharing {
+                ui.colored_label(pal().green, "sua tela está sendo vista");
+            } else if wanted {
+                note(ui, "ligando o circuito de vídeo...");
+            } else if !note_text.is_empty() {
+                ui.colored_label(pal().error, note_text);
+            }
+            if !diag.is_empty() {
+                ui.label(RichText::new(diag).monospace().size(13.0).color(pal().muted));
+            }
+        });
+    }
+
     pub(crate) fn log_tab(&mut self, ui: &mut egui::Ui) {
+        self.broadcast_card(ui);
         // Sem linhas o poço de altura cheia só carregava uma frase no canto: um cartão curto diz o mesmo e o poço
         // volta quando houver o que listar.
         if self.log.lock_unpoisoned().is_empty() {
@@ -277,7 +301,6 @@ mod layout_tests {
             tab: Tab::Settings,
             audio_dirty: false,
             screen_tex: Default::default(),
-        screen_thumb: Default::default(),
             zoom: None,
             trust_ask: None,
             chat_with: None,
