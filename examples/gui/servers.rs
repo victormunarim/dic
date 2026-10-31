@@ -31,11 +31,11 @@ pub(crate) struct ServersUi {
     /// A pessoa voltou ao bate-papo mesmo com uma tela sendo assistida (clicou na sala na barra); zera quando
     /// a última tela para de ser assistida, para a próxima cobrir o centro de novo.
     pub(crate) chat_over_screen: bool,
-    /// O cartão de convite está aberto.
+    /// O menu de convite do cabeçalho está aberto.
     pub(crate) inviting: bool,
     /// Escolha da pessoa para a coluna de membros; `None` segue a largura da janela (`members_fit`).
     pub(crate) members_open: Option<bool>,
-    /// Resposta do cartão de convite (erro ou envio feito), mostrada nele e não no topo da aba.
+    /// Resposta do menu de convite (erro ou envio feito), mostrada nele e não no topo da aba.
     pub(crate) invite_msg: String,
     pub(crate) invite_info: String,
     pub(crate) msg: String,
@@ -59,16 +59,16 @@ pub(crate) fn members_shown(choice: Option<bool>, window_width: f32) -> bool {
 }
 
 impl ServersUi {
-    /// Abre o cartão de convite e a coluna de membros, onde ele mora, mesmo em janela estreita.
+    /// Fecha o menu de convite e apaga o retorno dele.
     fn close_invite(&mut self) {
         self.inviting = false;
         self.invite_msg.clear();
         self.invite_info.clear();
     }
 
+    /// Abre o menu de convite do cabeçalho do servidor.
     pub(crate) fn start_invite(&mut self) {
         self.inviting = true;
-        self.members_open = Some(true);
     }
 
     /// Mostra ou esconde a coluna de membros (o mesmo que o botão do cabeçalho e o Ctrl+B).
@@ -260,7 +260,7 @@ impl App {
         self.room_chat(ui, hub, v);
     }
 
-    /// Coluna dos membros, à direita e de ponta a ponta da janela; o convite fica recolhido no fim do cartão de membros.
+    /// Coluna dos membros, à direita e de ponta a ponta da janela.
     pub(crate) fn members_panel(&mut self, ctx: &egui::Context, offline: bool) {
         if self.tab != Tab::Servers || offline || !members_shown(self.srv.members_open, ctx.screen_rect().width()) {
             return;
@@ -369,9 +369,23 @@ impl App {
                                 }
                                 // Convidar fora da coluna: em janela estreita ela fica escondida e o convite com ela.
                                 let invite_tip = format!("Convidar alguém ({})", ctx.format_shortcut(&INVITE_KEY));
-                                if glyph_button(ui, "Convidar alguém", None, invite_icon).on_hover_text(invite_tip).clicked() || ctx.input_mut(|i| i.consume_shortcut(&INVITE_KEY)) {
-                                    self.srv.start_invite();
+                                let plus = glyph_button(ui, "Convidar alguém", None, invite_icon).on_hover_text(invite_tip);
+                                let shortcut = ctx.input_mut(|i| i.consume_shortcut(&INVITE_KEY));
+                                let was_open = self.srv.inviting;
+                                if shortcut {
+                                    self.srv.inviting = true;
                                 }
+                                // Fecha só ao clicar fora (ou Esc), para dar tempo de escolher o contato e marcar o aviso.
+                                let mut open = self.srv.inviting;
+                                egui::Popup::menu(&plus).open_bool(&mut open).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| self.invite_form(ui, hub, v));
+                                // O clique no botão alterna sozinho; o egui só cuidava do clique fora.
+                                if plus.clicked() {
+                                    open = !was_open;
+                                }
+                                if was_open && !open {
+                                    self.srv.close_invite();
+                                }
+                                self.srv.inviting = open;
                             });
                         });
                         ui.add_space(8.0);
@@ -716,37 +730,15 @@ impl App {
                 });
                 ui.add_space(4.0);
             }
-            ui.add_space(4.0);
-            self.invite_card(ui, hub, v);
         });
     }
 
-    /// Convite de um contato, compacto: recolhido até a pessoa querer convidar.
-    fn invite_card(&mut self, ui: &mut egui::Ui, hub: &clam::server::net::ServerHub, v: &ServerView) {
+    /// Convite de um contato: o formulário do menu aberto pelo + do cabeçalho do servidor.
+    fn invite_form(&mut self, ui: &mut egui::Ui, hub: &clam::server::net::ServerHub, v: &ServerView) {
         let contacts = parse_contacts(&self.form.contacts);
-        // Como o cartão "nova sala": um cartão apagado com + que, ao clicar, vira o formulário no próprio lugar.
-        if !self.srv.inviting {
-            if ghost_card(ui, "Convidar alguém para o servidor") {
-                self.srv.inviting = true;
-            }
-            return;
-        }
-        // Esc fecha o cartão, a menos que a tecla esteja fechando a lista de contatos aberta.
-        if !egui::Popup::is_any_open(ui.ctx()) && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
-            self.srv.close_invite();
-            return;
-        }
         {
-          raised_frame(ui, 12, 12, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Convidar alguém").strong().color(pal().strong)).on_hover_text("O convite chega pela rede, cifrado, e só o contato escolhido consegue abri-lo. Qualquer membro pode convidar.");
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if close_button(ui, "Fechar").clicked() {
-                        self.srv.close_invite();
-                    }
-                });
-            });
+            ui.set_width(300.0);
+            ui.label(RichText::new("Convidar alguém").strong().color(pal().strong)).on_hover_text("O convite chega pela rede, cifrado, e só o contato escolhido consegue abri-lo. Qualquer membro pode convidar.");
             let shown = self.srv.pick.map_or("escolha um contato".to_string(), |k| member_name(&contacts, &k));
             egui::ComboBox::from_id_salt("convidar").selected_text(shown).width(260.0).show_ui(ui, |ui| {
                 for (name, key) in &contacts {
@@ -806,7 +798,6 @@ impl App {
                 }
                 note(ui, "Mande o texto por onde preferir; ele só abre na conta do convidado. Ele entra quando você estiver online. (Este caminho não envia nada pela rede.)");
             }
-          });
         }
     }
 
@@ -961,11 +952,11 @@ mod tests {
     }
 
     #[test]
-    fn inviting_opens_the_members_column_even_in_a_narrow_window() {
+    fn inviting_does_not_touch_the_members_column() {
         let mut srv = ServersUi::default();
         srv.start_invite();
         assert!(srv.inviting);
-        assert!(members_shown(srv.members_open, 820.0), "o convite mora na coluna de membros");
+        assert_eq!(srv.members_open, None, "o convite mora no menu do cabeçalho, não na coluna");
     }
 
     #[test]

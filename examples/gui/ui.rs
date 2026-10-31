@@ -258,7 +258,7 @@ impl App {
                         self.shared.audio.muted.store(!muted_now, Ordering::Relaxed);
                         ui.close();
                     }
-                    ui.label(egui::RichText::new("Esc fecha o cartão de convite").size(12.0).color(pal().muted));
+                    ui.label(egui::RichText::new("Esc fecha o menu de convite").size(12.0).color(pal().muted));
                 });
                 theme::menu_focus_back(ui, &gear, menu.is_some());
                 let muted = self.shared.audio.muted.load(Ordering::Relaxed);
