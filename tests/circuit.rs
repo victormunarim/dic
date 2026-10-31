@@ -182,7 +182,7 @@ fn replayed_and_tampered_cells_are_dropped() {
     let mut cc = s.build();
     let cell = cc.send_data(b"uma vez").unwrap();
     s.client_send(cell.clone());
-    s.client_send(cell.clone()); // replay
+    s.client_send(cell); // replay
     assert_eq!(s.delivered.len(), 1);
     assert_eq!(s.nodes["A"].stats.dropped_replay, 1);
 

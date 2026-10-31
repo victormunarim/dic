@@ -111,7 +111,7 @@ impl Samples {
         if self.0.is_empty() {
             return;
         }
-        self.0.sort_by(|a, b| a.total_cmp(b));
+        self.0.sort_by(f64::total_cmp);
         let q = |p: f64| self.0[((self.0.len() - 1) as f64 * p).round() as usize];
         let mean = self.0.iter().sum::<f64>() / got as f64;
         let jitter = self.0.iter().map(|x| (x - mean).abs()).sum::<f64>() / got as f64;

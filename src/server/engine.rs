@@ -814,15 +814,12 @@ impl Servers {
         let Some(from) = contacts.iter().find(|k| k[..8] == sender[..]).copied() else { return out };
         let Some(Msg::InviteChunk { id, idx, total, data }) = wire::open(&self.me.secret, &from, &INVITE_SERVER, frame) else { return out };
         out.ack = wire::nonce_tag(frame).and_then(|t| wire::seal(&self.me.secret, &from, &INVITE_SERVER, &Msg::Ack(t)));
-        let at = match self.assembling.iter().position(|(k, _)| *k == (from, id)) {
-            Some(i) => i,
-            None => {
-                if self.assembling.len() >= INVITES_KEPT {
-                    self.assembling.remove(0);
-                }
-                self.assembling.push(((from, id), vec![None; total as usize]));
-                self.assembling.len() - 1
+        let at = if let Some(i) = self.assembling.iter().position(|(k, _)| *k == (from, id)) { i } else {
+            if self.assembling.len() >= INVITES_KEPT {
+                self.assembling.remove(0);
             }
+            self.assembling.push(((from, id), vec![None; total as usize]));
+            self.assembling.len() - 1
         };
         let parts = &mut self.assembling[at].1;
         if parts.len() != total as usize {

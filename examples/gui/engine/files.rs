@@ -27,7 +27,7 @@ pub(crate) struct Receiving {
 
 /// A pessoa escolheu um arquivo: confere, registra a oferta e a manda; o envio só segue com o aceite.
 pub(crate) fn start_send(shared: &std::sync::Arc<Shared>, dialer: &Dialer, out: &Sink, peer: [u8; 32], path: PathBuf) {
-    let size = std::fs::metadata(&path).ok().filter(|m| m.is_file()).map(|m| m.len());
+    let size = std::fs::metadata(&path).ok().filter(std::fs::Metadata::is_file).map(|m| m.len());
     let name = path.file_name().map(|n| transfer::safe_name(&n.to_string_lossy()));
     let (Some(size), Some(name)) = (size, name) else {
         out.line(format!("não consegui ler {}", path.display()));

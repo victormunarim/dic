@@ -180,7 +180,7 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
             }
             Some((peer, attempt, r)) = dialed_rx.recv() => {
                 saver.sync(&book_of(&node), &out);
-                let step = dial_step(attempt, r.as_ref().map(|r| r.is_ok()));
+                let step = dial_step(attempt, r.as_ref().map(std::result::Result::is_ok));
                 // Entre uma tentativa e a próxima a janela segue "chamando"; em qualquer outro desfecho, acabou.
                 if !matches!(step, DialStep::Retry) {
                     *shared.ringing.lock_unpoisoned() = None;

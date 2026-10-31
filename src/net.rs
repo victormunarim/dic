@@ -172,7 +172,7 @@ impl Node {
                     .build()
                     .map_err(|e| e.to_string())?;
                 let gossipsub = gossipsub::Behaviour::new(gossipsub::MessageAuthenticity::Anonymous, gs_cfg)
-                    .map_err(|e| e.to_string())?;
+                    .map_err(std::string::ToString::to_string)?;
                 let identify = identify::Behaviour::new(identify::Config::new("/clam/1".into(), key.public()));
                 Ok(Behaviour { kad, gossipsub, identify })
             })

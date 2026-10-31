@@ -79,15 +79,12 @@ impl JitterBuffer {
         if now < self.deadline(self.next)? {
             return None;
         }
-        let out = match self.frames.remove(&self.next) {
-            Some(d) => {
-                self.stats.played += 1;
-                Playout::Frame(d)
-            }
-            None => {
-                self.stats.lost += 1;
-                Playout::Lost
-            }
+        let out = if let Some(d) = self.frames.remove(&self.next) {
+            self.stats.played += 1;
+            Playout::Frame(d)
+        } else {
+            self.stats.lost += 1;
+            Playout::Lost
         };
         match self.next.checked_add(1) {
             Some(n) => self.next = n,

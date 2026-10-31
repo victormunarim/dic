@@ -194,7 +194,7 @@ impl App {
         }
         let mut up: std::collections::HashSet<[u8; 32]> = self.shared.presence.lock_unpoisoned().iter().filter(|(_, on)| **on).map(|(k, _)| *k).collect();
         if let Some(hub) = self.shared.servers.lock_unpoisoned().clone() {
-            for v in hub.read(|s, now| s.views(now)) {
+            for v in hub.read(clam::server::Servers::views) {
                 up.extend(v.members.iter().filter(|m| !m.is_me && m.online).map(|m| m.key));
             }
         }

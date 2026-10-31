@@ -357,15 +357,12 @@ pub fn detect_region(prev: &RawFrame, cur: &RawFrame) -> Option<(Rect, i32)> {
     let (mut best, mut start) = ((0usize, 0usize), 0usize);
     let mut voters = false;
     for b in 0..=BANDS {
-        match ok.get(b) {
-            Some(&(true, v)) => voters |= v,
-            _ => {
-                if voters && b - start > best.1 - best.0 {
-                    best = (start, b);
-                }
-                start = b + 1;
-                voters = false;
+        if let Some(&(true, v)) = ok.get(b) { voters |= v } else {
+            if voters && b - start > best.1 - best.0 {
+                best = (start, b);
             }
+            start = b + 1;
+            voters = false;
         }
     }
     if best.1 <= best.0 {
@@ -724,7 +721,7 @@ mod tests {
         }
         assert_eq!(changed_rows(&a, &c), None, "mudança grande vale um quadro-chave");
         let s = band(&b, 50, 8).unwrap();
-        let mut canvas = a.clone();
+        let mut canvas = a;
         assert!(apply_patch(&mut canvas, 50, 8, &s));
         assert_eq!(canvas, b);
         assert!(!apply_patch(&mut canvas, 195, 8, &s), "passa do fim");
@@ -749,7 +746,7 @@ mod tests {
     fn window(off: usize) -> RawFrame {
         let fixed = page(320, 240, 7000);
         let moving = page(320, 240, off);
-        let mut f = fixed.clone();
+        let mut f = fixed;
         for y in 24..216 {
             for x in 80..320 {
                 let i = (y * 320 + x) * 4;
@@ -831,7 +828,7 @@ mod tests {
         let (a, b) = (sparse_window(800), sparse_window(860));
         let (rect, dy) = detect_region(&a, &b).expect("região");
         assert_eq!(dy, 60);
-        let mut p = a.clone();
+        let mut p = a;
         let s = strip_region(&b, rect, dy).unwrap();
         assert!(apply_region(&mut p, rect, dy, &s));
         assert_eq!(p, b, "{rect:?}");

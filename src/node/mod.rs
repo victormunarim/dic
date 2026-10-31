@@ -303,7 +303,7 @@ impl Node {
         phone.accept_introductions(introductions);
         let server_hub = ServerHub::start(restore(secret.clone(), saved_servers.as_deref()), dialer.clone(), &phone, own.clone());
         if publishes {
-            background.push(tokio::spawn(server_publisher(dialer.clone(), server_hub.clone(), current.clone())));
+            background.push(tokio::spawn(server_publisher(dialer.clone(), server_hub.clone(), current)));
         }
         let inbox = Inbox::default();
         inbox.blocked.lock_unpoisoned().extend(blocked);

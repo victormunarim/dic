@@ -233,22 +233,19 @@ async fn drive<C: Codec>(
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
         tokio::select! {
-            pcm = mic.recv() => match pcm {
-                Some(pcm) => {
-                    if let Ok(p) = call.send(&pcm) {
+            pcm = mic.recv() => if let Some(pcm) = pcm {
+                if let Ok(p) = call.send(&pcm) {
+                    let _ = wire_out.send(WireOut::Frame { conn: current, data: p.to_vec() }).await;
+                }
+            } else {
+                // Três cópias seguidas: a voz tolera perda, o desligar não deveria depender de uma célula.
+                for _ in 0..3 {
+                    if let Ok(p) = call.hangup() {
                         let _ = wire_out.send(WireOut::Frame { conn: current, data: p.to_vec() }).await;
                     }
+                    tokio::time::sleep(Duration::from_millis(frame_ms)).await;
                 }
-                None => {
-                    // Três cópias seguidas: a voz tolera perda, o desligar não deveria depender de uma célula.
-                    for _ in 0..3 {
-                        if let Ok(p) = call.hangup() {
-                            let _ = wire_out.send(WireOut::Frame { conn: current, data: p.to_vec() }).await;
-                        }
-                        tokio::time::sleep(Duration::from_millis(frame_ms)).await;
-                    }
-                    break;
-                }
+                break;
             },
             inb = wire_in.recv() => match inb {
                 Some((conn, data)) => {

@@ -132,16 +132,13 @@ pub(crate) async fn talk(mut c: ActiveCall, hz: f64, stop: Arc<AtomicBool>, out:
                 }
                 n += 1;
             }
-            f = c.next_pcm() => match f {
-                Some(f) => {
-                    frames += 1;
-                    energy += f.iter().map(|x| (*x as f64).powi(2)).sum::<f64>() / f.len() as f64;
-                    play_scaled(sound.as_ref(), f, shared);
-                }
-                None => {
-                    end = if c.peer_hung_up() { End::PeerHangup } else { End::Lost };
-                    break;
-                }
+            f = c.next_pcm() => if let Some(f) = f {
+                frames += 1;
+                energy += f.iter().map(|x| (*x as f64).powi(2)).sum::<f64>() / f.len() as f64;
+                play_scaled(sound.as_ref(), f, shared);
+            } else {
+                end = if c.peer_hung_up() { End::PeerHangup } else { End::Lost };
+                break;
             },
             ev = screen_rx.recv(), if screen_open => match ev {
                 Some(ev) => {

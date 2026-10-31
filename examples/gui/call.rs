@@ -101,15 +101,12 @@ impl App {
         for (who, seq, color) in shown {
             // Atualiza a textura que já existe: criar uma nova na GPU a cada quadro (15 por segundo, em
             // 1080p) enche a memória de vídeo de texturas à espera de serem liberadas.
-            match self.screen_tex.get_mut(&who) {
-                Some((n, tex)) => {
-                    tex.set(color, egui::TextureOptions::LINEAR);
-                    *n = seq;
-                }
-                None => {
-                    let tex = ctx.load_texture(format!("tela-{}", who[0]), color, egui::TextureOptions::LINEAR);
-                    self.screen_tex.insert(who, (seq, tex));
-                }
+            if let Some((n, tex)) = self.screen_tex.get_mut(&who) {
+                tex.set(color, egui::TextureOptions::LINEAR);
+                *n = seq;
+            } else {
+                let tex = ctx.load_texture(format!("tela-{}", who[0]), color, egui::TextureOptions::LINEAR);
+                self.screen_tex.insert(who, (seq, tex));
             }
         }
     }

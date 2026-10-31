@@ -922,13 +922,10 @@ pub fn pump_all(source: &mut dyn ScreenSource, encoder: &mut H264Encoder, shares
     encoder.peers_roll = !shares.is_empty() && shares.iter().all(|s| s.peer_rolls());
     let wanted = shares.iter().fold(force_key, |w, s| s.keyframe_wanted() | w);
     // A taxa segue o pior espectador. Sem relatório novo, relatórios que sumiram com vídeo saindo cortam a taxa.
-    match shares.iter().filter_map(|s| s.take_report()).map(|r| r.loss).reduce(f32::max) {
-        Some(loss) => encoder.report_loss(loss),
-        None => {
-            let silent = |s: &&ScreenShare| s.report_age().is_some_and(|(age, sent)| age > SILENCE && sent >= SILENCE_PACKETS);
-            if shares.iter().any(silent) {
-                encoder.report_silence();
-            }
+    if let Some(loss) = shares.iter().filter_map(|s| s.take_report()).map(|r| r.loss).reduce(f32::max) { encoder.report_loss(loss) } else {
+        let silent = |s: &&ScreenShare| s.report_age().is_some_and(|(age, sent)| age > SILENCE && sent >= SILENCE_PACKETS);
+        if shares.iter().any(silent) {
+            encoder.report_silence();
         }
     }
     // O circuito ainda escoa o quadro anterior: capturar agora só criaria um quadro velho na fila.
@@ -1092,7 +1089,7 @@ mod tests {
     fn window(off: usize) -> RawFrame {
         let (w, h) = (1280, 720);
         let (fixed, moving) = (lines(w, h, 9_999), lines(w, h, off));
-        let mut f = fixed.clone();
+        let mut f = fixed;
         for y in 40..h - 40 {
             f.rgba[(y * w + 240) * 4..(y * w + w) * 4].copy_from_slice(&moving.rgba[(y * w + 240) * 4..(y * w + w) * 4]);
         }

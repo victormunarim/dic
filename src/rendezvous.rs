@@ -328,12 +328,12 @@ impl Budget {
 
 /// Atende os circuitos que o relay de saída encaminha a `listener` (veja [`GATEWAY_DEST`]) com a DHT de `dht`.
 pub async fn serve_gateway(listener: TcpListener, dht: Arc<Rendezvous>) {
-    serve(listener, dht, GATEWAY_PER_MINUTE).await
+    serve(listener, dht, GATEWAY_PER_MINUTE).await;
 }
 
 /// Atende os circuitos que o relay de saída encaminha a `listener` (veja [`ANCHOR_DEST`]) com o depósito de `anchor`.
 pub async fn serve_anchor(listener: TcpListener, anchor: Arc<Anchor>) {
-    serve(listener, anchor, ANCHOR_PER_MINUTE).await
+    serve(listener, anchor, ANCHOR_PER_MINUTE).await;
 }
 
 async fn serve<S: Store>(listener: TcpListener, store: Arc<S>, per_minute: u32) {
@@ -511,7 +511,7 @@ mod tests {
         let item = record(&[7; 32], 5);
         assert!(item.verify());
         assert!(!Signed { seq: 6, ..item.clone() }.verify());
-        assert!(!Signed { value: vec![4; RECORD_LEN], ..item.clone() }.verify());
+        assert!(!Signed { value: vec![4; RECORD_LEN], ..item }.verify());
         assert!(!Signed { key: [8; 32], ..item }.verify());
     }
 

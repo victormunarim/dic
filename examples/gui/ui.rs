@@ -285,7 +285,7 @@ impl App {
     /// Registra no log da janela uma lentidão da própria janela, no máximo uma vez por segundo.
     fn note_slow(&mut self, line: String) {
         thread_local!(static LAST_NOTE: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) });
-        let due = LAST_NOTE.with(|l| l.get()).is_none_or(|t| t.elapsed() >= Duration::from_secs(1));
+        let due = LAST_NOTE.with(std::cell::Cell::get).is_none_or(|t| t.elapsed() >= Duration::from_secs(1));
         if due {
             LAST_NOTE.with(|l| l.set(Some(std::time::Instant::now())));
             self.log.lock_unpoisoned().push(line);
@@ -356,7 +356,7 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         let began = std::time::Instant::now();
         let watching = !self.shared.screen.images.lock_unpoisoned().is_empty();
-        if let Some(end) = LAST_FRAME_END.with(|l| l.get()) {
+        if let Some(end) = LAST_FRAME_END.with(std::cell::Cell::get) {
             // Vendo tela a janela repinta a cada 16 ms: bem mais que isso sem atualizar é a janela travada fora da
             // nossa conta (troca de buffers, eventos do sistema).
             let gap = began.duration_since(end);

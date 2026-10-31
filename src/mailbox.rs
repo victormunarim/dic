@@ -62,15 +62,12 @@ impl Custody {
             return true;
         }
         let idx = usize::from(part.idx);
-        let at = match self.partial.iter().position(|p| p.from == from && p.id == part.id) {
-            Some(at) => at,
-            None => {
-                if self.partial.len() >= MAX_PARTIAL || self.full(&from) {
-                    return false;
-                }
-                self.partial.push(Partial { from, id: part.id, parts: vec![None; usize::from(part.total)] });
-                self.partial.len() - 1
+        let at = if let Some(at) = self.partial.iter().position(|p| p.from == from && p.id == part.id) { at } else {
+            if self.partial.len() >= MAX_PARTIAL || self.full(&from) {
+                return false;
             }
+            self.partial.push(Partial { from, id: part.id, parts: vec![None; usize::from(part.total)] });
+            self.partial.len() - 1
         };
         // Pedaços do mesmo depósito que discordam no total: o depósito inteiro é descartado.
         let Some(slot) = self.partial.get_mut(at).filter(|p| p.parts.len() == usize::from(part.total)).and_then(|p| p.parts.get_mut(idx)) else {

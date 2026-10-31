@@ -845,7 +845,7 @@ mod tests {
         let chat = Chat { id: 1_000_000, text: "olá, tudo bem? ção".into() };
         let frame = seal_chat(&a, &pb, &chat).unwrap();
         assert_eq!(frame.len(), PACKET_LEN);
-        assert_eq!(open_chat(&b, &frame, 1_000_500), Some((*pa.as_bytes(), chat.clone())));
+        assert_eq!(open_chat(&b, &frame, 1_000_500), Some((*pa.as_bytes(), chat)));
         assert_eq!(open_chat(&a, &frame, 1_000_500), None, "o remetente não abre o próprio quadro");
         assert_eq!(open_chat(&StaticSecret::random_from_rng(OsRng), &frame, 1_000_500), None);
         assert_eq!(open_chat(&b, &frame, 1_000_000 + REMOVAL_WINDOW_MS + 1), None, "quadro velho");

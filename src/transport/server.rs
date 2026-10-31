@@ -90,7 +90,7 @@ impl RelayServer {
         let link = cfg.link_secret.take().unwrap_or_else(|| StaticSecret::random_from_rng(OsRng));
         let link_public = PublicKey::from(&link).to_bytes();
         let secret = Zeroizing::new(link.to_bytes());
-        let (cover, cover_rx) = watch::channel(cfg.profile.map_or(cfg.cover, |p| p.link_interval()));
+        let (cover, cover_rx) = watch::channel(cfg.profile.map_or(cfg.cover, super::super::cover::CoverProfile::link_interval));
         let task = tokio::spawn(relay_actor(node, secret, listener, cfg, cover_rx));
         Ok(Self { addr, link_public, cover, task })
     }

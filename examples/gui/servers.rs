@@ -92,7 +92,7 @@ impl App {
             });
             return;
         };
-        let views = hub.read(|s, now| s.views(now));
+        let views = hub.read(clam::server::Servers::views);
         if self.srv.sel.is_some_and(|id| !views.iter().any(|v| v.id == id)) {
             self.srv.sel = None;
         }
@@ -113,7 +113,7 @@ impl App {
     /// Clicar abre a aba Servidores naquele servidor.
     pub(crate) fn server_rail(&mut self, ctx: &egui::Context, offline: bool) {
         let hub = self.shared.servers.lock_unpoisoned().clone().filter(|_| !offline);
-        let views = hub.as_ref().map(|h| h.read(|s, now| s.views(now))).unwrap_or_default();
+        let views = hub.as_ref().map(|h| h.read(clam::server::Servers::views)).unwrap_or_default();
         if self.srv.sel.is_some_and(|id| !views.iter().any(|v| v.id == id)) {
             self.srv.sel = None;
         }
@@ -264,7 +264,7 @@ impl App {
             return;
         }
         let Some(hub) = self.shared.servers.lock_unpoisoned().clone() else { return };
-        let Some(v) = hub.read(|s, now| s.views(now)).into_iter().find(|v| Some(v.id) == self.srv.sel) else { return };
+        let Some(v) = hub.read(clam::server::Servers::views).into_iter().find(|v| Some(v.id) == self.srv.sel) else { return };
         egui::SidePanel::right("membros")
             .show_separator_line(true)
             .exact_width(340.0)
@@ -313,7 +313,7 @@ impl App {
     /// perfil, o mudo, a engrenagem com as demais telas e o desligar.
     pub(crate) fn rooms_panel(&mut self, ctx: &egui::Context, offline: bool, in_call: bool, status: &str) {
         let hub = self.shared.servers.lock_unpoisoned().clone().filter(|_| !offline);
-        let view = hub.as_ref().and_then(|h| h.read(|s, now| s.views(now)).into_iter().find(|v| Some(v.id) == self.srv.sel));
+        let view = hub.as_ref().and_then(|h| h.read(clam::server::Servers::views).into_iter().find(|v| Some(v.id) == self.srv.sel));
         let my_room = self.shared.room.lock_unpoisoned().at;
         // (sala, servidor) em que estou: vira a subseção acima do perfil, com o sair da sala.
         let room_bar = hub.as_ref().zip(my_room).and_then(|(h, (sid, rid))| {
@@ -499,7 +499,7 @@ impl App {
 
     fn room_list(&mut self, ui: &mut egui::Ui, hub: &clam::server::net::ServerHub, v: &ServerView, my_room: Option<(ServerId, clam::server::RoomId)>, in_call: bool) {
         let contacts = parse_contacts(&self.form.contacts);
-        let manages = v.my_role.is_some_and(|r| r.manages());
+        let manages = v.my_role.is_some_and(clam::server::Role::manages);
         let mut action: Option<([u8; 32], bool)> = None;
         for room in &v.rooms {
             let here = my_room == Some((v.id, room.id));
@@ -683,7 +683,7 @@ impl App {
     fn members_card(&mut self, ui: &mut egui::Ui, hub: &clam::server::net::ServerHub, v: &ServerView) {
         let contacts = parse_contacts(&self.form.contacts);
         let name_of = |key: &[u8; 32], given: &str| if given.is_empty() { member_name(&contacts, key) } else { given.to_string() };
-        let manages = v.my_role.is_some_and(|r| r.manages());
+        let manages = v.my_role.is_some_and(clam::server::Role::manages);
         card(ui, "Membros", "", |ui| {
             for m in &v.members {
                 ui.horizontal(|ui| {

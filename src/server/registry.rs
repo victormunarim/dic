@@ -513,7 +513,7 @@ mod tests {
         assert!(r.make(&a.sk, a.id, Action::CreateRoom { room: [2; 16], name: "y".into() }).is_some());
         // Um salto de mais de um também é ignorado, e vale quando a que faltava chega.
         let skip = Op::sign(&SID, &b.sk, b.id, 5, 3, Action::CreateRoom { room: [3; 16], name: "z".into() });
-        r.insert(skip.clone());
+        r.insert(skip);
         assert!(!r.state().rooms.contains_key(&[3; 16]));
         let fill = Op::sign(&SID, &b.sk, b.id, 4, 2, Action::SetName { name: "Bia".into() });
         r.insert(fill);

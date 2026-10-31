@@ -462,28 +462,25 @@ impl CircuitManager {
 
         if is_active {
             let was_ready = slot.phase == Phase::Ready;
-            match self.standby.take() {
-                Some(sb) => {
-                    if sb.phase == Phase::Ready {
-                        if was_ready {
-                            out.push(Out::Event(Event::FailedOver { silence_ms: now.saturating_sub(slot.last_rx) }));
-                        } else {
-                            // O ativo morreu montando: o reserva pronto nunca anunciou `Ready`.
-                            out.push(Out::Event(Event::Ready { rtt_ms: sb.rtt_ms.map_or(0, |r| r as u64) }));
-                        }
+            if let Some(sb) = self.standby.take() {
+                if sb.phase == Phase::Ready {
+                    if was_ready {
+                        out.push(Out::Event(Event::FailedOver { silence_ms: now.saturating_sub(slot.last_rx) }));
+                    } else {
+                        // O ativo morreu montando: o reserva pronto nunca anunciou `Ready`.
+                        out.push(Out::Event(Event::Ready { rtt_ms: sb.rtt_ms.map_or(0, |r| r as u64) }));
                     }
-                    self.active = Some(sb);
-                    self.next_standby_attempt = now;
                 }
-                None => {
-                    if !self.no_circuit_reported {
-                        self.no_circuit_reported = true;
-                        out.push(Out::Event(Event::NoCircuit));
-                    }
-                    // Sem cooldown no modo direto, a pausa é o que impede de refazer o circuito
-                    // sem parar contra um relay que o derruba (uma versão antiga, por exemplo).
-                    self.next_active_attempt = if self.cfg.direct { now + self.cfg.retry_ms } else { now };
+                self.active = Some(sb);
+                self.next_standby_attempt = now;
+            } else {
+                if !self.no_circuit_reported {
+                    self.no_circuit_reported = true;
+                    out.push(Out::Event(Event::NoCircuit));
                 }
+                // Sem cooldown no modo direto, a pausa é o que impede de refazer o circuito
+                // sem parar contra um relay que o derruba (uma versão antiga, por exemplo).
+                self.next_active_attempt = if self.cfg.direct { now + self.cfg.retry_ms } else { now };
             }
         } else {
             self.next_standby_attempt = now + self.cfg.retry_ms;

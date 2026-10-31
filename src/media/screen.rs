@@ -489,26 +489,23 @@ impl ScreenStream {
             Some(f) => (Some(f), false),
             None => (self.queue.pop_front(), true),
         };
-        let len = match next {
-            Some((flags, id, idx, total, data)) => {
-                self.stats.packets_sent += 1;
-                put(&mut buf, 0, &[flags | want]);
-                put(&mut buf, 1, &id.to_be_bytes());
-                put(&mut buf, 3, &idx.to_be_bytes());
-                put(&mut buf, 5, &total.to_be_bytes());
-                put(&mut buf, HEADER, &data);
-                if fresh {
-                    if self.history.len() >= HISTORY {
-                        self.history.pop_front();
-                    }
-                    self.history.push_back(Sent { frag: (flags, id, idx, total, data.clone()), resent: None });
+        let len = if let Some((flags, id, idx, total, data)) = next {
+            self.stats.packets_sent += 1;
+            put(&mut buf, 0, &[flags | want]);
+            put(&mut buf, 1, &id.to_be_bytes());
+            put(&mut buf, 3, &idx.to_be_bytes());
+            put(&mut buf, 5, &total.to_be_bytes());
+            put(&mut buf, HEADER, &data);
+            if fresh {
+                if self.history.len() >= HISTORY {
+                    self.history.pop_front();
                 }
-                HEADER + data.len()
+                self.history.push_back(Sent { frag: (flags, id, idx, total, data.clone()), resent: None });
             }
-            None => {
-                put(&mut buf, 0, &[IDLE | want]);
-                HEADER
-            }
+            HEADER + data.len()
+        } else {
+            put(&mut buf, 0, &[IDLE | want]);
+            HEADER
         };
         self.sealer.seal(buf.get(..len).ok_or(MediaError::TooLarge(len))?)
     }
@@ -562,17 +559,14 @@ impl ScreenStream {
         if self.last_id.is_some_and(|l| !older(l, id)) {
             return Ok(()); // quadro velho ou já entregue
         }
-        let slot = match self.pending.iter().position(|p| p.id == id) {
-            Some(i) => i,
-            None => {
-                let keyframe = flags & KEYFRAME != 0;
-                if keyframe {
-                    // O emissor largou tudo que era anterior ao quadro-chave: não há o que esperar.
-                    self.pending.retain(|q| !older(q.id, id));
-                }
-                self.pending.push(Pending { id, keyframe, total: total as u16, got: 0, parts: vec![None; total], last_at: Instant::now() });
-                self.pending.len() - 1
+        let slot = if let Some(i) = self.pending.iter().position(|p| p.id == id) { i } else {
+            let keyframe = flags & KEYFRAME != 0;
+            if keyframe {
+                // O emissor largou tudo que era anterior ao quadro-chave: não há o que esperar.
+                self.pending.retain(|q| !older(q.id, id));
             }
+            self.pending.push(Pending { id, keyframe, total: total as u16, got: 0, parts: vec![None; total], last_at: Instant::now() });
+            self.pending.len() - 1
         };
         let part = self.pending.get_mut(slot).filter(|p| p.total as usize == total).and_then(|p| Some((p.parts.get_mut(idx)?, &mut p.got, &mut p.last_at)));
         let Some((part, got, last_at)) = part else {
