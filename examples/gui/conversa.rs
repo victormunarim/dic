@@ -42,7 +42,7 @@ impl App {
             });
             note(ui, "Só vai para quem está online. Cada um guarda a sua cópia nesta máquina.");
             ui.add_space(6.0);
-            let height = (ui.clip_rect().bottom() - ui.cursor().top() - 120.0).max(160.0);
+            let height = (ui.clip_rect().bottom() - ui.cursor().top() - 92.0).max(160.0);
             egui::ScrollArea::vertical().id_salt(("conversa", peer)).max_height(height).min_scrolled_height(height).stick_to_bottom(true).auto_shrink([false, false]).show(ui, |ui| {
                 if msgs.is_empty() {
                     note(ui, "Sem mensagens ainda.");
