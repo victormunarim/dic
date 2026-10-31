@@ -36,7 +36,7 @@ impl ScreenSource for GdiScreen {
             return None;
         }
         // SAFETY: todos os objetos GDI criados aqui são liberados antes de sair.
-        unsafe {
+        let mut rgba = unsafe {
             let screen = GetDC(std::ptr::null_mut());
             if screen.is_null() {
                 return None;
@@ -46,7 +46,10 @@ impl ScreenSource for GdiScreen {
             let mut out = None;
             if !dc.is_null() && !bmp.is_null() {
                 let old = SelectObject(dc, bmp);
-                if BitBlt(dc, 0, 0, w as i32, h as i32, screen, 0, 0, SRCCOPY | CAPTUREBLT) != 0 {
+                let copied = BitBlt(dc, 0, 0, w as i32, h as i32, screen, 0, 0, SRCCOPY | CAPTUREBLT) != 0;
+                // `GetDIBits` exige o bitmap fora de qualquer DC: devolve o antigo antes de ler.
+                SelectObject(dc, old);
+                if copied {
                     let mut info: BITMAPINFO = std::mem::zeroed();
                     info.bmiHeader = BITMAPINFOHEADER {
                         biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
@@ -63,7 +66,6 @@ impl ScreenSource for GdiScreen {
                         out = Some(px);
                     }
                 }
-                SelectObject(dc, old);
             }
             if !bmp.is_null() {
                 DeleteObject(bmp);
@@ -72,14 +74,14 @@ impl ScreenSource for GdiScreen {
                 DeleteDC(dc);
             }
             ReleaseDC(std::ptr::null_mut(), screen);
-            let mut rgba = out?;
-            for px in rgba.as_chunks_mut::<4>().0.iter_mut() {
-                // GDI entrega B G R X.
-                px.swap(0, 2);
-                px[3] = 255;
-            }
-            RawFrame::new(w, h, rgba).ok()
+            out
+        }?;
+        for px in rgba.as_chunks_mut::<4>().0.iter_mut() {
+            // GDI entrega B G R X.
+            px.swap(0, 2);
+            px[3] = 255;
         }
+        RawFrame::new(w, h, rgba).ok()
     }
 }
 
