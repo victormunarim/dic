@@ -134,23 +134,58 @@ fn raster(frame: &mut Frame, prims: &[epaint::ClippedPrimitive], tex: &Textures,
 }
 
 /// Roda `ui` por alguns quadros (o layout do `egui` assenta depois do segundo) e devolve o último desenhado.
-fn render(size: egui::Vec2, bg: Color32, mut ui: impl FnMut(&egui::Context)) -> Frame {
+fn render(size: egui::Vec2, bg: Color32, ui: impl FnMut(&egui::Context)) -> Frame {
+    render_opening(size, bg, None, ui)
+}
+
+/// Como `render`, mas com `open` abre um menu pelo teclado: Tab até o controle cujo nome acessível contém `open`
+/// (é o nome que o leitor de tela ouve) e Enter nele. Menus e janelas flutuantes só existem depois do clique, e
+/// assim a captura não precisa saber onde o controle está na tela.
+fn render_opening(size: egui::Vec2, bg: Color32, open: Option<&str>, mut ui: impl FnMut(&egui::Context)) -> Frame {
+    #[derive(PartialEq)]
+    enum Phase {
+        Settle(u32),
+        Seek,
+        Press,
+        After(u32),
+    }
     let ctx = egui::Context::default();
     theme::apply(&ctx);
     let mut tex = Textures::default();
     let mut last = None;
-    for i in 0..4 {
-        let raw = egui::RawInput {
+    let mut phase = if open.is_some() { Phase::Seek } else { Phase::Settle(0) };
+    for (warmup, i) in (0..120_u32).enumerate() {
+        let mut raw = egui::RawInput {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)),
             time: Some(f64::from(i) * 0.1),
             ..Default::default()
         };
+        let key = |key, pressed| egui::Event::Key { key, physical_key: Some(key), pressed, repeat: false, modifiers: egui::Modifiers::NONE };
+        // Dois quadros de assentamento antes de mexer no foco: o layout só fecha no segundo.
+        if warmup >= 2 {
+            match phase {
+                Phase::Seek => raw.events.push(key(egui::Key::Tab, true)),
+                Phase::Press => raw.events.push(key(egui::Key::Enter, true)),
+                _ => {}
+            }
+        }
         let out = ctx.run(raw, &mut ui);
         tex.apply(&out.textures_delta);
-        last = Some((ctx.tessellate(out.shapes, 1.0), ));
+        last = Some(ctx.tessellate(out.shapes, 1.0));
+        let focused = out.platform_output.events.iter().filter_map(|e| e.widget_info().label.clone()).any(|l| open.is_some_and(|o| l.contains(o)));
+        phase = match phase {
+            Phase::Seek if focused => Phase::Press,
+            Phase::Press => Phase::After(0),
+            Phase::After(n) if n >= 5 => break,
+            Phase::After(n) => Phase::After(n + 1),
+            Phase::Settle(n) if n >= 3 => break,
+            Phase::Settle(n) => Phase::Settle(n + 1),
+            other => other,
+        };
+        assert!(i < 119 || phase != Phase::Seek, "controle {open:?} não achado pelo Tab");
     }
     let mut frame = Frame::filled(size.x as usize, size.y as usize, bg);
-    if let Some((prims,)) = last {
+    if let Some(prims) = last {
         raster(&mut frame, &prims, &tex, 1.0);
     }
     frame
@@ -217,6 +252,36 @@ fn shot_in_call(size: egui::Vec2) -> Frame {
     })
 }
 
+/// Aba aberta com um menu ou janela já aberto: `open` é o nome acessível do controle que o abre (ver
+/// `render_opening`); `prep` ajusta o app antes (por exemplo, marca a janela a mostrar).
+fn shot_opened(tab: Tab, size: egui::Vec2, open: Option<&str>, prep: impl FnOnce(&mut App)) -> Frame {
+    let mut app = sample_app(tab);
+    prep(&mut app);
+    render_opening(size, theme::pal().bg, open, |ctx| eframe::App::update(&mut app, ctx, &mut eframe::Frame::_new_kittest()))
+}
+
+/// Todos os menus e janelas que só aparecem depois de um clique: o quadro em repouso não os mostra.
+fn save_overlays(dir: &Path, theme_name: &str) {
+    let size = vec2(1280.0, 800.0);
+    let bruno = [0xab_u8; 32];
+    let out = |name: &str| dir.join(format!("{name}-{theme_name}.png"));
+    shot_opened(Tab::Contacts, size, Some("Menu"), |_| {}).save(&out("menu-engrenagem"));
+    shot_opened(Tab::Contacts, size, Some("Mais ações de Bruno"), |_| {}).save(&out("menu-contato"));
+    shot_opened(Tab::Contacts, size, None, |a| a.trust_ask = Some(bruno)).save(&out("janela-confiar"));
+    shot_opened(Tab::Contacts, size, None, |a| a.chat_with = Some(bruno)).save(&out("bate-papo"));
+    // A pergunta de transmitir mora no contexto do egui, então é pedida no primeiro quadro.
+    let mut app = sample_app(Tab::Contacts);
+    let mut asked = false;
+    render(size, theme::pal().bg, |ctx| {
+        if !asked {
+            crate::contacts::ask_share(ctx, false);
+            asked = true;
+        }
+        eframe::App::update(&mut app, ctx, &mut eframe::Frame::_new_kittest());
+    })
+    .save(&out("janela-transmitir"));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -252,6 +317,7 @@ mod tests {
                 shot(tab, vec2(1280.0, 800.0)).save(&dir.join(format!("{name}-{theme_name}.png")));
             }
             shot_in_call(vec2(1280.0, 800.0)).save(&dir.join(format!("chamada-ativa-{theme_name}.png")));
+            save_overlays(&dir, theme_name);
             // A página inteira de Configurações: a rolagem corta o que não cabe em 800 px.
             shot(Tab::Settings, vec2(1280.0, 1700.0)).save(&dir.join(format!("configuracoes-completa-{theme_name}.png")));
             shot(Tab::Settings, vec2(820.0, 560.0)).save(&dir.join(format!("configuracoes-estreita-{theme_name}.png")));
