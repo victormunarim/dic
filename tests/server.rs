@@ -340,6 +340,31 @@ fn invisible_members_do_not_show_up_but_still_see_others() {
 }
 
 #[test]
+fn a_member_who_says_bye_goes_offline_at_once_and_returns_with_the_next_hello() {
+    let (mut net, server) = Net::group(3);
+    net.advance(2);
+    let out = net.nodes[1].bye(net.now);
+    assert!(!out.send.is_empty(), "avisa quem está online");
+    net.run(1, out);
+    // Sem avançar o relógio: o prazo da presença (LEASE) ainda não venceu.
+    for i in [0, 2] {
+        assert!(!net.view(i, &server).members.iter().find(|m| m.id == net.id(1)).unwrap().online, "nó {i} já o vê offline");
+    }
+    net.advance(HEARTBEAT + 1);
+    assert!(net.view(0, &server).members.iter().find(|m| m.id == net.id(1)).unwrap().online, "o próximo Hello o traz de volta");
+}
+
+#[test]
+fn bye_from_an_invisible_member_sends_nothing() {
+    let (mut net, _) = Net::group(2);
+    net.advance(2);
+    let out = net.nodes[1].set_visible(false, net.now);
+    assert!(!out.send.is_empty(), "ficar invisível avisa quem estava online");
+    let out = net.nodes[1].bye(net.now);
+    assert!(out.send.is_empty(), "invisível não tem o que avisar");
+}
+
+#[test]
 fn rooms_stop_at_eight_people() {
     let (mut net, server) = Net::group(9);
     net.advance(3);

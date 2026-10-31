@@ -27,7 +27,7 @@ Limites: **50 membros** por servidor, **32 salas**, **8 pessoas por sala**, nome
 
 **Sala.** Só existe como operação `CreateRoom`; quem está nela **não** é estado do registro, é presença.
 
-**Presença.** Cada membro online diz o que é: visível ou não, sala atual, se transmite a tela, resumo do registro e época do segredo. `Hello` a cada 15 s a quem está online (a quem está offline, uma sondagem por minuto); vale por 40 s (`LEASE`). Quem some deixa a sala quando o contrato vence, e a chamada dele cai pelo vigia de silêncio.
+**Presença.** Cada membro online diz o que é: visível ou não, sala atual, se transmite a tela, resumo do registro e época do segredo. `Hello` a cada 15 s a quem está online (a quem está offline, uma sondagem por minuto); vale por 40 s (`LEASE`). Quem some deixa a sala quando o contrato vence, e a chamada dele cai pelo vigia de silêncio. Quem sai de propósito (fecha a janela, fica offline ou invisível) manda antes um `Bye` aos membros que viam online: eles o tiram da lista na hora, sem esperar os 40 s, e a sondagem de contatos da interface também o marca offline. O próximo `Hello` o traz de volta. Queda abrupta (kill, falta de energia, rede) não avisa e segue o contrato de 40 s; versão antiga ignora o `Bye` (tipo desconhecido) e também segue o contrato.
 
 ## Protocolo
 
@@ -50,6 +50,7 @@ A chave é **par a par**: `HKDF(DH(minha secreta, pública do outro), "clam/serv
 | `Ack` | "Recebi o quadro cujo nonce começa por estes 8 bytes" |
 | `InviteChunk` | Um pedaço do convite, só entre contatos (veja *Entrega do convite pela rede*) |
 | `Watch` | "Quero assistir à sua tela" / "parei" (só entre quem está na mesma sala) |
+| `Bye` | "Vou ficar offline/invisível": quem recebe zera a presença do remetente (online, sala, transmissão) até o próximo `Hello`; vale só de membro |
 | `Chat` | Uma linha do bate-papo da sala (texto UTF-8, até 157 B, sem caractere de controle; só entre quem está na mesma sala) |
 
 **Entrega.** O `ServerHub` (`src/server/net.rs`) junta os quadros por destinatário e manda em lote por um circuito (abre, manda, espera os `Ack`, fecha). Não se mantém circuito aberto com todos: cada um custaria cerca de 100 kbps de cobertura. Sem `Ack` a entrega é tentada de novo, e se falhar o nó procura o membro pelo registro do servidor (abaixo).
@@ -99,7 +100,7 @@ O endereço de um membro pode mudar enquanto ele está offline. Cada membro publ
 ## Privacidade
 
 - **Membros veem o seu IP.** O relay de quem recebe vê o relay de quem liga, que é a sua máquina. A janela avisa antes de convidar e de aceitar, e exige o aceite do aviso.
-- **Presença revela horário e sala.** Existe o estado **invisível** (clique na bolinha de estado do perfil, no pé da coluna de salas: cheia = aparecendo, só o aro = invisível): não responde `Hello` e não entra em presença.
+- **Presença revela horário e sala.** Existe o estado **invisível** (clique na bolinha de estado do perfil, no pé da coluna de salas: cheia = aparecendo, só o aro = invisível): não responde `Hello` e não entra em presença. Ao ficar invisível ou offline, manda um `Bye` só aos membros que já o viam online (nada que o `Hello` não mostrasse). Um `Bye` repetido por quem observa só faria o remetente parecer offline até o próximo `Hello` (≤ 15 s).
 - **O registro é a lista de membros inteira para todos.** Não há papéis nem membros ocultos.
 - **Cobertura:** os quadros de servidor viajam em circuito com a cobertura de hoje, dentro do link com preenchimento.
 - **Saída sem `Rekey`:** quem sai por conta própria continua com o segredo. Só uma troca de segredo o deixa de fora.

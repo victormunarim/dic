@@ -69,6 +69,9 @@ pub enum Event {
     Watch { server: ServerId, from: [u8; 32], on: bool },
     /// Um contato me convidou para um servidor: veja [`Servers::pending_invites`].
     Invitation { server: ServerId, from: [u8; 32] },
+    /// Um membro avisou que ficou offline (`Msg::Bye`): quem guarda a presença dele por outro caminho (a sondagem de
+    /// contatos) pode tirá-lo da lista já.
+    Gone { key: [u8; 32] },
     Notice(String),
 }
 
@@ -577,8 +580,9 @@ impl Servers {
         if self.visible == visible {
             return Output::default();
         }
+        // Ficar invisível é sumir da lista dos outros: avisa antes de calar (`bye` não manda nada se já estou invisível).
+        let mut out = if visible { Output::default() } else { self.bye(now) };
         self.visible = visible;
-        let mut out = Output::default();
         if visible {
             out.merge(self.hello_all(now, true));
         }
@@ -586,6 +590,22 @@ impl Servers {
             out.events.push(Event::Changed(s.id));
         }
         self.finish(now, out)
+    }
+
+    /// Aviso de saída: `Bye` a quem está online, para sumir da lista deles já, em vez de em até [`LEASE`] segundos.
+    /// Chamado ao ficar offline, ao ficar invisível e ao fechar o programa; quem perde o quadro cai no prazo.
+    pub fn bye(&mut self, now: u64) -> Output {
+        let mut out = Output::default();
+        if !self.visible {
+            return out;
+        }
+        for s in self.servers.values_mut().filter(|s| s.member) {
+            let keys: Vec<[u8; 32]> = s.peers.values().filter(|p| s.has(&p.key) && p.online(now)).map(|p| p.key).collect();
+            for k in keys {
+                out.send.extend(seal_to(&self.me, s, &k, &Msg::Bye));
+            }
+        }
+        out
     }
 
     /// Entra em `room` (ou sai de qualquer sala com `None`).
@@ -979,6 +999,18 @@ impl Servers {
                 let together = s.room.is_some() && s.peers.get(&id).is_some_and(|p| p.online(now) && p.room == s.room);
                 if is_member && together && (s.sharing || !on) {
                     out.events.push(Event::Watch { server: sid, from: key, on });
+                }
+            }
+            Msg::Bye => {
+                // Só vale de membro, e só zera a presença dele: o próximo `Hello` o traz de volta.
+                if is_member
+                    && let Some(p) = s.peers.get_mut(&id).filter(|p| p.online(now))
+                {
+                    p.until = 0;
+                    p.room = None;
+                    p.sharing = false;
+                    out.events.push(Event::Changed(sid));
+                    out.events.push(Event::Gone { key });
                 }
             }
             Msg::Chat(text) => {

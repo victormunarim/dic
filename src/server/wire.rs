@@ -79,6 +79,9 @@ pub enum Msg {
     InviteChunk { id: [u8; 4], idx: u8, total: u8, data: Vec<u8> },
     /// Linha do bate-papo da sala, só para quem está nela.
     Chat(String),
+    /// Vou ficar offline (ou invisível): quem recebe tira o remetente da lista de online na hora, sem esperar o
+    /// prazo da presença. Quem não conhece o tipo (versão antiga) ignora o quadro e segue o prazo.
+    Bye,
 }
 
 fn cipher(me: &StaticSecret, peer: &[u8; 32], server: &ServerId) -> Option<ChaCha20Poly1305> {
@@ -167,6 +170,7 @@ pub fn encode(msg: &Msg) -> Vec<u8> {
             v.push(12);
             v.extend_from_slice(text.as_bytes());
         }
+        Msg::Bye => v.push(13),
     }
     v
 }
@@ -245,6 +249,7 @@ pub fn decode(b: &[u8]) -> Option<Msg> {
             }
             Msg::Chat(text.to_string())
         }
+        13 if b.is_empty() => Msg::Bye,
         _ => return None,
     })
 }
@@ -331,6 +336,7 @@ mod tests {
             Msg::InviteChunk { id: [1, 2, 3, 4], idx: 2, total: 5, data: vec![9; INVITE_CHUNK] },
             Msg::Chat("olá".repeat(MAX_CHAT / 4)),
             Msg::Chat("x".repeat(MAX_CHAT)),
+            Msg::Bye,
         ]
     }
 

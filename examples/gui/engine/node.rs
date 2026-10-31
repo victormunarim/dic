@@ -352,6 +352,10 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
                         let _ = tx.send(RoomCmd::Viewer(from, on));
                     }
                 }
+                // Avisou que saiu: a sondagem de contatos ainda diria "online" até a próxima rodada.
+                Event::Gone { key } => {
+                    shared.presence.lock_unpoisoned().insert(key, false);
+                }
                 Event::Joined(_) => out.line("entrou no servidor"),
                 Event::Removed(id) => {
                     out.line("você foi removido de um servidor");
@@ -451,6 +455,8 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
             }
         }
     }
+    // Avisa os membros online antes de derrubar o nó: sem isso eles me veem online até o prazo vencer.
+    hub.goodbye(Duration::from_secs(3)).await;
     save_chats_if_dirty(&shared, &out);
     saver.sync(&book_of(&node), &out);
     let _ = save_custody(&node.custody_export());

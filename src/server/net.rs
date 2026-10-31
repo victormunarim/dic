@@ -173,6 +173,27 @@ impl ServerHub {
         self.inner.servers.lock_unpoisoned().my_key()
     }
 
+    /// Avisa os membros online de que vou embora (`Msg::Bye`) e espera as entregas por até `wait`. Não passa pela fila
+    /// de saída: ao parar o nó o laço de entrega morre junto, então o aviso é entregue aqui mesmo, em paralelo.
+    /// Passou do prazo, os outros seguem o tempo normal da presença ([`super::engine::LEASE`]).
+    pub async fn goodbye(&self, wait: Duration) {
+        let out = {
+            let mut s = self.inner.servers.lock_unpoisoned();
+            s.bye(now())
+        };
+        let mut by_peer: HashMap<[u8; 32], Vec<Outbound>> = HashMap::new();
+        for o in out.send {
+            by_peer.entry(o.to).or_default().push(o);
+        }
+        let mut tasks = tokio::task::JoinSet::new();
+        for (peer, batch) in by_peer {
+            let inner = self.inner.clone();
+            tasks.spawn(async move { deliver(&inner, peer, batch).await });
+        }
+        let _ = tokio::time::timeout(wait, async { while tasks.join_next().await.is_some() {} }).await;
+        tasks.abort_all();
+    }
+
     /// Para as tarefas de rede (o nó chama ao parar).
     pub fn stop(&self) {
         for t in self.inner.tasks.lock_unpoisoned().drain(..) {

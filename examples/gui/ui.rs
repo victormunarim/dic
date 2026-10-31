@@ -370,6 +370,17 @@ impl eframe::App for App {
         pal().bg.to_normalized_gamma_f32()
     }
 
+    /// Fechar a janela estando online: manda o aviso de saída aos membros dos servidores (`Msg::Bye`) antes de
+    /// o processo morrer; sem isso eles me veem online até o prazo da presença vencer.
+    fn on_exit(&mut self, _: Option<&eframe::glow::Context>) {
+        let Some(r) = &self.running else { return };
+        r.stop.store(true, Ordering::Relaxed);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !self.done.load(Ordering::Relaxed) && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         let began = std::time::Instant::now();
         let watching = !self.shared.screen.images.lock_unpoisoned().is_empty();
