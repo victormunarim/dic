@@ -12,6 +12,11 @@ pub(crate) fn focus_search_id() -> egui::Id {
     egui::Id::new("focar-busca")
 }
 
+/// Linha a que o foco volta depois de cancelar a remoção.
+fn back_focus_id() -> egui::Id {
+    egui::Id::new("foco-de-volta")
+}
+
 /// Clicável com o mouse, mas fora da ordem do Tab: avatar e nome abrem o mesmo bate-papo do botão da linha, que é a parada.
 const NO_TAB_STOP: egui::Sense = egui::Sense::CLICK;
 
@@ -59,12 +64,15 @@ impl Presence {
         }
     }
 
-    /// Posição na lista: quem está na chamada abre, depois os online, depois os demais (offline ou ainda sem resposta).
+    /// Posição na lista: quem está na chamada abre, depois os online, os offline sabidos e, por fim, quem ainda
+    /// espera a sondagem. A chamada divide o grupo dos online (rank 0 e 1 são o mesmo título, ver `group`).
     fn rank(self) -> u8 {
         match self {
             Self::InCall => 0,
             Self::Online => 1,
-            _ => 2,
+            Self::Offline => 2,
+            Self::Checking => 3,
+            Self::SelfOffline => 4,
         }
     }
 }
@@ -91,9 +99,21 @@ fn chat_name(name: &str, status: Presence) -> String {
     }
 }
 
-/// Título do grupo, só quando a lista mistura os dois: com todos no mesmo grupo o título não diz nada.
-fn group_title(rank: u8, online: usize) -> String {
-    if rank < 2 { format!("Online · {online}") } else { "Sem resposta".to_string() }
+/// Grupo da linha: a chamada em curso fica no topo do grupo dos online, sem título próprio.
+fn group(rank: u8) -> u8 {
+    rank.max(1)
+}
+
+/// Título do grupo com quantos são; a lista só mostra títulos quando há mais de um grupo, porque com todos no
+/// mesmo o título não diz nada.
+fn group_title(group: u8, count: usize) -> String {
+    let name = match group {
+        1 => "Online",
+        2 => "Offline",
+        3 => "Verificando…",
+        _ => "Contatos",
+    };
+    format!("{name} · {count}")
 }
 
 /// Se o contato aparece na busca: o texto (minúsculo, não vazio ou vazio) está no nome ou no começo do código.
@@ -245,18 +265,34 @@ impl App {
         let status_of = |k: &[u8; 32]| {
             if call_peer == Some(*k) { Presence::InCall } else { Presence::of(online, online_keys.contains(k), probed.contains_key(k)) }
         };
-        let order = display_order(&keys, |k| status_of(k).rank(), |k| unread[k], frozen.as_deref());
+        // Com a ordem congelada os grupos também: quem muda de presença sob o ponteiro só troca de grupo ao soltá-lo,
+        // senão os títulos se repetiriam e a contagem não bateria com as linhas.
+        let ranks_id = egui::Id::new("grupos-contatos");
+        let kept = if frozen.is_some() { ui.data(|d| d.get_temp::<std::collections::HashMap<[u8; 32], u8>>(ranks_id)) } else { None };
+        let rank_of = |k: &[u8; 32]| kept.as_ref().and_then(|m| m.get(k).copied()).unwrap_or_else(|| status_of(k).rank());
+        let order = display_order(&keys, rank_of, |k| unread[k], frozen.as_deref());
         shown.sort_by_key(|(_, (_, k))| order.iter().position(|o| o == k));
-        // Os títulos só aparecem quando há online e não-online juntos.
-        let online_shown = shown.iter().filter(|(_, (_, k))| status_of(k).rank() < 2).count();
-        let titled = online_shown > 0 && online_shown < shown.len();
-        let mut last_rank = None;
+        let mut counts = std::collections::BTreeMap::<u8, usize>::new();
+        for (_, (_, k)) in &shown {
+            *counts.entry(group(rank_of(k))).or_default() += 1;
+        }
+        let titled = counts.len() > 1;
+        let mut last_group = None;
+        if kept.is_none() {
+            let ranks: std::collections::HashMap<[u8; 32], u8> = shown.iter().map(|(_, (_, k))| (*k, rank_of(k))).collect();
+            ui.data_mut(|d| d.insert_temp(ranks_id, ranks));
+        }
         let list_top = ui.cursor().min;
         for (i, (name, key)) in shown {
-            let rank = status_of(key).rank().max(1);
-            if titled && last_rank != Some(rank) {
-                last_rank = Some(rank);
-                ui.label(RichText::new(group_title(rank, online_shown)).size(12.0).strong().color(pal().muted));
+            let g = group(rank_of(key));
+            if titled && last_group != Some(g) {
+                last_group = Some(g);
+                let count = counts.get(&g).copied().unwrap_or(0);
+                let title = group_title(g, count);
+                // Cabeçalho alcançável por teclado e lido por inteiro pelo leitor de tela.
+                let head = ui.add(egui::Label::new(RichText::new(&title).size(12.0).strong().color(pal().muted)).sense(egui::Sense::focusable_noninteractive()));
+                head.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, format!("{title} contatos")));
+                focus_ring(ui, &head, 4);
             }
             if self.remove_ask == Some(*key) {
                 self.remove_row(ui, name, *key);
@@ -311,6 +347,11 @@ impl App {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;
                     let dots = dots_button(ui).on_hover_text("Mais ações");
+                    // Cancelar a remoção devolve o foco ao menu desta linha, de onde a pessoa partiu.
+                    if ui.data(|d| d.get_temp::<[u8; 32]>(back_focus_id())) == Some(*key) {
+                        dots.request_focus();
+                        ui.data_mut(|d| d.remove_temp::<[u8; 32]>(back_focus_id()));
+                    }
                     egui::Popup::menu(&dots).show(|ui| {
                         let tip = if trusted {
                             "A sua tela vai direto a ele, sem relay, e ele vê o seu IP."
@@ -447,7 +488,9 @@ impl App {
                 d.remove::<bool>(egui::Id::new("remover-e-bloquear"));
                 d.remove::<bool>(egui::Id::new("remover-foco"));
             });
-            if choice != Remove::Cancel {
+            if choice == Remove::Cancel {
+                ui.data_mut(|d| d.insert_temp(back_focus_id(), key));
+            } else {
                 self.remove_contact_now(key);
                 // A linha some e levaria o foco junto: ele vai para a busca (que só existe com contatos na lista).
                 if !parse_contacts(&self.form.contacts).is_empty() {
@@ -585,25 +628,29 @@ mod tests {
 
     #[test]
     fn groups_come_first_and_unread_only_rises_within_a_group() {
-        let (a, b, c, d) = ([1; 32], [2; 32], [3; 32], [4; 32]);
-        // d na chamada, b online, a e c sem resposta; c tem mensagem nova, mas é de outro grupo que b.
-        let rank = |k: &[u8; 32]| match *k { x if x == d => 0, x if x == b => 1, _ => 2 };
-        let unread = |k: &[u8; 32]| usize::from(*k == c) * 5;
-        assert_eq!(display_order(&[a, b, c, d], rank, unread, None), vec![d, b, c, a]);
+        let (a, b, c, d, e) = ([1; 32], [2; 32], [3; 32], [4; 32], [5; 32]);
+        // d na chamada, b e e online, a offline, c ainda sem sondagem. c tem mensagem nova e e também: e sobe
+        // sobre b (mesmo grupo), mas c não passa de ninguém de outro grupo.
+        let rank = |k: &[u8; 32]| match *k { x if x == d => 0, x if x == b || x == e => 1, x if x == a => 2, _ => 3 };
+        let unread = |k: &[u8; 32]| usize::from(*k == c || *k == e) * 5;
+        assert_eq!(display_order(&[a, b, c, d, e], rank, unread, None), vec![d, e, b, a, c]);
     }
 
     #[test]
     fn presence_ranks_call_then_online_then_the_rest() {
         assert!(Presence::InCall.rank() < Presence::Online.rank());
         assert!(Presence::Online.rank() < Presence::Offline.rank());
-        assert_eq!(Presence::Offline.rank(), Presence::Checking.rank());
-        assert_eq!(Presence::Checking.rank(), Presence::SelfOffline.rank());
+        assert!(Presence::Offline.rank() < Presence::Checking.rank());
+        // A chamada e os online dividem o título.
+        assert_eq!(group(Presence::InCall.rank()), group(Presence::Online.rank()));
+        assert_ne!(group(Presence::Offline.rank()), group(Presence::Checking.rank()));
     }
 
     #[test]
     fn group_titles_count_the_online_ones() {
         assert_eq!(group_title(1, 3), "Online · 3");
-        assert_eq!(group_title(2, 3), "Sem resposta");
+        assert_eq!(group_title(2, 1), "Offline · 1");
+        assert_eq!(group_title(3, 2), "Verificando… · 2");
     }
 
     #[test]
