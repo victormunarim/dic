@@ -309,11 +309,16 @@ fn chevron(ui: &mut Ui, openness: f32, response: &egui::Response) {
     ui.painter().add(egui::Shape::convex_polygon(vec![turn(-2.5, -4.0), turn(3.5, 0.0), turn(-2.5, 4.0)], ink, Stroke::NONE));
 }
 
-/// Aviso discreto de que o ajuste de cima só vale quando o programa abrir de novo; sem ele a pessoa muda o campo e
-/// não vê efeito nenhum.
-pub(crate) fn reopen_hint(ui: &mut Ui) {
-    ui.label(RichText::new("Vale ao reabrir o programa.").size(12.0).color(pal().muted));
+/// Marca discreta ao lado de um campo que só vale quando o programa abrir de novo (relógio, com a explicação no
+/// hover); sem ela a pessoa muda o campo e não vê efeito nenhum.
+pub(crate) fn reopen_mark(ui: &mut Ui) -> egui::Response {
+    let (rect, reply) = ui.allocate_exact_size(vec2(24.0, 24.0), egui::Sense::hover());
+    reply.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, REOPEN_TIP));
+    clock_icon(ui.painter(), rect.center(), 16.0, if reply.hovered() { pal().strong } else { pal().muted });
+    reply.on_hover_text(REOPEN_TIP)
 }
+
+const REOPEN_TIP: &str = "Vale quando o programa abrir de novo.";
 
 /// Botão de tamanho normal, que pode ficar desligado.
 pub(crate) fn button(ui: &mut Ui, enabled: bool, text: &str, fill: Color32) -> egui::Response {
@@ -873,6 +878,42 @@ pub(crate) fn menu_focus_back(ui: &Ui, trigger: &egui::Response, open: bool) {
     if was && !open && !ui.input(|i| i.pointer.any_pressed()) {
         trigger.request_focus();
     }
+}
+
+/// Olho (mostrar a chave), desenhado: contorno de amêndoa e pupila. `off` risca o olho (esconder).
+pub(crate) fn eye_icon(painter: &egui::Painter, center: Pos2, size: f32, color: Color32, off: bool) {
+    let ink = Stroke::new(size * 0.09, color);
+    let (w, h) = (size * 0.5, size * 0.28);
+    let arc = |sign: f32| (0..=12).map(move |i| {
+        let x = -1.0 + i as f32 / 6.0;
+        center + vec2(x * w, sign * h * (1.0 - x * x))
+    });
+    let mut lens: Vec<Pos2> = arc(-1.0).collect();
+    lens.extend(arc(1.0).collect::<Vec<_>>().into_iter().rev());
+    painter.add(egui::Shape::closed_line(lens, ink));
+    painter.circle_stroke(center, size * 0.14, ink);
+    if off {
+        painter.line_segment([center + vec2(-w * 0.85, h * 1.6), center + vec2(w * 0.85, -h * 1.6)], Stroke::new(size * 0.11, color));
+    }
+}
+
+/// Copiar (duas folhas sobrepostas), desenhado.
+pub(crate) fn copy_icon(painter: &egui::Painter, center: Pos2, size: f32, color: Color32) {
+    let ink = Stroke::new(size * 0.09, color);
+    let side = size * 0.42;
+    let back = Rect::from_center_size(center + vec2(size * 0.08, -size * 0.08), vec2(side, side * 1.2));
+    let front = Rect::from_center_size(center + vec2(-size * 0.08, size * 0.08), vec2(side, side * 1.2));
+    painter.rect_stroke(back, CornerRadius::same(2), ink, egui::StrokeKind::Middle);
+    painter.rect_filled(front, CornerRadius::same(2), pal().bg);
+    painter.rect_stroke(front, CornerRadius::same(2), ink, egui::StrokeKind::Middle);
+}
+
+/// Relógio, desenhado: aro e dois ponteiros.
+pub(crate) fn clock_icon(painter: &egui::Painter, center: Pos2, size: f32, color: Color32) {
+    let ink = Stroke::new(size * 0.1, color);
+    painter.circle_stroke(center, size * 0.4, ink);
+    painter.line_segment([center, center + vec2(0.0, -size * 0.24)], ink);
+    painter.line_segment([center, center + vec2(size * 0.17, size * 0.08)], ink);
 }
 
 /// Lupa (tela cheia), desenhada: aro e cabo.

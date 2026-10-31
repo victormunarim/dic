@@ -401,8 +401,8 @@ impl eframe::App for App {
                 self.log_tab(ui);
                 return;
             }
-            // A chave secreta só fica à mostra enquanto a pessoa está em Configurações e offline.
-            if self.tab != Tab::Settings || !offline {
+            // A chave secreta só fica à mostra enquanto a pessoa está em Configurações.
+            if self.tab != Tab::Settings {
                 ctx.data_mut(|d| d.remove_temp::<bool>(crate::settings::show_secret_id()));
             }
             egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
