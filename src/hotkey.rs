@@ -40,7 +40,6 @@ impl Key {
     }
 
     /// Nome do tipo `m`, `7`, `F5` (a grafia do XDG e do X11).
-    #[cfg(any(unix, test))]
     fn xdg_name(self) -> String {
         match self {
             Key::Letter(c) => (c as char).to_string(),
@@ -60,8 +59,7 @@ pub struct Combo {
 }
 
 impl Combo {
-    /// `CTRL+SHIFT+d`, como o portal do XDG pede.
-    #[cfg(any(unix, test))]
+    /// `CTRL+SHIFT+d`, como o portal do XDG pede; também é o texto das mensagens de erro no Windows.
     fn xdg_trigger(&self) -> String {
         let mut out = String::new();
         for (on, name) in [(self.ctrl, "CTRL"), (self.alt, "ALT"), (self.shift, "SHIFT")] {
