@@ -864,6 +864,20 @@ pub(crate) fn mic_icon(painter: &egui::Painter, center: Pos2, size: f32, color: 
     }
 }
 
+/// Fone de ouvido (microfone e som juntos), desenhado; `off` risca.
+pub(crate) fn headphones_icon(painter: &egui::Painter, center: Pos2, size: f32, color: Color32, off: bool) {
+    let u = |x: f32, y: f32| center + vec2(x * size, y * size);
+    let ink = Stroke::new(size * 0.085, color);
+    let band: Vec<Pos2> = (0..=12).map(|i| { let a = (180.0 + 180.0 * i as f32 / 12.0).to_radians(); u(0.0, 0.05) + vec2(a.cos(), a.sin()) * (size * 0.36) }).collect();
+    painter.add(Shape::line(band, ink));
+    for x in [-0.36_f32, 0.36] {
+        painter.rect_filled(Rect::from_min_max(u(x - 0.09, 0.04), u(x + 0.09, 0.3)), CornerRadius::same((size * 0.06) as u8), color);
+    }
+    if off {
+        painter.line_segment([u(-0.36, -0.36), u(0.36, 0.36)], Stroke::new(size * 0.1, color));
+    }
+}
+
 /// Monitor pequeno (página de vídeo no menu), desenhado.
 pub(crate) fn monitor_icon(painter: &egui::Painter, center: Pos2, size: f32, color: Color32) {
     let u = |x: f32, y: f32| center + vec2(x * size, y * size);

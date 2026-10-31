@@ -95,9 +95,8 @@ pub(crate) fn devices_ui(ui: &mut egui::Ui, form: &mut Form, devs: &mut (Vec<Str
     }
 }
 
-/// Atalhos de teclado (Ctrl; Cmd no macOS). Entrar numa sala não tem atalho de propósito: é o gesto que mostra o
+/// Atalhos de teclado fixos (Ctrl; Cmd no macOS); mudo e fone são configuráveis (`atalhos`). Entrar numa sala não tem atalho de propósito: é o gesto que mostra o
 /// IP aos membros, e uma tecla perdida não pode fazer isso.
-pub(crate) const MUTE_KEY: egui::KeyboardShortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::M);
 pub(crate) const INVITE_KEY: egui::KeyboardShortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::I);
 pub(crate) const SEARCH_KEY: egui::KeyboardShortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::K);
 pub(crate) const MEMBERS_KEY: egui::KeyboardShortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::B);
@@ -249,12 +248,21 @@ impl App {
                     }
                 });
                 theme::menu_focus_back(ui, &gear, menu.is_some());
-                let muted = self.shared.audio.muted.load(Ordering::Relaxed);
-                let shortcut = ctx.format_shortcut(&MUTE_KEY);
-                let tip = if muted { format!("Você está no mudo: clique para voltar a falar ({shortcut})") } else { format!("Silenciar o microfone ({shortcut})") };
+                let a = &self.shared.audio;
+                let (muted, deaf) = (a.is_muted(), a.is_deafened());
+                let mute_key = crate::atalhos::resolve(&self.form.mute_key, crate::atalhos::MUTE_DEFAULT);
+                let deaf_key = crate::atalhos::resolve(&self.form.deafen_key, crate::atalhos::DEAFEN_DEFAULT);
+                // Layout da direita para a esquerda: o fone entra primeiro e fica à direita do microfone.
+                let tip = if deaf { format!("Fone desligado: sem microfone e sem som. Clique para voltar ({})", ctx.format_shortcut(&deaf_key)) } else { format!("Desligar microfone e som ({})", ctx.format_shortcut(&deaf_key)) };
+                let ear = glyph_button(ui, "Fone", &tip, deaf.then_some(pal().red), |p, c, s, k| headphones_icon(p, c, s, k, deaf));
+                let tip = if muted { format!("Você está no mudo: clique para voltar a falar ({})", ctx.format_shortcut(&mute_key)) } else { format!("Silenciar o microfone ({})", ctx.format_shortcut(&mute_key)) };
                 let mic = glyph_button(ui, "Microfone", &tip, muted.then_some(pal().red), |p, c, s, k| mic_icon(p, c, s, k, muted));
-                if mic.clicked() || ctx.input_mut(|i| i.consume_shortcut(&MUTE_KEY)) {
-                    self.shared.audio.muted.store(!muted, Ordering::Relaxed);
+                let keys = !crate::atalhos::capturing(ctx);
+                if mic.clicked() || (keys && ctx.input_mut(|i| i.consume_shortcut(&mute_key))) {
+                    self.shared.audio.toggle_muted();
+                }
+                if ear.clicked() || (keys && ctx.input_mut(|i| i.consume_shortcut(&deaf_key))) {
+                    self.shared.audio.toggle_deafened();
                 }
             });
         });

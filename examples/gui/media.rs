@@ -58,7 +58,7 @@ impl App {
     pub(crate) fn audio_tab(&mut self, ui: &mut egui::Ui, offline: bool, in_call: bool, testing: bool) {
         let shared = self.shared.clone();
         let a = &shared.audio;
-        let mut muted = a.muted.load(Ordering::Relaxed);
+        let mut muted = a.is_muted();
         let before = a.prefs();
         let mut p = before;
         let level = a.level();
@@ -72,10 +72,30 @@ impl App {
                     #[cfg(feature = "audio")]
                     devices_ui(ui, &mut self.form, &mut self.devs);
                 });
+                card(ui, "Atalhos", "Valem com a janela em primeiro plano.", |ui| {
+                    let fixed = [crate::ui::INVITE_KEY, crate::ui::SEARCH_KEY, crate::ui::MEMBERS_KEY];
+                    let mute = crate::atalhos::resolve(&self.form.mute_key, crate::atalhos::MUTE_DEFAULT);
+                    let deaf = crate::atalhos::resolve(&self.form.deafen_key, crate::atalhos::DEAFEN_DEFAULT);
+                    ui.label("Silenciar o microfone");
+                    if let Some(k) = crate::atalhos::field(ui, "mute", &mute, &[&fixed[..], &[deaf]].concat()) {
+                        self.form.mute_key = crate::atalhos::to_text(&k);
+                        self.form.save();
+                    }
+                    ui.label("Fone de ouvido: microfone e som que você escuta");
+                    if let Some(k) = crate::atalhos::field(ui, "deafen", &deaf, &[&fixed[..], &[mute]].concat()) {
+                        self.form.deafen_key = crate::atalhos::to_text(&k);
+                        self.form.save();
+                    }
+                    if button(ui, true, "Restaurar atalhos", pal().bg).clicked() {
+                        self.form.mute_key.clear();
+                        self.form.deafen_key.clear();
+                        self.form.save();
+                    }
+                });
                 card(ui, "Volume e microfone", "", |ui| {
                     ui.spacing_mut().slider_width = (ui.available_width() - 110.0).max(120.0);
                     if ui.check(&mut muted, "Mudo (o outro lado não ouve você)").changed() {
-                        a.muted.store(muted, Ordering::Relaxed);
+                        a.set_muted(muted);
                     }
                     ui.label("Volume do alto-falante");
                     ui.slider(egui::Slider::new(&mut p.volume, AudioPrefs::VOLUME));

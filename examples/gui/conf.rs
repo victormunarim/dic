@@ -135,6 +135,9 @@ pub(crate) struct Form {
     pub(crate) screen_audio: bool,
     /// Toca o som das telas que se assiste. Ligado de início; a chave guarda o "não" (`no_screen_hear`).
     pub(crate) screen_hear: bool,
+    /// Atalhos do mudo e do fone, como `cmd+shift+D` (veja `atalhos`); vazio = o padrão.
+    pub(crate) mute_key: String,
+    pub(crate) deafen_key: String,
     /// Codec de voz das chamadas que esta pessoa inicia: Opus (32 kbps) em vez do G.722 (64 kbps).
     /// Quem atende usa o que o convite pedir. Ligado de início.
     pub(crate) voice_opus: bool,
@@ -565,6 +568,8 @@ impl Form {
             screen_hear: get("no_screen_hear") != "1",
             // Ligado de início: a chave guarda o "não", então o arquivo antigo, sem ela, também aceita.
             voice_opus: get("no_opus") != "1",
+            mute_key: get("mute_key"),
+            deafen_key: get("deafen_key"),
             // Ligado de início: a chave guarda o "não", então o arquivo antigo, sem ela, também aceita.
             auto_online: get("no_auto_online") != "1",
             anchors: get("anchors").replace(';', "\n"),
@@ -588,7 +593,7 @@ impl Form {
         let secret = self.secret_to_write(vault_set);
         let secret = secret.as_str();
         let text = format!(
-            "audio={}\nsecret={}\ncontacts={}\npeer={}\npublic_addr={}\nno_dht={}\ndht_circuit={}\nname={}\nintros={}\nno_anchor={}\nno_screen_privacy={}\nscreen_sharp={}\nscreen_hardware={}\nno_screen_audio={}\nno_screen_hear={}\nanchors={}\ninput_dev={}\noutput_dev={}\nno_opus={}\nno_auto_online={}\ntrusted={}\nblocked={}\nlight={}\n{}",
+            "audio={}\nsecret={}\ncontacts={}\npeer={}\npublic_addr={}\nno_dht={}\ndht_circuit={}\nname={}\nintros={}\nno_anchor={}\nno_screen_privacy={}\nscreen_sharp={}\nscreen_hardware={}\nno_screen_audio={}\nno_screen_hear={}\nanchors={}\ninput_dev={}\noutput_dev={}\nno_opus={}\nno_auto_online={}\ntrusted={}\nblocked={}\nlight={}\nmute_key={}\ndeafen_key={}\n{}",
             u8::from(self.use_audio),
             secret,
             self.contacts.trim().replace('\n', ";"),
@@ -612,6 +617,8 @@ impl Form {
             self.trusted.trim(),
             self.blocked.trim(),
             self.light.map_or("", |l| if l { "1" } else { "0" }),
+            self.mute_key.trim(),
+            self.deafen_key.trim(),
             self.audio.to_conf()
         );
         // Contém a chave secreta: só o dono lê.
@@ -823,6 +830,15 @@ mod tests {
         // Fora da faixa, ilegível ou não finito: limita ou volta ao padrão.
         let bad = AudioPrefs::from_kv(&kv("volume=99\nmic_gain=abc\ngate_db=NaN\ngate_depth_db=-5\n"));
         assert_eq!((bad.volume, bad.mic_gain, bad.gate_db, bad.gate_depth_db), (2.0, 1.0, -45.0, 6.0));
+    }
+
+    #[test]
+    fn shortcut_keys_are_saved_in_the_conf_text() {
+        let f = Form { mute_key: " cmd+alt+M ".into(), deafen_key: "F9".into(), ..Form::default() };
+        let text = f.audio.to_conf();
+        assert!(!text.contains("mute_key"), "as teclas não moram nas preferências de áudio");
+        let saved = format!("mute_key={}\ndeafen_key={}\n", f.mute_key.trim(), f.deafen_key.trim());
+        assert_eq!(saved, "mute_key=cmd+alt+M\ndeafen_key=F9\n");
     }
 
     #[test]

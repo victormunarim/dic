@@ -18,6 +18,7 @@ mod conf;
 mod engine;
 mod call;
 mod arquivos;
+mod atalhos;
 mod chats;
 mod conversa;
 mod contacts;

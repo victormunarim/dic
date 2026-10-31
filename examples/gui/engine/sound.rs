@@ -80,6 +80,9 @@ pub(crate) fn open_sound(want: bool, form: &Form, out: &Sink) -> Option<Sound> {
 /// Ajustes de áudio da janela, lidos pelo motor a cada quadro.
 pub(crate) struct Controls {
     pub(crate) muted: AtomicBool,
+    /// Fone: o microfone fica mudo e nada do que chega é tocado. Não mexe em `muted`, então ao voltar o mudo
+    /// fica como a pessoa o deixou.
+    deafened: AtomicBool,
     prefs: Mutex<AudioPrefs>,
     /// Estado do tratamento da voz (filtro, porta, volume automático); só o laço de áudio mexe nele.
     voice: Mutex<Voice>,
@@ -99,6 +102,7 @@ impl Default for Controls {
     fn default() -> Self {
         Controls {
             muted: AtomicBool::new(false),
+            deafened: AtomicBool::new(false),
             prefs: Mutex::default(),
             voice: Mutex::default(),
             level: AtomicU32::new(0),
@@ -120,8 +124,29 @@ impl Controls {
     pub(crate) fn set_prefs(&self, p: AudioPrefs) {
         *self.prefs.lock_unpoisoned() = p;
     }
+    /// Volume de quem escuta: zero com o fone desligado.
     pub(crate) fn volume(&self) -> f32 {
-        self.prefs().volume
+        if self.is_deafened() { 0.0 } else { self.prefs().volume }
+    }
+    pub(crate) fn is_deafened(&self) -> bool {
+        self.deafened.load(Ordering::Relaxed)
+    }
+    /// O microfone não sai: mudo escolhido ou fone desligado.
+    pub(crate) fn is_muted(&self) -> bool {
+        self.muted.load(Ordering::Relaxed) || self.is_deafened()
+    }
+    /// Muda o mudo. Voltar a falar com o fone desligado liga o fone também (falar sem ouvir não faz sentido).
+    pub(crate) fn set_muted(&self, muted: bool) {
+        self.muted.store(muted, Ordering::Relaxed);
+        if !muted {
+            self.deafened.store(false, Ordering::Relaxed);
+        }
+    }
+    pub(crate) fn toggle_muted(&self) {
+        self.set_muted(!self.is_muted());
+    }
+    pub(crate) fn toggle_deafened(&self) {
+        self.deafened.fetch_xor(true, Ordering::Relaxed);
     }
     pub(crate) fn level(&self) -> f32 {
         f32::from_bits(self.level.load(Ordering::Relaxed))
@@ -168,7 +193,7 @@ impl Controls {
     pub(crate) fn outgoing(&self, f: &mut [i16]) {
         let prefs = self.prefs();
         let m = self.voice.lock_unpoisoned().process(f, &prefs, self.far_now());
-        if self.muted.load(Ordering::Relaxed) {
+        if self.is_muted() {
             self.level.store(0f32.to_bits(), Ordering::Relaxed);
             f.fill(0);
             self.speaking.store(false, Ordering::Relaxed);
@@ -274,6 +299,23 @@ mod tests {
         let mut f = vec![1000, -1000, 30000, -30000];
         scale_pcm(&mut f, 2.0);
         assert_eq!(f, vec![2000, -2000, i16::MAX, i16::MIN]);
+    }
+
+    #[test]
+    fn deafening_mutes_and_silences_and_undeafening_restores_the_mute_as_it_was() {
+        let c = Controls::default();
+        assert!(!c.is_muted() && c.volume() > 0.0);
+        c.toggle_deafened();
+        assert!(c.is_muted() && c.volume() == 0.0, "fone desligado: sem microfone e sem som");
+        c.toggle_deafened();
+        assert!(!c.is_muted() && c.volume() > 0.0, "voltou como estava");
+        c.set_muted(true);
+        c.toggle_deafened();
+        c.toggle_deafened();
+        assert!(c.is_muted(), "o mudo escolhido sobrevive ao fone");
+        c.toggle_deafened();
+        c.set_muted(false);
+        assert!(!c.is_muted() && !c.is_deafened(), "voltar a falar liga o fone");
     }
 
     #[test]
