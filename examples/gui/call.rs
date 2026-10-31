@@ -10,7 +10,7 @@ use crate::{conf::parse_contacts, engine::*, theme::*, ui::*};
 impl App {
     /// Cartão para ligar a um código de contato ou ao nome de um contato.
     pub(crate) fn dial_card(&mut self, ui: &mut egui::Ui, offline: bool, busy: bool) {
-        card(ui, "Ligar para um código", "Cole o código de contato de alguém, ou o nome de um contato.", |ui| {
+        card(ui, "Ligar para um código", "Cole o código de alguém, ou o nome de um contato. Também dá para ligar pelo telefone ao lado do contato.", |ui| {
             let live = !offline && !busy;
             // O botão fica na linha do campo, à direita: é dele que a ação sai, e abaixo ficava solto e apagado.
             let dial = ui.horizontal(|ui| {
@@ -41,7 +41,6 @@ impl App {
                 return;
             }
             self.dial_card(ui, offline, busy);
-            card(ui, "Nenhuma chamada em andamento", "Ligue pelo telefone ao lado do contato; a chamada e a tela compartilhada aparecem aqui.", |_| {});
             return;
         }
         let incoming = *self.shared.incoming.lock_unpoisoned();

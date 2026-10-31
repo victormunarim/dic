@@ -122,7 +122,7 @@ impl App {
                     ui.add_enabled_ui(p.gate, |ui| {
                         ui.spacing_mut().slider_width = (ui.available_width() - 110.0).max(120.0);
                         ui.label("Quanto abaixar o que não é voz");
-                        ui.add(egui::Slider::new(&mut p.gate_depth_db, AudioPrefs::GATE_DEPTH_DB).suffix(" dB"));
+                        ui.slider(egui::Slider::new(&mut p.gate_depth_db, AudioPrefs::GATE_DEPTH_DB).suffix(" dB"));
                     });
                     ui.check(&mut p.high_pass, "Cortar graves (ventilador, mesa, sopro)");
                 });

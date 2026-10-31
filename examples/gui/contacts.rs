@@ -490,8 +490,12 @@ impl App {
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, vec2(0.0, 0.0))
+            .title_bar(false)
+            .frame(egui::Frame::window(&ctx.style()).inner_margin(egui::Margin::same(16)))
             .show(ctx, |ui| {
-                ui.set_max_width(420.0);
+                ui.set_width(440.0);
+                ui.label(RichText::new("Transmitir a tela").strong().size(18.0).color(pal().strong));
+                ui.add_space(8.0);
                 let mut tip = String::from("Som do computador: quem assiste ouve o que toca aí, menos a voz do contato. Usa cerca de 10% da banda do vídeo (2,5% sem privacidade).");
                 if cfg!(target_os = "linux") {
                     tip.push_str(" No Linux precisa de gstreamer1.0-tools com o plugin do PulseAudio; se a captura falhar, o motivo aparece em Atividade.");

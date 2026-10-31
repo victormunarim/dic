@@ -212,6 +212,14 @@ impl App {
                     r.stop.store(true, Ordering::Relaxed);
                 }
             }
+            // Offline é o primeiro bloqueio de quem abre o app: o estado vira texto e a ação fica ao lado do avatar.
+            if offline {
+                ui.add_space(8.0);
+                let go = ui.add(egui::Label::new(egui::RichText::new("Ficar online").size(14.0).color(pal().strong)).sense(egui::Sense::click()));
+                if go.on_hover_text("Você está offline. Clique para ficar online").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                    self.go_online(ctx);
+                }
+            }
             // Sair da sala e desligar a chamada 1:1 ficam na subseção acima deste painel.
             // Engrenagem e mudo ficam juntos na ponta direita da linha (a engrenagem por último, na borda).
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
