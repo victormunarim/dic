@@ -47,6 +47,12 @@ pub(crate) struct ServersUi {
 /// membros (340) deixam ~380 px para o bate-papo e as telas.
 const MEMBERS_FIT_WIDTH: f32 = 1100.0;
 
+/// O trilho marca Contatos em toda tela que não é a de servidores (conversa, chamada, configurações): a coluna ao lado
+/// mostra os contatos nelas, e marcar o servidor escolhido fazia parecer que abrir um contato levava a ele.
+pub(crate) fn rail_marks_contacts(tab: Tab) -> bool {
+    tab != Tab::Servers
+}
+
 /// A coluna de membros aparece? A escolha da pessoa vale; sem ela, só em janela larga.
 pub(crate) fn members_shown(choice: Option<bool>, window_width: f32) -> bool {
     choice.unwrap_or(window_width >= MEMBERS_FIT_WIDTH)
@@ -129,7 +135,7 @@ impl App {
                     ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                         ui.spacing_mut().item_spacing.y = 14.0;
                         egui::ScrollArea::vertical().scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).auto_shrink([false, false]).show(ui, |ui| {
-                        let on = self.tab == Tab::Contacts;
+                        let on = rail_marks_contacts(self.tab);
                         let people = server_icon(ui, "pessoa", on.then_some(BLURPLE), if on { Color32::WHITE } else { pal().strong });
                         count_badge(ui.painter(), people.rect, self.shared.chats.lock_unpoisoned().unread_total(), pal().bg);
                         if people.on_hover_text("Contatos").clicked() {
@@ -137,8 +143,7 @@ impl App {
                         }
                         ui.separator();
                         for v in &views {
-                            // Fora de Contatos o ícone do servidor escolhido segue marcado.
-                            let on = self.tab != Tab::Contacts && self.srv.sel == Some(v.id);
+                            let on = !rail_marks_contacts(self.tab) && self.srv.sel == Some(v.id);
                             let initial = v.name.chars().next().map_or("?".to_string(), |c| c.to_uppercase().to_string());
                             let reply = server_icon(ui, &initial, on.then_some(BLURPLE), if on { Color32::WHITE } else { pal().strong });
                             if reply.on_hover_text(&v.name).clicked() {
@@ -938,6 +943,13 @@ enum Bar {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn opening_a_chat_marks_contacts_on_the_rail_not_the_server() {
+        assert!(rail_marks_contacts(Tab::Call));
+        assert!(rail_marks_contacts(Tab::Contacts));
+        assert!(!rail_marks_contacts(Tab::Servers));
+    }
+
     use super::*;
 
     #[test]
