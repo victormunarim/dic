@@ -72,7 +72,12 @@ impl App {
                     #[cfg(feature = "audio")]
                     devices_ui(ui, &mut self.form, &mut self.devs);
                 });
-                card(ui, "Atalhos", "Valem com a janela em primeiro plano.", |ui| {
+                let (global, why) = (self.global_keys.active(), self.global_keys.note());
+                let subtitle = if global { "Valem também com a janela em segundo plano." } else { "Valem com a janela em primeiro plano." };
+                card(ui, "Atalhos", subtitle, |ui| {
+                    if !global && !why.is_empty() {
+                        note(ui, format!("Em segundo plano não vale: {why}"));
+                    }
                     let fixed = [crate::ui::INVITE_KEY, crate::ui::SEARCH_KEY, crate::ui::MEMBERS_KEY];
                     let mute = crate::atalhos::resolve(&self.form.mute_key, crate::atalhos::MUTE_DEFAULT);
                     let deaf = crate::atalhos::resolve(&self.form.deafen_key, crate::atalhos::DEAFEN_DEFAULT);

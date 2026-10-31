@@ -86,6 +86,8 @@ pub mod transfer;
 pub mod rendezvous;
 #[cfg(feature = "net")]
 pub mod timer;
+#[cfg(feature = "hotkey")]
+pub mod hotkey;
 #[cfg(feature = "video")]
 pub mod hwenc;
 #[cfg(feature = "video")]

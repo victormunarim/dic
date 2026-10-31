@@ -217,6 +217,7 @@ fn sample_app(tab: Tab) -> App {
         trust_ask: None,
         chat_with: None,
         chat_draft: String::new(),
+        global_keys: Default::default(),
         srv: Default::default(),
         devs: Default::default(),
     }

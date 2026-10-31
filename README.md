@@ -70,6 +70,7 @@ Para ligar a alguém: rode o `examples/gui` (veja [docs/GUI.md](docs/GUI.md)) ou
 | `src/rendezvous.rs` | ponto de encontro na DHT Mainline e âncoras (feature `net`) |
 | `src/upnp.rs`, `src/timer.rs` | porta no roteador; temporizador de 1 ms no Windows (feature `net`) |
 | `src/video.rs`, `src/hwenc.rs` | codificação da tela: controle de taxa e qualidade, NACK; codificador por hardware opcional (feature `video`) |
+| `src/hotkey.rs` | atalhos globais (mudo e fone com a janela em segundo plano): `XGrabKey` no X11, portal `GlobalShortcuts` no Wayland, `RegisterHotKey` no Windows (feature `hotkey`) |
 | `src/capture.rs`, `src/portal.rs` | captura da tela: X11 e GDI; portal do desktop (features `capture`, `portal`) |
 | `src/phone.rs` | `Phone`, `IncomingCall`, `call`, `ActiveCall` (feature `net`) |
 | `src/transfer.rs` | Arquivo entre contatos: envio em pedaços, recepção com arquivo parcial, nome seguro (feature `net`) |

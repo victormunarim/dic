@@ -49,6 +49,8 @@ pub(crate) struct App {
     /// Contato cuja conversa 1:1 está aberta no centro, e o texto ainda não enviado.
     pub(crate) chat_with: Option<[u8; 32]>,
     pub(crate) chat_draft: String,
+    /// Atalhos de mudo e de fone que valem com a janela em segundo plano.
+    pub(crate) global_keys: crate::atalhos::Global,
 }
 
 /// A engrenagem fica marcada nas telas que só se abrem por ela: sem isso a pessoa em Áudio ou Configurações não vê
@@ -257,7 +259,9 @@ impl App {
                 let ear = glyph_button(ui, "Fone", &tip, deaf.then_some(pal().red), |p, c, s, k| headphones_icon(p, c, s, k, deaf));
                 let tip = if muted { format!("Você está no mudo: clique para voltar a falar ({})", ctx.format_shortcut(&mute_key)) } else { format!("Silenciar o microfone ({})", ctx.format_shortcut(&mute_key)) };
                 let mic = glyph_button(ui, "Microfone", &tip, muted.then_some(pal().red), |p, c, s, k| mic_icon(p, c, s, k, muted));
-                let keys = !crate::atalhos::capturing(ctx);
+                self.global_keys.sync(ctx, &self.shared, &mute_key, &deaf_key);
+                // Com o sistema entregando as teclas, a janela não as trata também.
+                let keys = !crate::atalhos::capturing(ctx) && !self.global_keys.active();
                 if mic.clicked() || (keys && ctx.input_mut(|i| i.consume_shortcut(&mute_key))) {
                     self.shared.audio.toggle_muted();
                 }

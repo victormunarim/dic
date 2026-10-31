@@ -52,6 +52,78 @@ pub(crate) fn resolve(text: &str, default: KeyboardShortcut) -> KeyboardShortcut
     from_text(text).unwrap_or(default)
 }
 
+/// Combinação que os atalhos globais entendem, ou `None` (tecla de seta, Enter etc.: só valem na janela).
+pub(crate) fn to_combo(s: &KeyboardShortcut) -> Option<clam::hotkey::Combo> {
+    let m = s.modifiers;
+    Some(clam::hotkey::Combo { ctrl: m.command || m.ctrl, alt: m.alt, shift: m.shift, key: clam::hotkey::Key::from_name(s.logical_key.name())? })
+}
+
+/// Atalhos que valem com a janela em segundo plano. Só liga com `enabled` (o `main`; os testes e as capturas não
+/// tomam teclas do sistema) e refaz o registro quando as teclas mudam.
+#[derive(Default)]
+pub(crate) struct Global {
+    pub(crate) enabled: bool,
+    registered: Vec<clam::hotkey::Combo>,
+    handle: Option<clam::hotkey::Handle>,
+}
+
+/// Quem os atalhos acionam.
+const MUTE_ID: u32 = 1;
+const DEAFEN_ID: u32 = 2;
+
+impl Global {
+    /// Atalhos globais ligados (o programa de verdade).
+    pub(crate) fn enabled() -> Self {
+        Global { enabled: true, ..Global::default() }
+    }
+
+    /// Garante que o sistema tem as teclas atuais. Barato: só compara com o que já está registrado.
+    pub(crate) fn sync(&mut self, ctx: &egui::Context, shared: &std::sync::Arc<crate::engine::Shared>, mute: &KeyboardShortcut, deafen: &KeyboardShortcut) {
+        if !self.enabled {
+            return;
+        }
+        let want: Vec<_> = [mute, deafen].into_iter().filter_map(to_combo).collect();
+        if want.len() == 2 && self.handle.is_some() && self.registered == want {
+            return;
+        }
+        self.handle = None;
+        self.registered = want.clone();
+        if want.len() != 2 {
+            return; // uma das teclas não existe fora da janela: vale só nela
+        }
+        let (shared, ctx) = (shared.clone(), ctx.clone());
+        let bindings = vec![
+            clam::hotkey::Binding { id: MUTE_ID, combo: want[0], label: "Silenciar o microfone".into() },
+            clam::hotkey::Binding { id: DEAFEN_ID, combo: want[1], label: "Desligar microfone e som".into() },
+        ];
+        self.handle = Some(clam::hotkey::register(
+            bindings,
+            std::sync::Arc::new(move |id| {
+                match id {
+                    MUTE_ID => shared.audio.toggle_muted(),
+                    DEAFEN_ID => shared.audio.toggle_deafened(),
+                    _ => return,
+                }
+                ctx.request_repaint();
+            }),
+        ));
+    }
+
+    /// O sistema já entrega as teclas: a janela não as trata (senão uma tecla mudaria o estado duas vezes).
+    pub(crate) fn active(&self) -> bool {
+        self.handle.as_ref().is_some_and(|h| h.status.active())
+    }
+
+    /// Por que não valem em segundo plano, para a dica; vazio se valem.
+    pub(crate) fn note(&self) -> String {
+        match &self.handle {
+            Some(h) => h.status.note(),
+            None if self.enabled => "Esta tecla só existe na janela (use uma letra, algarismo ou tecla F).".into(),
+            None => String::new(),
+        }
+    }
+}
+
 fn capturing_id() -> egui::Id {
     egui::Id::new("atalho_capturando")
 }

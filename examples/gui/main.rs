@@ -68,6 +68,7 @@ fn main() -> eframe::Result {
                 trust_ask: None,
                 chat_with: None,
                 chat_draft: String::new(),
+                global_keys: crate::atalhos::Global::enabled(),
                 srv: Default::default(),
                 #[cfg(feature = "audio")]
                 devs: clam::audio::devices(),
