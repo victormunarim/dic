@@ -385,11 +385,11 @@ impl App {
                     } else if online && !in_call {
                         if probed.contains_key(key) { "Contato offline" } else { "Verificando se o contato está online…" }
                     } else {
-                        "Fique online e sem chamada para ligar"
+                        "Para ligar, fique online (botão de ligar, embaixo à esquerda) e sem outra chamada"
                     };
                     let can_call = online && !in_call && up;
                     let call_name = if can_call { format!("Ligar para {name}") } else { format!("Ligar para {name} (indisponível: {})", off_tip.to_lowercase()) };
-                    let call = ui.add_enabled_ui(can_call, |ui| glyph_button(ui, &call_name, "Ligar", None, phone_icon)).inner;
+                    let call = ui.add_enabled_ui(can_call, |ui| glyph_button(ui, &call_name, if can_call { "Ligar" } else { off_tip }, None, phone_icon)).inner;
                     if call.on_disabled_hover_text(off_tip).clicked() {
                         self.dial(*key);
                     }

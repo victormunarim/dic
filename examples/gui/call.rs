@@ -23,7 +23,7 @@ impl App {
                 }
             }
             if offline {
-                note(ui, "Fique online primeiro.");
+                note(ui, format!("Fique online pelo {ONLINE_HINT}."));
             }
         });
     }
@@ -62,7 +62,10 @@ impl App {
             if ringing {
                 status_dot(ui, pal().yellow, "Chamando… aguardando a pessoa atender");
             } else {
-                status_dot(ui, pal().green, "Conversando agora");
+                ui.horizontal(|ui| {
+                    status_dot(ui, pal().green, "Conversando agora");
+                    privacy_badge(ui, "Privacidade da chamada", "Circuito de 2 saltos, cifrado em camadas, com tráfego constante: quem observa a rede não vê quando você fala. O primeiro salto é o relay de quem liga, então o contato vê o IP dele.");
+                });
             }
             let link = self.shared.link.lock_unpoisoned().clone();
             if !link.is_empty() {

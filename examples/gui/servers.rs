@@ -88,7 +88,7 @@ impl App {
         let hub = self.shared.servers.lock_unpoisoned().clone();
         let Some(hub) = hub.filter(|_| !offline) else {
             card(ui, "Servidores", "Grupos de pessoas com salas de voz, sem servidor no meio.", |ui| {
-                note(ui, "Fique online (engrenagem, Configurações) para ver e usar os seus servidores.");
+                note(ui, "Fique online pelo botão de ligar, no canto inferior esquerdo, para ver e usar os seus servidores.");
                 details(ui, "Como funciona", "Cada membro guarda o grupo e o mantém de pé enquanto estiver online; não há servidor que o hospede.");
             });
             return;
@@ -154,7 +154,7 @@ impl App {
                             }
                         }
                         let on = here && self.srv.sel.is_none();
-                        let plus = server_icon(ui, "+", on.then_some(pal().green), if on { Color32::WHITE } else { pal().green });
+                        let plus = server_icon(ui, "+", on.then_some(BLURPLE), if on { Color32::WHITE } else { pal().strong });
                         if plus.on_hover_text("Criar um servidor ou entrar com um convite").clicked() {
                             self.tab = Tab::Servers;
                             self.srv.sel = None;
@@ -875,7 +875,7 @@ fn theme_toggle(ui: &mut egui::Ui) -> egui::Response {
     let light = is_light();
     let tip = if light { "Tema escuro" } else { "Tema claro" };
     let (rect, reply) = rail_tile(ui, None, tip);
-    theme_icon(ui.painter(), rect, light, if light { pal().strong } else { pal().yellow });
+    theme_icon(ui.painter(), rect, light, pal().strong);
     reply.on_hover_text(tip)
 }
 

@@ -233,6 +233,10 @@ impl App {
                 });
                 theme::menu_focus_back(ui, &gear, menu.is_some());
                 let muted = self.shared.audio.muted.load(Ordering::Relaxed);
+                // Offline o caminho para ficar online fica à vista: sem ele, só o hover do avatar o mostrava.
+                if offline && glyph_button(ui, "Ficar online", "Ficar online", Some(pal().green), power_glyph).clicked() {
+                    self.go_online(ctx);
+                }
                 let shortcut = ctx.format_shortcut(&MUTE_KEY);
                 let tip = if muted { format!("Você está no mudo: clique para voltar a falar ({shortcut})") } else { format!("Silenciar o microfone ({shortcut})") };
                 let mic = glyph_button(ui, "Microfone", &tip, muted.then_some(pal().red), |p, c, s, k| mic_icon(p, c, s, k, muted));

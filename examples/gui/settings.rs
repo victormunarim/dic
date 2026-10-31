@@ -192,7 +192,7 @@ impl App {
                             ui.label("Âncoras que você usa");
                             reopen_mark(ui);
                         });
-                        ui.add(egui::TextEdit::multiline(&mut self.form.anchors).desired_rows(3).desired_width(f32::INFINITY).margin(Margin::symmetric(12, 10)))
+                        ui.add(egui::TextEdit::multiline(&mut self.form.anchors).hint_text("ip:porta#chave-do-circuito#chave-do-link, uma por linha").desired_rows(3).desired_width(f32::INFINITY).margin(Margin::symmetric(12, 10)))
                             .on_hover_text("Uma por linha, no código que o dono da âncora te passa: ip:porta#chave-do-circuito#chave-do-link");
                     });
                 });
@@ -218,7 +218,7 @@ impl App {
             egui::ScrollArea::vertical().auto_shrink(false).stick_to_bottom(true).show(ui, |ui| {
                 let lines = self.log.lock_unpoisoned();
                 if lines.is_empty() {
-                    note(ui, "Nada ainda. Fique online e o que o programa faz aparece aqui.");
+                    note(ui, "Nada ainda. Fique online (botão de ligar, no canto inferior esquerdo) e o que o programa faz aparece aqui.");
                 }
                 for l in lines.iter() {
                     ui.label(RichText::new(l).monospace().size(13.5));

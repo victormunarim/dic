@@ -383,11 +383,18 @@ fn bare_button(ui: &mut Ui, size: egui::Vec2, name: &str, tip: &str, ink: impl F
     let color = if enabled { ink(hovered) } else { pal().muted.gamma_multiply(0.5) };
     draw(ui.painter(), rect.center() + press_nudge(&reply), icon, color);
     focus_ring(ui, &reply, R_BARE);
-    reply.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand)
+    // `on_hover_text` só aparece com o widget ligado: num ícone desligado a dica (o motivo) vai por `on_disabled_hover_text`.
+    reply.on_hover_text(tip).on_disabled_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// Raio da placa de hover e do aro de foco dos botões sem moldura.
 const R_BARE: u8 = 8;
+
+/// Raio da caixa de marcar: pequeno, para ela ler como quadrado e não como o círculo do rádio.
+const R_CHECK: u8 = 3;
+
+/// Onde ficar online, para as telas que dependem disso dizerem o mesmo caminho.
+pub(crate) const ONLINE_HINT: &str = "botão de ligar, no canto inferior esquerdo";
 
 /// Botão de tamanho normal, que pode ficar desligado.
 pub(crate) fn button(ui: &mut Ui, enabled: bool, text: &str, fill: Color32) -> egui::Response {
@@ -436,7 +443,14 @@ pub(crate) trait CheckExt {
 
 impl CheckExt for egui::Ui {
     fn check(&mut self, checked: &mut bool, text: impl Into<egui::WidgetText>) -> egui::Response {
-        sunken_controls(self, |ui| ui.checkbox(checked, text))
+        sunken_controls(self, |ui| {
+            // O raio dos controles é o do botão (12 px): numa caixa de 14 px viraria círculo, igual ao rádio.
+            let w = &mut ui.visuals_mut().widgets;
+            for state in [&mut w.inactive, &mut w.hovered, &mut w.active] {
+                state.corner_radius = CornerRadius::same(R_CHECK);
+            }
+            ui.checkbox(checked, text)
+        })
     }
 
     fn radio_pick<V: PartialEq>(&mut self, current: &mut V, alt: V, text: impl Into<egui::WidgetText>) -> egui::Response {
@@ -680,6 +694,28 @@ pub(crate) fn power_icon(ui: &Ui, rect: egui::Rect, color: Color32) {
         .collect();
     ui.painter().add(egui::Shape::line(arc, stroke));
     ui.painter().line_segment([c - vec2(0.0, r * 1.25), c - vec2(0.0, r * 0.1)], stroke);
+}
+
+/// Símbolo de ligar/desligar no padrão dos outros ícones desenhados (`size` é a altura): arco aberto em cima e um traço.
+pub(crate) fn power_glyph(painter: &egui::Painter, c: Pos2, size: f32, color: Color32) {
+    let (r, stroke) = (size * 0.3, Stroke::new(size * 0.11, color));
+    let arc: Vec<Pos2> = (0..=24)
+        .map(|i| {
+            let a = (-60.0f32 + 300.0 * i as f32 / 24.0).to_radians();
+            c + vec2(a.cos(), a.sin()) * r
+        })
+        .collect();
+    painter.add(Shape::line(arc, stroke));
+    painter.line_segment([c - vec2(0.0, r * 1.3), c - vec2(0.0, r * 0.1)], stroke);
+}
+
+/// Selo só de leitura (sem clique, sem mão): escudo com a explicação no hover. O estado vai no texto da dica e no nome
+/// acessível, não só no desenho.
+pub(crate) fn privacy_badge(ui: &mut Ui, name: &str, tip: &str) -> egui::Response {
+    let (rect, reply) = ui.allocate_exact_size(vec2(24.0, 24.0), egui::Sense::hover());
+    reply.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, name));
+    shield_icon(ui.painter(), rect.center(), 20.0, pal().text, false);
+    reply.on_hover_text(tip)
 }
 
 /// Sol (ou lua, no tema claro) desenhado à mão: o botão que troca o tema. O raio do disco e os raios de luz
@@ -1570,6 +1606,13 @@ mod tests {
                 assert!(contrast(c, p.bg) >= 2.8, "{:?} sobre a base", c);
             }
         }
+    }
+
+    #[test]
+    fn check_box_reads_as_a_square_not_as_the_radio_circle() {
+        // Com o raio dos botões (12 px) numa caixa de 14 px a caixa viraria círculo, igual ao rádio.
+        let box_side = egui::Spacing::default().icon_width;
+        assert!(f32::from(R_CHECK) * 2.0 < box_side * 0.6, "raio {R_CHECK} px numa caixa de {box_side} px");
     }
 
     #[test]
