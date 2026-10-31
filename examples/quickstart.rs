@@ -5,7 +5,7 @@ use clam::{
     circle::CircleSecret,
     ed25519_dalek::SigningKey,
     pairing::PresenceKeys,
-    path::{PathMode, PathRequest},
+    path::PathMode,
     service::{self, PresenceConfig},
     store::MemoryStore,
     x25519_dalek::{PublicKey, StaticSecret},
@@ -34,8 +34,8 @@ fn main() {
     println!("Bob achou Alice: {:?}", found.is_some());
     assert_eq!(found, Some(intro_points));
 
-    // 4. Modo de caminho: o padrão é privado (2 saltos).
-    let mode = PathRequest::private().resolve().unwrap();
+    // 4. Modo de caminho: a opção "2 relays" decide (ligada: relay de terceiro; desligada: direto).
+    let mode = PathMode::from_two_relays(true);
     assert_eq!(mode, PathMode::TwoHop);
     println!("caminho: {mode:?}, {} relays, alvo {} ms", mode.relay_count(), mode.voice_latency_target_ms());
 

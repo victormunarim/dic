@@ -330,10 +330,10 @@ pub(crate) async fn run_room(mut rx: mpsc::UnboundedReceiver<RoomCmd>, me_tx: mp
                     tokens += 1;
                     viewers.insert(who, Viewer { token: tokens, since: Instant::now() });
                     let _ = c.ctl.send(ShareCtl::Remove(who));
-                    let (dialer, me_tx, token, private, hangup) = (dialer.clone(), me_tx.clone(), tokens, c.private, shared.clone());
+                    let (dialer, me_tx, token, hangup) = (dialer.clone(), me_tx.clone(), tokens, shared.clone());
                     tokio::spawn(async move {
                         let r = match rx.await {
-                            Ok(keys) => match until_hangup(dialer.share_screen_keys_with(who, &keys, Duration::from_secs(15), private), &hangup.hangup).await {
+                            Ok(keys) => match until_hangup(dialer.share_screen_keys(who, &keys, Duration::from_secs(15)), &hangup.hangup).await {
                                 Some(r) => r.map_err(|e| e.to_string()),
                                 None => Err("chamada encerrada".to_string()),
                             },

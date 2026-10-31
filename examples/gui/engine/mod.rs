@@ -69,8 +69,6 @@ pub(crate) enum Cmd {
     Retire([u8; 32]),
     /// Bloqueia (ou desbloqueia) a chave: apresentação e convite dela são descartados (`Node::block`).
     Block([u8; 32], bool),
-    /// Marca (ou desmarca) o contato como de confiança: a tela sem privacidade vai direto só para ele.
-    Trust([u8; 32], bool),
     /// Liga o microfone ao alto-falante para a pessoa conferir som e nível.
     MicTest,
     /// Entra na sala de voz do servidor.

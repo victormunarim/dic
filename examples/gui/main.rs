@@ -67,7 +67,6 @@ fn main() -> eframe::Result {
                 audio_dirty: false,
                 screen_tex: Default::default(),
                 zoom: None,
-                trust_ask: None,
                 chat_with: None,
                 chat_draft: String::new(),
                 global_keys: crate::atalhos::Global::enabled(),

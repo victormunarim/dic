@@ -44,8 +44,6 @@ pub(crate) struct App {
     pub(crate) srv: crate::servers::ServersUi,
     /// Textura da tela de quem transmite para você e o número da imagem que ela mostra.
     pub(crate) screen_tex: std::collections::HashMap<[u8; 32], (u64, egui::TextureHandle)>,
-    /// Contato que a pessoa acabou de marcar como de confiança e ainda não confirmou o aviso do IP.
-    pub(crate) trust_ask: Option<[u8; 32]>,
     /// Contato cuja conversa 1:1 está aberta no centro, e o texto ainda não enviado.
     pub(crate) chat_with: Option<[u8; 32]>,
     pub(crate) chat_draft: String,
@@ -417,7 +415,6 @@ impl eframe::App for App {
         self.update_screen_textures(ctx);
         self.zoom_window(ctx);
         crate::midia::overlay(ctx);
-        self.trust_window(ctx);
         self.share_window(ctx);
         let offline = self.running.is_none();
         let in_call = self.shared.in_call.load(Ordering::Relaxed);
@@ -428,7 +425,6 @@ impl eframe::App for App {
         let in_room = self.shared.room.lock_unpoisoned().at.is_some();
         // As preferências de tela são lidas ao começar a transmissão, esteja a pessoa em que aba estiver.
         let st = &self.shared.screen;
-        st.open_path.store(!self.form.screen_private, Ordering::Relaxed);
         st.sharp.store(self.form.screen_sharp, Ordering::Relaxed);
         st.hardware.store(self.form.screen_hardware, Ordering::Relaxed);
         st.audio.store(self.form.screen_audio, Ordering::Relaxed);

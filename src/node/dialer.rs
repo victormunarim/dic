@@ -2,7 +2,7 @@
 
 use crate::sync::LockExt;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -15,8 +15,7 @@ use crate::{
         codec::Codec,
         keys::CallKeys,
     },
-    path::{PathMode, PathRequest},
-    phone::{ActiveCall, AddressUpdate, CallError, PhoneLink, ScreenShare, call_linked, direct_screen_client_options, open_screen_client_options, screen_client_options, share_screen_slot, OPEN_SCREEN_SLOT, SCREEN_SLOT},
+    phone::{ActiveCall, AddressUpdate, CallError, PhoneLink, ScreenShare, call_linked, screen_client_options, share_screen_slot, SCREEN_SLOT},
     rendezvous::Rendezvous,
     transport::{CircuitClient, ClientOptions},
 };
@@ -27,6 +26,8 @@ use super::util::ready_within;
 pub enum DialError {
     #[error("{}", if *.tried_stored { "o endereço guardado do contato não respondeu e não há outro (peça um código de contato novo)" } else { "sem endereço desse contato: use o código de contato direto dele" })]
     NoAddress { tried_stored: bool },
+    #[error("a opção 2 relays está ligada, mas não há relay de outro contato para servir de primeiro salto: nunca se cai para um caminho que mostre o seu IP")]
+    NoRelays,
     #[error("{0}")]
     Call(#[from] CallError),
 }
@@ -52,8 +53,8 @@ pub struct Dialer {
     pub(super) dht_circuit: bool,
     /// Âncoras do usuário (veja [`NodeConfig::anchors`]).
     pub(super) anchors: Vec<RelayInfo>,
-    /// Contatos de confiança: os únicos para quem a tela sem privacidade vai direto (veja [`Dialer::set_trusted`]).
-    pub(super) trusted: Arc<Mutex<HashSet<[u8; 32]>>>,
+    /// Opção "2 relays" (veja [`NodeConfig::two_relays`]): ligada, o primeiro salto é o relay de outro contato; desligada, a ligação é direta.
+    pub(super) two_relays: bool,
     /// Último carimbo de bate-papo usado (veja [`Dialer::next_chat_id`]).
     pub(super) chat_stamp: Arc<std::sync::atomic::AtomicU64>,
 }
@@ -109,7 +110,7 @@ impl Dialer {
     /// Endereço velho (relay sumiu, ou outra máquina no mesmo IP) nunca completa o handshake.
     pub(super) async fn stored_client(&self, peer: &[u8; 32], stored: Vec<RelayInfo>, options: fn() -> ClientOptions) -> Option<(CircuitClient, RelayInfo)> {
         for k in stored {
-            let client = self.client_with(peer, &k, Vec::new(), options());
+            let client = self.client_with(peer, &k, options());
             if ready_within(&client, Duration::from_secs(5)).await {
                 return Some((client, k));
             }
@@ -150,18 +151,36 @@ impl Dialer {
         (None, tried)
     }
 
-    fn client_with(&self, peer: &[u8; 32], exit: &RelayInfo, mut relays: Vec<Candidate>, options: ClientOptions) -> CircuitClient {
-        if options.direct {
-            // Direto, o único salto é o relay do contato: nenhum outro candidato entra.
-            relays.clear();
-        } else {
-            // Último recurso para o primeiro salto: o próprio relay (por loopback). Perde o anonimato
-            // perante o outro lado, mas permite ligar quando só há duas pessoas online.
-            relays.push(Candidate { addr: format!("127.0.0.1:{}", self.relay_port), public: self.mine.onion, link_public: self.mine.link, score: 0.5 });
-        }
+    /// Relays de terceiros para o primeiro salto: os relays guardados dos outros contatos, nunca o de `peer`, o `exit`
+    /// nem o próprio. Qualquer contato serve; ele vê o seu IP e o do destino, mas não o conteúdo (cifrado de ponta a ponta).
+    pub(crate) fn third_party_relays(&self, peer: &[u8; 32], exit: &RelayInfo) -> Vec<Candidate> {
+        let known = self.known.lock_unpoisoned();
+        let mut seen = std::collections::HashSet::new();
+        known
+            .iter()
+            .filter(|(k, r)| *k != peer && r.addr != exit.addr && r.onion != self.mine.onion && seen.insert(r.addr.clone()))
+            .map(|(_, r)| r.candidate())
+            .collect()
+    }
+
+    /// Monta o cliente do circuito até `exit`. Opção desligada: ligação direta, um salto só, sem relay no meio
+    /// (nem o próprio, por loopback). Ligada: o primeiro salto é sempre o relay de um terceiro; sem nenhum, o
+    /// circuito não monta, em vez de cair para um caminho que mostre o IP.
+    fn client_with(&self, peer: &[u8; 32], exit: &RelayInfo, mut options: ClientOptions) -> CircuitClient {
+        options.direct = !self.two_relays;
+        let mut relays = if self.two_relays { self.third_party_relays(peer, exit) } else { Vec::new() };
         relays.push(exit.candidate());
         let cfg = ManagerConfig { exit_addr: Some(exit.addr.clone()), direct: options.direct, ..Default::default() };
         CircuitClient::spawn_with(CircuitManager::new(cfg, &dest_for(peer), relays), Duration::from_secs(3), options)
+    }
+
+    /// Falha cedo, com o motivo, quando a opção 2 relays está ligada e não há relay de terceiro (veja [`DialError::NoRelays`]).
+    fn check_relays(&self, peer: &[u8; 32]) -> Result<(), DialError> {
+        if !self.two_relays {
+            return Ok(());
+        }
+        let any = self.stored_for(peer).iter().any(|exit| !self.third_party_relays(peer, exit).is_empty());
+        if any || self.stored_for(peer).is_empty() { Ok(()) } else { Err(DialError::NoRelays) }
     }
 
     #[must_use]
@@ -189,6 +208,7 @@ impl Dialer {
     ///
     /// [`DialError::NoAddress`] se nenhum relay do contato foi achado; [`DialError::Call`] se a chamada falhou (circuito, sem resposta, recusada).
     pub async fn dial<C: Codec + Send + 'static>(&self, peer: [u8; 32], codec: C, wait: Duration) -> Result<ActiveCall, DialError> {
+        self.check_relays(&peer)?;
         let (found, tried_stored) = self.reachable_client(&peer, ClientOptions::default).await;
         let Some((client, k)) = found else { return Err(DialError::NoAddress { tried_stored }) };
         let call = call_linked(client, &self.secret, &PublicKey::from(peer), codec, wait, Some(&self.link)).await?;
@@ -197,76 +217,34 @@ impl Dialer {
     }
 
     /// Transmite a tela da chamada `call` para `peer`, por um circuito só da tela (cover de
-    /// [`SCREEN_SLOT`]). Privada: por circuito de 2 saltos, com cover.
+    /// [`SCREEN_SLOT`]). O caminho é o da opção "2 relays": ligada, por um relay de terceiro; desligada, direto.
     ///
     /// # Errors
     ///
-    /// Como [`Self::dial`]: sem endereço do contato ou falha ao montar o circuito da tela.
+    /// Como [`Self::dial`]: sem endereço do contato, sem relay de terceiro ou falha ao montar o circuito da tela.
     pub async fn share_screen(&self, peer: [u8; 32], call: &ActiveCall, wait: Duration) -> Result<ScreenShare, DialError> {
         self.share_screen_keys(peer, &call.next_share_keys(), wait).await
     }
 
     /// Como [`Self::share_screen`], com as chaves em vez da chamada (quem não tem mais a chamada em mãos
-    /// guarda uma cópia de [`ActiveCall::next_share_keys`]).
+    /// guarda uma cópia de [`ActiveCall::next_share_keys`]). Quem transmite deve usar
+    /// [`H264Encoder::bitrate_for`](crate::video::H264Encoder::bitrate_for) com o mesmo intervalo.
     ///
     /// # Errors
     ///
     /// Como [`Self::share_screen`].
     pub async fn share_screen_keys(&self, peer: [u8; 32], keys: &CallKeys, wait: Duration) -> Result<ScreenShare, DialError> {
-        self.share_screen_keys_with(peer, keys, wait, true).await
-    }
-
-    /// Marca (ou desmarca) `peer` como contato de confiança: a única pessoa para quem a tela sem privacidade
-    /// ([`Self::share_screen_keys_with`] com `private` falso) vai direto, mostrando o IP de quem transmite.
-    /// Quem chama deve ter avisado o usuário dessa exposição antes de marcar. Fora da lista, a tela segue
-    /// por 2 relays. Vale a partir da próxima transmissão.
-    pub fn set_trusted(&self, peer: [u8; 32], trusted: bool) {
-        let mut set = self.trusted.lock_unpoisoned();
-        if trusted {
-            set.insert(peer);
-        } else {
-            set.remove(&peer);
-        }
-    }
-
-    /// Se `peer` está marcado como contato de confiança (veja [`Self::set_trusted`]).
-    #[must_use]
-    pub fn is_trusted(&self, peer: &[u8; 32]) -> bool {
-        self.trusted.lock_unpoisoned().contains(peer)
-    }
-
-    /// Como [`Self::share_screen_keys`]. Com `private` falso a tela abre mão do cover: não manda pacote nos
-    /// instantes sem vídeo (quem observa a rede vê quando a tela se mexe) e o ritmo máximo quadruplica
-    /// ([`OPEN_SCREEN_SLOT`]). O caminho depende de quem assiste (veja [`PathRequest::resolve`]): para um contato
-    /// de confiança ([`Self::set_trusted`]) vai direto ao relay dele, sem relay no meio, e ele vê o seu IP; para
-    /// os demais segue por 2 relays, que escondem o seu IP. O relay do contato de confiança precisa ser desta
-    /// versão ou mais nova. O vídeo e as chaves seguem cifrados. Quem transmite deve usar
-    /// [`H264Encoder::bitrate_for`](crate::video::H264Encoder::bitrate_for) com o mesmo intervalo.
-    ///
-    /// # Errors
-    ///
-    /// Como [`Self::share_screen`]. Contato fora da confiança nunca vai direto: com `private` falso segue por 2 relays, sem falhar.
-    pub async fn share_screen_keys_with(&self, peer: [u8; 32], keys: &CallKeys, wait: Duration, private: bool) -> Result<ScreenShare, DialError> {
-        let (options, slot): (fn() -> ClientOptions, Duration) = match (private, self.screen_path(&peer, private)) {
-            (true, _) => (screen_client_options, SCREEN_SLOT),
-            (false, PathMode::Direct) => (direct_screen_client_options, OPEN_SCREEN_SLOT),
-            (false, _) => (open_screen_client_options, OPEN_SCREEN_SLOT),
-        };
-        let (found, tried_stored) = self.reachable_client(&peer, options).await;
+        self.check_relays(&peer)?;
+        let (found, tried_stored) = self.reachable_client(&peer, screen_client_options).await;
         let Some((client, used)) = found else { return Err(DialError::NoAddress { tried_stored }) };
-        let share = share_screen_slot(client, keys, wait, slot).await?;
+        let share = share_screen_slot(client, keys, wait, SCREEN_SLOT).await?;
         self.remember(&peer, used);
         Ok(share)
     }
 
-    /// O caminho da tela para `peer`: sempre [`PathMode::TwoHop`] com `private`; sem ele, [`PathMode::Direct`] só
-    /// para contato de confiança ([`Self::set_trusted`]) e [`PathMode::TwoHop`] para os demais. Marcar alguém de
-    /// confiança pressupõe o aviso de exposição do IP já confirmado.
+    /// Se a opção "2 relays" está ligada (veja [`NodeConfig::two_relays`]).
     #[must_use]
-    pub fn screen_path(&self, peer: &[u8; 32], private: bool) -> PathMode {
-        if private {
-            return PathMode::TwoHop;
-        }
-        PathRequest { mode: PathMode::Direct, contact_trusted: self.is_trusted(peer), ip_exposure_warning_acked: true }.resolve().unwrap_or_default()
+    pub fn two_relays(&self) -> bool {
+        self.two_relays
     }
 }

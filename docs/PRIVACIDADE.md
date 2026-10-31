@@ -53,20 +53,18 @@ Registros com assinatura inválida, chave errada ou formato errado são tratados
 ### 4. Escolher o modo de caminho
 
 ```rust
-use clam::path::{PathMode, PathRequest};
+use clam::path::PathMode;
 
-let modo = PathRequest::private().resolve()?;  // TwoHop, o padrão
-let direto = PathRequest {
-    mode: PathMode::Direct,
-    contact_trusted: true,              // contato marcado como de confiança
-    ip_exposure_warning_acked: true,    // usuário confirmou o aviso de exposição de IP
-}.resolve()?;                           // sem os dois campos: PathError::DirectNotAllowed
+let modo = PathMode::from_two_relays(true);   // TwoHop: por relays de outros contatos
+let direto = PathMode::from_two_relays(false); // Direct: o contato vê o seu IP
 ```
 
 | Modo | Relays | Alvo de voz |
 | --- | --- | --- |
-| `TwoHop` (padrão) | 2 | 200 ms |
+| `TwoHop` (padrão da biblioteca) | 2 | 200 ms |
 | `Direct` | 0 | 150 ms |
+
+O aplicativo escolhe pela opção "2 relays" de Configurações (`PathMode::from_two_relays`), **desligada de início**: sem ela a conexão é direta e o contato vê o seu IP. Não há marca de contato de confiança nem exceção por tipo de mídia.
 
 ### 5. Assinar os tópicos do círculo
 

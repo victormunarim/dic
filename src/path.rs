@@ -1,6 +1,4 @@
-//! Modos de caminho da mídia. O padrão é o privado, de 2 saltos.
-
-use thiserror::Error;
+//! Modos de caminho da mídia, decididos pela opção "2 relays" (veja `docs/DOIS-RELAYS.md`).
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PathMode {
@@ -29,38 +27,12 @@ impl PathMode {
     }
 }
 
-#[derive(Debug, Error, PartialEq, Eq)]
-pub enum PathError {
-    #[error("modo direto expõe o seu IP ao contato: exige contato de confiança e aviso confirmado")]
-    DirectNotAllowed,
-}
-
-/// Pedido de modo feito pelo usuário para um contato.
-#[derive(Debug, Clone, Copy)]
-pub struct PathRequest {
-    pub mode: PathMode,
-    pub contact_trusted: bool,
-    pub ip_exposure_warning_acked: bool,
-}
-
-impl PathRequest {
-    /// Pedido padrão: privado, sem exceções.
-    pub fn private() -> Self {
-        Self {
-            mode: PathMode::TwoHop,
-            contact_trusted: false,
-            ip_exposure_warning_acked: false,
-        }
-    }
-
-    /// Valida o pedido; o modo direto só passa com confiança e aviso confirmado.
-    pub fn resolve(self) -> Result<PathMode, PathError> {
-        if self.mode == PathMode::Direct
-            && !(self.contact_trusted && self.ip_exposure_warning_acked)
-        {
-            return Err(PathError::DirectNotAllowed);
-        }
-        Ok(self.mode)
+impl PathMode {
+    /// O caminho que a opção "2 relays" pede: ligada, por relays de terceiros; desligada, direto ao contato.
+    /// Não há exceção por contato nem por tipo de mídia: a opção vale para todo fluxo.
+    #[must_use]
+    pub fn from_two_relays(on: bool) -> Self {
+        if on { PathMode::TwoHop } else { PathMode::Direct }
     }
 }
 
@@ -71,21 +43,12 @@ mod tests {
     #[test]
     fn default_is_two_hop() {
         assert_eq!(PathMode::default(), PathMode::TwoHop);
-        assert_eq!(PathRequest::private().resolve(), Ok(PathMode::TwoHop));
     }
 
     #[test]
-    fn direct_requires_trust_and_ack() {
-        let base = PathRequest { mode: PathMode::Direct, contact_trusted: false, ip_exposure_warning_acked: false };
-        assert_eq!(base.resolve(), Err(PathError::DirectNotAllowed));
-        assert_eq!(
-            PathRequest { contact_trusted: true, ..base }.resolve(),
-            Err(PathError::DirectNotAllowed)
-        );
-        assert_eq!(
-            PathRequest { contact_trusted: true, ip_exposure_warning_acked: true, ..base }.resolve(),
-            Ok(PathMode::Direct)
-        );
+    fn the_option_decides_the_path() {
+        assert_eq!(PathMode::from_two_relays(true), PathMode::TwoHop);
+        assert_eq!(PathMode::from_two_relays(false), PathMode::Direct);
     }
 
     #[test]

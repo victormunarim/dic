@@ -177,6 +177,16 @@ impl App {
                     });
                 });
             } else {
+                card(ui, "2 relays", "Esconde o seu IP de quem você liga.", |ui| {
+                    details(ui, "Como funciona", "Desligado (padrão), a ligação é direta: o contato e quem observa a rede perto dele ou de você veem o seu IP. O conteúdo segue cifrado de ponta a ponta. Ligado, a ligação passa pelo relay de outro contato (qualquer um serve): ele vê o seu IP e o destino, mas não o conteúdo, e o contato com quem você fala só vê o IP desse relay. Vale para voz, tela, bate-papo e arquivos. Sem relay de outro contato disponível, a ligação falha com o motivo, e nunca cai para o caminho direto. Ainda falta esconder o IP de quem recebe (veja docs/DOIS-RELAYS.md).");
+                    lock(ui, offline, locked, |ui| {
+                        ui.check(&mut self.form.two_relays, "Passar as ligações por relays de outros contatos")
+                            .on_hover_text("Desligado, a ligação é direta e o contato vê o seu IP. Ligado, o primeiro salto é o relay de outro contato e o destino não vê o seu IP. Um pouco mais lento. Vale ao reiniciar a conexão.");
+                    });
+                    if !self.form.two_relays {
+                        note(ui, "Desligado: o contato e quem observa a rede veem o seu IP.");
+                    }
+                });
                 card(ui, "Encontrar contatos", "Como reencontrar um contato que mudou de endereço.", |ui| {
                     details(ui, "Como funciona", "Quando um contato muda de endereço (IP novo, outra rede), o programa avisa direto. Se vocês dois mudarem enquanto estavam separados, o aviso não chega, e o reencontro usa a DHT, as âncoras ou as duas. Não existe servidor: o que é guardado vai cifrado e só o contato lê.");
                     lock(ui, offline, locked, |ui| {
@@ -310,7 +320,6 @@ mod layout_tests {
             audio_dirty: false,
             screen_tex: Default::default(),
             zoom: None,
-            trust_ask: None,
             chat_with: None,
             chat_draft: String::new(),
             global_keys: Default::default(),

@@ -157,7 +157,6 @@ impl App {
             while let Some(i) = parse_contacts(&self.form.contacts).iter().position(|(_, k)| *k == key) {
                 self.form.contacts = remove_contact(&self.form.contacts, i);
             }
-            self.form.set_trusted(key, false);
         }
         self.form.save();
     }
@@ -214,8 +213,7 @@ impl App {
     }
 
     /// Lista de contatos na coluna da esquerda (o "início", como as mensagens diretas do Discord): um por linha,
-    /// com ligar e bate-papo à direita e, num menu de três pontos, a confiança para a tela e remover. Quem é de confiança
-    /// mostra o escudo cheio na própria linha (expõe o IP: não pode ficar escondido). No alto, a busca.
+    /// com ligar e bate-papo à direita e, num menu de três pontos, remover. No alto, a busca.
     pub(crate) fn contacts_list(&mut self, ui: &mut egui::Ui, online: bool, in_call: bool) {
         let contacts = parse_contacts(&self.form.contacts);
         // O texto da busca vive na memória temporária da janela: não vai para o disco nem precisa de campo em `App`.
@@ -307,8 +305,7 @@ impl App {
                 count_badge(ui.painter(), face.rect, unread[key], pal().bg);
                 // Adicionado só pelo código: o nome chega quando o contato devolve a apresentação.
                 let pending = *name == hex(key)[..8];
-                let trusted = self.form.is_trusted(key);
-                let marks = 22.0 * (usize::from(pending) + usize::from(trusted)) as f32;
+                let marks = 22.0 * usize::from(pending) as f32;
                 // Sem nome ainda, o começo da chave é provisório: o texto diz isso e a chave fica no hover.
                 let shown_name = if pending { "Novo contato".to_string() } else { name.clone() };
                 let ink = if dim || pending { pal().muted } else { pal().text };
@@ -317,16 +314,6 @@ impl App {
                 let label = label.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(format!("{}…\nAbrir o bate-papo", &hex(key)[..16]));
                 if label.clicked() || face.clicked() {
                     self.open_chat(*key);
-                }
-                // O escudo cheio fica à vista: quem vê o seu IP não pode ser um detalhe escondido no menu. É só uma
-                // marca (sem clique), mas alcançável por teclado e com nome para leitor de tela.
-                if trusted {
-                    let (mark, _) = ui.allocate_exact_size(vec2(18.0, 18.0), egui::Sense::hover());
-                    let reply = ui.interact(mark, egui::Id::new(("confianca", key)), egui::Sense::focusable_noninteractive());
-                    reply.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, "Contato de confiança: vê o seu IP"));
-                    shield_icon(ui.painter(), mark.center(), 16.0, pal().strong, true);
-                    focus_ring(ui, &reply, 6);
-                    reply.on_hover_text("Contato de confiança: a sua tela vai direto a ele, sem relay, e ele vê o seu IP. Tire no menu de três pontos.");
                 }
                 if pending {
                     let (mark, _) = ui.allocate_exact_size(vec2(18.0, 18.0), egui::Sense::hover());
@@ -340,21 +327,6 @@ impl App {
                     let block_id = ask.with("bloquear");
                     // Fecha só ao clicar fora (ou Esc): o primeiro clique em *Remover contato* troca o item pela pergunta.
                     let menu = menu(&dots).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
-                        let tip = if trusted {
-                            "A sua tela vai direto a ele, sem relay, e ele vê o seu IP."
-                        } else {
-                            "Só vale com a \"Privacidade na transmissão da tela\" desligada (aba Vídeo): a sua tela vai direto a este contato, sem relay no meio, e ele vê o seu IP. Os outros continuam recebendo por 2 relays."
-                        };
-                        let label = if trusted { "Tirar a confiança" } else { "Marcar como de confiança" };
-                        if menu_item(ui, false, None, label, |p, c, s, k| shield_icon(p, c, s, k, trusted)).on_hover_text(tip).clicked() {
-                            // Marcar pede confirmação do aviso; desmarcar vale na hora.
-                            if trusted {
-                                self.set_trust(*key, false);
-                            } else {
-                                self.trust_ask = Some(*key);
-                            }
-                            ui.close();
-                        }
                         // Remover é irreversível (o outro lado também te tira da lista dele): o menu pergunta e escreve o efeito.
                         let effect = format!("{name} sai da sua lista e é avisado para tirar você da dele. O histórico do bate-papo fica guardado.");
                         let block_tip = format!("Impede {name} de voltar sozinho à sua lista (por apresentação ou convite) até você adicioná-lo de novo ou desbloqueá-lo nas configurações.");
@@ -427,8 +399,6 @@ impl App {
         self.form.contacts = remove_contact(&self.form.contacts, i);
         // O endereço guardado do contato vai junto (a menos que a mesma chave ainda esteja na lista).
         if !parse_contacts(&self.form.contacts).iter().any(|(_, k)| *k == key) {
-            // A confiança não volta sozinha se o contato for adicionado de novo.
-            self.form.set_trusted(key, false);
             // O outro lado é avisado e também tira esta pessoa da lista dele. Offline, o aviso fica na fila
             // (`.clam-gui.removed`) e o endereço dele continua guardado até a entrega no próximo início.
             match &self.running {
@@ -451,15 +421,6 @@ impl App {
         self.form.save();
         if let Some(r) = &self.running {
             let _ = r.cmds.send(Cmd::Block(key, on));
-        }
-    }
-
-    /// Marca ou desmarca o contato como de confiança, grava e avisa o nó. Quem marca já confirmou o aviso do IP.
-    pub(crate) fn set_trust(&mut self, key: [u8; 32], on: bool) {
-        self.form.set_trusted(key, on);
-        self.form.save();
-        if let Some(r) = &self.running {
-            let _ = r.cmds.send(Cmd::Trust(key, on));
         }
     }
 
@@ -495,11 +456,7 @@ impl App {
                 ui.set_width(440.0);
                 ui.label(RichText::new("Transmitir a tela").strong().size(18.0).color(pal().strong));
                 ui.add_space(8.0);
-                let mut tip = String::from("Som do computador: quem assiste ouve o que toca aí, menos a voz do contato. Usa cerca de 10% da banda do vídeo (2,5% sem privacidade).");
-                // A janela não tem aviso fixo (decisão de design): a perda de ritmo constante fica só no hover.
-                if !self.form.screen_private {
-                    tip.push_str(" Sem privacidade na transmissão, quem observa a rede vê quando há som.");
-                }
+                let mut tip = String::from("Som do computador: quem assiste ouve o que toca aí, menos a voz do contato. Usa cerca de 10% da banda do vídeo.");
                 if cfg!(target_os = "linux") {
                     tip.push_str(" No Linux precisa de gstreamer1.0-tools com o plugin do PulseAudio; se a captura falhar, o motivo aparece em Atividade.");
                 }
@@ -539,43 +496,6 @@ impl App {
                 self.send(Cmd::RoomShare(true));
             } else {
                 self.shared.screen.want_share.store(true, Ordering::Relaxed);
-            }
-        }
-    }
-
-    /// Aviso de que o contato de confiança vê o IP de quem transmite; a confiança só vale depois do "Confiar".
-    pub(crate) fn trust_window(&mut self, ctx: &egui::Context) {
-        let Some(key) = self.trust_ask else { return };
-        if !parse_contacts(&self.form.contacts).iter().any(|(_, k)| *k == key) {
-            self.trust_ask = None;
-            return;
-        }
-        let name = member_name(&self.form.names(), &key);
-        let mut answer = None;
-        egui::Window::new(format!("Confiar em {name}?"))
-            .id(egui::Id::new("confiar-contato"))
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, vec2(0.0, 0.0))
-            .show(ctx, |ui| {
-                ui.set_max_width(420.0);
-                ui.label(format!("Com a \"Privacidade na transmissão da tela\" desligada, a sua tela vai direto a {name}, sem relay no meio: {name} e quem observa a rede perto dele passam a ver o seu endereço IP."));
-                ui.add_space(4.0);
-                ui.label("Marque só quem você conhece. Quem não é de confiança continua recebendo a tela por 2 relays. O vídeo segue cifrado nos dois casos.");
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    if button(ui, true, "Confiar", BLURPLE).clicked() {
-                        answer = Some(true);
-                    }
-                    if button(ui, true, "Cancelar", pal().bg).clicked() {
-                        answer = Some(false);
-                    }
-                });
-            });
-        if let Some(yes) = answer {
-            self.trust_ask = None;
-            if yes {
-                self.set_trust(key, true);
             }
         }
     }

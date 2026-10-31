@@ -956,6 +956,9 @@ pub fn pump_all(source: &mut dyn ScreenSource, encoder: &mut H264Encoder, shares
 
 #[cfg(test)]
 mod tests {
+    /// Intervalo hipotético de 0,5 ms (quatro vezes o ritmo): só as simulações o usam para medir quanto a qualidade
+    /// ganharia com mais banda; o produto trabalha em [`SCREEN_SLOT`].
+    const FAST_SLOT: std::time::Duration = std::time::Duration::from_micros(500);
     use super::*;
 
     /// Gradiente que se mexe com `t`, com algum ruído para dar trabalho ao codec.
@@ -1026,7 +1029,7 @@ mod tests {
 
     #[test]
     fn sliced_full_hd_frames_decode_close_to_the_source() {
-        let open = H264Encoder::bitrate_for(crate::phone::OPEN_SCREEN_SLOT);
+        let open = H264Encoder::bitrate_for(FAST_SLOT);
         let mut enc = H264Encoder::new(open).unwrap();
         let mut dec = H264Decoder::new().unwrap();
         let (mut shown, mut last) = (0, None);
@@ -1069,7 +1072,7 @@ mod tests {
 
     #[test]
     fn without_a_viewer_that_announced_it_scrolling_goes_as_plain_video() {
-        let open = H264Encoder::bitrate_for(crate::phone::OPEN_SCREEN_SLOT);
+        let open = H264Encoder::bitrate_for(FAST_SLOT);
         let mut enc = H264Encoder::new(open).unwrap();
         enc.set_scroll(true);
         enc.peers_roll = false;
@@ -1098,7 +1101,7 @@ mod tests {
 
     #[test]
     fn a_window_scrolling_inside_fixed_chrome_goes_as_a_region() {
-        let open = H264Encoder::bitrate_for(crate::phone::OPEN_SCREEN_SLOT);
+        let open = H264Encoder::bitrate_for(FAST_SLOT);
         let mut enc = H264Encoder::new(open).unwrap();
         enc.set_scroll(true);
         let mut dec = ScreenDecoder::new().unwrap();
@@ -1119,7 +1122,7 @@ mod tests {
 
     #[test]
     fn scrolling_goes_as_a_message_and_what_changes_after_goes_as_a_band() {
-        let open = H264Encoder::bitrate_for(crate::phone::OPEN_SCREEN_SLOT);
+        let open = H264Encoder::bitrate_for(FAST_SLOT);
         let mut enc = H264Encoder::new(open).unwrap();
         enc.set_scroll(true);
         let mut dec = ScreenDecoder::new().unwrap();
@@ -1179,7 +1182,7 @@ mod tests {
 
     #[test]
     fn a_scroll_that_does_not_fit_the_image_is_ignored_or_refused() {
-        let open = H264Encoder::bitrate_for(crate::phone::OPEN_SCREEN_SLOT);
+        let open = H264Encoder::bitrate_for(FAST_SLOT);
         let mut enc = H264Encoder::new(open).unwrap();
         enc.set_scroll(true);
         enc.encode(&lines(640, 360, 0), false).unwrap().unwrap();
@@ -1340,7 +1343,7 @@ mod tests {
     #[test]
     fn a_page_switch_goes_out_at_half_resolution_when_the_key_is_dear_and_full_size_returns_when_calm() {
         let (w, h) = (1920, 1080);
-        for (slot, half) in [(SCREEN_SLOT, true), (crate::phone::OPEN_SCREEN_SLOT, false)] {
+        for (slot, half) in [(SCREEN_SLOT, true), (FAST_SLOT, false)] {
             let mut enc = H264Encoder::new(H264Encoder::bitrate_for(slot)).unwrap();
             let mut dec = ScreenDecoder::new().unwrap();
             let a = lines(w, h, 0);
@@ -1385,7 +1388,7 @@ mod tests {
     fn hard_video_does_not_make_the_encoder_send_keyframes_on_its_own() {
         // Com camadas temporais, vídeo pesado fazia o openh264 mandar um quadro-chave (10× um quadro comum)
         // por decisão dele. Passado o começo, em que o QP ainda assenta, nenhum quadro é chave.
-        let mut enc = H264Encoder::new(H264Encoder::bitrate_for(crate::phone::OPEN_SCREEN_SLOT)).unwrap();
+        let mut enc = H264Encoder::new(H264Encoder::bitrate_for(FAST_SLOT)).unwrap();
         let mut dec = ScreenDecoder::new().unwrap();
         let (mut keys, mut sent) = (0, 0);
         for i in 0..120 {
@@ -1552,7 +1555,7 @@ mod tests {
 
     #[test]
     fn the_encoder_follows_the_loss_reports() {
-        let mut enc = H264Encoder::new(H264Encoder::bitrate_for(crate::phone::OPEN_SCREEN_SLOT)).unwrap();
+        let mut enc = H264Encoder::new(H264Encoder::bitrate_for(FAST_SLOT)).unwrap();
         let full = enc.bitrate();
         let target = enc.target;
         enc.report_loss(0.4);
@@ -1567,7 +1570,7 @@ mod tests {
 
     #[test]
     fn open_circuit_gets_a_higher_bitrate_and_30_fps() {
-        let (private, open) = (H264Encoder::bitrate_for(SCREEN_SLOT), H264Encoder::bitrate_for(crate::phone::OPEN_SCREEN_SLOT));
+        let (private, open) = (H264Encoder::bitrate_for(SCREEN_SLOT), H264Encoder::bitrate_for(FAST_SLOT));
         assert!(open >= HIGH_FPS_BITRATE && private < HIGH_FPS_BITRATE, "{private} / {open}");
         assert_eq!(fps_for(private), FPS);
         assert_eq!(fps_for(open), HIGH_FPS);
@@ -1601,7 +1604,7 @@ mod tests {
     #[test]
     #[ignore]
     fn after_scroll_timeline() {
-        for (label, slot, prio) in [("privado 2 ms", SCREEN_SLOT, Priority::Smoothness), ("aberto 0,5 ms", crate::phone::OPEN_SCREEN_SLOT, Priority::Smoothness), ("aberto 0,5 ms nitidez", crate::phone::OPEN_SCREEN_SLOT, Priority::Sharpness)] {
+        for (label, slot, prio) in [("privado 2 ms", SCREEN_SLOT, Priority::Smoothness), ("aberto 0,5 ms", FAST_SLOT, Priority::Smoothness), ("aberto 0,5 ms nitidez", FAST_SLOT, Priority::Sharpness)] {
             let bitrate = H264Encoder::bitrate_for(slot);
             let mut enc = H264Encoder::with_priority(bitrate, prio).unwrap();
             enc.set_scroll(true);
@@ -1651,7 +1654,7 @@ mod tests {
 
     #[test]
     fn a_wobbling_sample_is_not_taken_for_the_start_of_movement() {
-        let mut enc = H264Encoder::new(H264Encoder::bitrate_for(crate::phone::OPEN_SCREEN_SLOT)).unwrap();
+        let mut enc = H264Encoder::new(H264Encoder::bitrate_for(FAST_SLOT)).unwrap();
         enc.qp = 36.0;
         // Imagem calma e, de repente, tudo mexe: é o início de movimento, o QP sobe de uma vez.
         for _ in 0..4 {
@@ -1736,7 +1739,7 @@ mod tests {
     #[test]
     #[ignore]
     fn video_playback() {
-        for (label, slot, grain) in [("aberto 0,5 ms, grão 7", crate::phone::OPEN_SCREEN_SLOT, 7), ("aberto 0,5 ms, grão 15", crate::phone::OPEN_SCREEN_SLOT, 15), ("aberto 0,5 ms, grão 31", crate::phone::OPEN_SCREEN_SLOT, 31), ("privado 2 ms, grão 7", SCREEN_SLOT, 7), ("privado 2 ms, grão 15", SCREEN_SLOT, 15)] {
+        for (label, slot, grain) in [("aberto 0,5 ms, grão 7", FAST_SLOT, 7), ("aberto 0,5 ms, grão 15", FAST_SLOT, 15), ("aberto 0,5 ms, grão 31", FAST_SLOT, 31), ("privado 2 ms, grão 7", SCREEN_SLOT, 7), ("privado 2 ms, grão 15", SCREEN_SLOT, 15)] {
             let bitrate = H264Encoder::bitrate_for(slot);
             let mut enc = H264Encoder::new(bitrate).unwrap();
             enc.set_scroll(true);
@@ -1778,7 +1781,7 @@ mod tests {
     fn encode_cost() {
         let (w, h) = (1920, 1080);
         for (label, step, scrolling) in [("parado", 0, false), ("10 px sem rolagem", 10, false), ("40 px sem rolagem", 40, false), ("40 px com rolagem", 40, true)] {
-            let bitrate = H264Encoder::bitrate_for(crate::phone::OPEN_SCREEN_SLOT);
+            let bitrate = H264Encoder::bitrate_for(FAST_SLOT);
             let mut enc = H264Encoder::new(bitrate).unwrap();
             enc.set_scroll(scrolling);
             let frames: Vec<RawFrame> = (0..40).map(|i| lines(w, h, i * step)).collect();

@@ -40,7 +40,7 @@ Para ver a interface sem display, use as capturas em `docs/telas/` (escuro e cla
 - Parser de dado da rede nunca usa índice, `unwrap`, `expect` nem aritmética que estoura: `#![deny(clippy::indexing_slicing, clippy::unwrap_used)]` nesses módulos; use `get`, `split_at_checked`, `checked_*`. Entrada de fora é hostil.
 - Mutex: `LockExt::lock_unpoisoned`, nunca `lock().unwrap()`.
 - Segredos em `zeroize`, comparação em tempo constante (`subtle`), nonces nunca reutilizados, AEAD com dado associado. Segredo nunca vai a log, erro ou arquivo sem permissão restrita (`write_private`).
-- Privacidade é o padrão. Perder uma proteção (cover, 2 saltos, IP escondido) exige ação explícita do usuário, aviso na interface e, se expõe o IP, confiança por contato (`path::PathRequest::resolve`). Sem fallback silencioso para caminho menos privado.
+- Privacidade é o padrão. Perder uma proteção (cover, 2 saltos, IP escondido) exige ação explícita do usuário e aviso na interface; a opção "2 relays" (`path::PathMode::from_two_relays`) vale para todo fluxo, sem exceção por contato. Sem fallback silencioso para caminho menos privado.
 - Mudança que reduz anonimato ou aumenta o que um observador vê: diga isso em texto claro ao usuário e documente em `docs/SEGURANCA.md`.
 
 ### Testes

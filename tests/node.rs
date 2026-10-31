@@ -815,16 +815,17 @@ async fn an_anchor_lets_two_moved_contacts_find_each_other() {
     cb.hangup();
 }
 
-/// Liga A a B, A transmite a tela com `private` (e `trusted`: B é contato de confiança de A) e B tem de
-/// receber o quadro. Devolve o caminho que a tela tomou e se o quadro chegou igual.
-async fn screen_arrives(private: bool, trusted: bool) -> (PathMode, bool) {
+/// Liga A a B, A transmite a tela e B tem de receber o quadro. Com `two_relays`, A e B têm também um terceiro
+/// contato C, cujo relay é o primeiro salto. Devolve o caminho tomado e se o quadro chegou igual.
+async fn screen_arrives(two_relays: bool) -> (PathMode, bool) {
     use clam::phone::ScreenEvent;
-    let (sa, sb) = (key(), key());
-    let (pa, pb) = (*PublicKey::from(&sa).as_bytes(), *PublicKey::from(&sb).as_bytes());
-    let a = Node::start(fixed(sa, free_port(), vec![pb])).await.unwrap();
-    let mut b = Node::start(fixed(sb, free_port(), vec![pa])).await.unwrap();
+    let (sa, sb, sc) = (key(), key(), key());
+    let (pa, pb, pc) = (*PublicKey::from(&sa).as_bytes(), *PublicKey::from(&sb).as_bytes(), *PublicKey::from(&sc).as_bytes());
+    let c = Node::start(fixed(sc, free_port(), vec![pa, pb])).await.unwrap();
+    // O relay de C só entra como primeiro salto se A já o conhece (`known`).
+    let a = Node::start(NodeConfig { two_relays, known: vec![(pc, c.relay_info().unwrap())], ..fixed(sa, free_port(), vec![pb, pc]) }).await.unwrap();
+    let mut b = Node::start(fixed(sb, free_port(), vec![pa, pc])).await.unwrap();
     a.add_hint(pb, b.relay_info().unwrap());
-    a.set_trusted(pb, trusted);
     let answer = tokio::spawn(async move {
         let inc = timeout(Duration::from_secs(15), b.next_incoming()).await.unwrap().unwrap();
         (inc.accept(Mulaw::new()).await.unwrap(), b)
@@ -833,8 +834,8 @@ async fn screen_arrives(private: bool, trusted: bool) -> (PathMode, bool) {
     let (mut cb, _b) = answer.await.unwrap();
 
     let dialer = a.dialer();
-    let path = dialer.screen_path(&pb, private);
-    let share = dialer.share_screen_keys_with(pb, &ca.next_share_keys(), Duration::from_secs(15), private).await.unwrap();
+    let path = PathMode::from_two_relays(dialer.two_relays());
+    let share = dialer.share_screen_keys(pb, &ca.next_share_keys(), Duration::from_secs(15)).await.unwrap();
     let frame: Vec<u8> = (0..900).map(|i| (i as u8).wrapping_mul(7)).collect();
     assert!(share.push(&frame, true).unwrap());
     let got = timeout(Duration::from_secs(10), async {
@@ -852,42 +853,29 @@ async fn screen_arrives(private: bool, trusted: bool) -> (PathMode, bool) {
     (path, got.as_deref() == Some(frame.as_slice()))
 }
 
-/// A tela privada passa por 2 saltos (o próprio relay e o do contato), mesmo para contato de confiança.
+/// Opção desligada: a tela vai direto ao relay do contato, sem relay no meio.
 #[tokio::test]
-async fn the_private_screen_reaches_the_contact() {
-    assert_eq!(screen_arrives(true, false).await, (PathMode::TwoHop, true));
-    assert_eq!(screen_arrives(true, true).await, (PathMode::TwoHop, true));
+async fn the_screen_goes_straight_to_the_contact_when_two_relays_is_off() {
+    assert_eq!(screen_arrives(false).await, (PathMode::Direct, true));
 }
 
-/// Sem privacidade, para contato de confiança a tela vai direto ao relay dele, sem relay no meio.
+/// Opção ligada: a tela passa pelo relay de outro contato.
 #[tokio::test]
-async fn the_screen_without_privacy_goes_straight_to_a_trusted_contact() {
-    assert_eq!(screen_arrives(false, true).await, (PathMode::Direct, true));
+async fn the_screen_goes_through_a_third_party_relay_when_two_relays_is_on() {
+    assert_eq!(screen_arrives(true).await, (PathMode::TwoHop, true));
 }
 
-/// Sem privacidade, mas sem confiança, a tela segue por 2 saltos: o IP de quem transmite não aparece.
+/// Opção ligada e nenhum relay de terceiro: falha com o motivo, em vez de cair para um caminho que mostra o IP.
 #[tokio::test]
-async fn the_screen_without_privacy_keeps_two_hops_for_an_untrusted_contact() {
-    assert_eq!(screen_arrives(false, false).await, (PathMode::TwoHop, true));
-}
-
-/// Confiança é por pessoa, vale só até ser retirada ou o contato ser esquecido.
-#[tokio::test]
-async fn trust_is_per_person_and_dies_with_the_contact() {
-    let (sa, sb, sc) = (key(), key(), key());
-    let (pb, pc) = (*PublicKey::from(&sb).as_bytes(), *PublicKey::from(&sc).as_bytes());
-    let a = Node::start(fixed(sa, free_port(), vec![pb, pc])).await.unwrap();
-    let d = a.dialer();
-    assert_eq!(d.screen_path(&pb, false), PathMode::TwoHop, "ninguém é de confiança de início");
-    a.set_trusted(pb, true);
-    assert_eq!(d.screen_path(&pb, false), PathMode::Direct);
-    assert_eq!(d.screen_path(&pc, false), PathMode::TwoHop, "só quem foi marcado");
-    assert_eq!(d.screen_path(&pb, true), PathMode::TwoHop, "com privacidade nunca é direto");
-    a.forget(&pb);
-    assert_eq!(d.screen_path(&pb, false), PathMode::TwoHop, "esquecer o contato tira a confiança");
-    a.set_trusted(pc, true);
-    a.set_trusted(pc, false);
-    assert_eq!(d.screen_path(&pc, false), PathMode::TwoHop);
+async fn two_relays_fails_instead_of_falling_back_to_a_direct_path() {
+    use clam::node::DialError;
+    let (sa, sb) = (key(), key());
+    let pb = *PublicKey::from(&sb).as_bytes();
+    let b = Node::start(fixed(sb, free_port(), vec![])).await.unwrap();
+    let a = Node::start(NodeConfig { two_relays: true, ..fixed(sa, free_port(), vec![pb]) }).await.unwrap();
+    a.add_hint(pb, b.relay_info().unwrap());
+    let err = a.dial(pb, Mulaw::new(), Duration::from_secs(3)).await.err().expect("sem terceiro, não liga");
+    assert!(matches!(err, DialError::NoRelays), "{err}");
 }
 
 /// A, C e B: A adiciona B, que nunca esteve no ar; C é contato de confiança de A. A deixa o convite com C e na caixa
@@ -902,7 +890,6 @@ async fn an_offline_contact_finds_the_introduction_in_its_mailbox() {
     let c = Node::start(NodeConfig { updates: false, dht: dht(), ..fixed(sc, free_port(), vec![pa]) }).await.unwrap();
     let a = Node::start(NodeConfig { updates: false, dht: dht(), name: "Ana".into(), ..fixed(sa, free_port(), vec![pb, pc]) }).await.unwrap();
     a.add_hint(pc, c.relay_info().unwrap());
-    a.set_trusted(pc, true);
     a.introduce(pb);
 
     let held = until("C guarda o convite", || Some(c.custody_export()).filter(|v| !v.is_empty())).await;
@@ -930,7 +917,6 @@ async fn the_acceptance_comes_back_through_the_keeper_of_the_invite() {
     let c = Node::start(NodeConfig { updates: false, dht: dht(), mail_poll: poll, ..fixed(sc, free_port(), vec![pa]) }).await.unwrap();
     let a = Node::start(NodeConfig { updates: false, dht: dht(), name: "Ana".into(), ..fixed(sa.clone(), free_port(), vec![pb, pc]) }).await.unwrap();
     a.add_hint(pc, c.relay_info().unwrap());
-    a.set_trusted(pc, true);
     a.introduce(pb);
     until("C guarda o convite", || Some(c.custody_export()).filter(|v| !v.is_empty())).await;
     a.stop();
@@ -962,7 +948,6 @@ async fn an_offline_contact_finds_the_server_invite_in_its_mailbox() {
     let c = Node::start(NodeConfig { updates: false, dht: dht(), ..fixed(sc, free_port(), vec![pa]) }).await.unwrap();
     let a = Node::start(NodeConfig { updates: false, dht: dht(), name: "Ana".into(), ..fixed(sa, free_port(), vec![pb, pc]) }).await.unwrap();
     a.add_hint(pc, c.relay_info().unwrap());
-    a.set_trusted(pc, true);
     let hub = a.servers();
     let server = hub.try_run(|s, now| s.create("Amigos", now)).unwrap();
     // O endereço do nó só chega ao motor no primeiro tique do relógio.
@@ -978,23 +963,6 @@ async fn an_offline_contact_finds_the_server_invite_in_its_mailbox() {
     assert_eq!((got[0].name.as_str(), got[0].from, got[0].server), ("Amigos", pa, server));
 }
 
-/// Quem não é de confiança não guarda convite.
-#[tokio::test]
-async fn an_untrusted_contact_is_not_asked_to_keep_the_introduction() {
-    use clam::rendezvous::DhtOptions;
-    let testnet = mainline::Testnet::new(5).unwrap();
-    let dht = || Some(DhtOptions { bootstrap: testnet.bootstrap.clone(), bind: Some(std::net::Ipv4Addr::LOCALHOST), circuit: false });
-    let (sa, sb, sc) = (key(), key(), key());
-    let (pa, pb, pc) = (*PublicKey::from(&sa).as_bytes(), *PublicKey::from(&sb).as_bytes(), *PublicKey::from(&sc).as_bytes());
-    let c = Node::start(NodeConfig { updates: false, dht: dht(), ..fixed(sc, free_port(), vec![pa]) }).await.unwrap();
-    let a = Node::start(NodeConfig { updates: false, dht: dht(), ..fixed(sa, free_port(), vec![pb, pc]) }).await.unwrap();
-    a.add_hint(pc, c.relay_info().unwrap());
-    a.introduce(pb);
-    // Dá tempo de A tentar mais de uma vez (a espera é de 200 ms); só então confere que nada chegou.
-    tokio::time::sleep(Duration::from_secs(3)).await;
-    assert!(c.custody_export().is_empty());
-}
-
 /// Um estranho (fora da lista de C) não ocupa a custódia dele.
 #[tokio::test]
 async fn a_stranger_cannot_leave_an_introduction_in_custody() {
@@ -1006,7 +974,6 @@ async fn a_stranger_cannot_leave_an_introduction_in_custody() {
     let c = Node::start(NodeConfig { updates: false, dht: dht(), ..fixed(sc, free_port(), vec![]) }).await.unwrap();
     let a = Node::start(NodeConfig { updates: false, dht: dht(), ..fixed(sa, free_port(), vec![pb, pc]) }).await.unwrap();
     a.add_hint(pc, c.relay_info().unwrap());
-    a.set_trusted(pc, true);
     a.introduce(pb);
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert!(c.custody_export().is_empty());
@@ -1024,7 +991,6 @@ async fn the_introduction_back_stops_the_first_one() {
     let mail_poll = Duration::from_millis(300);
     let a = Node::start(NodeConfig { updates: false, dht: dht(), name: "Ana".into(), mail_poll, ..fixed(sa, free_port(), vec![pb, pc]) }).await.unwrap();
     a.add_hint(pc, c.relay_info().unwrap());
-    a.set_trusted(pc, true);
     // B ainda não subiu: só a caixa leva o convite.
     a.introduce(pb);
     until("C guarda o convite", || Some(c.custody_export()).filter(|v| !v.is_empty())).await;
@@ -1032,7 +998,6 @@ async fn the_introduction_back_stops_the_first_one() {
 
     let b = Node::start(NodeConfig { updates: false, dht: dht(), name: "Beto".into(), mail_poll, ..fixed(sb, free_port(), vec![pa, pc]) }).await.unwrap();
     b.add_hint(pc, c.relay_info().unwrap());
-    b.set_trusted(pc, true);
     // B vê o convite de A (já é contato) e responde pelo mesmo caminho.
     until("B acha o convite", || Some(b.take_introductions()).filter(|v| !v.is_empty())).await;
     b.introduce(pa);
@@ -1052,7 +1017,6 @@ async fn an_invitation_older_than_the_removal_is_refused() {
     let c = Node::start(NodeConfig { updates: false, dht: dht(), ..fixed(sc, free_port(), vec![pa]) }).await.unwrap();
     let a = Node::start(NodeConfig { updates: false, dht: dht(), name: "Ana".into(), ..fixed(sa, free_port(), vec![pb, pc]) }).await.unwrap();
     a.add_hint(pc, c.relay_info().unwrap());
-    a.set_trusted(pc, true);
     a.introduce(pb);
     until("C guarda o convite", || Some(c.custody_export()).filter(|v| !v.is_empty())).await;
     a.stop();
@@ -1078,11 +1042,8 @@ async fn the_keeper_passes_the_custody_one_hop_only() {
     let c = Node::start(NodeConfig { updates: false, dht: dht(), ..fixed(sc, free_port(), vec![pa, pd]) }).await.unwrap();
     let a = Node::start(NodeConfig { updates: false, dht: dht(), name: "Ana".into(), ..fixed(sa, free_port(), vec![pb, pc]) }).await.unwrap();
     d.add_hint(pe, e.relay_info().unwrap());
-    d.set_trusted(pe, true);
     c.add_hint(pd, d.relay_info().unwrap());
-    c.set_trusted(pd, true);
     a.add_hint(pc, c.relay_info().unwrap());
-    a.set_trusted(pc, true);
     a.introduce(pb);
 
     until("C guarda", || Some(c.custody_export()).filter(|v| !v.is_empty())).await;

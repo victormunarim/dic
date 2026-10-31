@@ -70,6 +70,9 @@ pub struct NodeConfig {
     /// De quanto em quanto tempo a caixa de correio desta pessoa é lida na DHT e o guardião olha o buraco de resposta
     /// de cada apresentação que segura. Padrão: 10 minutos.
     pub mail_poll: Duration,
+    /// Opção "2 relays". Desligada (padrão): a ligação é direta, sem relay no meio, e o contato e quem vê o fio
+    /// sabem o seu IP. Ligada: o primeiro salto é o relay de outro contato, e o destino não vê o seu IP (veja `docs/DOIS-RELAYS.md`).
+    pub two_relays: bool,
 }
 
 /// Segredos do relay do nó: o do circuito (`onion`) e o do link (Noise NK).
@@ -89,6 +92,6 @@ impl RelayKeys {
 impl NodeConfig {
     #[must_use]
     pub fn new(secret: StaticSecret, contacts: Vec<[u8; 32]>) -> Self {
-        Self { secret, contacts, relay_port: DEFAULT_RELAY_PORT, public_addr: None, upnp: true, known: Vec::new(), hints: Vec::new(), relay_keys: None, history: Vec::new(), updates: true, update_retry: UPDATE_RETRY, dht: None, name: String::new(), introductions: true, anchor: false, anchors: Vec::new(), servers: None, custody: Vec::new(), tombstones: Vec::new(), blocked: Vec::new(), mail_poll: MAIL_POLL }
+        Self { secret, contacts, relay_port: DEFAULT_RELAY_PORT, public_addr: None, upnp: true, known: Vec::new(), hints: Vec::new(), relay_keys: None, history: Vec::new(), updates: true, update_retry: UPDATE_RETRY, dht: None, name: String::new(), introductions: true, anchor: false, anchors: Vec::new(), servers: None, custody: Vec::new(), tombstones: Vec::new(), blocked: Vec::new(), mail_poll: MAIL_POLL, two_relays: false }
     }
 }

@@ -63,13 +63,6 @@ use crate::{
 /// Intervalo entre pacotes do circuito da tela: 500 pacotes/s, ≈ 680 kbps de vídeo.
 pub const SCREEN_SLOT: Duration = Duration::from_millis(2);
 
-/// Intervalo entre pacotes quando a pessoa abre mão da privacidade da tela: sem cover e quatro vezes a taxa
-/// (2000 pacotes/s, ≈ 2,7 Mbps de vídeo, 512 kB/s no fio).
-pub const OPEN_SCREEN_SLOT: Duration = Duration::from_micros(500);
-/// Pacotes seguidos que o modo sem privacidade pode mandar de uma vez para recuperar atraso do relógio
-/// (o temporizador do sistema acorda a cada 1 ms, ou pior, e o intervalo é menor que isso).
-const OPEN_SCREEN_BURST: f64 = 8.0;
-
 /// Maior quadro `[u16][dados]` aceito do circuito; os de mídia e sinalização têm 200 B.
 const MAX_FRAME: usize = 1024;
 
@@ -498,20 +491,6 @@ pub fn screen_client_options() -> ClientOptions {
     ClientOptions { cover: Some(every), circuit_cover: Some(every), ..Default::default() }
 }
 
-/// Opções do cliente de circuito da tela sem cover, para quem não é de confiança: segue com os 2 saltos, só
-/// sai o que há para enviar.
-#[must_use]
-pub fn open_screen_client_options() -> ClientOptions {
-    ClientOptions { cover: None, circuit_cover: None, ..Default::default() }
-}
-
-/// Opções do cliente de circuito da tela direto ao relay do contato de confiança: sem relay no meio e
-/// sem cover. Quem assiste vê o IP de quem transmite.
-#[must_use]
-pub fn direct_screen_client_options() -> ClientOptions {
-    ClientOptions { cover: None, circuit_cover: None, direct: true, ..Default::default() }
-}
-
 /// Quem transmite a tela: dono do circuito de tela até o telefone de quem assiste.
 ///
 /// Largar o valor interrompe sem avisar; [`stop`](Self::stop) avisa quem assiste.
@@ -604,9 +583,8 @@ pub async fn share_screen(client: CircuitClient, keys: &CallKeys, wait: Duration
     share_screen_slot(client, keys, wait, SCREEN_SLOT).await
 }
 
-/// Como [`share_screen`], com um pacote a cada `slot` ([`SCREEN_SLOT`] com cover;
-/// [`OPEN_SCREEN_SLOT`] para o cliente de [`open_screen_client_options`]). Sem cover, um relógio que atrasa
-/// (o do Windows, por exemplo) não reduz a taxa: o atraso vira crédito e sai em rajadas curtas.
+/// Como [`share_screen`], com um pacote a cada `slot` (o relógio que atrasa, o do Windows por exemplo, vira
+/// crédito e sai em rajada curta).
 ///
 /// # Errors
 ///
@@ -628,8 +606,8 @@ pub async fn share_screen_slot(mut client: CircuitClient, keys: &CallKeys, wait:
     .await
     .map_err(|_| CallError::NoCircuit)??;
 
-    // Com cover o circuito só aceita um pacote por intervalo; sem cover, o atraso do relógio se recupera.
-    let max_burst = if slot == SCREEN_SLOT { 1.0 } else { OPEN_SCREEN_BURST };
+    // Com cover o circuito só aceita um pacote por intervalo.
+    let max_burst = 1.0;
     let stream = Arc::new(Mutex::new(ScreenStream::new(keys)));
     let stopping = Arc::new(AtomicBool::new(false));
     let hello = stream.lock_unpoisoned().next_packet()?;

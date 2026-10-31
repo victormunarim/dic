@@ -114,12 +114,9 @@ pub(crate) struct Form {
     pub(crate) intros: bool,
     /// Serve de âncora para os registros de endereço dos outros (veja `NodeConfig::anchor`).
     pub(crate) anchor: bool,
-    /// Privacidade na transmissão da tela: circuito de tráfego constante, com cover. Desligada, o circuito
-    /// só manda o que há para enviar e dobra o ritmo (veja `Dialer::share_screen_keys_with`).
-    pub(crate) screen_private: bool,
-    /// Contatos de confiança, chaves em hex separadas por `;`: os únicos para quem a tela sem privacidade vai
-    /// direto, mostrando o IP de quem transmite (veja `Dialer::set_trusted`). Quem não é contato não conta.
-    pub(crate) trusted: String,
+    /// Opção "2 relays" (veja `NodeConfig::two_relays` e `docs/DOIS-RELAYS.md`). Desligada (padrão), a ligação é direta e
+    /// o contato vê o IP; ligada, passa pelo relay de outro contato.
+    pub(crate) two_relays: bool,
     /// Chaves bloqueadas, em hex (com `=nome` opcional) separadas por `;`: não voltam como contato sozinhas, por apresentação ou convite
     /// (veja `Node::block`). Só adicionar a chave de novo, de propósito, desbloqueia.
     pub(crate) blocked: String,
@@ -527,7 +524,7 @@ pub(crate) fn save_known(book: &Book) -> std::io::Result<()> {
 impl Form {
     /// Primeira abertura: já nasce com uma identidade, para a pessoa não precisar gerar nada.
     pub(crate) fn first_run() -> Self {
-        Form { secret: hex(&StaticSecret::random_from_rng(OsRng).to_bytes()), intros: true, use_dht: true, anchor: true, screen_private: true, voice_opus: true, auto_online: true, screen_audio: true, screen_hear: true, ..Form::default() }
+        Form { secret: hex(&StaticSecret::random_from_rng(OsRng).to_bytes()), intros: true, use_dht: true, anchor: true, voice_opus: true, auto_online: true, screen_audio: true, screen_hear: true, ..Form::default() }
     }
 
     pub(crate) fn load() -> Self {
@@ -556,8 +553,7 @@ impl Form {
             intros: get("intros") != "0",
             anchor: get("no_anchor") != "1",
             // Ligada de início: a chave guarda o "não", então o arquivo antigo, sem ela, também aceita.
-            screen_private: get("no_screen_privacy") != "1",
-            trusted: get("trusted"),
+            two_relays: get("two_relays") == "1",
             blocked: get("blocked"),
             light: match get("light").as_str() {
                 "1" => Some(true),
@@ -596,7 +592,7 @@ impl Form {
         let secret = self.secret_to_write(vault_set);
         let secret = secret.as_str();
         let text = format!(
-            "audio={}\nsecret={}\ncontacts={}\npeer={}\npublic_addr={}\nno_dht={}\ndht_circuit={}\nname={}\nintros={}\nno_anchor={}\nno_screen_privacy={}\nscreen_sharp={}\nscreen_hardware={}\nno_screen_audio={}\nno_screen_hear={}\nanchors={}\ninput_dev={}\noutput_dev={}\nno_opus={}\nno_auto_online={}\ntrusted={}\nblocked={}\nlight={}\nmute_key={}\ndeafen_key={}\nauto_files={}\n{}",
+            "audio={}\nsecret={}\ncontacts={}\npeer={}\npublic_addr={}\nno_dht={}\ndht_circuit={}\nname={}\nintros={}\nno_anchor={}\ntwo_relays={}\nscreen_sharp={}\nscreen_hardware={}\nno_screen_audio={}\nno_screen_hear={}\nanchors={}\ninput_dev={}\noutput_dev={}\nno_opus={}\nno_auto_online={}\nblocked={}\nlight={}\nmute_key={}\ndeafen_key={}\nauto_files={}\n{}",
             u8::from(self.use_audio),
             secret,
             self.contacts.trim().replace('\n', ";"),
@@ -607,7 +603,7 @@ impl Form {
             self.my_name.trim().replace(['\n', ';'], " "),
             u8::from(self.intros),
             u8::from(!self.anchor),
-            u8::from(!self.screen_private),
+            u8::from(self.two_relays),
             u8::from(self.screen_sharp),
             u8::from(self.screen_hardware),
             u8::from(!self.screen_audio),
@@ -617,7 +613,6 @@ impl Form {
             self.output_dev.trim(),
             u8::from(!self.voice_opus),
             u8::from(!self.auto_online),
-            self.trusted.trim(),
             self.blocked.trim(),
             self.light.map_or("", |l| if l { "1" } else { "0" }),
             self.mute_key.trim(),
@@ -627,12 +622,6 @@ impl Form {
         );
         // Contém a chave secreta: só o dono lê.
         write_private(&conf_path(), &text)
-    }
-
-    /// Contatos de confiança que ainda estão na lista.
-    pub(crate) fn trusted_keys(&self) -> Vec<[u8; 32]> {
-        let contacts = parse_contacts(&self.contacts);
-        self.trusted.split(';').filter_map(|k| unhex(k.trim()).ok()).filter(|k| contacts.iter().any(|(_, c)| c == k)).collect()
     }
 
     /// Chaves bloqueadas (lixo no arquivo e repetidas não contam).
@@ -680,19 +669,6 @@ impl Form {
             entries.push((key, name.map(|n| n.replace([';', '=', '\n', '\r'], " ").trim().to_string()).filter(|n| !n.is_empty())));
         }
         self.blocked = entries.iter().map(|(k, n)| n.as_ref().map_or_else(|| hex(k), |n| format!("{}={n}", hex(k)))).collect::<Vec<_>>().join(";");
-    }
-
-    pub(crate) fn is_trusted(&self, key: &[u8; 32]) -> bool {
-        self.trusted_keys().contains(key)
-    }
-
-    /// Marca ou desmarca `key` como contato de confiança. Quem chama avisa antes que o contato passa a ver o IP.
-    pub(crate) fn set_trusted(&mut self, key: [u8; 32], on: bool) {
-        let mut keys: Vec<[u8; 32]> = self.trusted_keys().into_iter().filter(|k| *k != key).collect();
-        if on {
-            keys.push(key);
-        }
-        self.trusted = keys.iter().map(|k| hex(k)).collect::<Vec<_>>().join(";");
     }
 
     /// Nomes dos contatos, para mostrar quem liga ou transmite a tela.
@@ -934,23 +910,9 @@ mod tests {
     }
 
     #[test]
-    fn trust_marks_only_contacts_and_dies_with_the_contact() {
-        let (a, b) = ([0xab; 32], [0xcd; 32]);
-        let mut f = Form { contacts: format!("ana {}\nbia {}", hex(&a), hex(&b)), ..Default::default() };
-        assert!(f.trusted_keys().is_empty(), "ninguém é de confiança de início");
-        f.set_trusted(a, true);
-        f.set_trusted(a, true);
-        assert_eq!(f.trusted_keys(), vec![a], "marcar duas vezes não duplica");
-        assert!(f.is_trusted(&a) && !f.is_trusted(&b));
-        f.set_trusted(b, true);
-        f.set_trusted(a, false);
-        assert_eq!(f.trusted_keys(), vec![b]);
-        // Chave que não é contato (ou lixo no arquivo) não conta.
-        f.trusted = format!("{};zz;{}", hex(&[1; 32]), hex(&b));
-        assert_eq!(f.trusted_keys(), vec![b]);
-        // Tirar o contato da lista tira a confiança, mesmo que a chave continue no texto.
-        f.contacts = remove_contact(&f.contacts, 1);
-        assert!(f.trusted_keys().is_empty());
+    fn two_relays_starts_off() {
+        assert!(!Form::default().two_relays, "o padrão é desligado");
+        assert!(!Form::first_run().two_relays, "a primeira abertura também começa desligada");
     }
 
     #[test]

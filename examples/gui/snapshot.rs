@@ -214,7 +214,6 @@ fn sample_app(tab: Tab) -> App {
         audio_dirty: false,
         screen_tex: Default::default(),
         zoom: None,
-        trust_ask: None,
         chat_with: None,
         chat_draft: String::new(),
         global_keys: Default::default(),
@@ -268,7 +267,6 @@ fn save_overlays(dir: &Path, theme_name: &str) {
     let out = |name: &str| dir.join(format!("{name}-{theme_name}.png"));
     shot_opened(Tab::Contacts, size, Some("Menu"), |_| {}).save(&out("menu-engrenagem"));
     shot_opened(Tab::Contacts, size, Some("Mais ações de Bruno"), |_| {}).save(&out("menu-contato"));
-    shot_opened(Tab::Contacts, size, None, |a| a.trust_ask = Some(bruno)).save(&out("janela-confiar"));
     shot_opened(Tab::Contacts, size, None, |a| a.chat_with = Some(bruno)).save(&out("bate-papo"));
     // A pergunta de transmitir mora no contexto do egui, então é pedida no primeiro quadro.
     let mut app = sample_app(Tab::Contacts);
@@ -287,11 +285,11 @@ fn save_overlays(dir: &Path, theme_name: &str) {
 mod tests {
     use super::*;
 
-    /// A captura parte dos padrões reais: a privacidade na transmissão da tela vem ligada.
+    /// A captura parte dos padrões reais: a opção "2 relays" vem desligada.
     #[test]
     fn sample_app_starts_from_the_real_defaults() {
         let app = sample_app(Tab::Video);
-        assert!(app.form.screen_private, "o padrão do app é privado");
+        assert!(!app.form.two_relays, "a opção 2 relays começa desligada");
         assert!(app.form.use_dht && app.form.auto_online);
     }
 

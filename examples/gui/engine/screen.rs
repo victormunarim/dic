@@ -6,8 +6,7 @@ use std::{collections::HashMap, sync::atomic::AtomicU64};
 use super::*;
 use clam::{
     node::Dialer,
-    path::PathMode,
-    phone::{OPEN_SCREEN_SLOT, SCREEN_SLOT, ScreenEvent, ScreenShare},
+    phone::{SCREEN_SLOT, ScreenEvent, ScreenShare},
     video::{H264Encoder, Priority, RawFrame, ScreenDecoder, ScreenSource, pump, pump_all},
 };
 
@@ -34,9 +33,6 @@ pub(crate) struct ScreenState {
     pub(crate) want_share: AtomicBool,
     /// Há uma tarefa de transmissão viva (ligando ou enviando).
     pub(crate) share_task: AtomicBool,
-    /// A pessoa abriu mão da privacidade da tela (sem cover, o dobro do ritmo; direto só para contato de confiança,
-    /// por 2 relays para os demais); falso é o padrão. A janela copia a escolha da configuração a cada quadro.
-    pub(crate) open_path: AtomicBool,
     /// A pessoa prefere nitidez a fluidez (metade dos quadros por segundo); a janela copia a escolha da
     /// configuração a cada quadro, e ela vale a partir da próxima transmissão.
     pub(crate) sharp: AtomicBool,
@@ -242,11 +238,10 @@ async fn open_source(fps: f32) -> Result<Box<dyn ScreenSource + Send>, String> {
     }
 }
 
-/// Abre a captura e o codificador conforme as escolhas da janela. Devolve também se a transmissão é privada.
-async fn start_capture(shared: &Arc<Shared>, out: &Sink) -> Result<(Box<dyn ScreenSource + Send>, H264Encoder, bool), String> {
+/// Abre a captura e o codificador conforme as escolhas da janela.
+async fn start_capture(shared: &Arc<Shared>, out: &Sink) -> Result<(Box<dyn ScreenSource + Send>, H264Encoder), String> {
     let st = &shared.screen;
-    let private = !st.open_path.load(Ordering::Relaxed);
-    let slot = if private { SCREEN_SLOT } else { OPEN_SCREEN_SLOT };
+    let slot = SCREEN_SLOT;
     let mut bitrate = H264Encoder::bitrate_for(slot);
     if st.audio.load(Ordering::Relaxed) {
         // O som toma slots do mesmo circuito: o vídeo cede essa parte, para a fila não encher.
@@ -269,7 +264,7 @@ async fn start_capture(shared: &Arc<Shared>, out: &Sink) -> Result<(Box<dyn Scre
             _ => out.line("tela: sem codificador por hardware neste computador (precisa de gstreamer1.0-tools e gstreamer1.0-plugins-bad com o driver da GPU), usando o openh264"),
         }
     }
-    Ok((src, enc, private))
+    Ok((src, enc))
 }
 
 /// Liga o circuito de tela e envia quadros enquanto a pessoa quiser e a chamada durar.
@@ -282,7 +277,7 @@ pub(crate) async fn share_task(dialer: Dialer, peer: [u8; 32], keys: clam::media
     };
     st.note.lock_unpoisoned().clear();
     let wanted = || st.want_share.load(Ordering::Relaxed) && !shared.hangup.load(Ordering::Relaxed);
-    let (mut src, mut enc, private) = match start_capture(&shared, &out).await {
+    let (mut src, mut enc) = match start_capture(&shared, &out).await {
         Ok(x) => x,
         Err(e) => {
             fail(e);
@@ -291,7 +286,7 @@ pub(crate) async fn share_task(dialer: Dialer, peer: [u8; 32], keys: clam::media
         }
     };
     out.line("tela: ligando o circuito de vídeo...");
-    let opened = if wanted() { until_hangup(dialer.share_screen_keys_with(peer, &keys, Duration::from_secs(15), private), &shared.hangup).await } else { None };
+    let opened = if wanted() { until_hangup(dialer.share_screen_keys(peer, &keys, Duration::from_secs(15)), &shared.hangup).await } else { None };
     let share = match opened {
         Some(Ok(s)) => s,
         Some(Err(e)) => {
@@ -305,11 +300,7 @@ pub(crate) async fn share_task(dialer: Dialer, peer: [u8; 32], keys: clam::media
         }
     };
     st.sharing.store(true, Ordering::Relaxed);
-    out.line(match (private, dialer.screen_path(&peer, private)) {
-        (true, _) => "tela: transmitindo",
-        (false, PathMode::Direct) => "tela: transmitindo sem privacidade (direto ao contato de confiança, sem cover)",
-        (false, _) => "tela: transmitindo sem cover (por 2 relays: o contato não é de confiança)",
-    });
+    out.line(if dialer.two_relays() { "tela: transmitindo (por um relay de outro contato)" } else { "tela: transmitindo (direto ao contato, que vê o seu IP)" });
     let flag = shared.clone();
     let mut audio = AudioTx::open(&shared, &out);
     let mut audio_gave_up = audio.is_none() && shared.screen.audio.load(Ordering::Relaxed);
@@ -385,16 +376,13 @@ pub(crate) enum ShareCtl {
 /// encerra a captura e os circuitos.
 pub(crate) struct RoomCapture {
     pub(crate) ctl: std::sync::mpsc::Sender<ShareCtl>,
-    /// Com privacidade os circuitos de tela abrem com 2 saltos e cover; sem ela, sem cover (o ritmo do codificador foi
-    /// escolhido para isso), direto ao espectador de confiança e por 2 saltos para os demais.
-    pub(crate) private: bool,
 }
 
 /// Abre a captura e deixa uma thread à espera dos espectadores: só captura quando há ao menos um.
 pub(crate) async fn start_room_capture(shared: Arc<Shared>, out: Sink) -> Option<RoomCapture> {
     let st = &shared.screen;
     st.note.lock_unpoisoned().clear();
-    let (mut src, mut enc, private) = match start_capture(&shared, &out).await {
+    let (mut src, mut enc) = match start_capture(&shared, &out).await {
         Ok(x) => x,
         Err(e) => {
             out.line(format!("tela: {e}"));
@@ -475,7 +463,7 @@ pub(crate) async fn start_room_capture(shared: Arc<Shared>, out: Sink) -> Option
         shared.screen.sharing.store(false, Ordering::Relaxed);
         shared.screen.tx_info.lock_unpoisoned().clear();
     });
-    Some(RoomCapture { ctl, private })
+    Some(RoomCapture { ctl })
 }
 
 #[cfg(test)]

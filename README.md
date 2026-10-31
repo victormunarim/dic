@@ -24,7 +24,7 @@ Valem para os módulos `pairing`, `presence`, `service`, `circle`, `intro` e `re
 - **Registro de presença:** contém só pontos de introdução (endereços de relays), nunca o IP. É cifrado (ChaCha20-Poly1305), assinado (ed25519) e tem sempre 668 bytes, qualquer que seja o conteúdo. O endereço entra como dado autenticado, então o registro não vale em outro endereço.
 - **Consultas falsas:** cada busca real vem misturada e embaralhada com consultas a endereços aleatórios.
 - **Círculos:** os tópicos de presença e de anúncio de call vêm do segredo do grupo. Quem não é membro não os deriva.
-- **Modos de caminho:** 2 saltos (padrão) e direto.
+- **Modos de caminho:** 2 saltos e direto. O aplicativo escolhe pela opção "2 relays" (desligada de início: conexão direta, o contato vê o seu IP).
 
 ## Documentação
 
@@ -37,7 +37,7 @@ Valem para os módulos `pairing`, `presence`, `service`, `circle`, `intro` e `re
 | [docs/GUI.md](docs/GUI.md) | A janela: abas, contatos, áudio, tela, opções |
 | [docs/ENCONTRO.md](docs/ENCONTRO.md) | Reencontrar contatos sem servidor: aviso de endereço novo e ponto de encontro na DHT, âncoras e contato de duas vias |
 | [docs/SERVIDORES.md](docs/SERVIDORES.md) | Servidores e salas de voz com presença, tela na sala e reencontro por servidor, tudo P2P |
-| [docs/DOIS-RELAYS.md](docs/DOIS-RELAYS.md) | Desenho (não implementado) da opção "2 relays": nenhum lado sabe o IP do outro |
+| [docs/DOIS-RELAYS.md](docs/DOIS-RELAYS.md) | Opção "2 relays": etapa 1 pronta (primeiro salto num relay de outro contato; desligada, conexão direta); o resto (nenhum lado sabe o IP do outro) é desenho |
 | [docs/SEGURANCA.md](docs/SEGURANCA.md) | Garantias, limites, chaveiro |
 | [docs/LINUX.md](docs/LINUX.md) / [docs/WINDOWS.md](docs/WINDOWS.md) | Instalação por sistema |
 
@@ -76,4 +76,4 @@ Para ligar a alguém: rode o `examples/gui` (veja [docs/GUI.md](docs/GUI.md)) ou
 | `src/phone.rs` | `Phone`, `IncomingCall`, `call`, `ActiveCall` (feature `net`) |
 | `src/transfer.rs` | Arquivo entre contatos: envio em pedaços, recepção com arquivo parcial, nome seguro (feature `net`) |
 | `src/media/` | `VoiceCall`, `keys` (handshake), `packet` (200 B + AEAD), `jitter`, `signal` (convite/aceite), `update` (aviso de endereço novo, apresentação, custódia e caixa de correio), `screen` (pacotes, NACK e taxa da tela), `codec` (µ-law, G.722, Opus; trait `Codec`) |
-| `src/path.rs` | `PathMode`, `PathRequest`, `PathError` |
+| `src/path.rs` | `PathMode`, `PathMode::from_two_relays` (a opção "2 relays" decide o caminho) |

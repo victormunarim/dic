@@ -1,6 +1,12 @@
 # Opção "2 relays": nenhum lado sabe o IP do outro (desenho)
 
-**Estado: proposto. Nada disto está implementado.** Este documento descreve o que a opção faria, o que ela custa e o que ela não promete, para ser revisado antes de qualquer código. Não existe a opção em Configurações, e nenhuma tela ou doc deve dizer que o IP fica escondido dos dois lados até a última etapa do plano estar pronta e testada.
+**Estado: etapa 1 implementada; o resto é desenho.** A opção existe em Configurações (`two_relays`, desligada de início) e decide o caminho de **todo** fluxo (chamada, tela, bate-papo, arquivos, convites). Decisões já em código, que valem acima do texto abaixo quando divergem:
+
+- **Qualquer contato pode ser relay.** Não existe marca de contato de confiança (`Dialer::set_trusted`, `PathRequest` e `PathError` foram removidos). O pool é `Dialer::known` sem o par, sem a saída e sem o seu relay (`Dialer::third_party_relays`).
+- **Não existe tela "sem privacidade".** A tela usa o mesmo circuito dos outros fluxos, com cover.
+- **Desligada = conexão direta, sem relay falso.** `ClientOptions::direct`: um salto ao relay do contato, sem o relay local em loopback que antes fazia as vezes de primeiro salto. O contato e quem observa a rede veem o seu IP, e a interface e `SEGURANCA.md` dizem isso.
+- **Ligada, etapa 1: o primeiro salto é o relay de outro contato.** O destino vê o IP desse relay, não o seu. Sem relay de terceiro a ligação falha com `DialError::NoRelays`, nunca cai para o caminho direto. **O IP de quem recebe continua conhecido de quem liga**, porque a saída do circuito ainda é o relay do próprio contato.
+- **Ainda não feito** (camadas B e C, etapas 2 a 5 abaixo): `intro:9` e `rv:9`, ponto de encontro, registro de presença v2, código de contato sem IP e convites com pontos de introdução. Nenhuma tela ou doc deve dizer que o IP fica escondido dos dois lados até elas estarem prontas e testadas.
 
 [← Voltar ao README](../README.md) · veja também [COMUNICACAO.md](COMUNICACAO.md), [CIRCUITO.md](CIRCUITO.md), [ENCONTRO.md](ENCONTRO.md) e [SEGURANCA.md](SEGURANCA.md).
 
@@ -65,7 +71,7 @@ você ──> relay R1 (contato X) ──> relay R2 (contato Y) ──> destino
 ```
 
 - R1 vê o seu IP, não o destino. R2 vê o destino (e o IP de R1), não o seu IP.
-- **Quem pode ser relay de terceiro:** só contatos marcados "de confiança" (a marca que já existe), que expõem o relay e aceitam servir. Quem serve passa a ser conhecido pelo IP de quem o usa; por isso o pool é pequeno e escolhido, não aberto.
+- **Quem pode ser relay de terceiro:** qualquer contato (decidido: sem marca de confiança). Quem serve passa a ser conhecido pelo IP de quem o usa; por isso o pool é de contatos, não aberto.
 - **Seleção:** o gerente sorteia entre os de maior pontuação, em grupos diferentes (`intro.rs` e `reputation.rs` já têm a política de diversidade e de saúde), sem repetir o par, sem usar o próprio nó. Se faltarem relays, devolve erro: `PathMode` ganha um modo novo (nome provisório `Hidden`), e `PathRequest::resolve` não o rebaixa nunca.
 - **O que A resolve:** o destinatário deixa de ver o IP de quem liga (ele vê o de R2). **O que A não resolve:** quem liga ainda conhece o IP do destinatário, porque o `Extend` do circuito precisa do endereço do relay do destino.
 
@@ -133,14 +139,13 @@ Sem esta camada, o IP volta pelo texto. Ela toca todo lugar da tabela "Onde o IP
 - **DoS de introdução.** `I` limita pedidos por D e por origem, como o gateway da DHT, que já tem limite de pedidos por minuto.
 - **Convites de servidor.** Quem convida e quem é convidado não aprendem o IP um do outro; o `Join` ao servidor passa a ir por introdução + encontro, não mais direto ao relay de quem convidou.
 - **Relay antigo e contato antigo.** Um relay de versão anterior não entende `intro:9` nem `rv:9` e recusa o destino; o contato com versão antiga não abre o registro versão 2. Com a opção desligada nada muda; com ela ligada, esses contatos ficam inalcançáveis e o app avisa em vez de cair para outro caminho.
-- **Tela sem privacidade para contato de confiança.** Hoje vai direto ao relay do contato e mostra o IP. Com a opção ligada ela fica **desativada**: a tela segue sempre privada e por circuito.
+- **Tela sem privacidade.** Removida: a tela segue a opção como os outros fluxos.
 
 ## Interface proposta
 
 - Em Configurações, uma caixa **2 relays**, desligada, com a dica (hover) explicando em uma frase o efeito e o custo, e o aviso de que exige contatos de confiança online.
 - Ligar a opção mostra o que muda: latência maior, tempo de estabelecer a chamada, e que contatos com versão antiga não serão alcançados.
 - Enquanto a opção está ligada, a interface mostra um estado discreto (ícone) quando há relays suficientes, e o motivo exato quando não há. A opção **nunca** muda o caminho sozinha.
-- A tela sem privacidade fica apagada, com o motivo na dica.
 - O código de contato gerado com a opção ligada não leva endereço; o texto avisa que o contato só se alcança por introdução.
 
 ## Plano de etapas
@@ -155,7 +160,7 @@ Cada etapa é um commit com testes e docs; a frase "nenhum lado sabe o IP do out
 
 ## Perguntas em aberto
 
-- **Quem serve de relay?** Só contatos de confiança, ou qualquer contato que aceite? O primeiro é mais seguro e mais escasso.
+- **Quem serve de relay?** Decidido: qualquer contato.
 - **O relay de quem usa a opção ligada.** Separar a chave do relay da de contato (proposto acima) exige que o `known`/`history` e os avisos de endereço passem a guardar duas identidades.
 - **Pontos de introdução de longa duração.** Três circuitos contínuos custam ≈ 300 kbps. Dá para manter um só em ritmo reduzido, aceitando que o ritmo passa a identificar "este é um ponto de espera"?
 - **Servidores grandes.** A malha da sala conecta todos com todos; com encontro, cada par precisa de um `M`. O custo de uma sala de muita gente precisa ser medido antes de a opção valer para salas.

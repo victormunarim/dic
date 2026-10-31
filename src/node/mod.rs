@@ -233,7 +233,7 @@ impl Node {
     }
 
     async fn finish(cfg: NodeConfig, mut phone: Phone, relay: RelayServer, onion: [u8; 32], dht: Services) -> io::Result<Self> {
-        let NodeConfig { secret, public_addr, upnp, known, hints, history, updates, update_retry, dht: dht_options, name, introductions, anchors, servers: saved_servers, custody: saved_custody, mail_poll, tombstones, blocked, .. } = cfg;
+        let NodeConfig { secret, public_addr, upnp, known, hints, history, updates, update_retry, dht: dht_options, name, introductions, anchors, servers: saved_servers, custody: saved_custody, mail_poll, tombstones, blocked, two_relays, .. } = cfg;
         let known: Known = Arc::new(Mutex::new(known.into_iter().collect()));
         let hints: Known = Arc::new(Mutex::new(hints.into_iter().collect()));
         // A lista guarda do mais novo ao mais velho de cada contato; ao reler, a ordem se mantém.
@@ -269,7 +269,7 @@ impl Node {
         if let Some(n) = dht_note {
             push_note(&mut note, n);
         }
-        let dialer = Dialer { secret: secret.clone(), mine: mine.clone(), relay_port: port, known: known.clone(), hints: hints.clone(), history: history.clone(), seen_seq: Arc::default(), link: phone.link(), dht: dht_client.clone(), dht_circuit: dht_options.as_ref().is_some_and(|o| o.circuit), anchors, trusted: Arc::default(), chat_stamp: Arc::default() };
+        let dialer = Dialer { secret: secret.clone(), mine: mine.clone(), relay_port: port, known: known.clone(), hints: hints.clone(), history: history.clone(), seen_seq: Arc::default(), link: phone.link(), dht: dht_client.clone(), dht_circuit: dht_options.as_ref().is_some_and(|o| o.circuit), anchors, two_relays, chat_stamp: Arc::default() };
         // Os convites levam este relay, para o outro lado ligar de volta.
         let link_to_phone = phone.link();
         let own = Arc::new(Mutex::new(own_relay(&mine, published)));
@@ -474,7 +474,6 @@ impl Node {
         // Lápide: convite que já estava na caixa antes desta remoção não readiciona o contato.
         self.inbox.bury(peer, unix_millis() as u64);
         self.phone.contacts().lock_unpoisoned().retain(|k| *k != peer);
-        self.dialer.set_trusted(peer, false);
         self.phone.custody().lock_unpoisoned().drop_from(&peer);
         let mut tasks = self.retiring.lock_unpoisoned();
         if tasks.contains_key(&peer) {
@@ -532,7 +531,6 @@ impl Node {
         self.known.lock_unpoisoned().remove(peer);
         self.hints.lock_unpoisoned().remove(peer);
         self.history.lock_unpoisoned().remove(peer);
-        self.dialer.set_trusted(*peer, false);
     }
 
     #[must_use]
@@ -625,11 +623,6 @@ impl Node {
     /// Veja [`Dialer::share_screen`].
     pub async fn share_screen(&self, peer: [u8; 32], call: &ActiveCall, wait: Duration) -> Result<ScreenShare, DialError> {
         self.dialer.share_screen(peer, call, wait).await
-    }
-
-    /// Marca `peer` como contato de confiança para a tela sem privacidade (veja [`Dialer::set_trusted`]).
-    pub fn set_trusted(&self, peer: [u8; 32], trusted: bool) {
-        self.dialer.set_trusted(peer, trusted);
     }
 
     /// Os servidores e salas desta pessoa: criar, convidar, presença, eventos. Cópia barata.

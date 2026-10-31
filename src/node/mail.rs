@@ -217,7 +217,7 @@ impl Dialer {
             self.put_mail(&master, mail, unix_millis() as i64).await;
         }
         let list: Vec<[u8; 32]> = contacts.lock_unpoisoned().clone();
-        let todo: Vec<[u8; 32]> = list.into_iter().filter(|k| *k != peer && self.is_trusted(k) && !kept.contains(k)).take(KEEPERS.saturating_sub(kept.len())).collect();
+        let todo: Vec<[u8; 32]> = list.into_iter().filter(|k| *k != peer && !kept.contains(k)).take(KEEPERS.saturating_sub(kept.len())).collect();
         let done = futures::future::join_all(todo.iter().map(|k| self.deliver_custody(*k, id, &master, mail))).await;
         kept.extend(todo.into_iter().zip(done).filter(|(_, ok)| *ok).map(|(k, _)| k));
     }
@@ -286,7 +286,7 @@ pub(super) async fn mail_keeper(dialer: Dialer, custody: Arc<Mutex<Custody>>, co
                 continue;
             }
             let list: Vec<[u8; 32]> = contacts.lock_unpoisoned().clone();
-            let todo: Vec<[u8; 32]> = list.into_iter().filter(|k| *k != h.from && dialer.is_trusted(k) && !entry.0.contains(k)).take(FORWARDS - entry.0.len()).collect();
+            let todo: Vec<[u8; 32]> = list.into_iter().filter(|k| *k != h.from && !entry.0.contains(k)).take(FORWARDS - entry.0.len()).collect();
             let done = futures::future::join_all(todo.iter().map(|k| dialer.deliver_custody(*k, h.id, &h.master, &h.mail))).await;
             entry.0.extend(todo.into_iter().zip(done).filter(|(_, ok)| *ok).map(|(k, _)| k));
             entry.1 = Instant::now() + FORWARD_RETRY;

@@ -33,6 +33,8 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
     cfg.custody = load_custody();
     cfg.tombstones = load_tombs();
     cfg.blocked = form.blocked_keys();
+    cfg.two_relays = form.two_relays;
+    out.line(if form.two_relays { "2 relays ligado: as ligações passam pelo relay de outro contato, que não vê o conteúdo" } else { "2 relays desligado: as ligações são diretas e o contato vê o seu IP" });
     if form.use_dht {
         cfg.dht = Some(clam::rendezvous::DhtOptions { circuit: form.dht_circuit, ..Default::default() });
         if form.dht_circuit {
@@ -69,10 +71,6 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
     let dialer = node.dialer();
     let mut receiving = super::files::Receiving::default();
     let mut introduced_back: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
-    // Só vale quem ainda é contato (o `Form` já descarta o resto).
-    for key in form.trusted_keys() {
-        dialer.set_trusted(key, true);
-    }
     tokio::spawn(probe_contacts(dialer.clone(), shared.clone(), stop.clone()));
     let hub = node.servers();
     if !form.my_name.trim().is_empty() {
@@ -249,7 +247,6 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
                         node.unblock(&key);
                     }
                 }
-                Some(Cmd::Trust(key, on)) => dialer.set_trusted(key, on),
                 Some(Cmd::Chat(peer, text)) => {
                     let parts = crate::chats::split_text(&text, clam::media::update::MAX_CHAT);
                     let sends: Vec<(u64, String)> = parts.into_iter().map(|t| (dialer.next_chat_id(), t)).collect();
