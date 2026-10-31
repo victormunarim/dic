@@ -3,7 +3,7 @@
 use clam::sync::LockExt;
 use std::sync::atomic::Ordering;
 
-use eframe::egui::{self, Color32, CornerRadius, Rect, RichText, pos2, vec2};
+use eframe::egui::{self, Color32, CornerRadius, Rect, RichText, vec2};
 
 use crate::{conf::parse_contacts, engine::*, theme::*, ui::*};
 
@@ -152,11 +152,11 @@ impl App {
                     if hangup_button(ui, if ringing { "Cancelar a chamada" } else { "Desligar a chamada" }).clicked() {
                         self.shared.hangup.store(true, Ordering::Relaxed);
                     }
-                    if !ringing && self.screen_thumb.is_empty() {
-                        // Com miniatura, as chaves moram nela. Sempre à vista, com ou sem tela rodando: as duas chaves começam ligadas e a pessoa precisa
+                    if !ringing {
+                        // Só o envio: ouvir é por tela aberta (ver `zoom_window`). Sempre à vista, com ou sem tela rodando: as duas chaves começam ligadas e a pessoa precisa
                         // ver onde estão antes de a transmissão começar. Em ordem de leitura: enviar, ouvir.
                         // Layout explícito: dentro de um right_to_left o `horizontal` herdaria a direção e inverteria a ordem.
-                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| self.screen_sound_toggles(ui, true, true));
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| self.screen_sound_toggles(ui, true, false));
                     }
                 });
             });
@@ -186,8 +186,8 @@ impl App {
         ui.add_space(14.0);
     }
 
-    /// As telas de quem transmite para você: uma miniatura parada, pequena. Assistir é clicar nela (tela cheia); as chaves
-    /// do som ficam no canto de baixo, dentro da própria miniatura.
+    /// As telas de quem transmite para você: uma miniatura parada, pequena. Assistir é clicar nela (tela cheia), e só
+    /// então o som dela toca: a miniatura não tem som nem botão de som.
     fn screens_ui(&mut self, ui: &mut egui::Ui) {
         let names = self.form.names();
         let mut order: Vec<_> = self.screen_thumb.iter().map(|(k, t)| (*k, t.clone())).collect();
@@ -214,11 +214,6 @@ impl App {
             if resp.clicked() {
                 self.zoom = Some(who);
             }
-            // Chaves do som no canto de baixo, num fundo escuro; ficam por cima do clique da miniatura.
-            let strip = Rect::from_min_size(pos2(rect.right() - 84.0, rect.bottom() - 42.0), vec2(80.0, 38.0));
-            ui.painter().rect_filled(strip, CornerRadius::same(10), Color32::from_black_alpha(150));
-            let mut inner = ui.new_child(egui::UiBuilder::new().max_rect(strip.shrink(2.0)).layout(egui::Layout::left_to_right(egui::Align::Center)));
-            self.screen_sound_toggles(&mut inner, true, true);
             ui.add_space(14.0);
         }
     }

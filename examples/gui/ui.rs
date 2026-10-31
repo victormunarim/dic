@@ -309,6 +309,14 @@ impl App {
             if ui.put(corner, |ui: &mut egui::Ui| theme::close_button(ui, "Sair da tela cheia (Esc)")).clicked() {
                 close = true;
             }
+            // Ouvir a tela: a chave mora aqui, onde a pessoa está assistindo.
+            let ear = egui::Rect::from_min_size(egui::pos2(screen.max.x - 92.0, screen.min.y + 12.0), vec2(34.0, 34.0));
+            let on = self.form.screen_hear;
+            let mut inner = ui.new_child(egui::UiBuilder::new().max_rect(ear));
+            if theme::sound_toggle(&mut inner, on, false, "Ouvir o som da tela", "Ouvir o som da tela. Toca o som que vem junto da tela que você assiste, no volume do alto-falante. Só toca com a tela aberta. Vale na hora.") {
+                self.form.screen_hear = !on;
+                self.form.save();
+            }
         });
         if close {
             self.zoom = None;
@@ -372,7 +380,10 @@ impl eframe::App for App {
         st.sharp.store(self.form.screen_sharp, Ordering::Relaxed);
         st.hardware.store(self.form.screen_hardware, Ordering::Relaxed);
         st.audio.store(self.form.screen_audio, Ordering::Relaxed);
-        st.silenced.store(!self.form.screen_hear, Ordering::Relaxed);
+        // Na chamada o som da tela só toca com a tela aberta (tela cheia): a miniatura é só uma amostra parada.
+        // Nas salas as telas são vistas direto e valem as chaves.
+        let thumb_only = calling && !in_room;
+        st.silenced.store(!self.form.screen_hear || (thumb_only && self.zoom.is_none()), Ordering::Relaxed);
         let status = self.shared.status.lock_unpoisoned().clone();
 
         self.server_rail(ctx, offline);
