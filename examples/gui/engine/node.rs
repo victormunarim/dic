@@ -271,7 +271,7 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
                 }
                 Some(Cmd::SendFile(peer, path)) => super::files::start_send(&shared, &dialer, &out, peer, path),
                 Some(Cmd::RoomFile(server, peers, path)) => super::files::room_send(&shared, &dialer, &out, &hub, server, peers, path),
-                Some(Cmd::FileCancel(peer, id, mine)) => super::files::cancel(&shared, &out, peer, id, mine),
+                Some(Cmd::FileCancel(peer, id, mine)) => super::files::cancel(&shared, &dialer, &out, &mut receiving, peer, id, mine),
                 Some(Cmd::FileAnswer(peer, id, accept)) => super::files::answer(&shared, &dialer, &out, &mut receiving, peer, id, accept),
                 Some(Cmd::Retire(key)) => {
                     node.retire(key);

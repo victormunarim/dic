@@ -139,8 +139,8 @@ impl App {
     }
 }
 
-/// Ao lado da mensagem do arquivo, enquanto ele não terminou. Quem envia vê o carregando e o X de cancelar (só ele
-/// cancela). Quem recebe vê o pedido com o ícone de baixar e o X de recusar; depois de baixar só espera.
+/// Ao lado da mensagem do arquivo, enquanto ele não terminou. Quem envia vê o carregando e o X de cancelar.
+/// Quem recebe vê o pedido com o ícone de baixar e o X de recusar; enquanto baixa também vê o X, de cancelar.
 fn file_progress(ui: &mut egui::Ui, x: &crate::arquivos::Xfer, cmds: &mut Vec<Cmd>) {
     if x.phase == Phase::Asking {
         ui.label(RichText::new(format!("pedido de arquivo · {}", size_text(x.size))).size(12.0).color(pal().muted));
@@ -159,8 +159,10 @@ fn file_progress(ui: &mut egui::Ui, x: &crate::arquivos::Xfer, cmds: &mut Vec<Cm
         _ => "começando…".to_string(),
     };
     ui.label(RichText::new(text).size(12.0).color(pal().muted));
-    if x.mine && close_button(ui, "Cancelar o envio").clicked() {
-        cmds.push(Cmd::FileCancel(x.peer, x.id, true));
+    // Quem recebe também cancela enquanto baixa: o parcial é apagado e o contato para de mandar.
+    let tip = if x.mine { "Cancelar o envio" } else { "Cancelar o recebimento: o que já chegou é apagado" };
+    if close_button(ui, tip).clicked() {
+        cmds.push(Cmd::FileCancel(x.peer, x.id, x.mine));
     }
 }
 

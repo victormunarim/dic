@@ -231,19 +231,28 @@ pub(crate) fn answer(shared: &std::sync::Arc<Shared>, dialer: &Dialer, out: &Sin
     });
 }
 
-/// A pessoa cancelou o **envio**: só quem envia cancela. A tela já mostra "cancelado" e a tarefa de envio para na hora
-/// (`transfer::stream` consulta o pedido a cada 100 ms, mesmo no meio de uma janela) e avisa o contato, que apaga o
-/// parcial. Quem recebe não cancela: recusa o pedido antes de baixar (`answer`) e depois só espera.
-pub(crate) fn cancel(shared: &std::sync::Arc<Shared>, out: &Sink, peer: [u8; 32], id: u64, mine: bool) {
-    if !mine {
+/// A pessoa cancelou. Quem envia: a tarefa de envio vê o pedido (`transfer::stream` o consulta a cada 100 ms, mesmo
+/// no meio do fluxo), avisa o contato e ele apaga o parcial. Quem recebe: apaga o parcial na hora e avisa o outro lado,
+/// que para de mandar (o quadro `Cancel` chega ao laço dele, `on_frames`).
+pub(crate) fn cancel(shared: &std::sync::Arc<Shared>, dialer: &Dialer, out: &Sink, rx: &mut Receiving, peer: [u8; 32], id: u64, mine: bool) {
+    if mine {
+        let mut t = shared.transfers.lock_unpoisoned();
+        t.request_cancel(&peer, id, true);
+        t.phase(&peer, id, true, Phase::Cancelled);
+        drop(t);
+        shared.chats.lock_unpoisoned().set_state(&peer, id, crate::chats::State::Failed);
+        (out.repaint)();
         return;
     }
-    let mut t = shared.transfers.lock_unpoisoned();
-    t.request_cancel(&peer, id, true);
-    t.phase(&peer, id, true, Phase::Cancelled);
-    drop(t);
-    shared.chats.lock_unpoisoned().set_state(&peer, id, crate::chats::State::Failed);
+    if let Some(inc) = rx.open.remove(&(peer, id)) {
+        inc.abort();
+    }
+    shared.transfers.lock_unpoisoned().phase(&peer, id, false, Phase::Cancelled);
     (out.repaint)();
+    let d = dialer.clone();
+    tokio::spawn(async move {
+        let _ = d.send_file_frame(peer, &FileFrame::Cancel { id }, CONTROL_WAIT).await;
+    });
 }
 
 #[cfg(test)]
@@ -270,5 +279,15 @@ mod tests {
         shared.auto_files.store(true, Ordering::Relaxed);
         let fresh = on_frames(&shared, &mut rx, vec![offer(4, "ficha.pdf", 90 * mb), offer(5, "enorme.zip", 101 * mb)]);
         assert_eq!(fresh, vec![([9; 32], 4)], "com a opção, tudo até 100 MB desce sozinho");
+    }
+
+    #[test]
+    fn a_cancel_from_the_receiver_stops_my_send() {
+        let shared = Arc::new(Shared::default());
+        let mut rx = Receiving::default();
+        shared.transfers.lock_unpoisoned().add_out([9; 32], 5, "v.mp4".into(), 1 << 20);
+        assert!(!shared.transfers.lock_unpoisoned().cancel_requested(&[9; 32], 5, true));
+        on_frames(&shared, &mut rx, vec![([9; 32], FileFrame::Cancel { id: 5 })]);
+        assert!(shared.transfers.lock_unpoisoned().cancel_requested(&[9; 32], 5, true), "o envio vê o pedido e para");
     }
 }
