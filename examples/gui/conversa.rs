@@ -92,17 +92,8 @@ impl App {
                 let waiting = crate::anexo::count(ui.ctx(), ("conversa", peer)) > 0;
                 let ready = sendable && (!self.chat_draft.trim().is_empty() || waiting);
                 let sent = button(ui, ready, "Enviar", BLURPLE).clicked();
-                if attach_button(ui, sendable, ATTACH_TIP).clicked() {
-                    // O diálogo do sistema bloqueia: roda fora da janela e deixa o arquivo em espera até o Enviar.
-                    let repaint = ui.ctx().clone();
-                    std::thread::spawn(move || {
-                        if let Some(path) = rfd::FileDialog::new().set_title("Anexar arquivo").pick_file() {
-                            crate::anexo::stage(&repaint, ("conversa", peer), path);
-                        }
-                    });
-                }
                 let hint = if sendable { "Mensagem" } else { "Contato offline: não dá para enviar" };
-                let reply = ui.add_enabled(sendable, field(&mut self.chat_draft, hint).desired_width(field_beside(ui, 0.0).max(80.0)));
+                let reply = ui.add_enabled(sendable, field(&mut self.chat_draft, hint).desired_width(field_beside(ui, 34.0 + ui.spacing().item_spacing.x).max(80.0)));
                 let enter = reply.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 if (sent || enter) && ready {
                     if let Some(r) = &self.running {
@@ -116,6 +107,16 @@ impl App {
                         }
                     }
                     reply.request_focus();
+                }
+                // À esquerda do campo: nesta fileira (da direita para a esquerda) o último a entrar fica mais à esquerda.
+                if attach_button(ui, sendable, ATTACH_TIP).clicked() {
+                    // O diálogo do sistema bloqueia: roda fora da janela e deixa o arquivo em espera até o Enviar.
+                    let repaint = ui.ctx().clone();
+                    std::thread::spawn(move || {
+                        if let Some(path) = rfd::FileDialog::new().set_title("Anexar arquivo").pick_file() {
+                            crate::anexo::stage(&repaint, ("conversa", peer), path);
+                        }
+                    });
                 }
             });
         });

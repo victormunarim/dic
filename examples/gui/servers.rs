@@ -775,17 +775,7 @@ impl App {
             let waiting = crate::anexo::count(ui.ctx(), key) > 0;
             let ready = !self.srv.chat_draft.trim().is_empty() || waiting;
             let sent = button(ui, ready, "Enviar", BLURPLE).clicked();
-            let tip = format!("{} O arquivo vai só aos contatos que estão na sala agora ({}); quem não é contato vê o aviso e não o recebe.", crate::conversa::ATTACH_TIP, recipients.len());
-            if crate::conversa::attach_button(ui, !recipients.is_empty(), &tip).clicked() {
-                // O diálogo do sistema bloqueia: roda fora da janela e deixa o arquivo em espera até o Enviar.
-                let repaint = ui.ctx().clone();
-                std::thread::spawn(move || {
-                    if let Some(path) = rfd::FileDialog::new().set_title("Anexar arquivo à sala").pick_file() {
-                        crate::anexo::stage(&repaint, key, path);
-                    }
-                });
-            }
-            let reply = ui.add(field(&mut self.srv.chat_draft, "Mensagem para a sala").desired_width(field_beside(ui, 0.0).max(80.0)));
+            let reply = ui.add(field(&mut self.srv.chat_draft, "Mensagem para a sala").desired_width(field_beside(ui, 34.0 + ui.spacing().item_spacing.x).max(80.0)));
             let enter = reply.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             if (sent || enter) && ready {
                 for path in crate::anexo::take(ui.ctx(), key) {
@@ -800,6 +790,17 @@ impl App {
                     self.srv.msg = e.to_string();
                 }
                 reply.request_focus();
+            }
+            // À esquerda do campo: nesta fileira (da direita para a esquerda) o último a entrar fica mais à esquerda.
+            let tip = format!("{} O arquivo vai só aos contatos que estão na sala agora ({}); quem não é contato vê o aviso e não o recebe.", crate::conversa::ATTACH_TIP, recipients.len());
+            if crate::conversa::attach_button(ui, !recipients.is_empty(), &tip).clicked() {
+                // O diálogo do sistema bloqueia: roda fora da janela e deixa o arquivo em espera até o Enviar.
+                let repaint = ui.ctx().clone();
+                std::thread::spawn(move || {
+                    if let Some(path) = rfd::FileDialog::new().set_title("Anexar arquivo à sala").pick_file() {
+                        crate::anexo::stage(&repaint, key, path);
+                    }
+                });
             }
         });
         ui.add_space(16.0);
