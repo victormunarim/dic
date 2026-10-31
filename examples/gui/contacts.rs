@@ -394,6 +394,14 @@ impl App {
                     if call.clicked() {
                         self.dial(*key);
                     }
+                    // Quem transmite a tela para mim ganha o monitor verde ao lado dos outros ícones; clicar assiste em tela cheia.
+                    if self.screen_tex.contains_key(key) {
+                        let watch = screen_icon(ui, pal().green, false, egui::Sense::click());
+                        watch.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("Assistir à tela de {name}")));
+                        if watch.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(format!("{name} está transmitindo a tela: assistir")).clicked() {
+                            self.zoom = Some(*key);
+                        }
+                    }
                 });
               });
             });
@@ -472,7 +480,9 @@ impl App {
     pub(crate) fn share_window(&mut self, ctx: &egui::Context) {
         let Some(room) = ctx.data(|d| d.get_temp::<bool>(share_ask_id())) else { return };
         let mut answer: Option<Option<bool>> = None;
-        egui::Window::new("Transmitir a tela")
+        let default_sound = self.form.screen_audio;
+        let private = self.form.screen_private;
+        egui::Window::new("Som da transmissão")
             .id(egui::Id::new("transmitir-tela"))
             .collapsible(false)
             .resizable(false)
@@ -481,19 +491,35 @@ impl App {
                 ui.set_max_width(420.0);
                 ui.label("Enviar também o som do computador?");
                 ui.add_space(4.0);
-                ui.label(RichText::new("Quem assiste ouve o que toca aí (música, jogo, vídeo, notificações), menos a voz do contato. Usa cerca de 10% da banda do vídeo (2,5% sem privacidade) e, sem privacidade, quem observa a rede vê quando há som. No Linux precisa de gstreamer1.0-tools com o plugin do PulseAudio.").size(13.0).color(pal().muted));
+                ui.label(RichText::new("Quem assiste ouve o que toca aí, menos a voz do contato.").size(13.0).color(pal().muted));
+                // Só vale sem a privacidade da transmissão: com ela ligada o ritmo é constante e o som não aparece.
+                if !private {
+                    ui.add_space(4.0);
+                    note(ui, "Sem privacidade na transmissão, quem observa a rede vê quando há som.");
+                }
                 ui.add_space(8.0);
+                let mut details = String::from("Usa cerca de 10% da banda do vídeo (2,5% sem privacidade).");
+                if cfg!(target_os = "linux") {
+                    details.push_str(" No Linux precisa de gstreamer1.0-tools com o plugin do PulseAudio; se a captura falhar, o motivo aparece em Atividade.");
+                }
+                // O botão do padrão salvo leva o acento e responde ao Enter; o outro fica neutro.
                 ui.horizontal(|ui| {
-                    if button(ui, true, "Com som", BLURPLE).clicked() {
+                    let (with_fill, without_fill) = if default_sound { (BLURPLE, pal().bg) } else { (pal().bg, BLURPLE) };
+                    if button(ui, true, "Com som do PC", with_fill).on_hover_text(&details).clicked() {
                         answer = Some(Some(true));
                     }
-                    if button(ui, true, "Sem som", pal().bg).clicked() {
+                    if button(ui, true, "Só imagem", without_fill).clicked() {
                         answer = Some(Some(false));
                     }
                     if button(ui, true, "Cancelar", pal().bg).clicked() {
                         answer = Some(None);
                     }
                 });
+                if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    answer = Some(None);
+                } else if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    answer = Some(Some(default_sound));
+                }
             });
         let Some(choice) = answer else { return };
         ctx.data_mut(|d| d.remove_temp::<bool>(share_ask_id()));

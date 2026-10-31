@@ -408,7 +408,7 @@ impl App {
                             Bar::Share(false) => self.send(Cmd::RoomShare(false)),
                             Bar::Leave => self.send(Cmd::LeaveRoom),
                             Bar::Open => self.srv.chat_over_screen = true,
-                            Bar::Accept | Bar::Watch => {}
+                            Bar::Accept => {}
                             Bar::None => {}
                         }
                     } else if let Some(who) = call_bar {
@@ -421,7 +421,6 @@ impl App {
                             Bar::Leave if incoming.is_some() => self.shared.answer.store(ANSWER_REJECT, Ordering::Relaxed),
                             Bar::Accept => self.shared.answer.store(ANSWER_ACCEPT, Ordering::Relaxed),
                             Bar::Leave => self.shared.hangup.store(true, Ordering::Relaxed),
-                            Bar::Watch => self.zoom = self.screen_tex.keys().min().copied(),
                             Bar::Open | Bar::None => {}
                         }
                     }
@@ -493,14 +492,6 @@ impl App {
                     }
                     if ring == Ring::No && screen_button(ui, sharing).clicked() {
                         out = Bar::Share(!sharing);
-                    }
-                    // Na chamada, quem transmite aparece com o mesmo monitor verde da sala; clicar assiste (tela cheia).
-                    if ring == Ring::No && matches!(glyph, Glyph::Phone) && !self.screen_tex.is_empty() {
-                        let icon = screen_icon(ui, pal().green, false, egui::Sense::click());
-                        icon.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Assistir à tela"));
-                        if icon.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Transmitindo a tela: assistir").clicked() {
-                            out = Bar::Watch;
-                        }
                     }
                 });
             });
@@ -944,8 +935,6 @@ enum Bar {
     Open,
     /// Atendeu a chamada que tocava.
     Accept,
-    /// Clicou no monitor de quem transmite na chamada: abre a tela.
-    Watch,
 }
 
 #[cfg(test)]
