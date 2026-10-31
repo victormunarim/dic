@@ -25,6 +25,8 @@ cd fuzz && cargo +nightly fuzz run <alvo> -- -max_total_time=60
 
 Não rode `cargo fmt` (o estilo do repositório é próprio). A GUI não roda sem display: valide por compilação e testes, e diga isso ao relatar.
 
+Para ver a interface sem display, use as capturas em `docs/telas/` (escuro e claro; ver "Telas em PNG" em `docs/GUI.md`). Mudou o visual: regenere com `CLAM_TELAS=docs/telas cargo test --features gui --example gui telas_em_png -- --ignored` (é `#[ignore]` porque troca o tema global; nunca junto dos outros testes) e confira as imagens. Elas mostram só o quadro em repouso: hover, foco e menus abertos não aparecem. Auditoria de design da GUI é estática ou sobre esses PNGs (o detector do impeccable é só web).
+
 ## Princípios
 
 ### Sempre P2P
