@@ -131,13 +131,20 @@ fn gst_args(source: &str) -> Vec<String> {
         .collect()
 }
 
-/// Nome do monitor da saída padrão (`<saída>.monitor`), pelo `pactl`.
+/// Nome que o servidor de som resolve sozinho para o monitor da saída padrão: vale no PulseAudio e no PipeWire
+/// (`pipewire-pulse`), sem precisar do `pactl`.
+#[cfg(unix)]
+const DEFAULT_MONITOR: &str = "@DEFAULT_MONITOR@";
+
+/// Nome do monitor da saída padrão (`<saída>.monitor`), pelo `pactl`. Sem o `pactl` instalado cai no nome
+/// especial `@DEFAULT_MONITOR@`, que o servidor de som resolve: o programa não exige um pacote só para isso.
 #[cfg(unix)]
 fn default_monitor() -> Result<String, AudioError> {
-    let out = Command::new("pactl")
-        .arg("get-default-sink")
-        .output()
-        .map_err(|e| AudioError(format!("não deu para rodar o pactl (instale pulseaudio-utils): {e}")))?;
+    let out = match Command::new("pactl").arg("get-default-sink").output() {
+        Ok(out) => out,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(DEFAULT_MONITOR.to_string()),
+        Err(e) => return Err(AudioError(format!("não deu para rodar o pactl: {e}"))),
+    };
     let sink = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if !out.status.success() || sink.is_empty() {
         return Err(AudioError("não achei a saída de som padrão do sistema".into()));
