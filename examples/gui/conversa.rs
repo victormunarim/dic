@@ -47,17 +47,28 @@ impl App {
                 if msgs.is_empty() {
                     note(ui, "Sem mensagens ainda.");
                 }
-                for m in &msgs {
+                for g in crate::chats::groups(&msgs) {
+                    let parts = msgs.get(g).unwrap_or_default();
+                    let Some(m) = parts.first() else { continue };
+                    // Pedaços de um texto longo aparecem como uma mensagem só; o estado é o pior entre eles.
+                    let text: String = parts.iter().map(|p| p.text.as_str()).collect();
+                    let state = if parts.iter().any(|p| p.state == State::Failed) {
+                        State::Failed
+                    } else if parts.iter().any(|p| p.state == State::Sending) {
+                        State::Sending
+                    } else {
+                        m.state
+                    };
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing.x = 4.0;
                         let (who, color) = if m.mine() { ("Você", pal().green) } else { (name.as_str(), pal().strong) };
                         ui.label(RichText::new(format!("{who}:")).strong().color(color));
-                        ui.label(RichText::new(&m.text).color(pal().text));
+                        ui.label(RichText::new(text).color(pal().text));
                         if let Some(x) = xfers.iter().find(|x| x.id == m.id && x.mine == m.mine() && x.phase.live()) {
                             file_progress(ui, x, &mut file_cmds);
                             return;
                         }
-                        match m.state {
+                        match state {
                             State::Sending => ui.label(RichText::new("enviando…").size(12.0).color(pal().muted)),
                             State::Failed => ui.label(RichText::new("não entregue").size(12.0).color(pal().error)).on_hover_text("O contato não confirmou: estava offline ou sem rota. Não há caixa de correio; envie de novo quando ele voltar."),
                             State::Sent | State::Received => ui.label(""),

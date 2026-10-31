@@ -36,6 +36,21 @@ impl Msg {
     }
 }
 
+/// Junta as mensagens seguidas que são pedaços de um mesmo texto longo: mesmo autor e `id` consecutivo. `split_text`
+/// parte o texto em quadros de 128 bytes e `Dialer::next_chat_id` dá `id + 1` a cada pedaço da rajada, enquanto duas
+/// mensagens digitadas à mão ficam a segundos (milhares de ms) uma da outra. Devolve os intervalos `[início, fim)`.
+pub(crate) fn groups(msgs: &[Msg]) -> Vec<std::ops::Range<usize>> {
+    let mut out: Vec<std::ops::Range<usize>> = Vec::new();
+    for (i, m) in msgs.iter().enumerate() {
+        let joins = i > 0 && msgs.get(i - 1).is_some_and(|p| p.mine() == m.mine() && p.id.checked_add(1) == Some(m.id));
+        match out.last_mut() {
+            Some(g) if joins => g.end = i + 1,
+            _ => out.push(i..i + 1),
+        }
+    }
+    out
+}
+
 /// Todas as conversas, mais o que ainda não foi lido e se há algo por gravar.
 #[derive(Default)]
 pub(crate) struct ChatBook {
@@ -150,8 +165,9 @@ pub(crate) fn save_chats(text: &str) -> std::io::Result<()> {
     write_private(&chats_path(), text)
 }
 
-/// Parte `text` em pedaços de até `max` bytes sem cortar caractere, preferindo quebrar num espaço. Controle vira
-/// espaço; o que sobra de espaço nas pontas sai. Vazio, nada.
+/// Parte `text` em pedaços de até `max` bytes sem cortar caractere, preferindo quebrar num espaço, que fica no fim
+/// do pedaço: assim `concat` dos pedaços devolve o texto (é como a tela os junta de volta, ver `joined`). Controle
+/// vira espaço; o que sobra de espaço nas pontas do texto sai. Vazio, nada.
 pub(crate) fn split_text(text: &str, max: usize) -> Vec<String> {
     let clean: String = text.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
     let mut rest = clean.trim();
@@ -167,11 +183,11 @@ pub(crate) fn split_text(text: &str, max: usize) -> Vec<String> {
         }
         // Quebra no último espaço se ele não deixar o pedaço minúsculo.
         if let Some(sp) = rest.get(..cut).and_then(|h| h.rfind(' ')).filter(|&i| i >= max / 2) {
-            cut = sp;
+            cut = sp + 1;
         }
         let (head, tail) = rest.split_at(cut);
-        out.push(head.trim().to_string());
-        rest = tail.trim_start();
+        out.push(head.to_string());
+        rest = tail;
     }
     out
 }
@@ -186,7 +202,15 @@ mod tests {
         let parts = split_text(&text, 128);
         assert!(parts.len() > 1);
         assert!(parts.iter().all(|p| p.len() <= 128 && !p.is_empty()));
-        assert_eq!(parts.join(" "), text.trim());
+        assert_eq!(parts.concat(), text.trim());
+    }
+
+    #[test]
+    fn pieces_of_one_text_group_together_and_separate_messages_do_not() {
+        let m = |id, state| Msg { id, text: "x".into(), state };
+        let msgs = [m(10, State::Sent), m(11, State::Sent), m(12, State::Sent), m(5000, State::Sent), m(5001, State::Received), m(5002, State::Received), m(9000, State::Sent)];
+        assert_eq!(groups(&msgs), vec![0..3, 3..4, 4..6, 6..7]);
+        assert!(groups(&[]).is_empty());
     }
 
     #[test]
