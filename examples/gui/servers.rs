@@ -358,7 +358,7 @@ impl App {
                             });
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 let exit = exit_button(ui, "Sair do servidor");
-                                let menu = egui::Popup::menu(&exit).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| self.server_menu(ui, hub, v));
+                                let menu = menu(&exit).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| self.server_menu(ui, hub, v));
                                 if menu.is_none() {
                                     reset_confirm(ui, egui::Id::new(("sair-servidor", v.name.as_str())));
                                 }
@@ -521,7 +521,7 @@ impl App {
                     // Apagar sempre pede certeza: o item vermelho do menu é a confirmação. Na sala em que estou o item
                     // fica apagado e diz o motivo, em vez de abrir e dar erro.
                     let delete = egui::Id::new(("apagar-sala", room.id));
-                    let menu = egui::Popup::menu(&trash).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+                    let menu = menu(&trash).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
                         if here {
                             menu_row(ui, Some("Você está nesta sala: saia dela antes de apagá-la."), false, Some(pal().error), "Apagar a sala e as mensagens", None, trash_icon);
                             return;
@@ -702,7 +702,7 @@ impl App {
                             // Remover é irreversível e troca a chave do servidor: pergunta dentro do próprio menu, que por
                             // isso só fecha por clique fora ou por uma resposta.
                             let ask = egui::Id::new(("remover-membro", m.id));
-                            let menu = egui::Popup::menu(&dots).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+                            let menu = menu(&dots).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
                                 ui.set_min_width(MENU_WIDTH);
                                 let asking = ui.data(|d| d.get_temp::<bool>(ask)).unwrap_or(false);
                                 if v.my_role == Some(Role::Owner) && !asking {
@@ -768,7 +768,7 @@ impl App {
             }
             // Gerar o texto para mandar por fora é raro: fica no menu, e o aviso do IP continua valendo.
             let dots = dots_button(ui, "Mais ações do convite");
-            let menu = egui::Popup::menu(&dots).show(|ui| {
+            let menu = menu(&dots).show(|ui| {
                 let blocked = (!ready).then_some("Escolha um contato e marque o aviso do IP para liberar");
                 let item = menu_row(ui, blocked, false, None, "Gerar o convite como texto", None, invite_icon);
                 if ready && item.on_hover_text("Para mandar por onde preferir, sem passar pela rede").clicked() {

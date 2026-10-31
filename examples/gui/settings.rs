@@ -96,7 +96,7 @@ impl App {
                         // num menu que pergunta e escreve o efeito.
                         let dots = dots_button(ui, "Mais ações da identidade");
                         let ask = egui::Id::new("gerar-identidade");
-                        let menu = egui::Popup::menu(&dots).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+                        let menu = menu(&dots).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
                             ui.set_min_width(MENU_WIDTH);
                             let have = !self.form.secret.trim().is_empty();
                             let blocked = (!have).then_some("Não há chave para mostrar");

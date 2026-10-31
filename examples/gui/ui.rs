@@ -215,7 +215,7 @@ impl App {
                 // Atalhos nas linhas das ações a que pertencem; fora de um servidor, convidar e membros ficam apagados.
                 let in_server = self.srv.sel.is_some() && !offline;
                 let muted_now = self.shared.audio.muted.load(Ordering::Relaxed);
-                let menu = egui::Popup::menu(&gear).show(|ui| {
+                let menu = theme::menu(&gear).show(|ui| {
                     ui.set_min_width(theme::MENU_WIDTH);
                     type Icon = fn(&egui::Painter, egui::Pos2, f32, egui::Color32);
                     let mic: Icon = |p, c, s, k| mic_icon(p, c, s, k, false);
@@ -258,7 +258,6 @@ impl App {
                         self.shared.audio.muted.store(!muted_now, Ordering::Relaxed);
                         ui.close();
                     }
-                    ui.label(egui::RichText::new("Esc fecha o menu de convite").size(12.0).color(pal().muted));
                 });
                 theme::menu_focus_back(ui, &gear, menu.is_some());
                 let muted = self.shared.audio.muted.load(Ordering::Relaxed);

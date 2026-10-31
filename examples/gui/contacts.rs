@@ -352,14 +352,14 @@ impl App {
                         dots.request_focus();
                         ui.data_mut(|d| d.remove_temp::<[u8; 32]>(back_focus_id()));
                     }
-                    let menu = egui::Popup::menu(&dots).show(|ui| {
+                    let menu = menu(&dots).show(|ui| {
                         let tip = if trusted {
                             "A sua tela vai direto a ele, sem relay, e ele vê o seu IP."
                         } else {
                             "Só vale com a \"Privacidade na transmissão da tela\" desligada (aba Vídeo): a sua tela vai direto a este contato, sem relay no meio, e ele vê o seu IP. Os outros continuam recebendo por 2 relays."
                         };
                         let label = if trusted { "Tirar a confiança" } else { "Marcar como de confiança" };
-                        if menu_item(ui, false, None, label, |p, c, s, k| shield_icon(p, c, s, k, false)).on_hover_text(tip).clicked() {
+                        if menu_item(ui, false, None, label, |p, c, s, k| shield_icon(p, c, s, k, trusted)).on_hover_text(tip).clicked() {
                             // Marcar pede confirmação do aviso; desmarcar vale na hora.
                             if trusted {
                                 self.set_trust(*key, false);

@@ -350,7 +350,10 @@ fn bare_button(ui: &mut Ui, size: egui::Vec2, name: &str, tip: &str, ink: impl F
     let enabled = ui.is_enabled();
     let (rect, reply) = ui.allocate_exact_size(size, egui::Sense::click());
     reply.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, name));
-    let hovered = enabled && reply.hovered();
+    // Com o menu dele aberto o botão segue marcado: o ponteiro está no popup, e numa lista de ⋮ iguais é o que diz de
+    // qual linha é o menu.
+    let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&reply));
+    let hovered = enabled && (reply.hovered() || open);
     if hovered {
         ui.painter().rect_filled(rect, CornerRadius::same(R_BARE), pal().hover);
     }
@@ -815,7 +818,11 @@ pub(crate) fn menu_row(ui: &mut Ui, blocked: Option<&str>, selected: bool, tint:
     let sense = if enabled { egui::Sense::click() } else { egui::Sense::focusable_noninteractive() };
     let (rect, reply) = ui.allocate_exact_size(vec2(ui.available_width().max(MENU_WIDTH), 30.0), sense);
     let name = menu_row_name(label, blocked);
-    reply.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, name.clone()));
+    // O foco antes do `widget_info`: o nome só é anunciado no quadro em que o controle ganha o foco.
+    if enabled && take_menu_focus(ui.ctx()) {
+        reply.request_focus();
+    }
+    reply.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, enabled, selected, name.clone()));
     let painter = ui.painter();
     if enabled && selected {
         painter.rect_filled(rect, CornerRadius::same(8), pal().selected);
@@ -831,12 +838,43 @@ pub(crate) fn menu_row(ui: &mut Ui, blocked: Option<&str>, selected: bool, tint:
     painter.text(rect.left_center() + vec2(36.0, 0.0), egui::Align2::LEFT_CENTER, label, TextStyle::Button.resolve(ui.style()), ink);
     if let Some(keys) = shortcut {
         painter.text(rect.right_center() - vec2(12.0, 0.0), egui::Align2::RIGHT_CENTER, keys, FontId::proportional(12.0), pal().muted);
+    } else if enabled && selected {
+        // O item atual não pode depender só do fundo: o ponto de acento diz "você está aqui" também sem o relevo.
+        painter.circle_filled(rect.right_center() - vec2(16.0, 0.0), 4.0, pal().focus);
     }
     focus_ring(ui, &reply, 8);
     match blocked {
         Some(why) => reply.on_hover_text(why),
         None => reply.on_hover_cursor(egui::CursorIcon::PointingHand),
     }
+}
+
+/// Abre o menu do `trigger`. Se o gatilho foi acionado pelo teclado (Enter ou Espaço, sem soltar o ponteiro), o foco
+/// entra no primeiro item habilitado: sem isso o Tab sai do popup para a tela atrás dele. Com o mouse nada muda.
+pub(crate) fn menu(trigger: &egui::Response) -> egui::Popup<'static> {
+    let ctx = &trigger.ctx;
+    if trigger.clicked() && !ctx.input(|i| i.pointer.any_released()) {
+        let now = ctx.cumulative_frame_nr();
+        ctx.data_mut(|d| d.insert_temp(menu_focus_id(), now));
+    }
+    egui::Popup::menu(trigger)
+}
+
+fn menu_focus_id() -> egui::Id {
+    egui::Id::new("menu-foco-no-primeiro")
+}
+
+/// Consome o pedido de foco de [`menu`]: vale neste quadro e no seguinte (o popup pode desenhar um depois do clique),
+/// e vai ao primeiro item que perguntar. Um menu sem itens (formulário) deixa o pedido vencer sozinho.
+fn take_menu_focus(ctx: &egui::Context) -> bool {
+    let now = ctx.cumulative_frame_nr();
+    ctx.data_mut(|d| match d.get_temp::<u64>(menu_focus_id()) {
+        Some(at) => {
+            d.remove_temp::<u64>(menu_focus_id());
+            now.saturating_sub(at) <= 1
+        }
+        None => false,
+    })
 }
 
 /// Nome acessível da linha de menu: o motivo do bloqueio vai junto, como nos botões de ligar da lista de contatos.
@@ -1082,11 +1120,55 @@ mod tests {
     #[test]
     fn focus_ring_passes_3_to_1_on_both_bases_in_both_themes() {
         for (name, p) in [("escuro", &DARK_PALETTE), ("claro", &LIGHT_PALETTE)] {
-            for (on, bg) in [("bg", p.bg), ("deep", p.deep), ("hover", p.hover)] {
+            for (on, bg) in [("bg", p.bg), ("deep", p.deep), ("hover", p.hover), ("selected", p.selected)] {
                 let r = contrast(p.focus, bg);
                 assert!(r >= 3.0, "tema {name}: o aro de foco sobre {on} tem contraste {r:.2} (< 3)");
             }
         }
+    }
+
+    /// Roda `frames` quadros de um gatilho com menu e devolve os nomes que o leitor de tela ouviu ao ganhar foco.
+    /// No quadro 2 o gatilho recebe o foco; no `press_at`, Enter.
+    fn open_menu_by_keyboard(press: bool) -> Vec<String> {
+        let ctx = egui::Context::default();
+        let mut trigger = None;
+        let mut heard = Vec::new();
+        for frame in 0..6 {
+            let mut input = egui::RawInput::default();
+            if press && frame == 3 {
+                input.events.push(egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() });
+                input.events.push(egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: false, repeat: false, modifiers: Default::default() });
+            }
+            let out = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    if frame == 1 {
+                        ctx.memory_mut(|m| m.request_focus(trigger.unwrap()));
+                    }
+                    let dots = dots_button(ui, "n:Gatilho");
+                    trigger = Some(dots.id);
+                    menu(&dots).show(|ui| {
+                        menu_row(ui, Some("sem chave"), false, None, "n:Apagado", None, close_icon);
+                        menu_row(ui, None, false, None, "n:Primeiro", None, close_icon);
+                        menu_row(ui, None, false, None, "n:Segundo", None, close_icon);
+                    });
+                });
+            });
+            heard.extend(out.platform_output.events.iter().map(|e| e.widget_info().label.clone().unwrap_or_default()));
+        }
+        heard
+    }
+
+    #[test]
+    fn a_menu_opened_by_keyboard_focuses_its_first_enabled_item() {
+        let heard = open_menu_by_keyboard(true);
+        assert!(heard.iter().any(|l| l == "n:Primeiro"), "o foco não entrou no menu (ouvido: {heard:?})");
+        assert!(!heard.iter().any(|l| l.starts_with("n:Apagado") || l == "n:Segundo"), "o foco foi ao item errado (ouvido: {heard:?})");
+    }
+
+    #[test]
+    fn a_menu_that_nobody_opened_takes_no_focus() {
+        let heard = open_menu_by_keyboard(false);
+        assert!(!heard.iter().any(|l| l == "n:Primeiro"), "o foco entrou sozinho (ouvido: {heard:?})");
     }
 
     #[test]
