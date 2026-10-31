@@ -404,7 +404,7 @@ impl App {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let plus = plus_button(ui, "Novo contato");
                         // Fecha só ao clicar fora, para dar tempo de colar o código.
-                        egui::Popup::menu(&plus).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| self.new_contact_form(ui));
+                        egui::Popup::menu(&plus).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| self.new_contact_form(ui, true));
                     });
                 });
                 ui.add_space(8.0);

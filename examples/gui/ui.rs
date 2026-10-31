@@ -221,7 +221,7 @@ impl App {
                         (Tab::Settings, gear_icon as Icon, "Configurações"),
                         (Tab::Log, log_icon as Icon, "Atividade"),
                     ] {
-                        if menu_item(ui, self.tab == tab, label, icon).clicked() {
+                        if menu_item(ui, self.tab == tab, None, label, icon).clicked() {
                             self.tab = tab;
                             ui.close();
                         }

@@ -374,38 +374,39 @@ pub(crate) fn dots_button(ui: &mut Ui) -> egui::Response {
     reply.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// Escudo desenhado (confiança): cheio e verde quando ligado, só o contorno quando desligado.
-pub(crate) fn shield_button(ui: &mut Ui, on: bool) -> egui::Response {
-    let (rect, reply) = ui.allocate_exact_size(vec2(34.0, 34.0), egui::Sense::click());
-    let c = rect.center() + press_nudge(&reply);
-    let pts = [vec2(-7.0, -8.0), vec2(7.0, -8.0), vec2(7.0, 1.0), vec2(0.0, 9.0), vec2(-7.0, 1.0)].map(|d| c + d).to_vec();
+/// Escudo (confiança), desenhado: cheio e verde quando ligado, só o contorno quando desligado. `size` é a altura.
+pub(crate) fn shield_icon(painter: &egui::Painter, c: Pos2, size: f32, ink: Color32, on: bool) {
+    let k = size / 18.0;
+    let pts = [vec2(-7.0, -8.0), vec2(7.0, -8.0), vec2(7.0, 1.0), vec2(0.0, 9.0), vec2(-7.0, 1.0)].map(|d| c + d * k).to_vec();
     if on {
-        ui.painter().add(egui::Shape::convex_polygon(pts, pal().green, Stroke::NONE));
+        painter.add(egui::Shape::convex_polygon(pts, pal().green, Stroke::NONE));
         // Visto no meio: o estado ligado não depende só da cor.
-        let ink = Stroke::new(1.8_f32, pal().deep);
-        ui.painter().line_segment([c + vec2(-3.5, 0.0), c + vec2(-1.0, 3.0)], ink);
-        ui.painter().line_segment([c + vec2(-1.0, 3.0), c + vec2(3.5, -3.0)], ink);
+        let check = Stroke::new(1.8_f32 * k, pal().deep);
+        painter.line_segment([c + vec2(-3.5, 0.0) * k, c + vec2(-1.0, 3.0) * k], check);
+        painter.line_segment([c + vec2(-1.0, 3.0) * k, c + vec2(3.5, -3.0) * k], check);
     } else {
-        let ink = if reply.hovered() { pal().strong } else { pal().muted };
-        ui.painter().add(egui::Shape::convex_polygon(pts, Color32::TRANSPARENT, Stroke::new(1.6_f32, ink)));
+        painter.add(egui::Shape::convex_polygon(pts, Color32::TRANSPARENT, Stroke::new(1.6_f32 * k, ink)));
     }
-    focus_ring(ui, &reply, 8);
-    reply.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// Lixeira desenhada (remover): tampa, alça e corpo; vermelha ao passar o mouse.
+/// Lixeira (remover), desenhada: tampa, alça e corpo. `size` é a altura aproximada.
+pub(crate) fn trash_icon(painter: &egui::Painter, c: Pos2, size: f32, color: Color32) {
+    let k = size / 18.0;
+    let ink = Stroke::new(1.6_f32 * k, color);
+    let p = painter;
+    p.line_segment([c + vec2(-7.0, -5.0) * k, c + vec2(7.0, -5.0) * k], ink);
+    p.line_segment([c + vec2(-2.5, -5.0) * k, c + vec2(-2.5, -8.0) * k], ink);
+    p.line_segment([c + vec2(2.5, -5.0) * k, c + vec2(2.5, -8.0) * k], ink);
+    p.line_segment([c + vec2(-2.5, -8.0) * k, c + vec2(2.5, -8.0) * k], ink);
+    p.rect_stroke(Rect::from_min_max(c + vec2(-5.0, -5.0) * k, c + vec2(5.0, 8.0) * k), CornerRadius::same(2), ink, egui::StrokeKind::Middle);
+    p.line_segment([c + vec2(-1.8, -2.0) * k, c + vec2(-1.8, 5.0) * k], ink);
+    p.line_segment([c + vec2(1.8, -2.0) * k, c + vec2(1.8, 5.0) * k], ink);
+}
+
+/// Botão da lixeira; vermelha ao passar o mouse.
 pub(crate) fn trash_button(ui: &mut Ui) -> egui::Response {
     let (rect, reply) = ui.allocate_exact_size(vec2(34.0, 34.0), egui::Sense::click());
-    let c = rect.center() + press_nudge(&reply);
-    let ink = Stroke::new(1.6_f32, if reply.hovered() { pal().red } else { pal().muted });
-    let p = ui.painter();
-    p.line_segment([c + vec2(-7.0, -5.0), c + vec2(7.0, -5.0)], ink);
-    p.line_segment([c + vec2(-2.5, -5.0), c + vec2(-2.5, -8.0)], ink);
-    p.line_segment([c + vec2(2.5, -5.0), c + vec2(2.5, -8.0)], ink);
-    p.line_segment([c + vec2(-2.5, -8.0), c + vec2(2.5, -8.0)], ink);
-    p.rect_stroke(egui::Rect::from_min_max(c + vec2(-5.0, -5.0), c + vec2(5.0, 8.0)), CornerRadius::same(2), ink, egui::StrokeKind::Middle);
-    p.line_segment([c + vec2(-1.8, -2.0), c + vec2(-1.8, 5.0)], ink);
-    p.line_segment([c + vec2(1.8, -2.0), c + vec2(1.8, 5.0)], ink);
+    trash_icon(ui.painter(), rect.center() + press_nudge(&reply), 18.0, if reply.hovered() { pal().red } else { pal().muted });
     focus_ring(ui, &reply, 8);
     reply.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
@@ -714,8 +715,9 @@ pub(crate) fn glyph_button(ui: &mut Ui, name: &str, color: Option<Color32>, draw
     reply.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// Linha de menu com ícone desenhado à esquerda; `selected` afunda a linha como o item atual.
-pub(crate) fn menu_item(ui: &mut Ui, selected: bool, label: &str, draw: impl FnOnce(&egui::Painter, Pos2, f32, Color32)) -> egui::Response {
+/// Linha de menu com ícone desenhado à esquerda; `selected` marca a linha como o item atual e `tint` fixa a
+/// tinta (vermelho no destrutivo).
+pub(crate) fn menu_item(ui: &mut Ui, selected: bool, tint: Option<Color32>, label: &str, draw: impl FnOnce(&egui::Painter, Pos2, f32, Color32)) -> egui::Response {
     let (rect, reply) = ui.allocate_exact_size(vec2(ui.available_width().max(190.0), 30.0), egui::Sense::click());
     reply.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
     let painter = ui.painter();
@@ -724,7 +726,7 @@ pub(crate) fn menu_item(ui: &mut Ui, selected: bool, label: &str, draw: impl FnO
     } else if reply.hovered() {
         painter.rect_filled(rect, CornerRadius::same(8), pal().hover);
     }
-    let ink = if selected || reply.hovered() { pal().strong } else { pal().text };
+    let ink = tint.unwrap_or(if selected || reply.hovered() { pal().strong } else { pal().text });
     draw(painter, rect.left_center() + vec2(18.0, 0.0), 18.0, ink);
     painter.text(rect.left_center() + vec2(36.0, 0.0), egui::Align2::LEFT_CENTER, label, TextStyle::Button.resolve(ui.style()), ink);
     focus_ring(ui, &reply, 8);

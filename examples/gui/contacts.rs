@@ -6,6 +6,15 @@ use eframe::egui::{self, RichText, vec2};
 
 use crate::{conf::*, engine::*, theme::*, ui::*};
 
+/// Texto do avatar: a presença não pode depender só do ponto verde.
+fn presence_tip(session_online: bool, contact_online: bool) -> &'static str {
+    match (session_online, contact_online) {
+        (false, _) => "Você está offline",
+        (true, true) => "Online",
+        (true, false) => "Offline ou ainda não verificado",
+    }
+}
+
 /// Se o contato aparece na busca: o texto (minúsculo, não vazio ou vazio) está no nome ou no começo do código.
 fn matches_search(name: &str, key: &[u8; 32], needle: &str) -> bool {
     needle.is_empty() || name.to_lowercase().contains(needle) || hex(key).starts_with(needle)
@@ -57,13 +66,13 @@ impl App {
     }
 
     /// Formulário de novo contato, dentro do menu do + do cabeçalho da coluna.
-    pub(crate) fn new_contact_form(&mut self, ui: &mut egui::Ui) {
-        ui.set_width(260.0);
+    pub(crate) fn new_contact_form(&mut self, ui: &mut egui::Ui, in_menu: bool) {
+        ui.set_width(if in_menu { 260.0 } else { ui.available_width() });
         note(ui, "Peça o código de contato de um amigo.");
         ui.add(field(&mut self.form.new_code, "Código de contato"));
         if button(ui, !self.form.new_code.trim().is_empty(), "Adicionar", BLURPLE).clicked() {
             self.add_contact();
-            if self.error.is_empty() {
+            if in_menu && self.error.is_empty() {
                 ui.close();
             }
         }
@@ -73,7 +82,7 @@ impl App {
     }
 
     /// Contatos online agora: a sondagem do nó (`Shared::presence`) ou um servidor em comum que os mostra online.
-    /// Quem ainda não foi sondado não está na lista, e o 📞 espera o resultado.
+    /// Quem ainda não foi sondado não está na lista, e o botão de ligar espera o resultado.
     pub(crate) fn online_contacts(&self, contacts: &[(String, [u8; 32])]) -> std::collections::HashSet<[u8; 32]> {
         let keys: Vec<[u8; 32]> = contacts.iter().map(|(_, k)| *k).collect();
         {
@@ -91,8 +100,25 @@ impl App {
         up
     }
 
+    /// Lista vazia: o caminho inteiro na própria coluna. Os dois lados precisam do código um do outro, então o
+    /// formulário de adicionar já vem aberto e um atalho leva ao código de quem está aqui.
+    fn empty_contacts(&mut self, ui: &mut egui::Ui) {
+        sunken_frame(ui, 12, 12, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(RichText::new("Ninguém por aqui ainda").strong().color(pal().strong));
+            note(ui, "Para falar com alguém, os dois trocam o código de contato.");
+            ui.add_space(4.0);
+            self.new_contact_form(ui, false);
+            ui.add_space(4.0);
+            if button(ui, true, "Ver o meu código", pal().bg).on_hover_text("Fica em Configurações, em Meu código de contato").clicked() {
+                self.tab = Tab::Settings;
+            }
+        });
+    }
+
     /// Lista de contatos na coluna da esquerda (o "início", como as mensagens diretas do Discord): um por linha,
-    /// com ligar, a confiança para a tela (escudo) e remover (lixeira) à direita. No alto, a busca.
+    /// com ligar e bate-papo à direita e, num menu de três pontos, a confiança para a tela e remover. Quem é de confiança
+    /// mostra o escudo cheio na própria linha (expõe o IP: não pode ficar escondido). No alto, a busca.
     pub(crate) fn contacts_list(&mut self, ui: &mut egui::Ui, online: bool, in_call: bool) {
         let contacts = parse_contacts(&self.form.contacts);
         // O texto da busca vive na memória temporária da janela: não vai para o disco nem precisa de campo em `App`.
@@ -102,7 +128,7 @@ impl App {
         ui.data_mut(|d| d.insert_temp(search_id, query.clone()));
         let needle = query.trim().to_lowercase();
         if contacts.is_empty() {
-            note(ui, "Nenhum contato ainda. Use o + do alto com o código de quem você quer ouvir.");
+            self.empty_contacts(ui);
         } else if !needle.is_empty() && !contacts.iter().any(|(n, k)| matches_search(n, k, &needle)) {
             note(ui, "Ninguém com esse nome.");
         }
@@ -122,11 +148,12 @@ impl App {
               ui.set_width(ui.available_width());
               ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
-                let face = avatar(ui, name, 32.0, None);
+                let up = online_keys.contains(key);
+                let face = avatar(ui, name, 32.0, up.then_some(pal().green)).on_hover_text(presence_tip(online, up));
                 count_badge(ui.painter(), face.rect, unread[key], pal().bg);
                 // Adicionado só pelo código: o nome chega quando o contato devolve a apresentação.
                 let pending = *name == hex(key)[..8];
-                ui.add_sized([ui.available_width() - 142.0 - if pending { 22.0 } else { 0.0 }, 32.0], egui::Label::new(RichText::new(name).strong().color(pal().text)).truncate())
+                ui.add_sized([ui.available_width() - 110.0 - if pending { 22.0 } else { 0.0 } - if self.form.is_trusted(key) { 34.0 } else { 0.0 }, 32.0], egui::Label::new(RichText::new(name).strong().color(pal().text)).truncate())
                     .on_hover_text(format!("{}…", &hex(key)[..16]));
                 if pending {
                     let (mark, _) = ui.allocate_exact_size(vec2(18.0, 18.0), egui::Sense::hover());
@@ -135,25 +162,36 @@ impl App {
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;
-                    if trash_button(ui).on_hover_text("Remover contato").clicked() {
-                        remove = Some(i);
-                    }
                     let trusted = self.form.is_trusted(key);
-                    let tip = if trusted {
-                        "Contato de confiança (clique para tirar). A sua tela vai direto a ele, sem relay, e ele vê o seu IP."
-                    } else {
-                        "Marcar como contato de confiança. Só vale com a \"Privacidade na transmissão da tela\" desligada (aba Vídeo): a sua tela vai direto a este contato, sem relay no meio, e ele vê o seu IP. Os outros continuam recebendo por 2 relays. Marque só quem você conhece."
-                    };
-                    if shield_button(ui, trusted).on_hover_text(tip).clicked() {
-                        // Marcar pede confirmação do aviso; desmarcar vale na hora.
-                        if trusted {
-                            self.set_trust(*key, false);
+                    let dots = dots_button(ui).on_hover_text("Mais ações");
+                    egui::Popup::menu(&dots).show(|ui| {
+                        let tip = if trusted {
+                            "A sua tela vai direto a ele, sem relay, e ele vê o seu IP."
                         } else {
-                            self.trust_ask = Some(*key);
+                            "Só vale com a \"Privacidade na transmissão da tela\" desligada (aba Vídeo): a sua tela vai direto a este contato, sem relay no meio, e ele vê o seu IP. Os outros continuam recebendo por 2 relays."
+                        };
+                        let label = if trusted { "Tirar a confiança" } else { "Marcar como de confiança" };
+                        if menu_item(ui, false, None, label, |p, c, s, k| shield_icon(p, c, s, k, false)).on_hover_text(tip).clicked() {
+                            // Marcar pede confirmação do aviso; desmarcar vale na hora.
+                            if trusted {
+                                self.set_trust(*key, false);
+                            } else {
+                                self.trust_ask = Some(*key);
+                            }
+                            ui.close();
                         }
+                        if menu_item(ui, false, Some(pal().error), "Remover contato", trash_icon).on_hover_text("Pede confirmação antes de remover").clicked() {
+                            remove = Some(i);
+                            ui.close();
+                        }
+                    });
+                    let unread = unread[key];
+                    let chat = glyph_button(ui, "Bate-papo", (unread > 0).then_some(pal().focus), chat_icon);
+                    let tip = if unread > 0 { format!("Bate-papo ({unread} nova(s))") } else { "Bate-papo".to_string() };
+                    if chat.on_hover_text(tip).clicked() {
+                        self.open_chat(*key);
                     }
-                    // Os três ícones têm a mesma largura e ficam colados.
-                    let call = ui.add_enabled_ui(online && !in_call && online_keys.contains(key), |ui| glyph_button(ui, "Ligar", None, phone_icon)).inner;
+                    let call = ui.add_enabled_ui(online && !in_call && up, |ui| glyph_button(ui, "Ligar", None, phone_icon)).inner;
                     let off_tip = if ringing == Some(*key) {
                         "Chamando…"
                     } else if online && !in_call {
@@ -164,11 +202,11 @@ impl App {
                     if call.on_hover_text("Ligar").on_disabled_hover_text(off_tip).clicked() {
                         self.dial(*key);
                     }
-                    let unread = unread[key];
-                    let chat = glyph_button(ui, "Bate-papo", (unread > 0).then_some(pal().focus), chat_icon);
-                    let tip = if unread > 0 { format!("Bate-papo ({unread} nova(s))") } else { "Bate-papo".to_string() };
-                    if chat.on_hover_text(tip).clicked() {
-                        self.open_chat(*key);
+                    // O escudo cheio fica à vista: quem vê o seu IP não pode ser um detalhe escondido no menu.
+                    if trusted {
+                        let (rect, shield) = ui.allocate_exact_size(vec2(34.0, 34.0), egui::Sense::hover());
+                        shield_icon(ui.painter(), rect.center(), 18.0, pal().muted, true);
+                        shield.on_hover_text("Contato de confiança: a sua tela vai direto a ele, sem relay, e ele vê o seu IP. Tire no menu de três pontos.");
                     }
                 });
               });
@@ -239,14 +277,16 @@ impl App {
             .anchor(egui::Align2::CENTER_CENTER, vec2(0.0, 0.0))
             .show(ctx, |ui| {
                 ui.set_max_width(420.0);
-                ui.label(format!("{name} sai da sua lista de contatos e é avisado para tirar você da dele. Para voltar a falar, um dos dois precisa adicionar o outro de novo. O histórico do bate-papo fica guardado.\n\nBloquear também impede {name} de voltar sozinho à sua lista (por apresentação ou convite) até você adicioná-lo de novo ou desbloqueá-lo nas configurações."));
+                ui.label(format!("{name} sai da sua lista e é avisado para tirar você da dele. O histórico do bate-papo fica guardado."));
+                ui.add_space(4.0);
+                let block_id = egui::Id::new("remover-e-bloquear");
+                let mut block = ui.data(|d| d.get_temp::<bool>(block_id)).unwrap_or(false);
+                ui.check(&mut block, "Bloquear também").on_hover_text(format!("Impede {name} de voltar sozinho à sua lista (por apresentação ou convite) até você adicioná-lo de novo ou desbloqueá-lo nas configurações."));
+                ui.data_mut(|d| d.insert_temp(block_id, block));
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    if button(ui, true, "Só remover", pal().red).clicked() {
-                        answer = Some(Remove::Only);
-                    }
-                    if button(ui, true, "Remover e bloquear", pal().red).clicked() {
-                        answer = Some(Remove::AndBlock);
+                    if button(ui, true, "Remover", pal().red).clicked() {
+                        answer = Some(if block { Remove::AndBlock } else { Remove::Only });
                     }
                     if button(ui, true, "Cancelar", pal().bg).clicked() {
                         answer = Some(Remove::Cancel);
@@ -255,6 +295,7 @@ impl App {
             });
         if let Some(choice) = answer {
             self.remove_ask = None;
+            ctx.data_mut(|d| d.remove::<bool>(egui::Id::new("remover-e-bloquear")));
             if choice != Remove::Cancel {
                 self.remove_contact_now(key);
             }
@@ -353,5 +394,14 @@ mod tests {
         assert!(matches_search("Ana", &key, "abab"));
         assert!(!matches_search("Ana", &key, "bruno"));
         assert!(!matches_search("Ana", &key, "baba"));
+    }
+
+    #[test]
+    fn presence_tip_says_why_the_dot_is_missing() {
+        assert_eq!(presence_tip(true, true), "Online");
+        assert_eq!(presence_tip(true, false), "Offline ou ainda não verificado");
+        // Sem estar online, nenhum contato pode ser dado como online.
+        assert_eq!(presence_tip(false, true), "Você está offline");
+        assert_eq!(presence_tip(false, false), "Você está offline");
     }
 }
