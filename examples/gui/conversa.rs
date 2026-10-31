@@ -30,7 +30,8 @@ impl App {
         ui.scope(|ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
-                ui.label(RichText::new(format!("Bate-papo com {name}")).strong().size(18.0).color(pal().strong));
+                ui.label(RichText::new(format!("Bate-papo com {name}")).strong().size(18.0).color(pal().strong))
+                    .on_hover_text("Só vai para quem está online. Cada um guarda a sua cópia nesta máquina.");
                 // Em chamada a conversa é a da linha: fechar não faz sentido.
                 if !self.shared.in_call.load(std::sync::atomic::Ordering::Relaxed) {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -40,7 +41,6 @@ impl App {
                     });
                 }
             });
-            note(ui, "Só vai para quem está online. Cada um guarda a sua cópia nesta máquina.");
             ui.add_space(6.0);
             let height = (ui.clip_rect().bottom() - ui.cursor().top() - 84.0).max(160.0);
             egui::ScrollArea::vertical().id_salt(("conversa", peer)).max_height(height).min_scrolled_height(height).stick_to_bottom(true).auto_shrink([false, false]).show(ui, |ui| {

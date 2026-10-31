@@ -439,8 +439,11 @@ impl eframe::App for App {
         self.rooms_panel(ctx, offline, calling, &status);
         self.members_panel(ctx, offline);
         egui::CentralPanel::default().frame(egui::Frame::new().fill(pal().bg).inner_margin(Margin::symmetric(36, 26))).show(ctx, |ui| {
-            let (title, subtitle) = self.title();
-            page_header(ui, title, &subtitle);
+            // Chamada e conversa não levam cabeçalho de página: o que está abaixo já diz o que é.
+            if !matches!(self.tab, Tab::Contacts | Tab::Call) {
+                let (title, subtitle) = self.title();
+                page_header(ui, title, &subtitle);
+            }
             if self.tab == Tab::Log {
                 self.log_tab(ui);
                 return;
