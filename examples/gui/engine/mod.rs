@@ -81,12 +81,14 @@ pub(crate) enum Cmd {
     RoomShare(bool),
     /// Mensagem de bate-papo 1:1 para o contato (o motor parte o texto em quadros, numera e guarda no histórico).
     Chat([u8; 32], String),
-    /// Envia o arquivo ao contato (ele recebe sem precisar aceitar).
+    /// Pede ao contato para enviar o arquivo: ele só desce quando o contato aceita (ou a política dele aceita sozinha).
     SendFile([u8; 32], std::path::PathBuf),
     /// Anexo no bate-papo da sala: avisa a sala e manda o arquivo a cada contato listado (os que estão na sala agora).
     RoomFile(clam::server::ServerId, Vec<[u8; 32]>, std::path::PathBuf),
-    /// Cancela a transferência (minha ou do contato) ou retira a oferta.
+    /// Cancela o envio (só quem envia cancela) ou retira a oferta.
     FileCancel([u8; 32], u64, bool),
+    /// Resposta da pessoa ao pedido de arquivo de um contato: baixar (`true`) ou recusar.
+    FileAnswer([u8; 32], u64, bool),
 }
 
 pub(crate) const ANSWER_NONE: u8 = 0;
@@ -124,6 +126,8 @@ pub(crate) struct Shared {
     pub(crate) audio: Controls,
     /// Codec das próximas ligações que esta pessoa fizer: Opus em vez de G.722 (`Form::voice_opus`).
     pub(crate) opus: AtomicBool,
+    /// Baixar sozinho todo arquivo recebido de até 100 MB (`Form::auto_files`); a janela o atualiza a cada quadro.
+    pub(crate) auto_files: AtomicBool,
     /// Teste do microfone em andamento (a pessoa se ouve); desligar este sinalizador encerra o teste.
     pub(crate) mic_test: AtomicBool,
     /// Texto de estado do nó ("online em ...").

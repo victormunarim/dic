@@ -138,8 +138,10 @@ pub(crate) fn announcement(name: &str) -> String {
 }
 
 /// Trata os quadros de arquivo que chegaram de contatos.
-/// Devolve as ofertas novas (contato, número): o laço as aceita sozinho.
+/// Devolve as ofertas novas (contato, número) que a política aceita sozinha (`arquivos::auto_accept`); as outras ficam
+/// como pedido, esperando o clique em baixar.
 pub(crate) fn on_frames(shared: &std::sync::Arc<Shared>, rx: &mut Receiving, frames: Vec<([u8; 32], FileFrame)>) -> Vec<([u8; 32], u64)> {
+    let all = shared.auto_files.load(std::sync::atomic::Ordering::Relaxed);
     let mut fresh = Vec::new();
     for (peer, frame) in frames {
         let id = frame.id();
@@ -153,7 +155,9 @@ pub(crate) fn on_frames(shared: &std::sync::Arc<Shared>, rx: &mut Receiving, fra
                     drop(t);
                     // Conta como mensagem nova: aparece na bolinha do contato.
                     shared.chats.lock_unpoisoned().push_received(peer, id, format!("📎 {name}"));
-                    fresh.push((peer, id));
+                    if crate::arquivos::auto_accept(&name, size, all) {
+                        fresh.push((peer, id));
+                    }
                 }
             }
             FileFrame::Answer { accept, .. } => shared.transfers.lock_unpoisoned().answered(&peer, id, accept),
@@ -198,7 +202,7 @@ pub(crate) fn on_frames(shared: &std::sync::Arc<Shared>, rx: &mut Receiving, fra
     fresh
 }
 
-/// Resposta a uma oferta (o laço aceita as de contato sozinho; quem cancela é a pessoa). Aceitar cria o arquivo parcial em `~/Downloads/clam`.
+/// Resposta a um pedido de arquivo: o laço responde sozinho quando a política deixa, senão é a pessoa (baixar ou recusar). Aceitar cria o arquivo parcial em `~/Downloads/clam`.
 pub(crate) fn answer(shared: &std::sync::Arc<Shared>, dialer: &Dialer, out: &Sink, rx: &mut Receiving, peer: [u8; 32], id: u64, accept: bool) {
     let Some((name, size)) = shared.transfers.lock_unpoisoned().asked(&peer, id) else { return };
     let phase = if !accept {
@@ -227,20 +231,44 @@ pub(crate) fn answer(shared: &std::sync::Arc<Shared>, dialer: &Dialer, out: &Sin
     });
 }
 
-/// A pessoa cancelou. Do lado que envia, a tarefa de envio vê o pedido; do que recebe, o parcial é apagado.
-pub(crate) fn cancel(shared: &std::sync::Arc<Shared>, dialer: &Dialer, out: &Sink, rx: &mut Receiving, peer: [u8; 32], id: u64, mine: bool) {
-    shared.transfers.lock_unpoisoned().request_cancel(&peer, id, mine);
-    if mine {
-        (out.repaint)();
+/// A pessoa cancelou o **envio**: só quem envia cancela. A tela já mostra "cancelado" e a tarefa de envio para na hora
+/// (`transfer::stream` consulta o pedido a cada 100 ms, mesmo no meio de uma janela) e avisa o contato, que apaga o
+/// parcial. Quem recebe não cancela: recusa o pedido antes de baixar (`answer`) e depois só espera.
+pub(crate) fn cancel(shared: &std::sync::Arc<Shared>, out: &Sink, peer: [u8; 32], id: u64, mine: bool) {
+    if !mine {
         return;
     }
-    if let Some(inc) = rx.open.remove(&(peer, id)) {
-        inc.abort();
-    }
-    shared.transfers.lock_unpoisoned().phase(&peer, id, false, Phase::Cancelled);
+    let mut t = shared.transfers.lock_unpoisoned();
+    t.request_cancel(&peer, id, true);
+    t.phase(&peer, id, true, Phase::Cancelled);
+    drop(t);
+    shared.chats.lock_unpoisoned().set_state(&peer, id, crate::chats::State::Failed);
     (out.repaint)();
-    let d = dialer.clone();
-    tokio::spawn(async move {
-        let _ = d.send_file_frame(peer, &FileFrame::Cancel { id }, CONTROL_WAIT).await;
-    });
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, atomic::Ordering};
+
+    use super::*;
+
+    fn offer(id: u64, name: &str, size: u64) -> ([u8; 32], FileFrame) {
+        ([9; 32], FileFrame::Offer { id, size, name: name.into() })
+    }
+
+    #[test]
+    fn requests_wait_for_a_click_unless_the_policy_accepts_them() {
+        let shared = Arc::new(Shared::default());
+        let mut rx = Receiving::default();
+        let mb = 1 << 20;
+        let fresh = on_frames(&shared, &mut rx, vec![offer(1, "foto.png", 3 * mb), offer(2, "ficha.pdf", mb), offer(3, "grande.mp4", 60 * mb)]);
+        assert_eq!(fresh, vec![([9; 32], 1)], "só a imagem pequena desce sozinha");
+        assert!(rx.open.is_empty(), "nada é criado no disco antes do aceite");
+        let t = shared.transfers.lock_unpoisoned();
+        assert_eq!(t.asking(&[9; 32]), 3, "os três são pedidos até alguém responder");
+        drop(t);
+        shared.auto_files.store(true, Ordering::Relaxed);
+        let fresh = on_frames(&shared, &mut rx, vec![offer(4, "ficha.pdf", 90 * mb), offer(5, "enorme.zip", 101 * mb)]);
+        assert_eq!(fresh, vec![([9; 32], 4)], "com a opção, tudo até 100 MB desce sozinho");
+    }
 }

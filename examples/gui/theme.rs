@@ -501,6 +501,11 @@ pub(crate) fn plus_button(ui: &mut Ui, tip: &str) -> egui::Response {
 }
 
 /// Botão só com um X, sem moldura (fechar). Desenhado: a fonte pode não ter o glifo "✕".
+/// Seta para baixo sobre a bandeja (o ícone de baixar), como botão sem relevo.
+pub(crate) fn download_button(ui: &mut Ui, tip: &str) -> egui::Response {
+    bare_button(ui, vec2(34.0, 34.0), tip, tip, |h| if h { pal().strong } else { BLURPLE }, 20.0, download_icon)
+}
+
 pub(crate) fn close_button(ui: &mut Ui, tip: &str) -> egui::Response {
     bare_button(ui, vec2(34.0, 34.0), tip, tip, |h| if h { pal().strong } else { pal().text }, 22.0, close_icon)
 }

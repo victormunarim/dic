@@ -76,7 +76,21 @@ pub async fn stream(dialer: &crate::node::Dialer, peer: [u8; 32], id: u64, path:
             if cancelled() {
                 return Err(TransferError::Cancelled);
             }
-            let done = dialer.send_file_chunks(peer, &pending, Duration::from_secs(20)).await;
+            // O cancelamento vale no meio da janela (que leva segundos): soltar o envio fecha o circuito.
+            let done = {
+                let send = dialer.send_file_chunks(peer, &pending, Duration::from_secs(20));
+                tokio::pin!(send);
+                loop {
+                    tokio::select! {
+                        done = &mut send => break done,
+                        () = tokio::time::sleep(Duration::from_millis(100)) => {
+                            if cancelled() {
+                                return Err(TransferError::Cancelled);
+                            }
+                        }
+                    }
+                }
+            };
             let mut keep = done.iter();
             pending.retain(|_| !keep.next().copied().unwrap_or(false));
             if pending.is_empty() {

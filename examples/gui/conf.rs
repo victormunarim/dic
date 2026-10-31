@@ -141,6 +141,8 @@ pub(crate) struct Form {
     /// Codec de voz das chamadas que esta pessoa inicia: Opus (32 kbps) em vez do G.722 (64 kbps).
     /// Quem atende usa o que o convite pedir. Ligado de início.
     pub(crate) voice_opus: bool,
+    /// Baixa sozinho todo arquivo recebido de até 100 MB. Desligado de início: só imagem e vídeo de até 50 MB descem sozinhos.
+    pub(crate) auto_files: bool,
     /// Tenta ficar online ao abrir o programa. Ligado de início.
     pub(crate) auto_online: bool,
     /// Âncoras que usa, uma por linha: `ip:porta#chave-do-circuito#chave-do-link`.
@@ -568,6 +570,7 @@ impl Form {
             screen_hear: get("no_screen_hear") != "1",
             // Ligado de início: a chave guarda o "não", então o arquivo antigo, sem ela, também aceita.
             voice_opus: get("no_opus") != "1",
+            auto_files: get("auto_files") == "1",
             mute_key: get("mute_key"),
             deafen_key: get("deafen_key"),
             // Ligado de início: a chave guarda o "não", então o arquivo antigo, sem ela, também aceita.
@@ -593,7 +596,7 @@ impl Form {
         let secret = self.secret_to_write(vault_set);
         let secret = secret.as_str();
         let text = format!(
-            "audio={}\nsecret={}\ncontacts={}\npeer={}\npublic_addr={}\nno_dht={}\ndht_circuit={}\nname={}\nintros={}\nno_anchor={}\nno_screen_privacy={}\nscreen_sharp={}\nscreen_hardware={}\nno_screen_audio={}\nno_screen_hear={}\nanchors={}\ninput_dev={}\noutput_dev={}\nno_opus={}\nno_auto_online={}\ntrusted={}\nblocked={}\nlight={}\nmute_key={}\ndeafen_key={}\n{}",
+            "audio={}\nsecret={}\ncontacts={}\npeer={}\npublic_addr={}\nno_dht={}\ndht_circuit={}\nname={}\nintros={}\nno_anchor={}\nno_screen_privacy={}\nscreen_sharp={}\nscreen_hardware={}\nno_screen_audio={}\nno_screen_hear={}\nanchors={}\ninput_dev={}\noutput_dev={}\nno_opus={}\nno_auto_online={}\ntrusted={}\nblocked={}\nlight={}\nmute_key={}\ndeafen_key={}\nauto_files={}\n{}",
             u8::from(self.use_audio),
             secret,
             self.contacts.trim().replace('\n', ";"),
@@ -619,6 +622,7 @@ impl Form {
             self.light.map_or("", |l| if l { "1" } else { "0" }),
             self.mute_key.trim(),
             self.deafen_key.trim(),
+            u8::from(self.auto_files),
             self.audio.to_conf()
         );
         // Contém a chave secreta: só o dono lê.

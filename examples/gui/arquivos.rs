@@ -4,6 +4,17 @@
 
 use std::path::{Path, PathBuf};
 
+/// Imagem ou vídeo até este tamanho desce sozinho.
+pub(crate) const AUTO_MEDIA_MAX: u64 = 50 << 20;
+/// Teto do "baixar todo arquivo recebido" (a opção da configuração).
+pub(crate) const AUTO_ALL_MAX: u64 = 100 << 20;
+
+/// Um pedido de arquivo de contato vira download sem a pessoa clicar? Imagem e vídeo de até 50 MB, sempre; qualquer
+/// outro arquivo só com a opção `all` ligada, até 100 MB. Antes do aceite nada é gravado neste computador.
+pub(crate) fn auto_accept(name: &str, size: u64, all: bool) -> bool {
+    (crate::midia::kind(name).is_some() && size <= AUTO_MEDIA_MAX) || (all && size <= AUTO_ALL_MAX)
+}
+
 /// Quantas transferências já encerradas se guardam para a tela.
 const KEEP_DONE: usize = 20;
 
@@ -187,6 +198,19 @@ mod tests {
         assert_eq!((x.phase, x.bytes), (Phase::Done(None), 100));
         assert!(t.of(&p).iter().any(|x| !x.mine && x.phase.live()));
         assert_eq!(t.asked(&p, 5), Some(("b.txt".into(), 50)));
+    }
+
+    #[test]
+    fn only_small_media_downloads_alone_unless_the_option_is_on() {
+        let mb = 1 << 20;
+        assert!(auto_accept("foto.JPG", 50 * mb, false));
+        assert!(auto_accept("filme.mp4", 10 * mb, false));
+        assert!(!auto_accept("foto.png", 50 * mb + 1, false), "mídia grande espera o clique");
+        assert!(!auto_accept("relatorio.pdf", mb, false), "outro tipo espera o clique");
+        assert!(!auto_accept("sem-extensao", 1, false));
+        assert!(auto_accept("relatorio.pdf", 100 * mb, true));
+        assert!(!auto_accept("relatorio.pdf", 100 * mb + 1, true));
+        assert!(auto_accept("filme.mp4", 80 * mb, true), "com a opção, mídia grande até 100 MB também");
     }
 
     #[test]

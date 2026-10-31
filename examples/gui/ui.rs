@@ -259,6 +259,7 @@ impl App {
                 let ear = glyph_button(ui, "Fone", &tip, deaf.then_some(pal().red), |p, c, s, k| headphones_icon(p, c, s, k, deaf));
                 let tip = if muted { format!("Você está no mudo: clique para voltar a falar ({})", ctx.format_shortcut(&mute_key)) } else { format!("Silenciar o microfone ({})", ctx.format_shortcut(&mute_key)) };
                 let mic = glyph_button(ui, "Microfone", &tip, muted.then_some(pal().red), |p, c, s, k| mic_icon(p, c, s, k, muted));
+                self.shared.auto_files.store(self.form.auto_files, Ordering::Relaxed);
                 self.global_keys.sync(ctx, &self.shared, &mute_key, &deaf_key);
                 // Com o sistema entregando as teclas, a janela não as trata também.
                 let keys = !crate::atalhos::capturing(ctx) && !self.global_keys.active();

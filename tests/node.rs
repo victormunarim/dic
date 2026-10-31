@@ -1218,3 +1218,37 @@ async fn measure_file_throughput() {
     eprintln!("VAZAO {:.1} KB/s em {s:.1} s (teto ~61)", size as f64 / 1000.0 / s);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// O cancelamento do envio vale no meio de uma janela (que leva segundos), não só entre elas.
+#[tokio::test]
+async fn cancelling_a_send_stops_it_inside_the_window() {
+    use clam::transfer::{self, TransferError};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let (sa, sb) = (key(), key());
+    let (pa, pb) = (*PublicKey::from(&sa).as_bytes(), *PublicKey::from(&sb).as_bytes());
+    let a = Node::start(fixed(sa, free_port(), vec![pb])).await.unwrap();
+    let b = Node::start(fixed(sb, free_port(), vec![pa])).await.unwrap();
+    a.add_hint(pb, b.relay_info().unwrap());
+    b.add_hint(pa, a.relay_info().unwrap());
+    let dir = std::env::temp_dir().join(format!("clam-cancel-it-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = dir.join("grande.bin");
+    let size = 600_000u64;
+    std::fs::write(&src, vec![3u8; size as usize]).unwrap();
+    let stop = AtomicBool::new(false);
+    let dialer = a.dialer();
+    let started = std::time::Instant::now();
+    let run = transfer::stream(&dialer, pb, 7, &src, size, |_| {}, || stop.load(Ordering::Relaxed));
+    tokio::pin!(run);
+    // Cancela logo no começo da primeira janela (sozinha leva ~2 s de envio); sem o corte no meio, só pararia depois dela.
+    let result = tokio::select! {
+        r = &mut run => r,
+        () = tokio::time::sleep(Duration::from_millis(600)) => {
+            stop.store(true, Ordering::Relaxed);
+            run.await
+        }
+    };
+    assert_eq!(result, Err(TransferError::Cancelled));
+    assert!(started.elapsed() < Duration::from_millis(1800), "parou dentro da janela: {:?}", started.elapsed());
+    let _ = std::fs::remove_dir_all(&dir);
+}

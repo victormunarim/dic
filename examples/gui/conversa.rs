@@ -138,8 +138,19 @@ impl App {
     }
 }
 
-/// Ao lado da mensagem do arquivo, enquanto ele anda: carregando, porcentagem e X para cancelar.
+/// Ao lado da mensagem do arquivo, enquanto ele não terminou. Quem envia vê o carregando e o X de cancelar (só ele
+/// cancela). Quem recebe vê o pedido com o ícone de baixar e o X de recusar; depois de baixar só espera.
 fn file_progress(ui: &mut egui::Ui, x: &crate::arquivos::Xfer, cmds: &mut Vec<Cmd>) {
+    if x.phase == Phase::Asking {
+        ui.label(RichText::new(format!("pedido de arquivo · {}", size_text(x.size))).size(12.0).color(pal().muted));
+        if download_button(ui, "Baixar: o arquivo só vem para este computador depois do clique").clicked() {
+            cmds.push(Cmd::FileAnswer(x.peer, x.id, true));
+        }
+        if close_button(ui, "Recusar o pedido").clicked() {
+            cmds.push(Cmd::FileAnswer(x.peer, x.id, false));
+        }
+        return;
+    }
     ui.add(egui::Spinner::new().size(14.0).color(BLURPLE));
     let text = match x.phase {
         Phase::Active => format!("{}% de {}", (x.bytes * 100 / x.size.max(1)).min(100), size_text(x.size)),
@@ -147,12 +158,12 @@ fn file_progress(ui: &mut egui::Ui, x: &crate::arquivos::Xfer, cmds: &mut Vec<Cm
         _ => "começando…".to_string(),
     };
     ui.label(RichText::new(text).size(12.0).color(pal().muted));
-    if close_button(ui, "Cancelar").clicked() {
-        cmds.push(Cmd::FileCancel(x.peer, x.id, x.mine));
+    if x.mine && close_button(ui, "Cancelar o envio").clicked() {
+        cmds.push(Cmd::FileCancel(x.peer, x.id, true));
     }
 }
 
-pub(crate) const ATTACH_TIP: &str = "Anexar arquivo: abre as pastas do computador (ou arraste o arquivo para a janela). O arquivo só sai quando você clica em Enviar. Limite de 32 MB";
+pub(crate) const ATTACH_TIP: &str = "Anexar arquivo: abre as pastas do computador (ou arraste o arquivo para a janela). O arquivo só sai quando você clica em Enviar. Limite de 100 MB";
 
 /// Clipe de papel desenhado (a fonte pode não ter o glifo): abre o seletor de arquivos do sistema.
 pub(crate) fn attach_button(ui: &mut egui::Ui, enabled: bool, tip: &str) -> egui::Response {

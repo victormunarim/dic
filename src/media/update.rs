@@ -87,9 +87,9 @@ pub const REMOVAL_WINDOW_MS: u64 = 3_600_000;
 pub const MAX_CHAT: usize = 128;
 /// Conteúdo da mensagem: versão, carimbo, tamanho e o texto preenchido com zeros.
 const CHAT_PLAIN_LEN: usize = 1 + 8 + 1 + MAX_CHAT;
-/// Maior arquivo que o bate-papo transfere (32 MiB): a 500 quadros por segundo são uns 9 minutos, e o receptor guarda só
-/// uma tabela de pedaços (~34 KB) na memória.
-pub const MAX_FILE: u64 = 32 << 20;
+/// Maior arquivo que o bate-papo transfere (100 MiB): no ritmo da tela são ~30 minutos no melhor caso, e o receptor guarda só
+/// uma tabela de pedaços (~100 KB) na memória.
+pub const MAX_FILE: u64 = 100 << 20;
 /// Bytes de arquivo em cada quadro `Chunk`: o corpo de 128 menos índice (4) e tamanho (1).
 pub const FILE_CHUNK: usize = MAX_CHAT - 5;
 /// Maior nome de arquivo na oferta (bytes UTF-8): o corpo de 128 menos tamanho (8) e comprimento (1), com folga.

@@ -50,6 +50,13 @@ impl App {
             if ui.check(&mut self.form.auto_online, "Tentar ficar online ao abrir o programa").changed() {
                 self.form.save();
             }
+            if ui
+                .check(&mut self.form.auto_files, "Baixar todo arquivo recebido até 100 MB")
+                .on_hover_text("Desligado, o contato só envia um pedido: imagens e vídeos de até 50 MB descem sozinhos, e qualquer outro arquivo (ou maior) só vem para este computador quando você clica em baixar. Ligado, tudo de até 100 MB desce sozinho, de contatos, para a pasta Downloads/clam.")
+                .changed()
+            {
+                self.form.save();
+            }
             if !self.error.is_empty() {
                 ui.colored_label(pal().error, &self.error);
             }
