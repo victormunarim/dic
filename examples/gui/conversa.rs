@@ -70,7 +70,13 @@ impl App {
                         }
                         match state {
                             State::Sending => ui.label(RichText::new("enviando…").size(12.0).color(pal().muted)),
-                            State::Failed => ui.label(RichText::new("não entregue").size(12.0).color(pal().error)).on_hover_text("O contato não confirmou: estava offline ou sem rota. Não há caixa de correio; envie de novo quando ele voltar."),
+                            State::Failed => {
+                                // Discreto: um triângulo pequeno no tom do erro, sem texto; o motivo fica no hover.
+                                let (rect, r) = ui.allocate_exact_size(vec2(14.0, 14.0), egui::Sense::hover());
+                                r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, "Não entregue"));
+                                alert_icon(ui.painter(), rect.center(), 13.0, pal().error.gamma_multiply(0.8));
+                                r.on_hover_text("Não entregue: o contato não confirmou, estava offline ou sem rota. Não há caixa de correio; envie de novo quando ele voltar.")
+                            }
                             State::Sent | State::Received => ui.label(""),
                         };
                     });
