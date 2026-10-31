@@ -82,7 +82,7 @@ impl App {
                     });
                 }
                 let hint = if sendable { "Mensagem" } else { "Contato offline: não dá para enviar" };
-                let reply = ui.add_enabled(sendable, field(&mut self.chat_draft, hint).desired_width(ui.available_width().max(80.0)));
+                let reply = ui.add_enabled(sendable, field(&mut self.chat_draft, hint).desired_width(field_beside(ui, 0.0).max(80.0)));
                 let enter = reply.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 if (sent || enter) && ready {
                     let text = std::mem::take(&mut self.chat_draft);

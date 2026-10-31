@@ -823,7 +823,7 @@ impl App {
         ui.allocate_ui_with_layout(vec2(ui.available_width(), 36.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let ready = !self.srv.chat_draft.trim().is_empty();
             let sent = button(ui, ready, "Enviar", BLURPLE).clicked();
-            let reply = ui.add(field(&mut self.srv.chat_draft, "Mensagem para a sala").desired_width(ui.available_width().max(80.0)));
+            let reply = ui.add(field(&mut self.srv.chat_draft, "Mensagem para a sala").desired_width(field_beside(ui, 0.0).max(80.0)));
             let enter = reply.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             if (sent || enter) && !self.srv.chat_draft.trim().is_empty() {
                 let text = std::mem::take(&mut self.srv.chat_draft);
