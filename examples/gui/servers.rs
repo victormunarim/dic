@@ -4,7 +4,7 @@ use clam::sync::LockExt;
 use std::sync::atomic::Ordering;
 
 use clam::server::{Output, Role, ServerId, ServerView};
-use eframe::egui::{self, Color32, CornerRadius, Margin, RichText, vec2};
+use eframe::egui::{self, Color32, Margin, RichText, vec2};
 
 use crate::{contacts::ask_share, conf::*, engine::*, theme::*, ui::{App, Tab, INVITE_KEY, MEMBERS_KEY}};
 
@@ -28,9 +28,8 @@ pub(crate) struct ServersUi {
     pub(crate) chat_draft: String,
     /// O cartão "nova sala" está aceitando o nome.
     pub(crate) adding_room: bool,
-    /// A pessoa voltou ao bate-papo mesmo com uma tela sendo assistida (clicou na sala na barra); zera quando
-    /// a última tela para de ser assistida, para a próxima cobrir o centro de novo.
-    pub(crate) chat_over_screen: bool,
+    /// Quem a pessoa clicou para assistir: a tela cheia abre assim que o primeiro quadro chega (`zoom_window`).
+    pub(crate) open_screen: Option<[u8; 32]>,
     /// O menu de convite do cabeçalho está aberto.
     pub(crate) inviting: bool,
     /// Escolha da pessoa para a coluna de membros; `None` segue a largura da janela (`members_fit`).
@@ -237,21 +236,11 @@ impl App {
         });
     }
 
-    /// Tela central de um servidor: a tela que assisto (cobrindo o centro) ou o bate-papo da sala em que estou. Presença e
+    /// Tela central de um servidor: o bate-papo da sala em que estou (a tela de quem transmite abre em tela cheia). Presença e
     /// sair do servidor ficam no menu ⋮ do cabeçalho da coluna de salas.
     fn server_view(&mut self, ui: &mut egui::Ui, hub: &clam::server::net::ServerHub, v: &ServerView) {
         if v.joining {
             note(ui, "Aguardando o convidante responder para trazer o servidor (ele precisa estar online).");
-        }
-        let in_this_server = self.shared.room.lock_unpoisoned().at.is_some_and(|(server, _)| server == v.id);
-        if self.screen_tex.is_empty() {
-            self.srv.chat_over_screen = false;
-        }
-        // Assistindo, a tela cobre o centro inteiro e o bate-papo sai; ele volta ao parar de assistir
-        // ou ao clicar na sala na barra.
-        if in_this_server && !self.screen_tex.is_empty() && !self.srv.chat_over_screen {
-            self.screen_cover(ui);
-            return;
         }
         self.room_chat(ui, hub, v);
     }
@@ -404,9 +393,7 @@ impl App {
                             Bar::Share(true) => ask_share(ui.ctx(), true),
                             Bar::Share(false) => self.send(Cmd::RoomShare(false)),
                             Bar::Leave => self.send(Cmd::LeaveRoom),
-                            Bar::Open => self.srv.chat_over_screen = true,
-                            Bar::Accept => {}
-                            Bar::None => {}
+                            Bar::Open | Bar::Accept | Bar::None => {}
                         }
                     } else if let Some(who) = call_bar {
                         // A qualidade da linha fica na aba da chamada; a barra pequena não mostra estatística.
@@ -499,7 +486,7 @@ impl App {
     fn room_list(&mut self, ui: &mut egui::Ui, hub: &clam::server::net::ServerHub, v: &ServerView, my_room: Option<(ServerId, clam::server::RoomId)>, in_call: bool) {
         let contacts = parse_contacts(&self.form.contacts);
         let manages = v.my_role.is_some_and(clam::server::Role::manages);
-        let mut action: Option<([u8; 32], bool)> = None;
+        let mut action: Option<[u8; 32]> = None;
         for room in &v.rooms {
             let here = my_room == Some((v.id, room.id));
             let blocked = if here { None } else if my_room.is_some() { Some("Saia da sala atual (ícone de sair no pé da coluna) antes de trocar") } else if in_call { Some("Encerre a chamada antes de entrar numa sala") } else { None };
@@ -550,13 +537,12 @@ impl App {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             // Mesma folga da borda que o avatar tem à esquerda.
                             ui.add_space(14.0);
-                            let on = live.watching.contains(&m.key);
                             if here && !m.is_me {
-                                let watch = if on { "Parar de assistir" } else { "Assistir à tela" };
-                                let icon = screen_icon(ui, pal().green, on, egui::Sense::click());
-                                icon.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, on, format!("{watch} de {who}")));
-                                if icon.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(watch).clicked() {
-                                    action = Some((m.key, !on));
+                                // Igual ao contato: sem miniatura, o monitor abre a tela cheia (e passa a seguir a tela).
+                                let icon = screen_icon(ui, pal().green, false, egui::Sense::click());
+                                icon.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("Assistir à tela de {who}")));
+                                if icon.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(format!("{who} está transmitindo a tela: assistir")).clicked() {
+                                    action = Some(m.key);
                                 }
                             } else {
                                 screen_icon(ui, pal().green, false, egui::Sense::hover()).on_hover_text("transmitindo a tela");
@@ -566,8 +552,9 @@ impl App {
                 });
             }
             drop(live);
-            if let Some((key, on)) = action {
-                crate::engine::follow(&self.shared, key, on);
+            if let Some(key) = action {
+                crate::engine::follow(&self.shared, key, true);
+                self.srv.open_screen = Some(key);
             }
             });
             ui.add_space(8.0);
@@ -614,29 +601,6 @@ impl App {
         } else {
             if ghost_card(ui, "Nova sala") {
                 self.srv.adding_room = true;
-            }
-        }
-    }
-
-    /// Telas assistidas ocupando o centro todo, sem o bate-papo. O ícone de lupa abre a tela cheia
-    /// (a mesma de `zoom_window`).
-    fn screen_cover(&mut self, ui: &mut egui::Ui) {
-        let names = self.form.names();
-        let mut order: Vec<_> = self.screen_tex.iter().map(|(k, (_, tex))| (*k, tex.clone())).collect();
-        order.sort_by_key(|(k, _)| *k);
-        let each = (ui.available_height() / order.len().max(1) as f32 - 8.0).max(120.0);
-        for (who, tex) in order {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(format!("Tela de {}", member_name(&names, &who))).strong());
-                if magnifier_button(ui, "Tela cheia (Esc ou o X para sair)").clicked() {
-                    self.zoom = Some(who);
-                }
-                if stop_watching_button(ui).on_hover_text("Parar de assistir").clicked() {
-                    crate::engine::follow(&self.shared, who, false);
-                }
-            });
-            if self.zoom != Some(who) {
-                ui.add(egui::Image::new(&tex).max_size(vec2(ui.available_width(), each)).corner_radius(CornerRadius::same(8)).shrink_to_fit());
             }
         }
     }

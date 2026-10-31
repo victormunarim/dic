@@ -287,9 +287,19 @@ impl App {
     /// no Wayland, que esperava a troca de buffers das duas.
     fn zoom_window(&mut self, ctx: &egui::Context) {
         let flag = egui::Id::new("tela-cheia");
+        // Clique no monitor de quem transmite na sala: abre quando o primeiro quadro chega; desiste se parou de seguir.
+        if let Some(who) = self.srv.open_screen {
+            if self.screen_tex.contains_key(&who) {
+                self.zoom = Some(who);
+                self.srv.open_screen = None;
+            } else if !self.shared.room.lock_unpoisoned().watching.contains(&who) {
+                self.srv.open_screen = None;
+            }
+        }
         let was = ctx.data_mut(|d| d.get_temp::<bool>(flag)).unwrap_or(false);
         let tex = self.zoom.and_then(|who| self.screen_tex.get(&who).map(|(_, tex)| tex.clone()));
         let Some(tex) = tex else {
+            self.stop_following_zoom();
             self.zoom = None;
             if was {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
@@ -325,9 +335,19 @@ impl App {
             }
         });
         if close {
+            self.stop_following_zoom();
             self.zoom = None;
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
             ctx.data_mut(|d| d.insert_temp(flag, false));
+        }
+    }
+
+    /// Fechar a tela cheia de uma transmissão da sala para de segui-la: sem miniatura, não há por que receber.
+    fn stop_following_zoom(&self) {
+        if let Some(who) = self.zoom
+            && self.shared.room.lock_unpoisoned().watching.contains(&who)
+        {
+            crate::engine::follow(&self.shared, who, false);
         }
     }
 

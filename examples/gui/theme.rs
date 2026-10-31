@@ -609,25 +609,6 @@ pub(crate) fn screen_icon(ui: &mut Ui, color: Color32, filled: bool, sense: egui
     reply
 }
 
-/// Monitor riscado (parar de assistir): é o monitor de [`screen_button`] com um traço, para não se confundir com
-/// sair da sala nem desligar. O traço leva um vão da cor da base, para ler em tamanho pequeno.
-pub(crate) fn stop_watching_button(ui: &mut Ui) -> egui::Response {
-    let reply = screen_icon(ui, Color32::TRANSPARENT, false, egui::Sense::click());
-    reply.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Parar de assistir"));
-    let color = if reply.hovered() { pal().strong } else { pal().muted };
-    let c = reply.rect.center();
-    let ink = Stroke::new(1.7_f32, color);
-    let p = ui.painter();
-    let screen = Rect::from_center_size(c + vec2(0.0, -2.0), vec2(20.0, 14.0));
-    p.rect_stroke(screen, CornerRadius::same(2), ink, egui::StrokeKind::Middle);
-    p.line_segment([c + vec2(0.0, 5.0), c + vec2(0.0, 9.0)], ink);
-    p.line_segment([c + vec2(-5.0, 9.0), c + vec2(5.0, 9.0)], ink);
-    let (from, to) = (c + vec2(-11.0, 10.0), c + vec2(11.0, -12.0));
-    p.line_segment([from, to], Stroke::new(5.0_f32, pal().bg));
-    p.line_segment([from, to], Stroke::new(1.9_f32, color));
-    reply.on_hover_cursor(egui::CursorIcon::PointingHand)
-}
-
 /// Monitor desenhado (compartilhar a tela): vermelho e preenchido enquanto transmite, cinza em repouso.
 pub(crate) fn screen_button(ui: &mut Ui, sharing: bool) -> egui::Response {
     let name = if sharing { "Parar de compartilhar a tela" } else { "Compartilhar a minha tela" };
@@ -1208,18 +1189,6 @@ pub(crate) fn clock_icon(painter: &egui::Painter, center: Pos2, size: f32, color
     painter.line_segment([center, center + vec2(size * 0.17, size * 0.08)], ink);
 }
 
-/// Lupa (tela cheia), desenhada: aro e cabo.
-pub(crate) fn magnifier_icon(painter: &egui::Painter, center: Pos2, size: f32, color: Color32) {
-    let ink = Stroke::new(size * 0.1, color);
-    painter.circle_stroke(center + vec2(-size * 0.08, -size * 0.08), size * 0.26, ink);
-    painter.line_segment([center + vec2(size * 0.12, size * 0.12), center + vec2(size * 0.34, size * 0.34)], Stroke::new(size * 0.14, color));
-}
-
-/// Botão só com a lupa, sem moldura (tela cheia). A dica diz a ação.
-pub(crate) fn magnifier_button(ui: &mut Ui, tip: &str) -> egui::Response {
-    bare_button(ui, vec2(32.0, 34.0), tip, tip, |h| if h { pal().strong } else { pal().muted }, 22.0, magnifier_icon)
-}
-
 /// Cartão fantasma com o +: o lugar de uma coisa nova (sala, convite). O sinal usa o `muted` cheio, que passa
 /// de 3:1 sobre a base nos dois temas, e sobe para o texto ao passar o mouse. Devolve se foi clicado.
 pub(crate) fn ghost_card(ui: &mut Ui, tip: &str) -> bool {
@@ -1602,13 +1571,11 @@ mod tests {
     #[test]
     fn every_icon_button_has_an_accessible_name() {
         type Draw = fn(&mut Ui) -> egui::Response;
-        let buttons: [(&str, Draw); 14] = [
+        let buttons: [(&str, Draw); 12] = [
             ("n:Novo contato", |ui| plus_button(ui, "n:Novo contato")),
             ("n:Fechar", |ui| close_button(ui, "n:Fechar")),
             ("n:Desligar", |ui| hangup_button(ui, "n:Desligar")),
-            ("n:Tela cheia", |ui| magnifier_button(ui, "n:Tela cheia")),
             ("Compartilhar a minha tela", |ui| screen_button(ui, false)),
-            ("Parar de assistir", stop_watching_button),
             ("n:Ligar", |ui| phone_button(ui, true, "n:Ligar", BLURPLE)),
             ("n:Sair", |ui| exit_button(ui, "n:Sair")),
             ("n:Desligar", |ui| leave_call_button(ui, "n:Desligar")),
