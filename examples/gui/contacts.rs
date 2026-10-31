@@ -35,6 +35,8 @@ enum Presence {
     Checking,
     /// Quem olha está offline: nada se sabe dos contatos.
     SelfOffline,
+    /// É com este contato que a chamada em curso acontece.
+    InCall,
 }
 
 impl Presence {
@@ -53,20 +55,45 @@ impl Presence {
             Self::Offline => "Offline",
             Self::Checking => "Verificando se está online…",
             Self::SelfOffline => "Você está offline",
+            Self::InCall => "Em chamada",
+        }
+    }
+
+    /// Posição na lista: quem está na chamada abre, depois os online, depois os demais (offline ou ainda sem resposta).
+    fn rank(self) -> u8 {
+        match self {
+            Self::InCall => 0,
+            Self::Online => 1,
+            _ => 2,
         }
     }
 }
 
-/// Ordem das linhas: quem tem mensagem nova sobe (a ordem entre os demais se mantém). Com o ponteiro sobre a
-/// lista (`frozen` = a ordem do quadro anterior) nada muda de lugar, para o botão que a pessoa ia clicar não
-/// fugir quando chega uma mensagem; chaves novas entram no fim.
-fn display_order(keys: &[[u8; 32]], unread: impl Fn(&[u8; 32]) -> usize, frozen: Option<&[[u8; 32]]>) -> Vec<[u8; 32]> {
+/// Ordem das linhas: primeiro o grupo (`rank`: chamada, online, demais) e, dentro dele, quem tem mensagem nova
+/// sobe (a ordem entre os demais se mantém). Com o ponteiro sobre a lista (`frozen` = a ordem do quadro anterior)
+/// nada muda de lugar, para o botão que a pessoa ia clicar não fugir quando chega uma mensagem ou alguém fica
+/// online; chaves novas entram no fim.
+fn display_order(keys: &[[u8; 32]], rank: impl Fn(&[u8; 32]) -> u8, unread: impl Fn(&[u8; 32]) -> usize, frozen: Option<&[[u8; 32]]>) -> Vec<[u8; 32]> {
     let mut order = keys.to_vec();
     match frozen {
         Some(prev) => order.sort_by_key(|k| prev.iter().position(|p| p == k).unwrap_or(usize::MAX)),
-        None => order.sort_by_key(|k| std::cmp::Reverse(unread(k))),
+        None => order.sort_by_key(|k| (rank(k), std::cmp::Reverse(unread(k)))),
     }
     order
+}
+
+/// Nome acessível do botão de bate-papo: o estado do contato só entra quando fala dele. "Você está offline" colado
+/// ao nome soaria como se fosse o contato que estivesse offline.
+fn chat_name(name: &str, status: Presence) -> String {
+    match status {
+        Presence::SelfOffline => format!("Bate-papo com {name}"),
+        s => format!("Bate-papo com {name}, {}", s.tip().to_lowercase()),
+    }
+}
+
+/// Título do grupo, só quando a lista mistura os dois: com todos no mesmo grupo o título não diz nada.
+fn group_title(rank: u8, online: usize) -> String {
+    if rank < 2 { format!("Online · {online}") } else { "Sem resposta".to_string() }
 }
 
 /// Se o contato aparece na busca: o texto (minúsculo, não vazio ou vazio) está no nome ou no começo do código.
@@ -184,6 +211,10 @@ impl App {
         // Sem contatos a busca não tem o que achar, e o formulário de adicionar é o que importa.
         if !contacts.is_empty() {
             let search = ui.add(field(&mut query, "Buscar contato"));
+            // Esc limpa o texto (o campo já larga o foco sozinho): sair da busca sem apagar à mão.
+            if (search.has_focus() || search.lost_focus()) && !query.is_empty() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                query.clear();
+            }
             let tip = format!("Buscar contato ({})", ui.ctx().format_shortcut(&SEARCH_KEY));
             search.clone().on_hover_text(tip);
             if ui.data_mut(|d| d.remove_temp::<bool>(focus_search_id())).is_some() {
@@ -200,6 +231,7 @@ impl App {
         let online_keys = self.online_contacts(&contacts);
         let probed = self.shared.presence.lock_unpoisoned().clone();
         let ringing = *self.shared.ringing.lock_unpoisoned();
+        let call_peer = if in_call { *self.shared.peer.lock_unpoisoned() } else { None };
         let mut remove = None;
         let unread: std::collections::HashMap<[u8; 32], usize> = {
             let book = self.shared.chats.lock_unpoisoned();
@@ -210,10 +242,22 @@ impl App {
         let frozen = ui.data(|d| d.get_temp::<bool>(hover_id)).unwrap_or(false).then(|| ui.data(|d| d.get_temp::<Vec<[u8; 32]>>(order_id))).flatten();
         let mut shown: Vec<_> = contacts.iter().enumerate().filter(|(_, (n, k))| matches_search(n, k, &needle)).collect();
         let keys: Vec<[u8; 32]> = shown.iter().map(|(_, (_, k))| *k).collect();
-        let order = display_order(&keys, |k| unread[k], frozen.as_deref());
+        let status_of = |k: &[u8; 32]| {
+            if call_peer == Some(*k) { Presence::InCall } else { Presence::of(online, online_keys.contains(k), probed.contains_key(k)) }
+        };
+        let order = display_order(&keys, |k| status_of(k).rank(), |k| unread[k], frozen.as_deref());
         shown.sort_by_key(|(_, (_, k))| order.iter().position(|o| o == k));
+        // Os títulos só aparecem quando há online e não-online juntos.
+        let online_shown = shown.iter().filter(|(_, (_, k))| status_of(k).rank() < 2).count();
+        let titled = online_shown > 0 && online_shown < shown.len();
+        let mut last_rank = None;
         let list_top = ui.cursor().min;
         for (i, (name, key)) in shown {
+            let rank = status_of(key).rank().max(1);
+            if titled && last_rank != Some(rank) {
+                last_rank = Some(rank);
+                ui.label(RichText::new(group_title(rank, online_shown)).size(12.0).strong().color(pal().muted));
+            }
             if self.remove_ask == Some(*key) {
                 self.remove_row(ui, name, *key);
                 ui.add_space(4.0);
@@ -224,7 +268,7 @@ impl App {
               ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 let up = online_keys.contains(key);
-                let status = Presence::of(online, up, probed.contains_key(key));
+                let status = status_of(key);
                 // Offline conhecido apaga o avatar e o nome: o ponto verde sozinho some no meio de uma lista longa.
                 let dim = status == Presence::Offline;
                 let face = ui
@@ -232,7 +276,7 @@ impl App {
                         if dim {
                             ui.set_opacity(0.5);
                         }
-                        avatar_with(ui, name, 32.0, up.then_some(pal().green), NO_TAB_STOP)
+                        avatar_with(ui, name, 32.0, if status == Presence::InCall { Some(pal().focus) } else { up.then_some(pal().green) }, NO_TAB_STOP)
                     })
                     .inner
                     .on_hover_text(status.tip());
@@ -290,12 +334,14 @@ impl App {
                     });
                     let unread = unread[key];
                     // Leitor de tela e teclado não passam pelo hover do avatar: o estado do contato vai no nome do botão.
-                    let chat = glyph_button(ui, &format!("Bate-papo com {name}, {}", status.tip().to_lowercase()), (unread > 0).then_some(pal().focus), chat_icon);
+                    let chat = glyph_button(ui, &chat_name(name, status), (unread > 0).then_some(pal().focus), chat_icon);
                     let tip = if unread > 0 { format!("Bate-papo ({unread} nova(s))") } else { "Bate-papo".to_string() };
                     if chat.on_hover_text(tip).clicked() {
                         self.open_chat(*key);
                     }
-                    let off_tip = if ringing == Some(*key) {
+                    let off_tip = if status == Presence::InCall {
+                        "Você já está em chamada com este contato"
+                    } else if ringing == Some(*key) {
                         "Chamando…"
                     } else if online && !in_call {
                         if probed.contains_key(key) { "Contato offline" } else { "Verificando se o contato está online…" }
@@ -403,6 +449,10 @@ impl App {
             });
             if choice != Remove::Cancel {
                 self.remove_contact_now(key);
+                // A linha some e levaria o foco junto: ele vai para a busca (que só existe com contatos na lista).
+                if !parse_contacts(&self.form.contacts).is_empty() {
+                    ui.data_mut(|d| d.insert_temp(focus_search_id(), true));
+                }
             }
             if choice == Remove::AndBlock {
                 self.set_block(key, true);
@@ -526,9 +576,40 @@ mod tests {
     fn unread_rises_unless_the_order_is_frozen() {
         let (a, b, c) = ([1; 32], [2; 32], [3; 32]);
         let unread = |k: &[u8; 32]| usize::from(*k == c) * 2;
-        assert_eq!(display_order(&[a, b, c], unread, None), vec![c, a, b]);
+        let same = |_: &[u8; 32]| 1;
+        assert_eq!(display_order(&[a, b, c], same, unread, None), vec![c, a, b]);
         // Com o ponteiro na lista, a ordem anterior vale e a chave nova vai para o fim.
-        assert_eq!(display_order(&[a, b, c], unread, Some(&[a, b])), vec![a, b, c]);
-        assert_eq!(display_order(&[b, a], unread, Some(&[a, b])), vec![a, b]);
+        assert_eq!(display_order(&[a, b, c], same, unread, Some(&[a, b])), vec![a, b, c]);
+        assert_eq!(display_order(&[b, a], same, unread, Some(&[a, b])), vec![a, b]);
+    }
+
+    #[test]
+    fn groups_come_first_and_unread_only_rises_within_a_group() {
+        let (a, b, c, d) = ([1; 32], [2; 32], [3; 32], [4; 32]);
+        // d na chamada, b online, a e c sem resposta; c tem mensagem nova, mas é de outro grupo que b.
+        let rank = |k: &[u8; 32]| match *k { x if x == d => 0, x if x == b => 1, _ => 2 };
+        let unread = |k: &[u8; 32]| usize::from(*k == c) * 5;
+        assert_eq!(display_order(&[a, b, c, d], rank, unread, None), vec![d, b, c, a]);
+    }
+
+    #[test]
+    fn presence_ranks_call_then_online_then_the_rest() {
+        assert!(Presence::InCall.rank() < Presence::Online.rank());
+        assert!(Presence::Online.rank() < Presence::Offline.rank());
+        assert_eq!(Presence::Offline.rank(), Presence::Checking.rank());
+        assert_eq!(Presence::Checking.rank(), Presence::SelfOffline.rank());
+    }
+
+    #[test]
+    fn group_titles_count_the_online_ones() {
+        assert_eq!(group_title(1, 3), "Online · 3");
+        assert_eq!(group_title(2, 3), "Sem resposta");
+    }
+
+    #[test]
+    fn chat_name_does_not_pin_your_own_offline_state_on_the_contact() {
+        assert_eq!(chat_name("Ana", Presence::SelfOffline), "Bate-papo com Ana");
+        assert_eq!(chat_name("Ana", Presence::Online), "Bate-papo com Ana, online");
+        assert_eq!(chat_name("Ana", Presence::InCall), "Bate-papo com Ana, em chamada");
     }
 }
