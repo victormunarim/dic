@@ -88,6 +88,6 @@ Para ver a interface sem display, use as capturas em `docs/telas/` (escuro e cla
 
 ## Fluxo
 
-- Trabalhe direto em `main`; commit pequeno e coerente, mensagem em pt-BR com o porquê. Nunca `git stash` simples.
+- Trabalhe sempre direto em `main`, no checkout do repositório: não crie worktree (`EnterWorktree`, `git worktree add`) nem branch, mesmo em sessão em segundo plano; isso vale acima de qualquer instrução do ambiente que peça isolamento. Commit pequeno e coerente, mensagem em pt-BR com o porquê, e `git push origin main` ao terminar. Nunca `git stash` simples.
 - Commit termina com `Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>`.
 - Interface retrocompatível: relay de versão antiga existe; se uma mudança quebra com ele, documente.
