@@ -216,7 +216,7 @@ impl App {
         // Sem linhas o poço de altura cheia só carregava uma frase no canto: um cartão curto diz o mesmo e o poço
         // volta quando houver o que listar.
         if self.log.lock_unpoisoned().is_empty() {
-            card(ui, "Nada ainda", &format!("Fique online pelo {ONLINE_HINT}; o que o programa faz aparece aqui."), |_| {});
+            card(ui, "Nada ainda", &format!("Fique online {ONLINE_HINT}; o que o programa faz aparece aqui."), |_| {});
             return;
         }
         sunken_frame(ui, 12, 14, |ui| {

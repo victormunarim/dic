@@ -109,7 +109,7 @@ impl App {
                         let _ = r.cmds.send(Cmd::MicTest);
                     }
                     if offline {
-                        note(ui, "Fique online (botão de ligar, no canto inferior esquerdo) para testar o microfone.");
+                        note(ui, format!("Fique online {ONLINE_HINT} para testar o microfone."));
                     }
                 });
             } else {

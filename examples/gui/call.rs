@@ -27,7 +27,7 @@ impl App {
                 }
             }
             if offline {
-                note(ui, format!("Fique online pelo {ONLINE_HINT}."));
+                note(ui, format!("Fique online {ONLINE_HINT}."));
             }
         });
     }

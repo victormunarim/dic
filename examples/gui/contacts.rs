@@ -385,7 +385,7 @@ impl App {
                     } else if online && !in_call {
                         if probed.contains_key(key) { "Contato offline" } else { "Verificando se o contato está online…" }
                     } else {
-                        "Para ligar, fique online (botão de ligar, embaixo à esquerda) e sem outra chamada"
+                        "Para ligar, fique online (clique na inicial do seu nome, embaixo à esquerda) e sem outra chamada"
                     };
                     let can_call = online && !in_call && up;
                     let call_name = if can_call { format!("Ligar para {name}") } else { format!("Ligar para {name} (indisponível: {})", off_tip.to_lowercase()) };

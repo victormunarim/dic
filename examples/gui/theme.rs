@@ -409,7 +409,7 @@ const R_BARE: u8 = 8;
 const R_CHECK: u8 = 3;
 
 /// Onde ficar online, para as telas que dependem disso dizerem o mesmo caminho.
-pub(crate) const ONLINE_HINT: &str = "botão de ligar, no canto inferior esquerdo";
+pub(crate) const ONLINE_HINT: &str = "clicando na inicial do seu nome, no canto inferior esquerdo";
 
 /// Botão de tamanho normal, que pode ficar desligado.
 pub(crate) fn button(ui: &mut Ui, enabled: bool, text: &str, fill: Color32) -> egui::Response {
@@ -709,19 +709,6 @@ pub(crate) fn power_icon(ui: &Ui, rect: egui::Rect, color: Color32) {
         .collect();
     ui.painter().add(egui::Shape::line(arc, stroke));
     ui.painter().line_segment([c - vec2(0.0, r * 1.25), c - vec2(0.0, r * 0.1)], stroke);
-}
-
-/// Símbolo de ligar/desligar no padrão dos outros ícones desenhados (`size` é a altura): arco aberto em cima e um traço.
-pub(crate) fn power_glyph(painter: &egui::Painter, c: Pos2, size: f32, color: Color32) {
-    let (r, stroke) = (size * 0.3, Stroke::new(size * 0.11, color));
-    let arc: Vec<Pos2> = (0..=24)
-        .map(|i| {
-            let a = (-60.0f32 + 300.0 * i as f32 / 24.0).to_radians();
-            c + vec2(a.cos(), a.sin()) * r
-        })
-        .collect();
-    painter.add(Shape::line(arc, stroke));
-    painter.line_segment([c - vec2(0.0, r * 1.3), c - vec2(0.0, r * 0.1)], stroke);
 }
 
 /// Selo só de leitura (sem clique, sem mão): escudo com a explicação no hover. O estado vai no texto da dica e no nome

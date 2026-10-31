@@ -88,7 +88,7 @@ impl App {
         let hub = self.shared.servers.lock_unpoisoned().clone();
         let Some(hub) = hub.filter(|_| !offline) else {
             // O título da página já diz "Servidores": o cartão diz o estado, não repete o nome.
-            card(ui, "Você está offline", &format!("Para ver e usar os seus servidores, fique online pelo {ONLINE_HINT}."), |ui| {
+            card(ui, "Você está offline", &format!("Para ver e usar os seus servidores, fique online {ONLINE_HINT}."), |ui| {
                 details(ui, "Como funciona", "Cada membro guarda o grupo e o mantém de pé enquanto estiver online; não há servidor que o hospede.");
             });
             return;
