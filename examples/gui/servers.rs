@@ -294,8 +294,10 @@ impl App {
 
     /// Menu aberto pelo ícone de sair do servidor: um único item vermelho, que serve de confirmação.
     fn server_menu(&mut self, ui: &mut egui::Ui, hub: &clam::server::net::ServerHub, v: &ServerView) {
-        let tip = "O servidor some da sua lista. Para voltar, alguém precisa convidar você de novo.";
-        if menu_item(ui, false, Some(pal().error), "Sair do servidor", exit_icon).on_hover_text(tip).clicked() {
+        let id = egui::Id::new(("sair-servidor", v.name.as_str()));
+        let question = format!("Sair de {}?", v.name);
+        let effect = "O servidor some da sua lista. Para voltar, alguém precisa convidar você de novo.";
+        if confirm_item(ui, id, "Sair do servidor", "Pede confirmação antes de sair", &question, effect, "Sair", exit_icon) {
             if let Err(e) = hub.try_act(|s, now| s.leave(&v.id, now)) {
                 self.srv.msg = e.to_string();
             }
@@ -349,8 +351,12 @@ impl App {
                                 ui.label(RichText::new(format!("{} online", v.members.iter().filter(|m| m.online).count())).size(13.0).color(pal().muted));
                             });
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                let exit = exit_button(ui).on_hover_text("Sair do servidor");
-                                egui::Popup::menu(&exit).show(|ui| self.server_menu(ui, hub, v));
+                                let exit = exit_button(ui, "Sair do servidor").on_hover_text("Sair do servidor");
+                                let menu = egui::Popup::menu(&exit).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| self.server_menu(ui, hub, v));
+                                if menu.is_none() {
+                                    reset_confirm(ui, egui::Id::new(("sair-servidor", v.name.as_str())));
+                                }
+                                menu_focus_back(ui, &exit, menu.is_some());
                                 let shown = members_shown(self.srv.members_open, ctx.screen_rect().width());
                                 let members_tip = format!("{} os membros ({})", if shown { "Esconder" } else { "Mostrar" }, ctx.format_shortcut(&MEMBERS_KEY));
                                 if members_toggle(ui, shown).on_hover_text(members_tip).clicked() || ctx.input_mut(|i| i.consume_shortcut(&MEMBERS_KEY)) {
@@ -491,20 +497,27 @@ impl App {
                     self.send(Cmd::JoinRoom(v.id, room.id));
                 }
                 if manages {
-                    let trash = trash_button(ui).on_hover_text("Apagar a sala");
+                    let trash = trash_button(ui, &format!("Apagar a sala {}", room.name)).on_hover_text("Apagar a sala");
                     // Apagar sempre pede certeza: o item vermelho do menu é a confirmação. Na sala em que estou o item
                     // fica apagado e diz o motivo, em vez de abrir e dar erro.
-                    egui::Popup::menu(&trash).show(|ui| {
-                        let item = menu_row(ui, !here, false, Some(pal().error), "Apagar a sala e as mensagens", None, trash_icon);
+                    let delete = egui::Id::new(("apagar-sala", room.id));
+                    let menu = egui::Popup::menu(&trash).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
                         if here {
-                            item.on_hover_text("Você está nesta sala: saia dela antes de apagá-la.");
-                        } else if item.on_hover_text("A sala some para todos os membros do servidor.").clicked() {
+                            menu_row(ui, Some("Você está nesta sala: saia dela antes de apagá-la."), false, Some(pal().error), "Apagar a sala e as mensagens", None, trash_icon);
+                            return;
+                        }
+                        let question = format!("Apagar a sala {}?", room.name);
+                        if confirm_item(ui, delete, "Apagar a sala e as mensagens", "Pede confirmação antes de apagar", &question, "A sala some para todos os membros do servidor.", "Apagar", trash_icon) {
                             if let Err(e) = hub.try_act(|s, now| s.delete_room(&v.id, room.id, now)) {
                                 self.srv.msg = e.to_string();
                             }
                             ui.close();
                         }
                     });
+                    if menu.is_none() {
+                        reset_confirm(ui, delete);
+                    }
+                    menu_focus_back(ui, &trash, menu.is_some());
                 }
             });
             let live = self.shared.room.lock_unpoisoned();
@@ -664,30 +677,15 @@ impl App {
                     });
                     if manages && !m.is_me && m.role != Role::Owner {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let dots = dots_button(ui).on_hover_text("Mais ações");
+                            let who = if m.name.is_empty() { member_name(&contacts, &m.key) } else { m.name.clone() };
+                            let dots = dots_button(ui, &format!("Mais ações de {who}")).on_hover_text("Mais ações");
                             // Remover é irreversível e troca a chave do servidor: pergunta dentro do próprio menu, que por
                             // isso só fecha por clique fora ou por uma resposta.
                             let ask = egui::Id::new(("remover-membro", m.id));
-                            let shown = egui::Popup::menu(&dots).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
-                                ui.set_min_width(220.0);
+                            let menu = egui::Popup::menu(&dots).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+                                ui.set_min_width(230.0);
                                 let asking = ui.data(|d| d.get_temp::<bool>(ask)).unwrap_or(false);
-                                if asking {
-                                    let who = if m.name.is_empty() { member_name(&contacts, &m.key) } else { m.name.clone() };
-                                    ui.add(egui::Label::new(RichText::new(format!("Remover {who} do servidor?")).strong().color(pal().strong)).wrap());
-                                    ui.add(egui::Label::new(RichText::new("O segredo do servidor é trocado para quem fica: a pessoa não vê mais o que vier depois.").size(13.0).color(pal().text)).wrap());
-                                    if menu_item(ui, false, Some(pal().error), "Remover", trash_icon).clicked() {
-                                        if let Err(e) = hub.try_act(|s, now| s.remove_member(&v.id, m.id, now)) {
-                                            self.srv.msg = e.to_string();
-                                        }
-                                        ui.data_mut(|d| d.remove_temp::<bool>(ask));
-                                        ui.close();
-                                    }
-                                    if menu_item(ui, false, None, "Cancelar", close_icon).clicked() {
-                                        ui.data_mut(|d| d.remove_temp::<bool>(ask));
-                                    }
-                                    return;
-                                }
-                                if v.my_role == Some(Role::Owner) {
+                                if v.my_role == Some(Role::Owner) && !asking {
                                     let (label, to) = if m.role == Role::Admin { ("Rebaixar", Role::Member) } else { ("Promover", Role::Admin) };
                                     if menu_item(ui, false, None, label, person_icon).on_hover_text("Muda o papel de admin deste membro").clicked() {
                                         if let Err(e) = hub.try_act(|s, now| s.set_role(&v.id, m.id, to, now)) {
@@ -696,14 +694,18 @@ impl App {
                                         ui.close();
                                     }
                                 }
-                                if menu_item(ui, false, Some(pal().error), "Remover do servidor", trash_icon).on_hover_text("Pede confirmação antes de remover").clicked() {
-                                    ui.data_mut(|d| d.insert_temp(ask, true));
+                                let effect = "O segredo do servidor é trocado para quem fica: a pessoa não vê mais o que vier depois.";
+                                if confirm_item(ui, ask, "Remover do servidor", "Pede confirmação antes de remover", &format!("Remover {who} do servidor?"), effect, "Remover", trash_icon) {
+                                    if let Err(e) = hub.try_act(|s, now| s.remove_member(&v.id, m.id, now)) {
+                                        self.srv.msg = e.to_string();
+                                    }
+                                    ui.close();
                                 }
                             });
-                            // Menu fechado por clique fora: a próxima abertura volta ao começo, sem a pergunta pendente.
-                            if shown.is_none() {
-                                ui.data_mut(|d| d.remove_temp::<bool>(ask));
+                            if menu.is_none() {
+                                reset_confirm(ui, ask);
                             }
+                            menu_focus_back(ui, &dots, menu.is_some());
                         });
                     }
                 });
@@ -768,11 +770,11 @@ impl App {
                 }
             }
             // Gerar o texto para mandar por fora é raro: fica no menu, e o aviso do IP continua valendo.
-            let dots = dots_button(ui);
-            egui::Popup::menu(&dots).show(|ui| {
-                let item = menu_row(ui, ready, false, None, "Gerar o convite como texto", None, invite_icon);
-                let item = if ready { item.on_hover_text("Para mandar por onde preferir, sem passar pela rede") } else { item.on_hover_text("Escolha um contato e marque o aviso do IP para liberar") };
-                if ready && item.clicked() {
+            let dots = dots_button(ui, "Mais ações do convite");
+            let menu = egui::Popup::menu(&dots).show(|ui| {
+                let blocked = (!ready).then_some("Escolha um contato e marque o aviso do IP para liberar");
+                let item = menu_row(ui, blocked, false, None, "Gerar o convite como texto", None, invite_icon);
+                if ready && item.on_hover_text("Para mandar por onde preferir, sem passar pela rede").clicked() {
                     let key = self.srv.pick.expect("item só liga com contato escolhido");
                     match hub.try_run(|s, now| s.invite(&v.id, key, now).map(|t| (t, Output::default()))) {
                         Ok(text) => {
@@ -784,6 +786,7 @@ impl App {
                     ui.close();
                 }
             });
+            menu_focus_back(ui, &dots, menu.is_some());
             });
             if !self.srv.invite_info.is_empty() {
                 ui.colored_label(pal().green, &self.srv.invite_info);

@@ -364,8 +364,9 @@ pub(crate) fn close_button(ui: &mut Ui, tip: &str) -> egui::Response {
 
 /// Três pontos um acima do outro (menu de ações), desenhados: a fonte pode não ter o glifo "⋮". Quem chama
 /// abre o menu com `egui::Popup::menu(&resposta)`.
-pub(crate) fn dots_button(ui: &mut Ui) -> egui::Response {
+pub(crate) fn dots_button(ui: &mut Ui, name: &str) -> egui::Response {
     let (rect, reply) = ui.allocate_exact_size(vec2(34.0, 34.0), egui::Sense::click());
+    reply.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name));
     let ink = if reply.hovered() { pal().strong } else { pal().muted };
     for dy in [-6.0, 0.0, 6.0] {
         ui.painter().circle_filled((rect.center() + press_nudge(&reply)) + vec2(0.0, dy), 2.0, ink);
@@ -405,8 +406,9 @@ pub(crate) fn trash_icon(painter: &egui::Painter, c: Pos2, size: f32, color: Col
 }
 
 /// Botão da lixeira; vermelha ao passar o mouse.
-pub(crate) fn trash_button(ui: &mut Ui) -> egui::Response {
+pub(crate) fn trash_button(ui: &mut Ui, name: &str) -> egui::Response {
     let (rect, reply) = ui.allocate_exact_size(vec2(34.0, 34.0), egui::Sense::click());
+    reply.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name));
     trash_icon(ui.painter(), rect.center() + press_nudge(&reply), 18.0, if reply.hovered() { pal().red } else { pal().muted });
     focus_ring(ui, &reply, 8);
     reply.on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -425,8 +427,9 @@ pub(crate) fn exit_icon(painter: &egui::Painter, c: Pos2, size: f32, color: Colo
 }
 
 /// Botão da porta com seta (sair); vermelho ao passar o mouse. Quem chama decide a confirmação.
-pub(crate) fn exit_button(ui: &mut Ui) -> egui::Response {
+pub(crate) fn exit_button(ui: &mut Ui, name: &str) -> egui::Response {
     let (rect, reply) = ui.allocate_exact_size(vec2(34.0, 34.0), egui::Sense::click());
+    reply.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name));
     exit_icon(ui.painter(), rect.center() + press_nudge(&reply), 18.0, if reply.hovered() { pal().red } else { pal().muted });
     focus_ring(ui, &reply, 8);
     reply.on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -736,15 +739,19 @@ pub(crate) fn glyph_button(ui: &mut Ui, name: &str, color: Option<Color32>, draw
 /// Linha de menu com ícone desenhado à esquerda; `selected` marca a linha como o item atual e `tint` fixa a
 /// tinta (vermelho no destrutivo).
 pub(crate) fn menu_item(ui: &mut Ui, selected: bool, tint: Option<Color32>, label: &str, draw: impl FnOnce(&egui::Painter, Pos2, f32, Color32)) -> egui::Response {
-    menu_row(ui, true, selected, tint, label, None, draw)
+    menu_row(ui, None, selected, tint, label, None, draw)
 }
 
-/// Linha de menu completa: `enabled` falso apaga a linha e tira o relevo e o clique (o motivo vai no hover de quem
-/// chama) e `shortcut` aparece à direita, na mesma linha da ação a que pertence.
-pub(crate) fn menu_row(ui: &mut Ui, enabled: bool, selected: bool, tint: Option<Color32>, label: &str, shortcut: Option<&str>, draw: impl FnOnce(&egui::Painter, Pos2, f32, Color32)) -> egui::Response {
-    let sense = if enabled { egui::Sense::click() } else { egui::Sense::hover() };
+/// Linha de menu completa. `blocked` com motivo apaga a linha (sem relevo nem clique) e leva o motivo ao hover e ao
+/// nome acessível, para teclado e leitor de tela não ficarem com um item mudo; `shortcut` aparece à direita, na mesma
+/// linha da ação a que pertence.
+pub(crate) fn menu_row(ui: &mut Ui, blocked: Option<&str>, selected: bool, tint: Option<Color32>, label: &str, shortcut: Option<&str>, draw: impl FnOnce(&egui::Painter, Pos2, f32, Color32)) -> egui::Response {
+    let enabled = blocked.is_none();
+    // Apagado continua alcançável pelo Tab (sem clicar), senão o motivo só existiria para o mouse.
+    let sense = if enabled { egui::Sense::click() } else { egui::Sense::focusable_noninteractive() };
     let (rect, reply) = ui.allocate_exact_size(vec2(ui.available_width().max(190.0), 30.0), sense);
-    reply.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
+    let name = menu_row_name(label, blocked);
+    reply.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, name.clone()));
     let painter = ui.painter();
     if enabled && selected {
         painter.rect_filled(rect, CornerRadius::same(8), pal().selected);
@@ -761,11 +768,61 @@ pub(crate) fn menu_row(ui: &mut Ui, enabled: bool, selected: bool, tint: Option<
     if let Some(keys) = shortcut {
         painter.text(rect.right_center() - vec2(12.0, 0.0), egui::Align2::RIGHT_CENTER, keys, FontId::proportional(12.0), pal().muted);
     }
-    if enabled {
-        focus_ring(ui, &reply, 8);
-        reply.on_hover_cursor(egui::CursorIcon::PointingHand)
-    } else {
-        reply
+    focus_ring(ui, &reply, 8);
+    match blocked {
+        Some(why) => reply.on_hover_text(why),
+        None => reply.on_hover_cursor(egui::CursorIcon::PointingHand),
+    }
+}
+
+/// Nome acessível da linha de menu: o motivo do bloqueio vai junto, como nos botões de ligar da lista de contatos.
+fn menu_row_name(label: &str, blocked: Option<&str>) -> String {
+    match blocked {
+        Some(why) => format!("{label} (indisponível: {})", why.to_lowercase()),
+        None => label.to_string(),
+    }
+}
+
+/// Item destrutivo com a pergunta dentro do menu: o primeiro clique troca o conteúdo pela frase do efeito, com
+/// `confirm` (vermelho) e *Cancelar*; só o segundo clique age. Devolve `true` no clique que confirma. O efeito fica
+/// escrito porque hover não existe no teclado nem no toque. Quem chama usa `PopupCloseBehavior::CloseOnClickOutside`
+/// (senão o primeiro clique fecharia o menu), fecha com `ui.close()` ao receber `true` e chama `reset_confirm` quando
+/// o menu fecha por fora.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn confirm_item(ui: &mut Ui, id: egui::Id, label: &str, hint: &str, question: &str, effect: &str, confirm: &str, draw: impl FnOnce(&egui::Painter, Pos2, f32, Color32)) -> bool {
+    ui.set_min_width(230.0);
+    if !ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(false) {
+        if menu_item(ui, false, Some(pal().error), label, draw).on_hover_text(hint).clicked() {
+            ui.data_mut(|d| d.insert_temp(id, true));
+        }
+        return false;
+    }
+    ui.add(egui::Label::new(RichText::new(question).strong().color(pal().strong)).wrap());
+    ui.add(egui::Label::new(RichText::new(effect).size(13.0).color(pal().text)).wrap());
+    let mut done = false;
+    if menu_item(ui, false, Some(pal().error), confirm, trash_icon).clicked() {
+        done = true;
+        reset_confirm(ui, id);
+    }
+    if menu_item(ui, false, None, "Cancelar", close_icon).clicked() {
+        reset_confirm(ui, id);
+    }
+    done
+}
+
+/// Volta o item de `confirm_item` ao começo (menu fechado por fora, ou resposta dada).
+pub(crate) fn reset_confirm(ui: &Ui, id: egui::Id) {
+    ui.data_mut(|d| d.remove_temp::<bool>(id));
+}
+
+/// Devolve o foco ao botão que abriu o menu quando ele fecha pelo teclado (Esc, Enter num item). Com o mouse o foco
+/// não importa, e roubá-lo de onde a pessoa clicou seria pior. `open` é se o menu está aberto neste quadro.
+pub(crate) fn menu_focus_back(ui: &Ui, trigger: &egui::Response, open: bool) {
+    let id = trigger.id.with("menu-aberto");
+    let was = ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
+    ui.data_mut(|d| d.insert_temp(id, open));
+    if was && !open && !ui.input(|i| i.pointer.any_pressed()) {
+        trigger.request_focus();
     }
 }
 
@@ -828,6 +885,12 @@ mod tests {
                 assert!(r >= 3.0, "tema {name}: o aro de foco sobre {on} tem contraste {r:.2} (< 3)");
             }
         }
+    }
+
+    #[test]
+    fn a_blocked_menu_row_carries_its_reason_in_the_accessible_name() {
+        assert_eq!(menu_row_name("Convidar", None), "Convidar");
+        assert_eq!(menu_row_name("Convidar", Some("Abra um servidor")), "Convidar (indisponível: abra um servidor)");
     }
 
     #[test]

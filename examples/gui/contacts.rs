@@ -346,13 +346,13 @@ impl App {
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;
-                    let dots = dots_button(ui).on_hover_text("Mais ações");
+                    let dots = dots_button(ui, &format!("Mais ações de {name}")).on_hover_text("Mais ações");
                     // Cancelar a remoção devolve o foco ao menu desta linha, de onde a pessoa partiu.
                     if ui.data(|d| d.get_temp::<[u8; 32]>(back_focus_id())) == Some(*key) {
                         dots.request_focus();
                         ui.data_mut(|d| d.remove_temp::<[u8; 32]>(back_focus_id()));
                     }
-                    egui::Popup::menu(&dots).show(|ui| {
+                    let menu = egui::Popup::menu(&dots).show(|ui| {
                         let tip = if trusted {
                             "A sua tela vai direto a ele, sem relay, e ele vê o seu IP."
                         } else {
@@ -373,6 +373,7 @@ impl App {
                             ui.close();
                         }
                     });
+                    menu_focus_back(ui, &dots, menu.is_some());
                     let unread = unread[key];
                     // Leitor de tela e teclado não passam pelo hover do avatar: o estado do contato vai no nome do botão.
                     let chat = glyph_button(ui, &chat_name(name, status), (unread > 0).then_some(pal().focus), chat_icon);
