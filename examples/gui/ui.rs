@@ -212,27 +212,57 @@ impl App {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let gear = glyph_button(ui, "Menu", None, gear_icon).on_hover_text("Chamada, vídeo, áudio, configurações e atividade");
                 let calling_1to1 = in_call && !in_room;
+                // Atalhos nas linhas das ações a que pertencem; fora de um servidor, convidar e membros ficam apagados.
+                let in_server = self.srv.sel.is_some() && !offline;
+                let muted_now = self.shared.audio.muted.load(Ordering::Relaxed);
                 egui::Popup::menu(&gear).show(|ui| {
+                    ui.set_min_width(280.0);
                     type Icon = fn(&egui::Painter, egui::Pos2, f32, egui::Color32);
                     let mic: Icon = |p, c, s, k| mic_icon(p, c, s, k, false);
                     for (tab, icon, label) in [
-                        (Tab::Call, phone_icon as Icon, if calling_1to1 { "Chamada ●" } else { "Chamada" }),
+                        (Tab::Call, phone_icon as Icon, if calling_1to1 { "Chamada em curso" } else { "Chamada" }),
                         (Tab::Video, monitor_icon as Icon, "Vídeo"),
                         (Tab::Audio, mic, "Áudio"),
                         (Tab::Settings, gear_icon as Icon, "Configurações"),
                         (Tab::Log, log_icon as Icon, "Atividade"),
                     ] {
-                        if menu_item(ui, self.tab == tab, None, label, icon).clicked() {
+                        // A chamada em curso também vai no acento do ícone, além do rótulo.
+                        let live = tab == Tab::Call && calling_1to1;
+                        let drawn = move |p: &egui::Painter, c: egui::Pos2, s: f32, k: egui::Color32| icon(p, c, s, if live { pal().focus } else { k });
+                        if menu_item(ui, self.tab == tab, None, label, drawn).clicked() {
                             self.tab = tab;
                             ui.close();
                         }
                     }
-                    // Os atalhos ficam à vista aqui, além da dica de cada botão.
                     ui.separator();
-                    for (keys, what) in [(&INVITE_KEY, "Convidar para o servidor"), (&MEMBERS_KEY, "Mostrar ou esconder os membros"), (&SEARCH_KEY, "Buscar contato"), (&MUTE_KEY, "Microfone mudo")] {
-                        ui.label(egui::RichText::new(format!("{}  {what}", ctx.format_shortcut(keys))).size(12.0).color(pal().muted));
+                    let keys = |k: &egui::KeyboardShortcut| ctx.format_shortcut(k);
+                    let members_label = if crate::servers::members_shown(self.srv.members_open, ctx.screen_rect().width()) { "Esconder os membros" } else { "Mostrar os membros" };
+                    let need_server = "Abra um servidor para usar";
+                    let invite = menu_row(ui, in_server, false, None, "Convidar para o servidor", Some(&keys(&INVITE_KEY)), invite_icon);
+                    if !in_server {
+                        invite.on_hover_text(need_server);
+                    } else if invite.clicked() {
+                        self.srv.start_invite();
+                        ui.close();
                     }
-                    ui.label(egui::RichText::new("Esc  Fechar o convite").size(12.0).color(pal().muted));
+                    let members = menu_row(ui, in_server, false, None, members_label, Some(&keys(&MEMBERS_KEY)), person_icon);
+                    if !in_server {
+                        members.on_hover_text(need_server);
+                    } else if members.clicked() {
+                        self.srv.toggle_members(ctx.screen_rect().width());
+                        ui.close();
+                    }
+                    if menu_row(ui, true, false, None, "Buscar contato", Some(&keys(&SEARCH_KEY)), magnifier_icon).clicked() {
+                        self.tab = Tab::Contacts;
+                        ctx.data_mut(|d| d.insert_temp(crate::contacts::focus_search_id(), true));
+                        ui.close();
+                    }
+                    let (mute_label, mute_tint) = if muted_now { ("Voltar a falar", Some(pal().error)) } else { ("Microfone mudo", None) };
+                    if menu_row(ui, true, false, mute_tint, mute_label, Some(&keys(&MUTE_KEY)), move |p, c, s, k| mic_icon(p, c, s, k, !muted_now)).clicked() {
+                        self.shared.audio.muted.store(!muted_now, Ordering::Relaxed);
+                        ui.close();
+                    }
+                    ui.label(egui::RichText::new("Esc fecha o cartão de convite").size(12.0).color(pal().muted));
                 });
                 let muted = self.shared.audio.muted.load(Ordering::Relaxed);
                 let mic = glyph_button(ui, "Microfone", muted.then_some(pal().red), |p, c, s, k| mic_icon(p, c, s, k, muted));

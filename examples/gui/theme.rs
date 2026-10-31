@@ -412,21 +412,32 @@ pub(crate) fn trash_button(ui: &mut Ui) -> egui::Response {
     reply.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// Porta com seta para fora (sair), desenhada; vermelha ao passar o mouse. Quem chama decide a confirmação.
+/// Porta com seta para fora (sair), desenhada: batente aberto à direita, para a seta sair por ali.
+pub(crate) fn exit_icon(painter: &egui::Painter, c: Pos2, size: f32, color: Color32) {
+    let k = size / 18.0;
+    let ink = Stroke::new(1.6_f32, color);
+    painter.line_segment([c + vec2(1.0, -8.0) * k, c + vec2(-6.0, -8.0) * k], ink);
+    painter.line_segment([c + vec2(-6.0, -8.0) * k, c + vec2(-6.0, 8.0) * k], ink);
+    painter.line_segment([c + vec2(-6.0, 8.0) * k, c + vec2(1.0, 8.0) * k], ink);
+    painter.line_segment([c + vec2(-2.0, 0.0) * k, c + vec2(8.0, 0.0) * k], ink);
+    painter.line_segment([c + vec2(4.0, -4.0) * k, c + vec2(8.0, 0.0) * k], ink);
+    painter.line_segment([c + vec2(4.0, 4.0) * k, c + vec2(8.0, 0.0) * k], ink);
+}
+
+/// Botão da porta com seta (sair); vermelho ao passar o mouse. Quem chama decide a confirmação.
 pub(crate) fn exit_button(ui: &mut Ui) -> egui::Response {
     let (rect, reply) = ui.allocate_exact_size(vec2(34.0, 34.0), egui::Sense::click());
-    let c = rect.center() + press_nudge(&reply);
-    let ink = Stroke::new(1.6_f32, if reply.hovered() { pal().red } else { pal().muted });
-    let p = ui.painter();
-    // Batente aberto à direita, para a seta sair por ali.
-    p.line_segment([c + vec2(1.0, -8.0), c + vec2(-6.0, -8.0)], ink);
-    p.line_segment([c + vec2(-6.0, -8.0), c + vec2(-6.0, 8.0)], ink);
-    p.line_segment([c + vec2(-6.0, 8.0), c + vec2(1.0, 8.0)], ink);
-    p.line_segment([c + vec2(-2.0, 0.0), c + vec2(8.0, 0.0)], ink);
-    p.line_segment([c + vec2(4.0, -4.0), c + vec2(8.0, 0.0)], ink);
-    p.line_segment([c + vec2(4.0, 4.0), c + vec2(8.0, 0.0)], ink);
+    exit_icon(ui.painter(), rect.center() + press_nudge(&reply), 18.0, if reply.hovered() { pal().red } else { pal().muted });
     focus_ring(ui, &reply, 8);
     reply.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Xis (cancelar, fechar), desenhado.
+pub(crate) fn close_icon(painter: &egui::Painter, c: Pos2, size: f32, color: Color32) {
+    let h = size * 0.28;
+    let ink = Stroke::new(1.6_f32, color);
+    painter.line_segment([c + vec2(-h, -h), c + vec2(h, h)], ink);
+    painter.line_segment([c + vec2(-h, h), c + vec2(h, -h)], ink);
 }
 
 /// Círculo com um xis (sair da sala), desenhado: simples e legível em tamanho pequeno. Vermelho ao passar o
@@ -725,19 +736,37 @@ pub(crate) fn glyph_button(ui: &mut Ui, name: &str, color: Option<Color32>, draw
 /// Linha de menu com ícone desenhado à esquerda; `selected` marca a linha como o item atual e `tint` fixa a
 /// tinta (vermelho no destrutivo).
 pub(crate) fn menu_item(ui: &mut Ui, selected: bool, tint: Option<Color32>, label: &str, draw: impl FnOnce(&egui::Painter, Pos2, f32, Color32)) -> egui::Response {
-    let (rect, reply) = ui.allocate_exact_size(vec2(ui.available_width().max(190.0), 30.0), egui::Sense::click());
-    reply.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+    menu_row(ui, true, selected, tint, label, None, draw)
+}
+
+/// Linha de menu completa: `enabled` falso apaga a linha e tira o relevo e o clique (o motivo vai no hover de quem
+/// chama) e `shortcut` aparece à direita, na mesma linha da ação a que pertence.
+pub(crate) fn menu_row(ui: &mut Ui, enabled: bool, selected: bool, tint: Option<Color32>, label: &str, shortcut: Option<&str>, draw: impl FnOnce(&egui::Painter, Pos2, f32, Color32)) -> egui::Response {
+    let sense = if enabled { egui::Sense::click() } else { egui::Sense::hover() };
+    let (rect, reply) = ui.allocate_exact_size(vec2(ui.available_width().max(190.0), 30.0), sense);
+    reply.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
     let painter = ui.painter();
-    if selected {
+    if enabled && selected {
         painter.rect_filled(rect, CornerRadius::same(8), pal().selected);
-    } else if reply.hovered() {
+    } else if enabled && reply.hovered() {
         painter.rect_filled(rect, CornerRadius::same(8), pal().hover);
     }
-    let ink = tint.unwrap_or(if selected || reply.hovered() { pal().strong } else { pal().text });
+    let ink = if !enabled {
+        pal().muted.gamma_multiply(0.6)
+    } else {
+        tint.unwrap_or(if selected || reply.hovered() { pal().strong } else { pal().text })
+    };
     draw(painter, rect.left_center() + vec2(18.0, 0.0), 18.0, ink);
     painter.text(rect.left_center() + vec2(36.0, 0.0), egui::Align2::LEFT_CENTER, label, TextStyle::Button.resolve(ui.style()), ink);
-    focus_ring(ui, &reply, 8);
-    reply.on_hover_cursor(egui::CursorIcon::PointingHand)
+    if let Some(keys) = shortcut {
+        painter.text(rect.right_center() - vec2(12.0, 0.0), egui::Align2::RIGHT_CENTER, keys, FontId::proportional(12.0), pal().muted);
+    }
+    if enabled {
+        focus_ring(ui, &reply, 8);
+        reply.on_hover_cursor(egui::CursorIcon::PointingHand)
+    } else {
+        reply
+    }
 }
 
 /// Lupa (tela cheia), desenhada: aro e cabo.
