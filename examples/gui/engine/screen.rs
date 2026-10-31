@@ -11,6 +11,22 @@ use clam::{
     video::{H264Encoder, Priority, RawFrame, ScreenDecoder, ScreenSource, pump, pump_all},
 };
 
+/// Som de uma tela recebida: o decodificador e o que já foi decodificado e ainda não tocou.
+struct Heard {
+    opus: clam::media::codec::Opus,
+    pcm: std::collections::VecDeque<i16>,
+    last: Option<u16>,
+}
+
+impl Heard {
+    const FRAME: usize = clam::media::codec::Opus::SAMPLES;
+    const MAX: usize = Self::FRAME * 25;
+
+    fn new() -> Self {
+        Self { opus: clam::media::codec::Opus::new(), pcm: Default::default(), last: None }
+    }
+}
+
 /// Estado da tela compartilhada, visto pela janela e pela chamada.
 #[derive(Default)]
 pub(crate) struct ScreenState {
@@ -26,6 +42,12 @@ pub(crate) struct ScreenState {
     pub(crate) sharp: AtomicBool,
     /// A pessoa pediu codificação por hardware; a janela copia a escolha da configuração a cada quadro.
     pub(crate) hardware: AtomicBool,
+    /// A pessoa quer levar o som do computador junto; a janela copia a escolha da configuração a cada quadro.
+    pub(crate) audio: AtomicBool,
+    /// O que o alto-falante do programa tocou, para tirar do som do computador (`None` sem áudio aberto).
+    pub(crate) speaker: Mutex<Option<Speaker>>,
+    /// Som de tela recebido, por quem transmite, esperando a vez de tocar.
+    heard: Mutex<HashMap<[u8; 32], Heard>>,
     /// Os quadros estão saindo.
     pub(crate) sharing: AtomicBool,
     /// Última imagem recebida de cada pessoa que transmite, com o número dela; a janela só refaz a
@@ -41,6 +63,50 @@ pub(crate) struct ScreenState {
 }
 
 impl ScreenState {
+    /// Decodifica um quadro de som da tela de `who` e o guarda para tocar. Perda (lacuna no contador) é
+    /// escondida pelo próprio Opus.
+    pub(crate) fn hear(&self, who: [u8; 32], a: clam::media::screen::ScreenAudio) {
+        use clam::media::codec::Codec;
+        let mut m = self.heard.lock_unpoisoned();
+        let h = m.entry(who).or_insert_with(Heard::new);
+        let missing = h.last.map_or(0, |l| a.seq.wrapping_sub(l).wrapping_sub(1));
+        // Lacuna grande é reinício do outro lado, não perda: não vale esconder centenas de quadros.
+        for _ in 0..missing.min(3) {
+            let pcm = h.opus.decode(None);
+            h.pcm.extend(pcm);
+        }
+        h.last = Some(a.seq);
+        let pcm = h.opus.decode(Some(&a.data));
+        h.pcm.extend(pcm);
+        // Passou de meio segundo: é atraso acumulado, fica só o mais novo.
+        let max = Heard::MAX;
+        if h.pcm.len() > max {
+            let extra = h.pcm.len() - max;
+            h.pcm.drain(..extra);
+        }
+    }
+
+    /// Soma o próximo quadro de 20 ms de cada tela que está com som, no volume `volume`. Vazio se ninguém.
+    pub(crate) fn next_audio(&self) -> Option<Vec<i16>> {
+        let mut m = self.heard.lock_unpoisoned();
+        let mut out: Option<Vec<i16>> = None;
+        for h in m.values_mut() {
+            if h.pcm.len() < Heard::FRAME {
+                continue;
+            }
+            let f: Vec<i16> = h.pcm.drain(..Heard::FRAME).collect();
+            match &mut out {
+                None => out = Some(f),
+                Some(o) => {
+                    for (a, b) in o.iter_mut().zip(f) {
+                        *a = a.saturating_add(b);
+                    }
+                }
+            }
+        }
+        out
+    }
+
     pub(crate) fn set_image(&self, who: [u8; 32], img: Option<RawFrame>) {
         let mut m = self.images.lock_unpoisoned();
         match img {
@@ -73,14 +139,21 @@ impl ScreenState {
         }
         self.want_share.store(false, Ordering::Relaxed);
         self.images.lock_unpoisoned().clear();
+        self.heard.lock_unpoisoned().clear();
+        *self.speaker.lock_unpoisoned() = None;
     }
 }
 
 /// Trata um evento de tela recebido. Devolve `false` se o decodificador quebrou e o evento foi ignorado.
 pub(crate) fn on_screen_event(state: &ScreenState, who: [u8; 32], dec: &mut Option<ScreenDecoder>, ev: ScreenEvent) -> bool {
     match ev {
+        ScreenEvent::Audio(a) => {
+            state.hear(who, a);
+            true
+        }
         ScreenEvent::Stopped => {
             *dec = None;
+            state.heard.lock_unpoisoned().remove(&who);
             state.set_image(who, None);
             true
         }
@@ -148,7 +221,11 @@ async fn start_capture(shared: &Arc<Shared>, out: &Sink) -> Result<(Box<dyn Scre
     let st = &shared.screen;
     let private = !st.open_path.load(Ordering::Relaxed);
     let slot = if private { SCREEN_SLOT } else { OPEN_SCREEN_SLOT };
-    let bitrate = H264Encoder::bitrate_for(slot);
+    let mut bitrate = H264Encoder::bitrate_for(slot);
+    if st.audio.load(Ordering::Relaxed) {
+        // O som toma slots do mesmo circuito: o vídeo cede essa parte, para a fila não encher.
+        bitrate = (f64::from(bitrate) * (1.0 - audio_share(slot))) as u32;
+    }
     let priority = if st.sharp.load(Ordering::Relaxed) { Priority::Sharpness } else { Priority::Smoothness };
     let started = match open_source(priority.fps(bitrate)).await {
         Ok(src) => H264Encoder::with_priority(bitrate, priority).map(|e| (src, e)).map_err(|e| e.to_string()),
@@ -208,6 +285,7 @@ pub(crate) async fn share_task(dialer: Dialer, peer: [u8; 32], keys: clam::media
         (false, _) => "tela: transmitindo sem cover (por 2 relays: o contato não é de confiança)",
     });
     let flag = shared.clone();
+    let mut audio = AudioTx::open(&shared, &out);
     // Capturar e codificar pesa: fora do executor.
     let share = tokio::task::spawn_blocking(move || {
         let every = Duration::from_secs_f32(1.0 / enc.fps());
@@ -242,7 +320,16 @@ pub(crate) async fn share_task(dialer: Dialer, peer: [u8; 32], keys: clam::media
                 }
             );
             next += every;
-            std::thread::sleep(next.saturating_duration_since(std::time::Instant::now()));
+            nap_until(next, || {
+                if let Some(a) = audio.as_mut()
+                    && !a.pump(|d| {
+                        let _ = share.push_audio(d);
+                    })
+                {
+                    *flag.screen.note.lock_unpoisoned() = "o som do computador parou de ser capturado".into();
+                    audio = None;
+                }
+            });
         }
         share
     })
@@ -284,6 +371,7 @@ pub(crate) async fn start_room_capture(shared: Arc<Shared>, out: Sink) -> Option
             return None;
         }
     };
+    let mut audio = AudioTx::open(&shared, &out);
     let (ctl, rx) = std::sync::mpsc::channel::<ShareCtl>();
     let handle = tokio::runtime::Handle::current();
     tokio::task::spawn_blocking(move || {
@@ -312,6 +400,10 @@ pub(crate) async fn start_room_capture(shared: Arc<Shared>, out: Sink) -> Option
             }
             shared.screen.sharing.store(!shares.is_empty(), Ordering::Relaxed);
             if shares.is_empty() {
+                // Ninguém assiste: o som capturado é jogado fora, para não chegar velho a quem entrar.
+                if let Some(a) = audio.as_mut() {
+                    a.pump(|_| {});
+                }
                 std::thread::sleep(Duration::from_millis(50));
                 next = std::time::Instant::now();
                 continue;
@@ -327,7 +419,18 @@ pub(crate) async fn start_room_capture(shared: Arc<Shared>, out: Sink) -> Option
                 shares.len(), enc.scrolled, enc.skipped, enc.held, enc.bitrate() / 1000, enc.qp(), enc.scale(), enc.encode_ms
             );
             next += every;
-            std::thread::sleep(next.saturating_duration_since(std::time::Instant::now()));
+            nap_until(next, || {
+                if let Some(a) = audio.as_mut()
+                    && !a.pump(|d| {
+                        for s in shares.values() {
+                            let _ = s.push_audio(d);
+                        }
+                    })
+                {
+                    *shared.screen.note.lock_unpoisoned() = "o som do computador parou de ser capturado".into();
+                    audio = None;
+                }
+            });
         }
         for (_, share) in shares {
             handle.block_on(share.stop());
@@ -347,6 +450,47 @@ mod tests {
 
     fn frame(w: usize, h: usize, rgb: [u8; 3]) -> RawFrame {
         RawFrame::new(w, h, [rgb[0], rgb[1], rgb[2], 255].repeat(w * h)).unwrap()
+    }
+
+    #[test]
+    fn screen_sound_is_decoded_played_in_frames_and_dropped_when_the_peer_stops() {
+        use clam::media::{codec::{Codec, Opus}, screen::ScreenAudio};
+        let st = ScreenState::default();
+        let mut enc = Opus::new();
+        let tone: Vec<i16> = (0..Opus::SAMPLES).map(|i| (6000.0 * (i as f64 * 0.2).sin()) as i16).collect();
+        let mut dec = None;
+        for seq in 0..3u16 {
+            let data = enc.encode(&tone).unwrap();
+            assert!(on_screen_event(&st, WHO, &mut dec, ScreenEvent::Audio(ScreenAudio { seq, data })));
+        }
+        let mut frames = 0;
+        while let Some(f) = st.next_audio() {
+            assert_eq!(f.len(), Opus::SAMPLES);
+            frames += 1;
+        }
+        assert_eq!(frames, 3);
+        // Um quadro some no caminho: o Opus esconde a lacuna, então saem 2 quadros (o perdido e o novo).
+        let data = enc.encode(&tone).unwrap();
+        on_screen_event(&st, WHO, &mut dec, ScreenEvent::Audio(ScreenAudio { seq: 4, data }));
+        assert_eq!(std::iter::from_fn(|| st.next_audio()).count(), 2);
+        on_screen_event(&st, WHO, &mut dec, ScreenEvent::Audio(ScreenAudio { seq: 5, data: enc.encode(&tone).unwrap() }));
+        on_screen_event(&st, WHO, &mut dec, ScreenEvent::Stopped);
+        assert!(st.next_audio().is_none());
+    }
+
+    #[test]
+    fn screen_sound_from_two_people_is_summed_and_never_grows_past_the_cap() {
+        use clam::media::{codec::{Codec, Opus}, screen::ScreenAudio};
+        let st = ScreenState::default();
+        let mut enc = Opus::new();
+        let tone: Vec<i16> = (0..Opus::SAMPLES).map(|i| (4000.0 * (i as f64 * 0.2).sin()) as i16).collect();
+        for seq in 0..200u16 {
+            let data = enc.encode(&tone).unwrap();
+            st.hear([1; 32], ScreenAudio { seq, data: data.clone() });
+            st.hear([2; 32], ScreenAudio { seq, data });
+        }
+        // 200 quadros de cada um, mas só meio segundo (25 quadros) fica guardado.
+        assert_eq!(std::iter::from_fn(|| st.next_audio()).count(), 25);
     }
 
     #[test]

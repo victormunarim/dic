@@ -26,6 +26,7 @@ mod files;
 mod node;
 mod room;
 mod screen;
+mod screen_audio;
 mod sound;
 mod voice;
 
@@ -33,6 +34,7 @@ pub(crate) use call::*;
 pub(crate) use node::{member_name, run_node};
 pub(crate) use room::*;
 pub(crate) use screen::*;
+pub(crate) use screen_audio::*;
 pub(crate) use sound::*;
 pub(crate) use voice::*;
 

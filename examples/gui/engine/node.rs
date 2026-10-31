@@ -293,6 +293,7 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
                         continue;
                     }
                     let sound = open_sound(form.use_audio, &form, &out);
+                    remember_speaker(sound.as_ref(), &shared);
                     let (tx, rrx) = mpsc::unbounded_channel();
                     let (sh, o, d, me) = (shared.clone(), out.clone(), dialer.clone(), hub.my_key());
                     let tx2 = tx.clone();

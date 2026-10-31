@@ -146,6 +146,15 @@ impl Upsampler {
 
 type Queue = Arc<Mutex<VecDeque<i16>>>;
 
+/// O que saiu pelo alto-falante, na taxa `rate`, em duas filas independentes: uma para o cancelador de eco
+/// do microfone (que a consome) e outra para quem precisa tirar do áudio do sistema o que o próprio
+/// programa tocou ([`Audio::speaker_reference`]).
+#[derive(Clone, Default)]
+struct Taps {
+    mic: Queue,
+    app: Queue,
+}
+
 /// Maior desvio de velocidade aplicado à reprodução (0,5%: inaudível).
 const MAX_DRIFT: f64 = 0.005;
 /// Nível desejado da fila de reprodução, em quadros de 20 ms.
@@ -186,7 +195,7 @@ pub struct Audio {
     frame: usize,
     rate: u32,
     apm: Mutex<(AudioProcessing, Processing)>,
-    tap: Queue,
+    tap: Taps,
     /// Energia do microfone antes e depois do cancelador de eco, suavizada, só enquanto o outro lado fala.
     erle: Mutex<(f64, f64)>,
     played: Arc<AtomicUsize>,
@@ -212,7 +221,7 @@ impl Audio {
         let stop = Arc::new(AtomicBool::new(false));
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<String, AudioError>>();
         let played = Arc::new(AtomicUsize::new(0));
-        let tap = Queue::default();
+        let tap = Taps::default();
         let failure = Failure::default();
         let (c, p, s, n, tap2, f2) = (capture.clone(), playback.clone(), stop.clone(), played.clone(), tap.clone(), failure.clone());
         let devices = devices.clone();
@@ -253,7 +262,7 @@ impl Audio {
         drop(q);
         let before = pcm.clone();
         let mut guard = self.apm.lock_unpoisoned();
-        let far = clean_capture(&mut guard.0, &mut pcm, &mut self.tap.lock_unpoisoned(), self.frame / 2);
+        let far = clean_capture(&mut guard.0, &mut pcm, &mut self.tap.mic.lock_unpoisoned(), self.frame / 2);
         if far && guard.1.echo_cancel {
             let energy = |v: &[i16]| v.iter().map(|&x| (x as f64).powi(2)).sum::<f64>() / v.len() as f64;
             let mut m = self.erle.lock_unpoisoned();
@@ -296,6 +305,25 @@ impl Audio {
     /// Amostras de voz (8 kHz) já entregues ao alto-falante.
     pub fn played(&self) -> usize {
         self.played.load(Ordering::Relaxed)
+    }
+
+    /// Fila do que saiu pelo alto-falante (contínua, com o silêncio também), para [`SystemAudio`] tirar do
+    /// áudio do sistema o que o próprio programa tocou. Quem a lê é quem a esvazia.
+    #[must_use]
+    pub fn speaker_reference(&self) -> SpeakerReference {
+        SpeakerReference(self.tap.app.clone())
+    }
+
+    /// Soma PCM ao que já espera na fila do alto-falante, em vez de pô-lo depois (o som da tela toca junto
+    /// da voz, não atrás dela). A fila só cresce se `pcm` passar do que já havia nela.
+    pub fn play_mix(&self, pcm: &[i16]) {
+        let mut q = self.playback.lock_unpoisoned();
+        mix_into(&mut q, pcm);
+        let max = max_queued(self.rate);
+        if q.len() > max {
+            let extra = q.len() - max;
+            q.drain(..extra);
+        }
     }
 
     /// Enfileira PCM recebido para o alto-falante.
@@ -381,6 +409,42 @@ fn clean_capture(apm: &mut AudioProcessing, pcm: &mut [i16], tap: &mut VecDeque<
     far
 }
 
+/// Soma `pcm` ao começo de `q` (com saturação) e acrescenta o que sobrar.
+fn mix_into(q: &mut VecDeque<i16>, pcm: &[i16]) {
+    let mut it = pcm.iter();
+    for slot in q.iter_mut() {
+        match it.next() {
+            Some(&x) => *slot = slot.saturating_add(x),
+            None => return,
+        }
+    }
+    q.extend(it.copied());
+}
+
+/// Ponta de leitura do que o alto-falante tocou ([`Audio::speaker_reference`]).
+#[derive(Clone)]
+pub struct SpeakerReference(Queue);
+
+impl SpeakerReference {
+    /// Referência sem alto-falante por trás (nada foi tocado pelo programa): a subtração não tira nada.
+    #[must_use]
+    pub fn detached() -> Self {
+        Self(Queue::default())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn feed(&self, pcm: &[i16]) {
+        self.0.lock_unpoisoned().extend(pcm.iter().copied());
+    }
+
+    /// Tira da fila até `max` amostras.
+    pub fn take(&self, max: usize) -> Vec<i16> {
+        let mut q = self.0.lock_unpoisoned();
+        let n = q.len().min(max);
+        q.drain(..n).collect()
+    }
+}
+
 fn push_capped(q: &mut VecDeque<i16>, it: impl Iterator<Item = i16>, max: usize) {
     q.extend(it);
     if q.len() > max {
@@ -442,7 +506,7 @@ pub fn devices() -> (Vec<String>, Vec<String>) {
 /// Abre os fluxos pedindo blocos pequenos (10 ms) à placa e, se ela recusar, com o tamanho que ela escolher.
 /// Blocos grandes entregam o som em rajadas, e o cancelador de eco perde a noção do tempo entre o que tocou
 /// e o que o microfone ouviu.
-fn open_streams(capture: Queue, playback: Queue, played: Arc<AtomicUsize>, rate: u32, tap: Queue, want: &Devices, fail: Failure) -> Result<((Stream, Stream), String), AudioError> {
+fn open_streams(capture: Queue, playback: Queue, played: Arc<AtomicUsize>, rate: u32, tap: Taps, want: &Devices, fail: Failure) -> Result<((Stream, Stream), String), AudioError> {
     match open_streams_sized(capture.clone(), playback.clone(), played.clone(), rate, tap.clone(), want, fail.clone(), true) {
         Ok(r) => Ok(r),
         Err(_) => open_streams_sized(capture, playback, played, rate, tap, want, fail, false),
@@ -459,7 +523,7 @@ fn stream_config(c: &cpal::SupportedStreamConfig, small: bool) -> cpal::StreamCo
 }
 
 #[allow(clippy::too_many_arguments)]
-fn open_streams_sized(capture: Queue, playback: Queue, played: Arc<AtomicUsize>, rate: u32, tap: Queue, want: &Devices, fail: Failure, small: bool) -> Result<((Stream, Stream), String), AudioError> {
+fn open_streams_sized(capture: Queue, playback: Queue, played: Arc<AtomicUsize>, rate: u32, tap: Taps, want: &Devices, fail: Failure, small: bool) -> Result<((Stream, Stream), String), AudioError> {
     let host = cpal::default_host();
     let input = if want.input.is_empty() {
         host.default_input_device().ok_or_else(|| AudioError("sem microfone padrão".into()))?
@@ -550,7 +614,7 @@ impl Reference {
     }
 }
 
-fn build_output<T>(dev: &cpal::Device, cfg: cpal::StreamConfig, q: Queue, played: Arc<AtomicUsize>, rate: u32, tap: Queue, fail: Failure) -> Result<Stream, AudioError>
+fn build_output<T>(dev: &cpal::Device, cfg: cpal::StreamConfig, q: Queue, played: Arc<AtomicUsize>, rate: u32, tap: Taps, fail: Failure) -> Result<Stream, AudioError>
 where
     T: SizedSample + FromSample<f32>,
 {
@@ -566,7 +630,8 @@ where
         move |data: &mut [T], _| {
             let mut q = q.lock_unpoisoned();
             up.set_scale(drift.scale(q.len()));
-            let mut tap = tap.lock_unpoisoned();
+            let mut tap_mic = tap.mic.lock_unpoisoned();
+            let mut tap_app = tap.app.lock_unpoisoned();
             for frame in data.chunks_mut(ch) {
                 let before = q.len();
                 let f = up.pull(&mut q).unwrap_or(0.0);
@@ -576,7 +641,8 @@ where
                 let v = T::from_sample(f);
                 frame.fill(v);
                 if let Some(r) = reference.push(f) {
-                    push_capped(&mut tap, std::iter::once(r), max_queued(rate));
+                    push_capped(&mut tap_mic, std::iter::once(r), max_queued(rate));
+                    push_capped(&mut tap_app, std::iter::once(r), max_queued(rate));
                 }
             }
         },
@@ -589,6 +655,18 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mixing_adds_over_the_queue_head_and_only_extends_past_it() {
+        let mut q: VecDeque<i16> = [1, 2, 3].into();
+        mix_into(&mut q, &[10, 20]);
+        assert_eq!(q, [11, 22, 3]);
+        mix_into(&mut q, &[1, 1, 1, 7, 8]);
+        assert_eq!(q, [12, 23, 4, 7, 8]);
+        let mut loud: VecDeque<i16> = [i16::MAX, i16::MIN].into();
+        mix_into(&mut loud, &[100, -100]);
+        assert_eq!(loud, [i16::MAX, i16::MIN]);
+    }
 
     #[test]
     fn device_names_lose_alsa_trailing_separators_and_pseudo_devices_are_known() {

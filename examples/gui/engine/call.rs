@@ -120,6 +120,7 @@ pub(crate) async fn talk(mut c: ActiveCall, hz: f64, stop: Arc<AtomicBool>, out:
         tokio::select! {
             _ = tick.tick() => {
                 if stop.load(Ordering::Relaxed) { break; }
+                play_screen_audio(sound.as_ref(), shared);
                 let mut closed = false;
                 for f in mic_frames(sound.as_ref(), hz, n, shared) {
                     sent_n += 1;
@@ -185,6 +186,7 @@ pub(crate) async fn talk(mut c: ActiveCall, hz: f64, stop: Arc<AtomicBool>, out:
 /// `redial`: se a conexão cair, pede para religar a esse contato (só quem discou religa).
 pub(crate) fn start_talk(c: ActiveCall, hz: f64, shared: &Arc<Shared>, out: &Sink, form: &Form, redial: Option<Redial>, peer: Peer) {
     let sound = open_sound(form.use_audio, form, out);
+    remember_speaker(sound.as_ref(), shared);
     *shared.peer.lock_unpoisoned() = Some(peer.key);
     let (shared, out) = (shared.clone(), out.clone());
     // `talk` olha este sinalizador local; um vigia o liga quando a janela pede para desligar.

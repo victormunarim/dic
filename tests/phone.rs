@@ -332,7 +332,7 @@ async fn collect_frames(viewer: &mut ActiveCall, n: usize) -> Vec<clam::media::s
         while got.len() < n {
             match viewer.next_screen().await {
                 Some(ScreenEvent::Frame(f)) => got.push(f),
-                Some(ScreenEvent::Stopped | ScreenEvent::Lost(_)) => {}
+                Some(ScreenEvent::Stopped | ScreenEvent::Lost(_) | ScreenEvent::Audio(_)) => {}
                 None => break,
             }
         }
@@ -380,6 +380,41 @@ async fn caller_shares_its_screen_to_the_callee_over_its_own_circuit() {
     // A voz continua funcionando depois.
     let back = talk(&a, &mut b, 10).await;
     assert!(!back.is_empty());
+}
+
+#[tokio::test]
+async fn the_screen_carries_audio_next_to_the_video() {
+    let (alice, bob) = ids();
+    let mut phone = Phone::bind("127.0.0.1:0".parse().unwrap(), bob.clone(), vec![*PublicKey::from(&alice).as_bytes()]).await.unwrap();
+    let (_srv, cands) = relays(4, &phone.local_addr().to_string()).await;
+    let bob_pub = PublicKey::from(&bob);
+    let voice = cands.clone();
+    let caller = tokio::spawn(async move { call(client(voice), &alice, &bob_pub, Mulaw::new(), WAIT).await });
+    let incoming = timeout(WAIT, phone.next_incoming()).await.unwrap().unwrap();
+    let mut b = incoming.accept(Mulaw::new()).await.unwrap();
+    let a = caller.await.unwrap().unwrap();
+
+    let share = share_screen(screen_client(cands), &a.next_share_keys(), WAIT).await.unwrap();
+    assert!(share.push(&video(900, 1), true).unwrap());
+    for i in 0..3u8 {
+        share.push_audio(&video(80, 10 + i)).unwrap();
+    }
+    let (mut frames, mut audio) = (0, vec![]);
+    timeout(WAIT * 2, async {
+        while frames < 1 || audio.len() < 3 {
+            match b.next_screen().await {
+                Some(ScreenEvent::Frame(_)) => frames += 1,
+                Some(ScreenEvent::Audio(x)) => audio.push(x),
+                Some(_) => {}
+                None => break,
+            }
+        }
+    })
+    .await
+    .expect("vídeo e áudio da tela não chegaram a tempo");
+    assert_eq!(audio.iter().map(|x| x.seq).collect::<Vec<_>>(), [0, 1, 2]);
+    assert_eq!(audio[2].data, video(80, 12));
+    share.stop().await;
 }
 
 #[tokio::test]

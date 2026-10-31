@@ -20,6 +20,7 @@
 //! | `rendezvous` | Ponto de encontro na DHT Mainline (BEP 44) e âncoras, para reencontrar um contato que mudou de endereço (feature `net`) |
 //! | `video` | Codificação H.264 da tela: controle de taxa, qualidade e NACK (feature `video`) |
 //! | `scroll` | Mensagem de rolagem da tela: desloca a imagem em vez de recodificá-la (feature `video`) |
+//! | `sysaudio` | Áudio do computador para a tela, sem o que o programa toca (feature `audio`, Linux) |
 //! | `hwenc` | Codificador por hardware opcional, via `gst-launch` (feature `video`, Linux) |
 //! | `capture`, `portal` | Captura da tela: X11 e GDI; portal do desktop no Wayland (features `capture`, `portal`) |
 //! | `phone` | Chamado (`Phone`) e chamador (`call`) sobre o circuito (feature `net`) |
@@ -55,6 +56,8 @@ pub use x25519_dalek;
 
 #[cfg(feature = "audio")]
 pub mod audio;
+#[cfg(feature = "audio")]
+pub mod sysaudio;
 pub(crate) mod bytes;
 pub mod circle;
 pub mod cover;

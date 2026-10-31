@@ -21,6 +21,7 @@ enum Step {
     /// Pacote de bytes quaisquer, que a AEAD recusa.
     Garbage(Vec<u8>),
     Push { data: Vec<u8>, keyframe: bool },
+    PushAudio(Vec<u8>),
     Next,
     Report,
     Poll,
@@ -53,6 +54,10 @@ fuzz_target!(|steps: Vec<Step>| {
                 data.truncate(20_000);
                 let _ = stream.push_frame(&data, keyframe);
             }
+            Step::PushAudio(mut a) => {
+                a.truncate(300);
+                let _ = stream.push_audio(&a);
+            }
             Step::Next => {
                 if let Ok(p) = stream.next_packet() {
                     assert_eq!(p.len(), PACKET_LEN);
@@ -65,6 +70,7 @@ fuzz_target!(|steps: Vec<Step>| {
             }
             Step::Poll => {
                 let _ = stream.poll_frame();
+                let _ = stream.poll_audio();
                 let _ = stream.take_keyframe_request();
                 let _ = stream.take_report();
             }

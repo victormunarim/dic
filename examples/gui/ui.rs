@@ -369,6 +369,7 @@ impl eframe::App for App {
         st.open_path.store(!self.form.screen_private, Ordering::Relaxed);
         st.sharp.store(self.form.screen_sharp, Ordering::Relaxed);
         st.hardware.store(self.form.screen_hardware, Ordering::Relaxed);
+        st.audio.store(self.form.screen_audio, Ordering::Relaxed);
         let status = self.shared.status.lock_unpoisoned().clone();
 
         self.server_rail(ctx, offline);

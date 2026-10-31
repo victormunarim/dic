@@ -206,6 +206,7 @@ pub(crate) async fn run_room(mut rx: mpsc::UnboundedReceiver<RoomCmd>, me_tx: mp
     loop {
         tokio::select! {
             _ = tick.tick() => {
+                play_screen_audio(sound.as_ref(), &shared);
                 for f in mic_frames(sound.as_ref(), 440.0, n, &shared) {
                     for l in links.values() {
                         let _ = l.mic.try_send(f.clone());

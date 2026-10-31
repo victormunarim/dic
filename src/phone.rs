@@ -53,7 +53,7 @@ use crate::{
         CallStats, MediaError, VoiceCall,
         codec::{Codec, CodecId},
         keys::CallKeys,
-        screen::{LossReport, ScreenFrame, ScreenStats, ScreenStream},
+        screen::{LossReport, ScreenAudio, ScreenFrame, ScreenStats, ScreenStream},
         signal::{Answer, Caller, Incoming, RelayHint},
         update::{self, AddressRecord, Intro},
     },
@@ -125,6 +125,8 @@ pub struct ActiveCall {
 pub enum ScreenEvent {
     /// Quadro de vídeo remontado, pronto para o decodificador.
     Frame(ScreenFrame),
+    /// Quadro de áudio do computador de quem transmite, já na ordem de chegada e amarrado ao vídeo.
+    Audio(ScreenAudio),
     /// Quem transmitia parou.
     Stopped,
     /// Total de quadros que chegaram incompletos ou sem referência (diagnóstico).
@@ -317,6 +319,9 @@ async fn drive<C: Codec>(
 fn forward_screen(screen: &mut ScreenStream, tx: &mpsc::Sender<ScreenEvent>, lost_told: &mut u64) {
     while let Some(f) = screen.poll_frame() {
         let _ = tx.try_send(ScreenEvent::Frame(f));
+    }
+    while let Some(a) = screen.poll_audio() {
+        let _ = tx.try_send(ScreenEvent::Audio(a));
     }
     let lost = screen.stats().frames_lost;
     if lost != *lost_told {
@@ -524,6 +529,16 @@ impl ScreenShare {
     /// [`MediaError::TooLarge`] se o quadro passa de [`MAX_PAYLOAD`](crate::media::packet::MAX_PAYLOAD).
     pub fn push(&self, data: &[u8], keyframe: bool) -> Result<bool, MediaError> {
         self.stream.lock_unpoisoned().push_frame(data, keyframe)
+    }
+
+    /// Entrega um quadro de áudio já codificado (um pacote). Sai no próximo slot, antes do vídeo, e o
+    /// mais antigo cai se o áudio se acumular.
+    ///
+    /// # Errors
+    ///
+    /// [`MediaError::TooLarge`] se o quadro for vazio ou não couber em um pacote.
+    pub fn push_audio(&self, data: &[u8]) -> Result<(), MediaError> {
+        self.stream.lock_unpoisoned().push_audio(data)
     }
 
     /// Quem assiste perdeu imagem (ou a fila encheu): force um quadro-chave no codec. Consome o pedido.

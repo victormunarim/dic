@@ -86,6 +86,14 @@ const REPORT: u8 = 16;
 const NACK: u8 = 32;
 /// Em pacote de preenchimento: quem assiste entende as mensagens de rolagem (`crate::scroll`).
 const ROLL: u8 = 64;
+/// Pacote de áudio da tela (sempre junto de `IDLE`: receptor antigo o ignora como preenchimento).
+const AUDIO: u8 = 128;
+/// Quadros de áudio esperando saída: mais que isso, descarta o mais antigo (áudio atrasado não serve).
+pub const MAX_AUDIO_OUT: usize = 10;
+/// Quadros de áudio recebidos e ainda não lidos.
+const MAX_AUDIO_IN: usize = 100;
+/// Quanto o áudio espera o quadro de vídeo a que está amarrado antes de tocar mesmo assim.
+pub const AUDIO_HOLD: Duration = Duration::from_millis(1500);
 
 /// Janela de medição da perda, entre dois relatórios.
 const REPORT_EVERY: Duration = Duration::from_millis(500);
@@ -121,6 +129,9 @@ pub struct ScreenStats {
     pub packets_sent: u64,
     /// Fragmentos reenviados a pedido de quem assiste.
     pub retransmitted: u64,
+    /// Quadros de áudio enviados e recebidos.
+    pub audio_sent: u64,
+    pub audio_received: u64,
 }
 
 /// Fragmento: sinalizadores, id do quadro, índice, total, dados.
@@ -154,6 +165,14 @@ fn older(a: u16, b: u16) -> bool {
     a != b && b.wrapping_sub(a) < 0x8000
 }
 
+/// Quadro de áudio recebido junto da tela.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScreenAudio {
+    /// Contador do emissor (volta a zero em 65536): lacuna = quadro perdido, para o decodificador esconder.
+    pub seq: u16,
+    pub data: Vec<u8>,
+}
+
 /// Um lado do fluxo de tela.
 pub struct ScreenStream {
     sealer: Sealer,
@@ -163,6 +182,11 @@ pub struct ScreenStream {
     retx: VecDeque<Frag>,
     history: VecDeque<Sent>,
     next_id: u16,
+    /// Áudio a enviar: `(seq, quadro de vídeo a que está amarrado, dados)`.
+    audio_out: VecDeque<(u16, Option<u16>, Vec<u8>)>,
+    audio_seq: u16,
+    /// Áudio recebido, segurado até o vídeo a que se amarra ter sido entregue.
+    audio_in: VecDeque<(Option<u16>, Instant, ScreenAudio)>,
     /// Fila estourou: só aceita quadro-chave até limpar.
     need_key_out: bool,
     // Recepção.
@@ -203,6 +227,9 @@ impl ScreenStream {
             retx: VecDeque::new(),
             history: VecDeque::new(),
             next_id: 0,
+            audio_out: VecDeque::new(),
+            audio_seq: 0,
+            audio_in: VecDeque::new(),
             need_key_out: false,
             pending: Vec::new(),
             done: VecDeque::new(),
@@ -266,6 +293,38 @@ impl ScreenStream {
         Ok(true)
     }
 
+    /// Enfileira um quadro de áudio (já codificado, cabe em um pacote). Sai antes do vídeo no próximo slot e
+    /// carrega o id do último quadro de vídeo enfileirado, para o receptor tocá-lo junto da imagem.
+    /// Passou de [`MAX_AUDIO_OUT`], o mais antigo cai.
+    pub fn push_audio(&mut self, data: &[u8]) -> Result<(), MediaError> {
+        if data.is_empty() || data.len() > FRAGMENT_PAYLOAD {
+            return Err(MediaError::TooLarge(data.len()));
+        }
+        if self.audio_out.len() >= MAX_AUDIO_OUT {
+            self.audio_out.pop_front();
+        }
+        let stamp = (self.stats.frames_sent > 0).then(|| self.next_id.wrapping_sub(1));
+        self.audio_out.push_back((self.audio_seq, stamp, data.to_vec()));
+        self.audio_seq = self.audio_seq.wrapping_add(1);
+        Ok(())
+    }
+
+    /// Há áudio esperando saída.
+    pub fn has_audio(&self) -> bool {
+        !self.audio_out.is_empty()
+    }
+
+    /// Próximo quadro de áudio pronto para tocar: o vídeo a que se amarra já foi entregue (ou o prazo
+    /// [`AUDIO_HOLD`] passou, para um vídeo travado não calar o som).
+    pub fn poll_audio(&mut self) -> Option<ScreenAudio> {
+        let (stamp, at, _) = self.audio_in.front()?;
+        let video_ready = stamp.is_none_or(|s| self.last_id.is_some_and(|l| !older(l, s)));
+        if !video_ready && at.elapsed() < AUDIO_HOLD {
+            return None;
+        }
+        self.audio_in.pop_front().map(|(_, _, a)| a)
+    }
+
     /// Fragmentos esperando saída.
     pub fn queued(&self) -> usize {
         self.queue.len()
@@ -273,7 +332,7 @@ impl ScreenStream {
 
     /// Há fragmento esperando saída (quem não tem nada a mandar deixa o cover do circuito preencher).
     pub fn has_data(&self) -> bool {
-        !self.queue.is_empty() || !self.retx.is_empty()
+        !self.queue.is_empty() || !self.retx.is_empty() || !self.audio_out.is_empty()
     }
 
     /// Faltou quadro e a imagem está parada à espera de um quadro-chave: vale mandar um pedido.
@@ -485,6 +544,17 @@ impl ScreenStream {
     pub fn next_packet(&mut self) -> Result<[u8; PACKET_LEN], MediaError> {
         let want = ROLL | if self.broken { WANT_KEY } else { 0 };
         let mut buf = [0u8; MAX_PAYLOAD];
+        if let Some((seq, stamp, data)) = self.audio_out.pop_front() {
+            // b1..b2 = seq, b3..b4 = vídeo a que se amarra, b5 = 1 se há amarra.
+            put(&mut buf, 0, &[AUDIO | IDLE | want]);
+            put(&mut buf, 1, &seq.to_be_bytes());
+            put(&mut buf, 3, &stamp.unwrap_or(0).to_be_bytes());
+            put(&mut buf, 5, &[u8::from(stamp.is_some())]);
+            put(&mut buf, HEADER, &data);
+            self.stats.audio_sent += 1;
+            let len = HEADER + data.len();
+            return self.sealer.seal(buf.get(..len).ok_or(MediaError::TooLarge(len))?);
+        }
         let (next, fresh) = match self.retx.pop_front() {
             Some(f) => (Some(f), false),
             None => (self.queue.pop_front(), true),
@@ -544,6 +614,17 @@ impl ScreenStream {
         }
         if flags & STOP != 0 {
             self.peer_stopped = true;
+            return Ok(());
+        }
+        if flags & AUDIO != 0 && flags & IDLE != 0 {
+            if !body.is_empty() {
+                if self.audio_in.len() >= MAX_AUDIO_IN {
+                    self.audio_in.pop_front();
+                }
+                let stamp = (b5 == 1).then(|| u16::from_be_bytes([b3, b4]));
+                self.audio_in.push_back((stamp, Instant::now(), ScreenAudio { seq: u16::from_be_bytes([b1, b2]), data: body.to_vec() }));
+                self.stats.audio_received += 1;
+            }
             return Ok(());
         }
         if flags & IDLE != 0 {
@@ -633,6 +714,80 @@ mod tests {
         if !drop {
             b.receive(&p).unwrap();
         }
+    }
+
+    #[test]
+    fn audio_goes_first_and_reaches_the_peer() {
+        let (mut a, mut b) = pair();
+        a.push_frame(&frame(1000, 1), true).unwrap();
+        a.push_audio(&frame(80, 9)).unwrap();
+        assert!(a.has_audio());
+        slot(&mut a, &mut b, false); // o áudio sai antes do vídeo
+        assert!(!a.has_audio());
+        assert_eq!(b.poll_frame(), None);
+        while a.has_data() {
+            slot(&mut a, &mut b, false);
+        }
+        assert!(b.poll_frame().is_some());
+        // O vídeo a que o áudio se amarrava (nenhum quando ele saiu) já não segura nada.
+        let got = b.poll_audio().unwrap();
+        assert_eq!((got.seq, got.data), (0, frame(80, 9)));
+        assert_eq!(b.stats().audio_received, 1);
+        assert_eq!(a.stats().audio_sent, 1);
+    }
+
+    #[test]
+    fn audio_waits_for_the_video_it_is_tied_to() {
+        let (mut a, mut b) = pair();
+        a.push_frame(&frame(1000, 1), true).unwrap();
+        a.push_audio(&frame(80, 2)).unwrap(); // amarrado ao quadro 0
+        slot(&mut a, &mut b, false);
+        assert_eq!(b.poll_audio(), None, "o quadro 0 ainda não chegou inteiro");
+        while a.has_data() {
+            slot(&mut a, &mut b, false);
+        }
+        assert!(b.poll_frame().is_some());
+        assert!(b.poll_audio().is_some());
+    }
+
+    #[test]
+    fn audio_is_not_held_forever_by_stalled_video() {
+        let (mut a, mut b) = pair();
+        a.push_frame(&frame(1000, 1), true).unwrap();
+        a.push_audio(&frame(80, 2)).unwrap();
+        slot(&mut a, &mut b, false);
+        assert_eq!(b.poll_audio(), None);
+        b.audio_in.front_mut().unwrap().1 -= AUDIO_HOLD;
+        assert!(b.poll_audio().is_some());
+    }
+
+    #[test]
+    fn audio_queue_is_bounded_and_keeps_the_newest() {
+        let (mut a, mut b) = pair();
+        for i in 0..(MAX_AUDIO_OUT + 5) {
+            a.push_audio(&[i as u8; 10]).unwrap();
+        }
+        let mut first = None;
+        while a.has_audio() {
+            slot(&mut a, &mut b, false);
+        }
+        while let Some(x) = b.poll_audio() {
+            first.get_or_insert(x.seq);
+        }
+        assert_eq!(first, Some(5));
+        assert!(a.push_audio(&[]).is_err());
+        assert!(a.push_audio(&[0; FRAGMENT_PAYLOAD + 1]).is_err());
+    }
+
+    #[test]
+    fn audio_does_not_look_like_video_to_an_old_receiver() {
+        // Receptor antigo: IDLE é preenchimento. O novo manda IDLE|AUDIO, então nada vira quadro.
+        let (mut a, mut b) = pair();
+        a.push_audio(&frame(80, 3)).unwrap();
+        slot(&mut a, &mut b, false);
+        assert_eq!(b.poll_frame(), None);
+        assert_eq!(b.stats().frames_received, 0);
+        assert!(!b.peer_stopped());
     }
 
     #[test]

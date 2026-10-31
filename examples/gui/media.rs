@@ -38,6 +38,13 @@ impl App {
                     }
                 });
                 if ui
+                    .check(&mut self.form.screen_audio, "Incluir o som do computador (sem o do programa)")
+                    .on_hover_text("Quem assiste ouve o que toca no seu computador: música, jogo, vídeo, notificações. A voz do contato e o som de tela de outros, que o programa mesmo toca, são tirados para não voltarem a quem falou, mas não é perfeito: pode sobrar um resto fraco, e o som do computador pode abaixar um pouco enquanto o contato fala. Use fones se puder. Para aplicativos que você não quer que se ouçam (outra chamada, mensagens), silencie-os antes. Ocupa cerca de 10% da banda da tela (a imagem fica um pouco mais grosseira) e, sem privacidade na tela, quem observa a rede vê quando há som. Precisa de gstreamer1.0-tools e pactl; só no Linux por enquanto. Vale na próxima transmissão.")
+                    .changed()
+                {
+                    self.form.save();
+                }
+                if ui
                     .check(&mut self.form.screen_hardware, "Codificar a tela pela placa de vídeo (experimental)")
                     .on_hover_text("Usa a GPU (VA-API, NVENC ou Quick Sync, via GStreamer) em vez do processador. Precisa de gstreamer1.0-tools e gstreamer1.0-plugins-bad com o driver da GPU; sem isso, ou se ela parar, o programa volta sozinho ao openh264. Menos CPU, mas sem o controle fino de nitidez por quadro, e a imagem pode demorar um pouco mais a reagir. Não funciona no Windows. Vale na próxima transmissão.")
                     .changed()

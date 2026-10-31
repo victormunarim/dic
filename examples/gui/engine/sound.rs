@@ -6,6 +6,12 @@ use super::*;
 #[cfg(feature = "audio")]
 pub(crate) type Sound = clam::audio::Audio;
 
+/// O que o alto-falante do programa tocou, para a tela tirar isso do som do computador.
+#[cfg(feature = "audio")]
+pub(crate) type Speaker = clam::audio::SpeakerReference;
+#[cfg(not(feature = "audio"))]
+pub(crate) type Speaker = ();
+
 /// Sem a feature `audio` nenhum `Sound` existe: o tipo é vazio.
 #[cfg(not(feature = "audio"))]
 pub(crate) enum Sound {}
@@ -22,6 +28,12 @@ impl Sound {
         match *self {}
     }
     pub(crate) fn play(&self, _: &[i16]) {
+        match *self {}
+    }
+    pub(crate) fn play_mix(&self, _: &[i16]) {
+        match *self {}
+    }
+    pub(crate) fn speaker_reference(&self) -> Speaker {
         match *self {}
     }
 }
@@ -202,6 +214,21 @@ pub(crate) fn play_scaled(sound: Option<&Sound>, mut f: Vec<i16>, shared: &Share
         shared.audio.note_played(&f);
         s.play(&f);
     }
+}
+
+/// Toca por cima da voz o som das telas que chegam, no volume escolhido na janela. Chamada a cada 20 ms,
+/// com ou sem voz (quem divide a tela pode ficar calado).
+pub(crate) fn play_screen_audio(sound: Option<&Sound>, shared: &Shared) {
+    let Some(s) = sound else { return };
+    if let Some(mut f) = shared.screen.next_audio() {
+        scale_pcm(&mut f, shared.audio.volume());
+        s.play_mix(&f);
+    }
+}
+
+/// Guarda no estado da tela a referência do alto-falante aberto (ou a tira, sem áudio).
+pub(crate) fn remember_speaker(sound: Option<&Sound>, shared: &Shared) {
+    *shared.screen.speaker.lock_unpoisoned() = sound.map(Sound::speaker_reference);
 }
 
 /// Mostra no log o último erro do dispositivo de áudio, se houve.
