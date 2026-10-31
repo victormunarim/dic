@@ -381,10 +381,9 @@ impl eframe::App for App {
         st.sharp.store(self.form.screen_sharp, Ordering::Relaxed);
         st.hardware.store(self.form.screen_hardware, Ordering::Relaxed);
         st.audio.store(self.form.screen_audio, Ordering::Relaxed);
-        // Na chamada o som da tela só toca com a tela aberta (tela cheia): a miniatura é só uma amostra parada.
-        // Nas salas as telas são vistas direto e valem as chaves.
-        let thumb_only = calling && !in_room;
-        st.silenced.store(!self.form.screen_hear || (thumb_only && self.zoom.is_none()), Ordering::Relaxed);
+        // O som da tela só toca com ela aberta (tela cheia), na chamada e na sala: miniatura e quadro solto são mudos,
+        // e a chave de ouvir mora só na tela cheia.
+        st.silenced.store(!self.form.screen_hear || self.zoom.is_none(), Ordering::Relaxed);
         let status = self.shared.status.lock_unpoisoned().clone();
 
         self.server_rail(ctx, offline);
