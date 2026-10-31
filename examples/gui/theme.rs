@@ -311,7 +311,9 @@ pub(crate) fn big_button(ui: &mut Ui, text: &str, fill: Color32) -> egui::Respon
 /// Bloco recolhido com o texto longo de uma opção: a tela mostra só o título, e quem quer saber mais abre. O texto
 /// não fica fixo ocupando a tela (privacidade e limites se explicam aqui, não em parágrafos soltos).
 pub(crate) fn details(ui: &mut Ui, title: &str, text: &str) {
-    egui::CollapsingHeader::new(RichText::new(title).size(13.0).color(pal().muted)).icon(chevron).show(ui, |ui| note(ui, text));
+    // O id vem do texto: dois blocos "Como funciona" no mesmo nível (um por cartão) compartilhariam o do título e
+    // abririam e fechariam juntos.
+    egui::CollapsingHeader::new(RichText::new(title).size(13.0).color(pal().muted)).id_salt(text).icon(chevron).show(ui, |ui| note(ui, text));
 }
 
 /// Seta do bloco recolhido, desenhada: aponta para a direita fechada e gira para baixo ao abrir (`openness` de 0 a 1).
@@ -1150,6 +1152,24 @@ mod tests {
         assert_eq!(heights, (30.0, 44.0));
         assert!(fitted.0 <= 120.0 + 0.5, "largura {}", fitted.0);
         assert!(fitted.1, "o rótulo comprido devia ser cortado");
+    }
+
+    /// Dois blocos recolhidos com o mesmo título e textos diferentes (os "Como funciona" de Configurações) têm ids
+    /// próprios: com o id só do título, abrir um abria o outro. O egui avisa a repetição de id desenhando um texto.
+    #[test]
+    fn details_with_same_title_do_not_share_an_id() {
+        let ctx = egui::Context::default();
+        let mut warned = false;
+        for _ in 0..3 {
+            let out = ctx.run(egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(600.0, 400.0))), ..Default::default() }, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    details(ui, "Como funciona", "um texto");
+                    details(ui, "Como funciona", "outro texto");
+                });
+            });
+            warned |= out.shapes.iter().any(|s| matches!(&s.shape, egui::Shape::Text(t) if t.galley.text().contains("widget ID")));
+        }
+        assert!(!warned, "id repetido entre blocos recolhidos");
     }
 
     /// Largura da coluna esquerda depois de desenhar `wide` de largura de conteúdo, com ou sem `confined`.

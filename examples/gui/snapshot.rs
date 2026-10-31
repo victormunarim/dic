@@ -216,6 +216,8 @@ mod tests {
             for (tab, name) in tabs {
                 shot(tab, vec2(1280.0, 800.0)).save(&dir.join(format!("{name}-{theme_name}.png")));
             }
+            // A página inteira de Configurações: a rolagem corta o que não cabe em 800 px.
+            shot(Tab::Settings, vec2(1280.0, 1700.0)).save(&dir.join(format!("configuracoes-completa-{theme_name}.png")));
             shot(Tab::Settings, vec2(820.0, 560.0)).save(&dir.join(format!("configuracoes-estreita-{theme_name}.png")));
         }
         theme::set_light(false);

@@ -116,7 +116,7 @@ As seções da janela (trilho, salas, centro, membros) são separadas por uma li
 
 ## Telas em PNG
 
-`docs/telas/` guarda as telas da janela (escuro e claro, 1280×800, mais Configurações em 820×560), geradas sem display: o `egui` tessela o desenho e `examples/gui/snapshot.rs` rasteriza as malhas na CPU. Quem revisa a interface (pessoa ou ferramenta) vê o resultado sem abrir a janela. Para refazer depois de mudar o visual:
+`docs/telas/` guarda as telas da janela (escuro e claro, 1280×800; Configurações também inteira, 1280×1700, e estreita, 820×560), geradas sem display: o `egui` tessela o desenho e `examples/gui/snapshot.rs` rasteriza as malhas na CPU. Quem revisa a interface (pessoa ou ferramenta) vê o resultado sem abrir a janela. Para refazer depois de mudar o visual:
 
 ```sh
 CLAM_TELAS=docs/telas cargo test --features gui --example gui telas_em_png -- --ignored
