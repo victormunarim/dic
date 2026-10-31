@@ -378,7 +378,7 @@ impl App {
                                 }
                                 // Fecha só ao clicar fora (ou Esc), para dar tempo de escolher o contato e marcar o aviso.
                                 let mut open = self.srv.inviting;
-                                egui::Popup::menu(&plus).open_bool(&mut open).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| self.invite_form(ui, hub, v));
+                                crate::theme::menu(&plus).open_bool(&mut open).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| self.invite_form(ui, hub, v));
                                 // O clique no botão alterna sozinho; o egui só cuidava do clique fora.
                                 if plus.clicked() {
                                     open = !was_open;
@@ -443,7 +443,7 @@ impl App {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let plus = plus_button(ui, "Novo contato");
                         // Fecha só ao clicar fora, para dar tempo de colar o código.
-                        egui::Popup::menu(&plus).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| self.new_contact_form(ui, true));
+                        menu(&plus).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| self.new_contact_form(ui, true));
                     });
                 });
                 ui.add_space(8.0);
