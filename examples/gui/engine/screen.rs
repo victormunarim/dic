@@ -356,7 +356,7 @@ pub(crate) async fn share_task(dialer: Dialer, peer: [u8; 32], keys: clam::media
                         flag.screen.audio_tx.fetch_add(1, Ordering::Relaxed);
                     })
                 {
-                    *flag.screen.note.lock_unpoisoned() = "o som do computador parou de ser capturado".into();
+                    *flag.screen.note.lock_unpoisoned() = a.stop_reason();
                     audio = None;
                     audio_gave_up = true;
                 }
@@ -463,7 +463,7 @@ pub(crate) async fn start_room_capture(shared: Arc<Shared>, out: Sink) -> Option
                         shared.screen.audio_tx.fetch_add(1, Ordering::Relaxed);
                     })
                 {
-                    *shared.screen.note.lock_unpoisoned() = "o som do computador parou de ser capturado".into();
+                    *shared.screen.note.lock_unpoisoned() = a.stop_reason();
                     audio = None;
                     audio_gave_up = true;
                 }

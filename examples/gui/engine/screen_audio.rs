@@ -92,6 +92,14 @@ mod real {
             }
             !self.sys.is_dead()
         }
+
+        /// Por que a captura parou, para a nota da janela.
+        pub(crate) fn stop_reason(&self) -> String {
+            match self.sys.failure() {
+                Some(e) => format!("o som do computador parou de ser capturado: {e}"),
+                None => "o som do computador parou de ser capturado".into(),
+            }
+        }
     }
 }
 
@@ -110,6 +118,10 @@ impl AudioTx {
     }
 
     pub(crate) fn pump(&mut self, _: &ScreenState, _: impl FnMut(&[u8])) -> bool {
+        match *self {}
+    }
+
+    pub(crate) fn stop_reason(&self) -> String {
         match *self {}
     }
 }

@@ -137,6 +137,8 @@ pub struct SystemAudio {
 struct Loopback {
     stop: Arc<AtomicBool>,
     dead: Arc<AtomicBool>,
+    /// Último erro do stream, para a janela dizer por que o som parou.
+    error: Arc<Mutex<String>>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -145,12 +147,13 @@ struct Loopback {
 /// abaixo reduz a 16 kHz mono).
 #[cfg(windows)]
 fn open_loopback(queue: Arc<Mutex<VecDeque<i16>>>) -> Result<Loopback, AudioError> {
+    type Dead = (Arc<AtomicBool>, Arc<Mutex<String>>);
     use cpal::{
         SampleFormat,
         traits::{DeviceTrait, HostTrait, StreamTrait},
     };
 
-    fn build<T>(dev: &cpal::Device, cfg: cpal::StreamConfig, q: Arc<Mutex<VecDeque<i16>>>, dead: Arc<AtomicBool>) -> Result<cpal::Stream, AudioError>
+    fn build<T>(dev: &cpal::Device, cfg: cpal::StreamConfig, q: Arc<Mutex<VecDeque<i16>>>, dead: Dead) -> Result<cpal::Stream, AudioError>
     where
         T: cpal::SizedSample,
         f32: cpal::FromSample<T>,
@@ -172,17 +175,31 @@ fn open_loopback(queue: Arc<Mutex<VecDeque<i16>>>) -> Result<Loopback, AudioErro
                     q.drain(..extra);
                 }
             },
-            move |_| dead.store(true, Ordering::Relaxed),
+            move |e| {
+                *dead.1.lock_unpoisoned() = e.to_string();
+                dead.0.store(true, Ordering::Relaxed);
+            },
             None,
         )
         .map_err(|e| AudioError(format!("loopback do WASAPI: {e}")))
     }
 
+    /// Toca silêncio na mesma saída: o WASAPI só entrega pacotes de loopback enquanto algo é renderizado, e
+    /// sem isso um mixer parado deixa a captura muda (e, em alguns drivers, nunca mais acorda).
+    fn keepalive<T>(dev: &cpal::Device, cfg: cpal::StreamConfig) -> Result<cpal::Stream, AudioError>
+    where
+        T: cpal::SizedSample,
+    {
+        dev.build_output_stream(cfg, |data: &mut [T], _| data.fill(T::EQUILIBRIUM), |_| {}, None)
+            .map_err(|e| AudioError(format!("silêncio de apoio: {e}")))
+    }
+
     let (stop, dead) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
-    let (stop_t, dead_t) = (stop.clone(), dead.clone());
+    let error = Arc::new(Mutex::new(String::new()));
+    let (stop_t, dead_t) = (stop.clone(), (dead.clone(), error.clone()));
     let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), AudioError>>();
     let thread = std::thread::spawn(move || {
-        let open = || -> Result<cpal::Stream, AudioError> {
+        let open = || -> Result<(cpal::Stream, Option<cpal::Stream>), AudioError> {
             let dev = cpal::default_host().default_output_device().ok_or_else(|| AudioError("não achei a saída de som padrão do sistema".into()))?;
             let cfg = dev.default_output_config().map_err(|e| AudioError(format!("saída de som padrão: {e}")))?;
             let sc: cpal::StreamConfig = cfg.clone().into();
@@ -194,15 +211,25 @@ fn open_loopback(queue: Arc<Mutex<VecDeque<i16>>>) -> Result<Loopback, AudioErro
                 f => return Err(AudioError(format!("formato da saída não suportado: {f}"))),
             };
             stream.play().map_err(|e| AudioError(format!("loopback do WASAPI: {e}")))?;
-            Ok(stream)
+            let sc: cpal::StreamConfig = cfg.clone().into();
+            let quiet = match cfg.sample_format() {
+                SampleFormat::F32 => keepalive::<f32>(&dev, sc),
+                SampleFormat::I16 => keepalive::<i16>(&dev, sc),
+                SampleFormat::I32 => keepalive::<i32>(&dev, sc),
+                SampleFormat::U16 => keepalive::<u16>(&dev, sc),
+                _ => Err(AudioError(String::new())),
+            }
+            .ok()
+            .filter(|s| s.play().is_ok());
+            Ok((stream, quiet))
         };
         match open() {
-            Ok(stream) => {
+            Ok(streams) => {
                 let _ = ready_tx.send(Ok(()));
                 while !stop_t.load(Ordering::Relaxed) {
                     std::thread::sleep(Duration::from_millis(20));
                 }
-                drop(stream);
+                drop(streams);
             }
             Err(e) => {
                 let _ = ready_tx.send(Err(e));
@@ -210,7 +237,7 @@ fn open_loopback(queue: Arc<Mutex<VecDeque<i16>>>) -> Result<Loopback, AudioErro
         }
     });
     match ready_rx.recv_timeout(Duration::from_secs(5)) {
-        Ok(Ok(())) => Ok(Loopback { stop, dead, thread: Some(thread) }),
+        Ok(Ok(())) => Ok(Loopback { stop, dead, error, thread: Some(thread) }),
         Ok(Err(e)) => Err(e),
         Err(_) => {
             stop.store(true, Ordering::Relaxed);
@@ -320,6 +347,15 @@ impl SystemAudio {
         return self.capture.dead.load(Ordering::Relaxed);
         #[cfg(not(any(unix, windows)))]
         true
+    }
+
+    /// Por que a captura parou, se o sistema disse (só no Windows; no Linux o `gst-launch-1.0` morre mudo).
+    #[must_use]
+    pub fn failure(&self) -> Option<String> {
+        #[cfg(windows)]
+        return Some(self.capture.error.lock_unpoisoned().clone()).filter(|e| !e.is_empty());
+        #[cfg(not(windows))]
+        None
     }
 
     /// Próximo quadro de 20 ms, já sem o áudio do programa, se já houver.
