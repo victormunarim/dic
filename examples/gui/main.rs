@@ -24,6 +24,8 @@ mod contacts;
 mod media;
 mod settings;
 mod servers;
+#[cfg(test)]
+mod snapshot;
 mod theme;
 mod ui;
 

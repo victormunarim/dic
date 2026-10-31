@@ -782,6 +782,7 @@ dependencies = [
  "openh264",
  "openh264-sys2",
  "opus-pure",
+ "png",
  "rand_core 0.6.4",
  "rfd",
  "rustix 1.1.5",
