@@ -145,7 +145,7 @@ impl App {
                         }
                     });
                     self.shared.opus.store(self.form.voice_opus, Ordering::Relaxed);
-                    if ui.button("Restaurar padrões do áudio").clicked() {
+                    if button(ui, true, "Restaurar padrões do áudio", pal().bg).clicked() {
                         p = AudioPrefs::default();
                     }
                 });

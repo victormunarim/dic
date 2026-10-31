@@ -183,7 +183,7 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(&p.name).strong());
                     ui.label(format!("de {}", member_name(&contacts, &p.from)));
-                    if button(ui, self.srv.join_ok, "Aceitar", pal().green).clicked() {
+                    if button(ui, self.srv.join_ok, "Aceitar", BLURPLE).clicked() {
                         match hub.try_run(|s, now| s.accept(&p.text, now)) {
                             Ok(id) => {
                                 self.srv.sel = Some(id);
@@ -206,7 +206,7 @@ impl App {
     fn server_add(&mut self, ui: &mut egui::Ui, hub: &clam::server::net::ServerHub) {
         card(ui, "Criar um servidor", "Você vira o dono. Convide depois quem estiver nos seus contatos.", |ui| {
             ui.add(field(&mut self.srv.new_server, "Nome do servidor"));
-            if button(ui, !self.srv.new_server.trim().is_empty(), "Criar", pal().green).clicked() {
+            if button(ui, !self.srv.new_server.trim().is_empty(), "Criar", BLURPLE).clicked() {
                 let name = self.srv.new_server.trim().to_string();
                 match hub.try_run(|s, now| s.create(&name, now)) {
                     Ok(id) => {
@@ -481,15 +481,14 @@ impl App {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     ui.add_space(6.0);
-                    if hangup_button(ui).on_hover_text(leave_tip).clicked() {
+                    if exit_button(ui, leave_tip).on_hover_text(leave_tip).clicked() {
                         out = Bar::Leave;
                     }
-                    let tip = if sharing { "Parar de compartilhar a tela" } else { "Compartilhar a minha tela" };
                     // Chamando ainda não há com quem dividir a tela.
                     if ring == Ring::In && phone_button(ui, true, "Atender", pal().green).clicked() {
                         out = Bar::Accept;
                     }
-                    if ring == Ring::No && screen_button(ui, sharing).on_hover_text(tip).clicked() {
+                    if ring == Ring::No && screen_button(ui, sharing).clicked() {
                         out = Bar::Share(!sharing);
                     }
                 });
@@ -791,7 +790,7 @@ impl App {
             }
             if !self.srv.invite_out.is_empty() {
                 ui.add(egui::Label::new(RichText::new(&self.srv.invite_out).monospace().size(12.0)).wrap());
-                if button(ui, true, "Copiar o convite", pal().green).clicked() {
+                if button(ui, true, "Copiar o convite", BLURPLE).clicked() {
                     ui.ctx().copy_text(self.srv.invite_out.clone());
                 }
                 note(ui, "Mande o texto por onde preferir; ele só abre na conta do convidado. Ele entra quando você estiver online. (Este caminho não envia nada pela rede.)");

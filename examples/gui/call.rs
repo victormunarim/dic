@@ -52,7 +52,7 @@ impl App {
                     if phone_button(ui, true, "Atender", pal().green).clicked() {
                         self.shared.answer.store(ANSWER_ACCEPT, Ordering::Relaxed);
                     }
-                    if hangup_button(ui).on_hover_text("Recusar").clicked() {
+                    if hangup_button(ui, "Recusar").clicked() {
                         self.shared.answer.store(ANSWER_REJECT, Ordering::Relaxed);
                     }
                 });
@@ -71,7 +71,7 @@ impl App {
                 note(ui, format!("Linha: {link}"));
             }
             ui.add_space(4.0);
-            if hangup_button(ui).on_hover_text(if ringing { "Cancelar a chamada" } else { "Desligar a chamada" }).clicked() {
+            if hangup_button(ui, if ringing { "Cancelar a chamada" } else { "Desligar a chamada" }).clicked() {
                 self.shared.hangup.store(true, Ordering::Relaxed);
             }
         });

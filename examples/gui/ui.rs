@@ -86,7 +86,7 @@ pub(crate) fn devices_ui(ui: &mut egui::Ui, form: &mut Form, devs: &mut (Vec<Str
     pick(ui, "Microfone", &mut form.input_dev, &ins);
     pick(ui, "Alto-falante", &mut form.output_dev, &outs);
     note(ui, format!("Sistema de áudio: {}", clam::audio::host_name()));
-    if ui.button("Atualizar a lista de dispositivos").clicked() {
+    if button(ui, true, "Atualizar a lista de dispositivos", pal().bg).clicked() {
         *devs = clam::audio::devices();
     }
 }
@@ -324,7 +324,7 @@ impl App {
             let image = egui::Rect::from_center_size(screen.center(), size * fit);
             ui.put(image, egui::Image::new(&tex).fit_to_exact_size(image.size()));
             let corner = egui::Rect::from_min_size(egui::pos2(screen.max.x - 48.0, screen.min.y + 12.0), vec2(32.0, 34.0));
-            if ui.put(corner, |ui: &mut egui::Ui| theme::hangup_button(ui)).on_hover_text("Sair da tela cheia (Esc)").clicked() {
+            if ui.put(corner, |ui: &mut egui::Ui| theme::close_button(ui, "Sair da tela cheia (Esc)")).clicked() {
                 close = true;
             }
         });

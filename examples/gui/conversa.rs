@@ -136,6 +136,7 @@ fn attach_button(ui: &mut egui::Ui, enabled: bool) -> egui::Response {
     let pts = [vec2(-3.0, 8.0), vec2(-6.0, 5.0), vec2(-6.0, -7.0), vec2(0.0, -10.0), vec2(6.0, -7.0), vec2(6.0, 6.0), vec2(2.0, 9.0), vec2(-2.0, 6.0), vec2(-2.0, -4.0)];
     ui.painter().add(egui::Shape::line(pts.iter().map(|p| c + *p).collect(), stroke));
     let tip = "Anexar arquivo: abre as pastas do computador (ou arraste o arquivo para a janela). Limite de 32 MB";
+    reply.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, "Anexar arquivo"));
     let reply = reply.on_hover_text(tip);
     if enabled { reply.on_hover_cursor(egui::CursorIcon::PointingHand) } else { reply }
 }
