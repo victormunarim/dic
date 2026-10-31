@@ -6,6 +6,9 @@ use eframe::egui::{self, RichText, vec2};
 
 use crate::{conf::*, engine::*, theme::*, ui::*};
 
+/// Clicável com o mouse, mas fora da ordem do Tab: avatar e nome abrem o mesmo bate-papo do botão da linha, que é a parada.
+const NO_TAB_STOP: egui::Sense = egui::Sense::CLICK;
+
 /// Estado de um contato na lista. O ponto verde só diz "online"; os outros três estados ficam no texto do avatar,
 /// para a cor não carregar sozinha a informação.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -156,12 +159,20 @@ impl App {
     /// mostra o escudo cheio na própria linha (expõe o IP: não pode ficar escondido). No alto, a busca.
     pub(crate) fn contacts_list(&mut self, ui: &mut egui::Ui, online: bool, in_call: bool) {
         let contacts = parse_contacts(&self.form.contacts);
+        if self.remove_ask.is_some_and(|k| !contacts.iter().any(|(_, c)| *c == k)) {
+            self.remove_ask = None;
+        }
         // O texto da busca vive na memória temporária da janela: não vai para o disco nem precisa de campo em `App`.
         let search_id = egui::Id::new("busca-contatos");
         let mut query = ui.data_mut(|d| d.get_temp::<String>(search_id)).unwrap_or_default();
         // Sem contatos a busca não tem o que achar, e o formulário de adicionar é o que importa.
         if !contacts.is_empty() {
-            ui.add(field(&mut query, "Buscar contato"));
+            let search = ui.add(field(&mut query, "Buscar contato"));
+            let tip = format!("Buscar contato ({})", ui.ctx().format_shortcut(&SEARCH_KEY));
+            search.clone().on_hover_text(tip);
+            if ui.ctx().input_mut(|i| i.consume_shortcut(&SEARCH_KEY)) {
+                search.request_focus();
+            }
             ui.data_mut(|d| d.insert_temp(search_id, query.clone()));
         }
         let needle = query.trim().to_lowercase();
@@ -187,6 +198,11 @@ impl App {
         shown.sort_by_key(|(_, (_, k))| order.iter().position(|o| o == k));
         let list_top = ui.cursor().min;
         for (i, (name, key)) in shown {
+            if self.remove_ask == Some(*key) {
+                self.remove_row(ui, name, *key);
+                ui.add_space(4.0);
+                continue;
+            }
             raised_frame(ui, 12, 8, |ui| {
               ui.set_width(ui.available_width());
               ui.horizontal(|ui| {
@@ -200,7 +216,7 @@ impl App {
                         if dim {
                             ui.set_opacity(0.5);
                         }
-                        avatar(ui, name, 32.0, up.then_some(pal().green))
+                        avatar_with(ui, name, 32.0, up.then_some(pal().green), NO_TAB_STOP)
                     })
                     .inner
                     .on_hover_text(status.tip());
@@ -209,8 +225,10 @@ impl App {
                 let pending = *name == hex(key)[..8];
                 let trusted = self.form.is_trusted(key);
                 let marks = 22.0 * (usize::from(pending) + usize::from(trusted)) as f32;
-                let ink = if dim { pal().muted } else { pal().text };
-                let label = ui.add_sized([ui.available_width() - 110.0 - marks, 32.0], egui::Label::new(RichText::new(name).strong().color(ink)).truncate().sense(egui::Sense::click()));
+                // Sem nome ainda, o começo da chave é provisório: o texto diz isso em vez de parecer defeito.
+                let shown_name = if pending { format!("Novo contato · {name}") } else { name.clone() };
+                let ink = if dim || pending { pal().muted } else { pal().text };
+                let label = ui.add_sized([ui.available_width() - 110.0 - marks, 32.0], egui::Label::new(RichText::new(shown_name).strong().color(ink)).truncate().sense(NO_TAB_STOP));
                 let label = label.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(format!("{}…\nAbrir o bate-papo", &hex(key)[..16]));
                 if label.clicked() || face.clicked() {
                     self.open_chat(*key);
@@ -221,7 +239,7 @@ impl App {
                     let (mark, _) = ui.allocate_exact_size(vec2(18.0, 18.0), egui::Sense::hover());
                     let reply = ui.interact(mark, egui::Id::new(("confianca", key)), egui::Sense::focusable_noninteractive());
                     reply.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, "Contato de confiança: vê o seu IP"));
-                    shield_icon(ui.painter(), mark.center(), 16.0, pal().muted, true);
+                    shield_icon(ui.painter(), mark.center(), 16.0, pal().strong, true);
                     focus_ring(ui, &reply, 6);
                     reply.on_hover_text("Contato de confiança: a sua tela vai direto a ele, sem relay, e ele vê o seu IP. Tire no menu de três pontos.");
                 }
@@ -330,41 +348,30 @@ impl App {
         }
     }
 
-    /// Pergunta antes de remover o contato; só a confirmação remove.
-    pub(crate) fn remove_window(&mut self, ctx: &egui::Context) {
-        let Some(key) = self.remove_ask else { return };
-        if !parse_contacts(&self.form.contacts).iter().any(|(_, k)| *k == key) {
-            self.remove_ask = None;
-            return;
-        }
-        let name = member_name(&self.form.names(), &key);
+    /// Pergunta antes de remover o contato, na própria linha: sem janela modal, e só a confirmação remove. Esc cancela.
+    fn remove_row(&mut self, ui: &mut egui::Ui, name: &str, key: [u8; 32]) {
         let mut answer = None;
-        egui::Window::new(format!("Remover {name}?"))
-            .id(egui::Id::new("remover-contato"))
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, vec2(0.0, 0.0))
-            .show(ctx, |ui| {
-                ui.set_max_width(420.0);
-                ui.label(format!("{name} sai da sua lista e é avisado para tirar você da dele. O histórico do bate-papo fica guardado."));
-                ui.add_space(4.0);
-                let block_id = egui::Id::new("remover-e-bloquear");
-                let mut block = ui.data(|d| d.get_temp::<bool>(block_id)).unwrap_or(false);
-                ui.check(&mut block, "Bloquear também").on_hover_text(format!("Impede {name} de voltar sozinho à sua lista (por apresentação ou convite) até você adicioná-lo de novo ou desbloqueá-lo nas configurações."));
-                ui.data_mut(|d| d.insert_temp(block_id, block));
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    if button(ui, true, "Remover", pal().red).clicked() {
-                        answer = Some(if block { Remove::AndBlock } else { Remove::Only });
-                    }
-                    if button(ui, true, "Cancelar", pal().bg).clicked() {
-                        answer = Some(Remove::Cancel);
-                    }
-                });
+        raised_frame(ui, 12, 8, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(RichText::new(format!("Remover {name}?")).strong().color(pal().strong));
+            ui.label(RichText::new(format!("{name} sai da sua lista e é avisado para tirar você da dele. O histórico do bate-papo fica guardado.")).size(13.0).color(pal().text));
+            let block_id = egui::Id::new("remover-e-bloquear");
+            let mut block = ui.data(|d| d.get_temp::<bool>(block_id)).unwrap_or(false);
+            ui.check(&mut block, "Bloquear também").on_hover_text(format!("Impede {name} de voltar sozinho à sua lista (por apresentação ou convite) até você adicioná-lo de novo ou desbloqueá-lo nas configurações."));
+            ui.data_mut(|d| d.insert_temp(block_id, block));
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if button(ui, true, "Remover", pal().red).clicked() {
+                    answer = Some(if block { Remove::AndBlock } else { Remove::Only });
+                }
+                if button(ui, true, "Cancelar", pal().bg).clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    answer = Some(Remove::Cancel);
+                }
             });
+        });
         if let Some(choice) = answer {
             self.remove_ask = None;
-            ctx.data_mut(|d| d.remove::<bool>(egui::Id::new("remover-e-bloquear")));
+            ui.data_mut(|d| d.remove::<bool>(egui::Id::new("remover-e-bloquear")));
             if choice != Remove::Cancel {
                 self.remove_contact_now(key);
             }

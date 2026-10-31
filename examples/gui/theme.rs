@@ -374,14 +374,15 @@ pub(crate) fn dots_button(ui: &mut Ui) -> egui::Response {
     reply.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// Escudo (confiança), desenhado: cheio e verde quando ligado, só o contorno quando desligado. `size` é a altura.
+/// Escudo (confiança), desenhado: cheio, na tinta forte e com visto, quando ligado; só o contorno quando desligado.
+/// Não é verde: o verde é "ao vivo/ok" e a confiança expõe o IP, então a cor não pode tranquilizar. `size` é a altura.
 pub(crate) fn shield_icon(painter: &egui::Painter, c: Pos2, size: f32, ink: Color32, on: bool) {
     let k = size / 18.0;
     let pts = [vec2(-7.0, -8.0), vec2(7.0, -8.0), vec2(7.0, 1.0), vec2(0.0, 9.0), vec2(-7.0, 1.0)].map(|d| c + d * k).to_vec();
     if on {
-        painter.add(egui::Shape::convex_polygon(pts, pal().green, Stroke::NONE));
+        painter.add(egui::Shape::convex_polygon(pts, pal().strong, Stroke::NONE));
         // Visto no meio: o estado ligado não depende só da cor.
-        let check = Stroke::new(1.8_f32 * k, pal().deep);
+        let check = Stroke::new(1.8_f32 * k, pal().bg);
         painter.line_segment([c + vec2(-3.5, 0.0) * k, c + vec2(-1.0, 3.0) * k], check);
         painter.line_segment([c + vec2(-1.0, 3.0) * k, c + vec2(3.5, -3.0) * k], check);
     } else {
@@ -504,7 +505,13 @@ fn hue(name: &str) -> Color32 {
 
 /// Círculo colorido com a inicial do nome; `dot` põe um ponto de estado no canto. A resposta aceita clique.
 pub(crate) fn avatar(ui: &mut Ui, name: &str, size: f32, dot: Option<Color32>) -> egui::Response {
-    let (rect, reply) = ui.allocate_exact_size(vec2(size, size), egui::Sense::click());
+    avatar_with(ui, name, size, dot, egui::Sense::click())
+}
+
+/// `avatar` com o `Sense` à escolha: quem já tem um botão para a mesma ação tira o foco do avatar
+/// (`focusable: false`) para o teclado não parar duas vezes.
+pub(crate) fn avatar_with(ui: &mut Ui, name: &str, size: f32, dot: Option<Color32>, sense: egui::Sense) -> egui::Response {
+    let (rect, reply) = ui.allocate_exact_size(vec2(size, size), sense);
     let p = ui.painter();
     p.circle_filled(rect.center(), size / 2.0, hue(name));
     let initial = name.trim().chars().next().map_or('?', |c| c.to_uppercase().next().unwrap_or(c)).to_string();
@@ -791,6 +798,15 @@ mod tests {
                 let r = contrast(p.focus, bg);
                 assert!(r >= 3.0, "tema {name}: o aro de foco sobre {on} tem contraste {r:.2} (< 3)");
             }
+        }
+    }
+
+    #[test]
+    fn trust_shield_check_is_readable_on_its_fill() {
+        for (name, p) in [("escuro", &DARK_PALETTE), ("claro", &LIGHT_PALETTE)] {
+            let r = contrast(p.bg, p.strong);
+            assert!(r >= 4.5, "tema {name}: o visto do escudo sobre o preenchimento tem contraste {r:.2} (< 4,5)");
+            assert!(contrast(p.strong, p.bg) >= 3.0, "tema {name}: o escudo some sobre a base");
         }
     }
 

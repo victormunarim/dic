@@ -95,6 +95,7 @@ pub(crate) fn devices_ui(ui: &mut egui::Ui, form: &mut Form, devs: &mut (Vec<Str
 /// IP aos membros, e uma tecla perdida não pode fazer isso.
 pub(crate) const MUTE_KEY: egui::KeyboardShortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::M);
 pub(crate) const INVITE_KEY: egui::KeyboardShortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::I);
+pub(crate) const SEARCH_KEY: egui::KeyboardShortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::K);
 pub(crate) const MEMBERS_KEY: egui::KeyboardShortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::B);
 
 impl App {
@@ -228,7 +229,7 @@ impl App {
                     }
                     // Os atalhos ficam à vista aqui, além da dica de cada botão.
                     ui.separator();
-                    for (keys, what) in [(&INVITE_KEY, "Convidar para o servidor"), (&MEMBERS_KEY, "Mostrar ou esconder os membros"), (&MUTE_KEY, "Microfone mudo")] {
+                    for (keys, what) in [(&INVITE_KEY, "Convidar para o servidor"), (&MEMBERS_KEY, "Mostrar ou esconder os membros"), (&SEARCH_KEY, "Buscar contato"), (&MUTE_KEY, "Microfone mudo")] {
                         ui.label(egui::RichText::new(format!("{}  {what}", ctx.format_shortcut(keys))).size(12.0).color(pal().muted));
                     }
                     ui.label(egui::RichText::new("Esc  Fechar o convite").size(12.0).color(pal().muted));
@@ -349,7 +350,6 @@ impl eframe::App for App {
         self.update_screen_textures(ctx);
         self.zoom_window(ctx);
         self.trust_window(ctx);
-        self.remove_window(ctx);
         let offline = self.running.is_none();
         let in_call = self.shared.in_call.load(Ordering::Relaxed);
         let testing = self.shared.mic_test.load(Ordering::Relaxed);

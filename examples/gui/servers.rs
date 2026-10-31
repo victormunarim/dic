@@ -933,7 +933,7 @@ mod tests {
     #[test]
     fn shortcuts_do_not_collide() {
         use crate::ui::MUTE_KEY;
-        let keys = [MUTE_KEY, INVITE_KEY, MEMBERS_KEY];
+        let keys = [MUTE_KEY, INVITE_KEY, MEMBERS_KEY, crate::ui::SEARCH_KEY];
         for (i, a) in keys.iter().enumerate() {
             assert!(keys.iter().skip(i + 1).all(|b| a != b), "atalho repetido: {a:?}");
         }
