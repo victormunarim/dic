@@ -481,7 +481,6 @@ impl App {
     pub(crate) fn share_window(&mut self, ctx: &egui::Context) {
         let Some(room) = ctx.data(|d| d.get_temp::<bool>(share_ask_id())) else { return };
         let mut answer: Option<Option<bool>> = None;
-        let private = self.form.screen_private;
         // O som começa ligado a cada transmissão; a chave só vale nesta janela.
         let sound_id = egui::Id::new("transmitir-tela-som");
         let mut sound = ctx.data(|d| d.get_temp::<bool>(sound_id)).unwrap_or(true);
@@ -497,6 +496,10 @@ impl App {
                 ui.label(RichText::new("Transmitir a tela").strong().size(18.0).color(pal().strong));
                 ui.add_space(8.0);
                 let mut tip = String::from("Som do computador: quem assiste ouve o que toca aí, menos a voz do contato. Usa cerca de 10% da banda do vídeo (2,5% sem privacidade).");
+                // A janela não tem aviso fixo (decisão de design): a perda de ritmo constante fica só no hover.
+                if !self.form.screen_private {
+                    tip.push_str(" Sem privacidade na transmissão, quem observa a rede vê quando há som.");
+                }
                 if cfg!(target_os = "linux") {
                     tip.push_str(" No Linux precisa de gstreamer1.0-tools com o plugin do PulseAudio; se a captura falhar, o motivo aparece em Atividade.");
                 }
@@ -516,11 +519,6 @@ impl App {
                         }
                     });
                 });
-                // Sem a privacidade da transmissão o ritmo não é constante: o aviso protege e fica à vista.
-                if sound && !private {
-                    ui.add_space(4.0);
-                    note(ui, "Sem privacidade na transmissão, quem observa a rede vê quando há som.");
-                }
                 if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                     answer = Some(None);
                 } else if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
