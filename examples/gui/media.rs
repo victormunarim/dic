@@ -2,7 +2,7 @@
 
 use std::sync::atomic::Ordering;
 
-use eframe::egui::{self, Color32, CornerRadius};
+use eframe::egui::{self, CornerRadius};
 
 use crate::{conf::*, engine::*, theme::*, ui::*};
 
@@ -92,7 +92,7 @@ impl App {
                             .text(if speaking { "voz" } else { "" }),
                     );
                     let x = meter.rect.left() + meter.rect.width() * voice_meter(p.gate_db);
-                    ui.painter().vline(x, meter.rect.y_range(), egui::Stroke::new(2.5_f32, Color32::from_rgb(230, 160, 40)));
+                    ui.painter().vline(x, meter.rect.y_range(), egui::Stroke::new(2.5_f32, pal().strong));
                     ui.label("Sensibilidade (limiar da voz)");
                     ui.add(egui::Slider::new(&mut p.gate_db, AudioPrefs::GATE_DB).suffix(" dB"))
                         .on_hover_text("A linha laranja no medidor. Quanto mais para a esquerda, mais sensível: sons baixos já contam como voz.");
