@@ -357,7 +357,7 @@ impl App {
                                 ui.label(RichText::new(format!("{} online", v.members.iter().filter(|m| m.online).count())).size(13.0).color(pal().muted));
                             });
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                let exit = exit_button(ui, "Sair do servidor").on_hover_text("Sair do servidor");
+                                let exit = exit_button(ui, "Sair do servidor");
                                 let menu = egui::Popup::menu(&exit).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| self.server_menu(ui, hub, v));
                                 if menu.is_none() {
                                     reset_confirm(ui, egui::Id::new(("sair-servidor", v.name.as_str())));
@@ -370,7 +370,7 @@ impl App {
                                 }
                                 // Convidar fora da coluna: em janela estreita ela fica escondida e o convite com ela.
                                 let invite_tip = format!("Convidar alguém ({})", ctx.format_shortcut(&INVITE_KEY));
-                                let plus = glyph_button(ui, "Convidar alguém", None, invite_icon).on_hover_text(invite_tip);
+                                let plus = glyph_button(ui, "Convidar alguém", &invite_tip, None, invite_icon);
                                 let shortcut = ctx.input_mut(|i| i.consume_shortcut(&INVITE_KEY));
                                 let was_open = self.srv.inviting;
                                 if shortcut {
@@ -481,7 +481,7 @@ impl App {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     ui.add_space(6.0);
-                    if exit_button(ui, leave_tip).on_hover_text(leave_tip).clicked() {
+                    if exit_button(ui, leave_tip).clicked() {
                         out = Bar::Leave;
                     }
                     // Chamando ainda não há com quem dividir a tela.
@@ -517,7 +517,7 @@ impl App {
                     self.send(Cmd::JoinRoom(v.id, room.id));
                 }
                 if manages {
-                    let trash = trash_button(ui, &format!("Apagar a sala {}", room.name)).on_hover_text("Apagar a sala");
+                    let trash = trash_button(ui, &format!("Apagar a sala {}", room.name));
                     // Apagar sempre pede certeza: o item vermelho do menu é a confirmação. Na sala em que estou o item
                     // fica apagado e diz o motivo, em vez de abrir e dar erro.
                     let delete = egui::Id::new(("apagar-sala", room.id));
@@ -698,7 +698,7 @@ impl App {
                     if manages && !m.is_me && m.role != Role::Owner {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let who = if m.name.is_empty() { member_name(&contacts, &m.key) } else { m.name.clone() };
-                            let dots = dots_button(ui, &format!("Mais ações de {who}")).on_hover_text("Mais ações");
+                            let dots = dots_button(ui, &format!("Mais ações de {who}"));
                             // Remover é irreversível e troca a chave do servidor: pergunta dentro do próprio menu, que por
                             // isso só fecha por clique fora ou por uma resposta.
                             let ask = egui::Id::new(("remover-membro", m.id));
@@ -754,7 +754,7 @@ impl App {
                 note(ui, "Não há contato para convidar: todos já são membros (ou a lista está vazia). Adicione contatos pelo + da coluna de contatos.");
             }
             ui.horizontal(|ui| {
-            if button(ui, ready, "Enviar convite", BLURPLE).on_disabled_hover_text("Escolha um contato e marque o aviso do IP para liberar").clicked() {
+            if why_off(button(ui, ready, "Enviar convite", BLURPLE), ready, "Escolha um contato e marque o aviso do IP para liberar").clicked() {
                 let key = self.srv.pick.expect("botão só liga com contato escolhido");
                 match hub.try_act(|s, now| s.invite_send(&v.id, key, now)) {
                     // O resultado vai ao pé da aba, que sobrevive ao fechamento do menu.

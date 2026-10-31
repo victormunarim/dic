@@ -210,7 +210,7 @@ impl App {
             // Sair da sala e desligar a chamada 1:1 ficam na subseção acima deste painel.
             // Engrenagem e mudo ficam juntos na ponta direita da linha (a engrenagem por último, na borda).
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let gear = glyph_button(ui, "Menu", None, gear_icon).on_hover_text("Chamada, vídeo, áudio, configurações e atividade");
+                let gear = glyph_button(ui, "Menu", "Chamada, vídeo, áudio, configurações e atividade", None, gear_icon);
                 let calling_1to1 = in_call && !in_room;
                 // Atalhos nas linhas das ações a que pertencem; fora de um servidor, convidar e membros ficam apagados.
                 let in_server = self.srv.sel.is_some() && !offline;
@@ -262,10 +262,10 @@ impl App {
                 });
                 theme::menu_focus_back(ui, &gear, menu.is_some());
                 let muted = self.shared.audio.muted.load(Ordering::Relaxed);
-                let mic = glyph_button(ui, "Microfone", muted.then_some(pal().red), |p, c, s, k| mic_icon(p, c, s, k, muted));
                 let shortcut = ctx.format_shortcut(&MUTE_KEY);
                 let tip = if muted { format!("Você está no mudo: clique para voltar a falar ({shortcut})") } else { format!("Silenciar o microfone ({shortcut})") };
-                if mic.on_hover_text(tip).clicked() || ctx.input_mut(|i| i.consume_shortcut(&MUTE_KEY)) {
+                let mic = glyph_button(ui, "Microfone", &tip, muted.then_some(pal().red), |p, c, s, k| mic_icon(p, c, s, k, muted));
+                if mic.clicked() || ctx.input_mut(|i| i.consume_shortcut(&MUTE_KEY)) {
                     self.shared.audio.muted.store(!muted, Ordering::Relaxed);
                 }
             });

@@ -42,7 +42,7 @@ impl App {
                 if big_button(ui, "Ficar online", pal().green).clicked() {
                     self.go_online(ctx);
                 }
-            } else if button(ui, !in_call, "Ficar offline", pal().bg).on_disabled_hover_text("Desligue a chamada antes de ficar offline").clicked()
+            } else if why_off(button(ui, !in_call, "Ficar offline", pal().bg), !in_call, "Desligue a chamada antes de ficar offline").clicked()
                 && let Some(r) = &self.running
             {
                 r.stop.store(true, Ordering::Relaxed);
@@ -94,7 +94,7 @@ impl App {
                             .on_disabled_hover_text(locked);
                         // Mostrar e copiar só leem a chave e valem online; trocar muda o código de contato e fica
                         // num menu que pergunta e escreve o efeito.
-                        let dots = dots_button(ui, "Mais ações da identidade").on_hover_text("Mais ações");
+                        let dots = dots_button(ui, "Mais ações da identidade");
                         let ask = egui::Id::new("gerar-identidade");
                         let menu = egui::Popup::menu(&dots).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
                             ui.set_min_width(MENU_WIDTH);

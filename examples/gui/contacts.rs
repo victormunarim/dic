@@ -346,7 +346,7 @@ impl App {
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;
-                    let dots = dots_button(ui, &format!("Mais ações de {name}")).on_hover_text("Mais ações");
+                    let dots = dots_button(ui, &format!("Mais ações de {name}"));
                     // Cancelar a remoção devolve o foco ao menu desta linha, de onde a pessoa partiu.
                     if ui.data(|d| d.get_temp::<[u8; 32]>(back_focus_id())) == Some(*key) {
                         dots.request_focus();
@@ -376,9 +376,9 @@ impl App {
                     menu_focus_back(ui, &dots, menu.is_some());
                     let unread = unread[key];
                     // Leitor de tela e teclado não passam pelo hover do avatar: o estado do contato vai no nome do botão.
-                    let chat = glyph_button(ui, &chat_name(name, status), (unread > 0).then_some(pal().focus), chat_icon);
                     let tip = if unread > 0 { format!("Bate-papo ({unread} nova(s))") } else { "Bate-papo".to_string() };
-                    if chat.on_hover_text(tip).clicked() {
+                    let chat = glyph_button(ui, &chat_name(name, status), &tip, (unread > 0).then_some(pal().focus), chat_icon);
+                    if chat.clicked() {
                         self.open_chat(*key);
                     }
                     let off_tip = if status == Presence::InCall {
@@ -392,8 +392,8 @@ impl App {
                     };
                     let can_call = online && !in_call && up;
                     let call_name = if can_call { format!("Ligar para {name}") } else { format!("Ligar para {name} (indisponível: {})", off_tip.to_lowercase()) };
-                    let call = ui.add_enabled_ui(can_call, |ui| glyph_button(ui, &call_name, None, phone_icon)).inner;
-                    if call.on_hover_text("Ligar").on_disabled_hover_text(off_tip).clicked() {
+                    let call = ui.add_enabled_ui(can_call, |ui| glyph_button(ui, &call_name, "Ligar", None, phone_icon)).inner;
+                    if call.on_disabled_hover_text(off_tip).clicked() {
                         self.dial(*key);
                     }
                 });

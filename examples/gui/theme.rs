@@ -256,9 +256,11 @@ pub(crate) fn focus_ring(ui: &Ui, reply: &egui::Response, radius: u8) {
 /// Botão macio: elevado em repouso, afundado ao apertar, plano e apagado quando desligado. A cor de `fill`
 /// é a da superfície (a base, para os neutros; o acento ou o semântico para ação principal e destrutiva).
 fn soft_button(ui: &mut Ui, enabled: bool, text: RichText, fill: Color32, min: egui::Vec2) -> egui::Response {
+    let name = text.text().to_string();
     let galley = egui::WidgetText::from(text).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, TextStyle::Button);
     let size = (galley.size() + ui.spacing().button_padding * 2.0).max(min);
     let (reply, rect, pressed) = soft_surface(ui, enabled, fill, size);
+    reply.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, &name));
     if ui.is_rect_visible(rect) {
         let color = if enabled { galley.job.sections.first().map_or(Color32::WHITE, |s| s.format.color) } else { pal().muted };
         let at = egui::Align2::CENTER_CENTER.align_size_within_rect(galley.size(), rect).min + if pressed { vec2(0.0, 1.0) } else { egui::Vec2::ZERO };
@@ -270,7 +272,11 @@ fn soft_button(ui: &mut Ui, enabled: bool, text: RichText, fill: Color32, min: e
 /// A superfície do botão macio (relevo, hover, apertado, desligado) sem o conteúdo. Devolve a resposta, o
 /// retângulo e se está apertado, para quem desenha o rótulo ou o ícone por cima.
 fn soft_surface(ui: &mut Ui, enabled: bool, fill: Color32, size: egui::Vec2) -> (egui::Response, Rect, bool) {
-    let (rect, reply) = ui.allocate_exact_size(size, if enabled { egui::Sense::click() } else { egui::Sense::hover() });
+    // Desligado continua alcançável pelo Tab (sem clicar), senão o motivo só existiria para o mouse.
+    let (rect, mut reply) = ui.allocate_exact_size(size, if enabled { egui::Sense::click() } else { egui::Sense::focusable_noninteractive() });
+    if enabled {
+        reply = reply.on_hover_cursor(egui::CursorIcon::PointingHand);
+    }
     let pressed = enabled && reply.is_pointer_button_down_on();
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
@@ -330,6 +336,33 @@ fn ink_on(fill: Color32) -> Color32 {
     ink_on_with(pal(), fill)
 }
 
+/// Motivo de um botão desligado por `button`/`big_button`/`phone_button`: a resposta deles segue "habilitada" para o egui
+/// (o `Ui` não está desligado), então `on_disabled_hover_text` nunca apareceria.
+pub(crate) fn why_off(reply: egui::Response, enabled: bool, reason: &str) -> egui::Response {
+    if enabled { reply } else { reply.on_hover_text(reason) }
+}
+
+/// Base de todo botão de ícone sem moldura: nome acessível e dica andam juntos (o leitor de tela não lê o hover), a
+/// placa suave aparece sob o ponteiro, o ícone afunda 1 px ao apertar e o aro de foco e a mãozinha vêm de graça.
+/// `ink` recebe se o ponteiro está em cima e devolve a tinta; em `Ui` desligado o ícone apaga e não reage. Botão novo
+/// nasce daqui, para não esquecer nome, dica ou foco.
+fn bare_button(ui: &mut Ui, size: egui::Vec2, name: &str, tip: &str, ink: impl FnOnce(bool) -> Color32, icon: f32, draw: impl FnOnce(&egui::Painter, Pos2, f32, Color32)) -> egui::Response {
+    let enabled = ui.is_enabled();
+    let (rect, reply) = ui.allocate_exact_size(size, egui::Sense::click());
+    reply.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, name));
+    let hovered = enabled && reply.hovered();
+    if hovered {
+        ui.painter().rect_filled(rect, CornerRadius::same(R_BARE), pal().hover);
+    }
+    let color = if enabled { ink(hovered) } else { pal().muted.gamma_multiply(0.5) };
+    draw(ui.painter(), rect.center() + press_nudge(&reply), icon, color);
+    focus_ring(ui, &reply, R_BARE);
+    reply.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Raio da placa de hover e do aro de foco dos botões sem moldura.
+const R_BARE: u8 = 8;
+
 /// Botão de tamanho normal, que pode ficar desligado.
 pub(crate) fn button(ui: &mut Ui, enabled: bool, text: &str, fill: Color32) -> egui::Response {
     soft_button(ui, enabled, RichText::new(text).strong().color(ink_on(fill)), fill, vec2(110.0, 40.0))
@@ -383,33 +416,23 @@ pub(crate) fn draw_plus(painter: &egui::Painter, center: Pos2, half: f32, color:
 
 /// Botão só com o sinal de mais, sem moldura. A dica diz o que ele cria.
 pub(crate) fn plus_button(ui: &mut Ui, tip: &str) -> egui::Response {
-    let (rect, reply) = ui.allocate_exact_size(vec2(34.0, 34.0), egui::Sense::click());
-    reply.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tip));
-    draw_plus(ui.painter(), rect.center() + press_nudge(&reply), 8.0, if reply.hovered() { pal().strong } else { pal().text });
-    focus_ring(ui, &reply, 8);
-    reply.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand)
+    bare_button(ui, vec2(34.0, 34.0), tip, tip, |h| if h { pal().strong } else { pal().text }, 8.0, draw_plus)
 }
 
 /// Botão só com um X, sem moldura (fechar). Desenhado: a fonte pode não ter o glifo "✕".
 pub(crate) fn close_button(ui: &mut Ui, tip: &str) -> egui::Response {
-    let (rect, reply) = ui.allocate_exact_size(vec2(34.0, 34.0), egui::Sense::click());
-    reply.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tip));
-    close_icon(ui.painter(), rect.center() + press_nudge(&reply), 22.0, if reply.hovered() { pal().strong } else { pal().text });
-    focus_ring(ui, &reply, 8);
-    reply.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand)
+    bare_button(ui, vec2(34.0, 34.0), tip, tip, |h| if h { pal().strong } else { pal().text }, 22.0, close_icon)
 }
 
-/// Três pontos um acima do outro (menu de ações), desenhados: a fonte pode não ter o glifo "⋮". Quem chama
+/// Três pontos um acima do outro (menu de ações; a dica é sempre "Mais ações"), desenhados: a fonte pode não ter o glifo "⋮". Quem chama
 /// abre o menu com `egui::Popup::menu(&resposta)`.
 pub(crate) fn dots_button(ui: &mut Ui, name: &str) -> egui::Response {
-    let (rect, reply) = ui.allocate_exact_size(vec2(34.0, 34.0), egui::Sense::click());
-    reply.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name));
-    let ink = if reply.hovered() { pal().strong } else { pal().muted };
-    for dy in [-6.0, 0.0, 6.0] {
-        ui.painter().circle_filled((rect.center() + press_nudge(&reply)) + vec2(0.0, dy), 2.0, ink);
-    }
-    focus_ring(ui, &reply, 8);
-    reply.on_hover_cursor(egui::CursorIcon::PointingHand)
+    let dots = |p: &egui::Painter, c: Pos2, _: f32, k: Color32| {
+        for dy in [-6.0, 0.0, 6.0] {
+            p.circle_filled(c + vec2(0.0, dy), 2.0, k);
+        }
+    };
+    bare_button(ui, vec2(34.0, 34.0), name, "Mais ações", |h| if h { pal().strong } else { pal().muted }, 0.0, dots)
 }
 
 /// Escudo (confiança), desenhado: cheio, na tinta forte e com visto, quando ligado; só o contorno quando desligado.
@@ -444,11 +467,7 @@ pub(crate) fn trash_icon(painter: &egui::Painter, c: Pos2, size: f32, color: Col
 
 /// Botão da lixeira; vermelha ao passar o mouse.
 pub(crate) fn trash_button(ui: &mut Ui, name: &str) -> egui::Response {
-    let (rect, reply) = ui.allocate_exact_size(vec2(34.0, 34.0), egui::Sense::click());
-    reply.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name));
-    trash_icon(ui.painter(), rect.center() + press_nudge(&reply), 18.0, if reply.hovered() { pal().red } else { pal().muted });
-    focus_ring(ui, &reply, 8);
-    reply.on_hover_cursor(egui::CursorIcon::PointingHand)
+    bare_button(ui, vec2(34.0, 34.0), name, name, |h| if h { pal().red } else { pal().muted }, 18.0, trash_icon)
 }
 
 /// Porta com seta para fora (sair), desenhada: batente aberto à direita, para a seta sair por ali.
@@ -465,11 +484,7 @@ pub(crate) fn exit_icon(painter: &egui::Painter, c: Pos2, size: f32, color: Colo
 
 /// Botão da porta com seta (sair); vermelho ao passar o mouse. Quem chama decide a confirmação.
 pub(crate) fn exit_button(ui: &mut Ui, name: &str) -> egui::Response {
-    let (rect, reply) = ui.allocate_exact_size(vec2(34.0, 34.0), egui::Sense::click());
-    reply.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name));
-    exit_icon(ui.painter(), rect.center() + press_nudge(&reply), 18.0, if reply.hovered() { pal().red } else { pal().muted });
-    focus_ring(ui, &reply, 8);
-    reply.on_hover_cursor(egui::CursorIcon::PointingHand)
+    bare_button(ui, vec2(34.0, 34.0), name, name, |h| if h { pal().red } else { pal().muted }, 18.0, exit_icon)
 }
 
 /// Xis (cancelar, fechar), desenhado.
@@ -480,14 +495,14 @@ pub(crate) fn close_icon(painter: &egui::Painter, c: Pos2, size: f32, color: Col
     painter.line_segment([c + vec2(-h, h), c + vec2(h, -h)], ink);
 }
 
-/// Fone deitado (desligar, recusar), sem moldura. Vermelho ao passar o mouse; quem chama decide o que acontece ao
-/// clicar. `name` é o que o leitor de tela diz.
+/// Fone deitado em botão vermelho e em relevo (desligar, recusar), do mesmo tamanho do de atender: sem moldura o vermelho
+/// do tema não passa de 3:1 sobre a base escura, e um fone cinza some ao lado do verde. Branco sobre o vermelho já
+/// vale 4,5:1 nos dois temas. Quem chama decide o que acontece ao clicar; `name` é o que o leitor de tela diz.
 pub(crate) fn hangup_button(ui: &mut Ui, name: &str) -> egui::Response {
-    let (rect, reply) = ui.allocate_exact_size(vec2(34.0, 34.0), egui::Sense::click());
+    let (reply, rect, pressed) = soft_surface(ui, true, pal().red, vec2(44.0, 40.0));
     reply.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name));
-    hangup_icon(ui.painter(), rect.center() + press_nudge(&reply), 22.0, if reply.hovered() { pal().red } else { pal().muted });
-    focus_ring(ui, &reply, 8);
-    reply.on_hover_text(name).on_hover_cursor(egui::CursorIcon::PointingHand)
+    hangup_icon(ui.painter(), rect.center() + if pressed { vec2(0.0, 1.0) } else { egui::Vec2::ZERO }, 22.0, Color32::WHITE);
+    reply.on_hover_text(name)
 }
 
 /// Monitor desenhado, na `color` dada; `filled` preenche a tela. Base de [`screen_button`] e do ícone de quem transmite.
@@ -775,16 +790,10 @@ pub(crate) fn alert_icon(painter: &egui::Painter, center: Pos2, size: f32, color
 }
 
 /// Botão só com um ícone desenhado, sem moldura (lista de contatos, painel do usuário). `draw` pinta o ícone;
-/// `name` é o que o leitor de tela diz; `color` fixa a tinta (sem ela: texto, e forte ao passar o mouse). Num
+/// `name` é o que o leitor de tela diz e `tip`, o hover; `color` fixa a tinta (sem ela: texto, e forte ao passar o mouse). Num
 /// `Ui` desligado o ícone apaga e não clica.
-pub(crate) fn glyph_button(ui: &mut Ui, name: &str, color: Option<Color32>, draw: impl FnOnce(&egui::Painter, Pos2, f32, Color32)) -> egui::Response {
-    let enabled = ui.is_enabled();
-    let (rect, reply) = ui.allocate_exact_size(vec2(34.0, 34.0), egui::Sense::click());
-    reply.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, name));
-    let ink = if !enabled { pal().muted.gamma_multiply(0.5) } else { color.unwrap_or(if reply.hovered() { pal().strong } else { pal().text }) };
-    draw(ui.painter(), rect.center() + press_nudge(&reply), 20.0, ink);
-    focus_ring(ui, &reply, 8);
-    reply.on_hover_cursor(egui::CursorIcon::PointingHand)
+pub(crate) fn glyph_button(ui: &mut Ui, name: &str, tip: &str, color: Option<Color32>, draw: impl FnOnce(&egui::Painter, Pos2, f32, Color32)) -> egui::Response {
+    bare_button(ui, vec2(34.0, 34.0), name, tip, |h| color.unwrap_or(if h { pal().strong } else { pal().text }), 20.0, draw)
 }
 
 /// Linha de menu com ícone desenhado à esquerda; `selected` marca a linha como o item atual e `tint` fixa a
@@ -948,11 +957,7 @@ pub(crate) fn magnifier_icon(painter: &egui::Painter, center: Pos2, size: f32, c
 
 /// Botão só com a lupa, sem moldura (tela cheia). A dica diz a ação.
 pub(crate) fn magnifier_button(ui: &mut Ui, tip: &str) -> egui::Response {
-    let (rect, reply) = ui.allocate_exact_size(vec2(32.0, 34.0), egui::Sense::click());
-    reply.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tip));
-    magnifier_icon(ui.painter(), rect.center() + press_nudge(&reply), 22.0, if reply.hovered() { pal().strong } else { pal().muted });
-    focus_ring(ui, &reply, 8);
-    reply.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand)
+    bare_button(ui, vec2(32.0, 34.0), tip, tip, |h| if h { pal().strong } else { pal().muted }, 22.0, magnifier_icon)
 }
 
 /// Cartão fantasma com o +: o lugar de uma coisa nova (sala, convite). O sinal usa o `muted` cheio, que passa
@@ -1136,10 +1141,34 @@ mod tests {
         }
     }
 
+    /// Os nomes que o leitor de tela ouve ao pôr o foco no controle desenhado por `draw`. O nome só sai como
+    /// evento quando o controle ganha o foco: o primeiro quadro descobre o id, o segundo pede o foco antes de
+    /// desenhar.
+    fn heard(draw: fn(&mut Ui) -> egui::Response) -> Vec<String> {
+        let ctx = egui::Context::default();
+        let mut id = None;
+        let mut heard = Vec::new();
+        for _ in 0..3 {
+            let out = ctx.run(Default::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    if let Some(id) = id.take() {
+                        ctx.memory_mut(|m| m.request_focus(id));
+                    }
+                    let reply = draw(ui);
+                    if heard.is_empty() {
+                        id = Some(reply.id);
+                    }
+                });
+            });
+            heard.extend(out.platform_output.events.iter().map(|e| e.widget_info().label.clone().unwrap_or_default()));
+        }
+        heard
+    }
+
     #[test]
     fn every_icon_button_has_an_accessible_name() {
         type Draw = fn(&mut Ui) -> egui::Response;
-        let buttons: [(&str, Draw); 8] = [
+        let buttons: [(&str, Draw); 12] = [
             ("n:Novo contato", |ui| plus_button(ui, "n:Novo contato")),
             ("n:Fechar", |ui| close_button(ui, "n:Fechar")),
             ("n:Desligar", |ui| hangup_button(ui, "n:Desligar")),
@@ -1148,28 +1177,35 @@ mod tests {
             ("Parar de assistir", stop_watching_button),
             ("n:Ligar", |ui| phone_button(ui, true, "n:Ligar", BLURPLE)),
             ("n:Sair", |ui| exit_button(ui, "n:Sair")),
+            ("n:Mais ações de Ana", |ui| dots_button(ui, "n:Mais ações de Ana")),
+            ("n:Apagar a sala", |ui| trash_button(ui, "n:Apagar a sala")),
+            ("n:Menu", |ui| glyph_button(ui, "n:Menu", "dica", None, gear_icon)),
+            ("n:Bate-papo", |ui| glyph_button(ui, "n:Bate-papo", "dica", Some(BLURPLE), chat_icon)),
         ];
         for (want, draw) in buttons {
-            // O nome só sai como evento quando o controle ganha o foco: o primeiro quadro descobre o id, o segundo
-            // pede o foco antes de desenhar.
-            let ctx = egui::Context::default();
-            let mut id = None;
-            let mut heard = Vec::new();
-            for _ in 0..3 {
-                let out = ctx.run(Default::default(), |ctx| {
-                    egui::CentralPanel::default().show(ctx, |ui| {
-                        if let Some(id) = id.take() {
-                            ctx.memory_mut(|m| m.request_focus(id));
-                        }
-                        let reply = draw(ui);
-                        if heard.is_empty() {
-                            id = Some(reply.id);
-                        }
-                    });
-                });
-                heard.extend(out.platform_output.events.iter().map(|e| e.widget_info().label.clone().unwrap_or_default()));
-            }
+            let heard = heard(draw);
             assert!(heard.iter().any(|l| l == want), "botão sem nome acessível: {want} (ouvido: {heard:?})");
+        }
+    }
+
+    #[test]
+    fn text_buttons_have_an_accessible_name_even_when_disabled() {
+        // O desligado também recebe o foco: sem isso o teclado nunca chegaria ao motivo.
+        assert!(heard(|ui| button(ui, true, "n:Cancelar", pal().bg)).iter().any(|l| l == "n:Cancelar"));
+        assert!(heard(|ui| button(ui, false, "n:Enviar", BLURPLE)).iter().any(|l| l == "n:Enviar"), "botão desligado fora do Tab");
+        assert!(heard(|ui| big_button(ui, "n:Criar", BLURPLE)).iter().any(|l| l == "n:Criar"));
+    }
+
+    #[test]
+    fn bare_icons_stay_visible_on_the_hover_plate_in_both_themes() {
+        // Ícone sem moldura: 3:1 (não é texto) sobre a base e sobre a placa de hover.
+        for (name, p) in [("escuro", &DARK_PALETTE), ("claro", &LIGHT_PALETTE)] {
+            for (what, c) in [("muted", p.muted), ("text", p.text), ("strong", p.strong)] {
+                for (on, bg) in [("base", p.bg), ("placa", p.hover)] {
+                    let r = contrast(c, bg);
+                    assert!(r >= 3.0, "tema {name}: {what} sobre {on} tem contraste {r:.2} (< 3)");
+                }
+            }
         }
     }
 
