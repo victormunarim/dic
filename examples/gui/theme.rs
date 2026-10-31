@@ -849,6 +849,9 @@ pub(crate) fn menu_row(ui: &mut Ui, blocked: Option<&str>, selected: bool, tint:
     if enabled && take_menu_focus(ui.ctx()) {
         reply.request_focus();
     }
+    if enabled {
+        menu_rows_jump(ui, &reply);
+    }
     reply.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, enabled, selected, name.clone()));
     let painter = ui.painter();
     if enabled && selected {
@@ -890,6 +893,43 @@ pub(crate) fn menu_row(ui: &mut Ui, blocked: Option<&str>, selected: bool, tint:
     }
 }
 
+/// Primeira e última linha habilitada do popup, neste quadro e no anterior.
+#[derive(Clone, Copy, Default)]
+struct MenuRows {
+    frame: u64,
+    first: Option<egui::Id>,
+    last: Option<egui::Id>,
+    prev_first: Option<egui::Id>,
+    prev_last: Option<egui::Id>,
+}
+
+/// Home e End levem o foco à primeira e à última linha do popup (↑↓ o egui já faz entre controles focáveis). A
+/// última linha só se conhece ao fim do quadro, então o salto usa a do quadro anterior.
+fn menu_rows_jump(ui: &Ui, reply: &egui::Response) {
+    let ctx = ui.ctx();
+    let key = egui::Id::new("menu-linhas").with(ui.layer_id());
+    let now = ctx.cumulative_frame_nr();
+    let mut rows = ctx.data(|d| d.get_temp::<MenuRows>(key)).unwrap_or_default();
+    if rows.frame != now {
+        rows = MenuRows { frame: now, first: None, last: None, prev_first: rows.first, prev_last: rows.last };
+    }
+    rows.first.get_or_insert(reply.id);
+    rows.last = Some(reply.id);
+    if reply.has_focus() {
+        let target = if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Home)) {
+            rows.prev_first
+        } else if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::End)) {
+            rows.prev_last
+        } else {
+            None
+        };
+        if let Some(id) = target {
+            ctx.memory_mut(|m| m.request_focus(id));
+        }
+    }
+    ctx.data_mut(|d| d.insert_temp(key, rows));
+}
+
 /// Abre o menu do `trigger`. Se o gatilho foi acionado pelo teclado (Enter ou Espaço, sem soltar o ponteiro), o foco
 /// entra no primeiro item habilitado: sem isso o Tab sai do popup para a tela atrás dele. Com o mouse nada muda.
 pub(crate) fn menu(trigger: &egui::Response) -> egui::Popup<'static> {
@@ -927,24 +967,24 @@ fn menu_row_name(label: &str, blocked: Option<&str>) -> String {
 }
 
 /// Item destrutivo com a pergunta dentro do menu: o primeiro clique troca o conteúdo pela frase do efeito, com
-/// `confirm` (vermelho) e *Cancelar*; só o segundo clique age. Devolve `true` no clique que confirma. O efeito fica
-/// escrito porque hover não existe no teclado nem no toque. Quem chama usa `PopupCloseBehavior::CloseOnClickOutside`
-/// (senão o primeiro clique fecharia o menu), fecha com `ui.close()` ao receber `true` e chama `reset_confirm` quando
-/// o menu fecha por fora.
+/// *Cancelar* e, abaixo e afastado, `confirm` (vermelho, com o ícone do próprio item); só o segundo clique age.
+/// Devolve `true` no clique que confirma. O efeito fica escrito porque hover não existe no teclado nem no toque.
+/// Quem chama usa `PopupCloseBehavior::CloseOnClickOutside` (senão o primeiro clique fecharia o menu), fecha com
+/// `ui.close()` ao receber `true` e chama `reset_confirm` quando o menu fecha por fora.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn confirm_item(ui: &mut Ui, id: egui::Id, label: &str, hint: &str, question: &str, effect: &str, confirm: &str, draw: impl FnOnce(&egui::Painter, Pos2, f32, Color32)) -> bool {
+pub(crate) fn confirm_item(ui: &mut Ui, id: egui::Id, label: &str, hint: &str, question: &str, effect: &str, confirm: &str, draw: impl Fn(&egui::Painter, Pos2, f32, Color32)) -> bool {
     confirm_item_with(ui, id, label, hint, question, effect, confirm, draw, |_| {})
 }
 
 /// Como [`confirm_item`], com `extra` desenhado entre o efeito e os botões (uma opção que vale só para esta
 /// confirmação, como *Bloquear também*). Quem guarda o estado da opção também o limpa quando o menu fecha.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn confirm_item_with(ui: &mut Ui, id: egui::Id, label: &str, hint: &str, question: &str, effect: &str, confirm: &str, draw: impl FnOnce(&egui::Painter, Pos2, f32, Color32), extra: impl FnOnce(&mut Ui)) -> bool {
+pub(crate) fn confirm_item_with(ui: &mut Ui, id: egui::Id, label: &str, hint: &str, question: &str, effect: &str, confirm: &str, draw: impl Fn(&egui::Painter, Pos2, f32, Color32), extra: impl FnOnce(&mut Ui)) -> bool {
     ui.set_min_width(MENU_WIDTH);
     let focus_cancel = id.with("foco-cancelar");
     let focus_item = id.with("foco-item");
     if !ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(false) {
-        let item = menu_item(ui, false, Some(pal().error), label, draw).on_hover_text(hint);
+        let item = menu_item(ui, false, Some(pal().error), label, &draw).on_hover_text(hint);
         // Voltou da pergunta (Cancelar ou Esc): o foco do teclado volta ao item de onde saiu.
         if ui.data_mut(|d| d.remove_temp::<bool>(focus_item)).unwrap_or(false) {
             item.request_focus();
@@ -959,15 +999,10 @@ pub(crate) fn confirm_item_with(ui: &mut Ui, id: egui::Id, label: &str, hint: &s
     }
     // Esc desfaz a pergunta em vez de fechar o menu todo; o segundo Esc fecha.
     let esc = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
-    ui.add(egui::Label::new(RichText::new(question).strong().color(pal().strong)).wrap());
-    ui.add(egui::Label::new(RichText::new(effect).size(13.0).color(pal().text)).wrap());
-    extra(ui);
-    let mut done = false;
-    if menu_item(ui, false, Some(pal().error), confirm, trash_icon).clicked() {
-        done = true;
+    let (done, cancel) = confirm_body(ui, question, effect, confirm, &draw, extra);
+    if done {
         reset_confirm(ui, id);
     }
-    let cancel = menu_item(ui, false, None, "Cancelar", close_icon);
     // O item que tinha o foco sumiu; o foco vai ao padrão seguro, não ao destrutivo.
     if ui.data_mut(|d| d.remove_temp::<bool>(focus_cancel)).unwrap_or(false) {
         cancel.request_focus();
@@ -977,6 +1012,29 @@ pub(crate) fn confirm_item_with(ui: &mut Ui, id: egui::Id, label: &str, hint: &s
         ui.data_mut(|d| d.insert_temp(focus_item, true));
     }
     done
+}
+
+/// Menu de um item só: abre já na pergunta, sem a linha intermediária. *Cancelar* vem primeiro, então o foco do
+/// teclado ao abrir cai nele (o padrão seguro) e fecha o menu. Devolve `true` no clique que confirma.
+pub(crate) fn confirm_direct(ui: &mut Ui, question: &str, effect: &str, confirm: &str, draw: impl Fn(&egui::Painter, Pos2, f32, Color32)) -> bool {
+    ui.set_min_width(MENU_WIDTH);
+    let (done, cancel) = confirm_body(ui, question, effect, confirm, &draw, |_| {});
+    if cancel.clicked() {
+        ui.close();
+    }
+    done
+}
+
+/// Corpo da pergunta: frase, efeito, `extra`, *Cancelar* e, com folga, a confirmação vermelha. Devolve se confirmou
+/// e a resposta do *Cancelar*.
+fn confirm_body(ui: &mut Ui, question: &str, effect: &str, confirm: &str, draw: &impl Fn(&egui::Painter, Pos2, f32, Color32), extra: impl FnOnce(&mut Ui)) -> (bool, egui::Response) {
+    ui.add(egui::Label::new(RichText::new(question).strong().color(pal().strong)).wrap());
+    ui.add(egui::Label::new(RichText::new(effect).size(13.0).color(pal().text)).wrap());
+    extra(ui);
+    let cancel = menu_item(ui, false, None, "Cancelar", close_icon);
+    ui.add_space(8.0);
+    let done = menu_item(ui, false, Some(pal().error), confirm, draw).clicked();
+    (done, cancel)
 }
 
 /// Volta o item de `confirm_item` ao começo (menu fechado por fora, ou resposta dada).
@@ -1190,6 +1248,15 @@ mod tests {
     }
 
     #[test]
+    fn muted_text_passes_aa_on_the_base_in_both_themes() {
+        // O motivo da linha apagada é texto de 12 px em `muted`: precisa de 4,5:1 (AA), não dos 3:1 de ícone.
+        for (name, p) in [("escuro", &DARK_PALETTE), ("claro", &LIGHT_PALETTE)] {
+            let r = contrast(p.muted, p.bg);
+            assert!(r >= 4.5, "tema {name}: `muted` sobre `bg` tem contraste {r:.2} (< 4,5)");
+        }
+    }
+
+    #[test]
     fn focus_ring_passes_3_to_1_on_both_bases_in_both_themes() {
         for (name, p) in [("escuro", &DARK_PALETTE), ("claro", &LIGHT_PALETTE)] {
             for (on, bg) in [("bg", p.bg), ("deep", p.deep), ("hover", p.hover), ("selected", p.selected)] {
@@ -1228,6 +1295,72 @@ mod tests {
             heard.extend(out.platform_output.events.iter().map(|e| e.widget_info().label.clone().unwrap_or_default()));
         }
         heard
+    }
+
+    #[test]
+    fn home_and_end_jump_to_the_first_and_last_row_of_a_menu() {
+        let ctx = egui::Context::default();
+        let mut trigger = None;
+        let mut ids = Vec::new();
+        let mut focused = Vec::new();
+        let key = |k| egui::Event::Key { key: k, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() };
+        for frame in 0..16 {
+            let mut input = egui::RawInput::default();
+            match frame {
+                3 => {
+                    input.events.push(key(egui::Key::Enter));
+                    input.events.push(egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: false, repeat: false, modifiers: Default::default() });
+                }
+                6 => input.events.push(key(egui::Key::End)),
+                10 => input.events.push(key(egui::Key::Home)),
+                _ => {}
+            }
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    if frame == 1 {
+                        ctx.memory_mut(|m| m.request_focus(trigger.unwrap()));
+                    }
+                    let dots = dots_button(ui, "n:Gatilho");
+                    trigger = Some(dots.id);
+                    menu(&dots).show(|ui| {
+                        ids = ["Primeiro", "Meio", "Último"].map(|l| menu_row(ui, None, false, None, l, None, close_icon).id).to_vec();
+                    });
+                });
+            });
+            focused.push(ctx.memory(|m| m.focused()));
+        }
+        assert_eq!(focused[5], ids.first().copied(), "Enter deveria focar o primeiro");
+        assert_eq!(focused[9], ids.last().copied(), "End não levou ao último");
+        assert_eq!(focused[13], ids.first().copied(), "Home não voltou ao primeiro");
+    }
+
+    #[test]
+    fn a_direct_confirmation_opens_on_cancel_not_on_the_destructive_item() {
+        let ctx = egui::Context::default();
+        let mut trigger = None;
+        let mut heard = Vec::new();
+        for frame in 0..6 {
+            let mut input = egui::RawInput::default();
+            if frame == 3 {
+                input.events.push(egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() });
+                input.events.push(egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: false, repeat: false, modifiers: Default::default() });
+            }
+            let out = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    if frame == 1 {
+                        ctx.memory_mut(|m| m.request_focus(trigger.unwrap()));
+                    }
+                    let exit = exit_button(ui, "n:Gatilho");
+                    trigger = Some(exit.id);
+                    menu(&exit).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+                        confirm_direct(ui, "Sair?", "Some da lista.", "Sair", exit_icon);
+                    });
+                });
+            });
+            heard.extend(out.platform_output.events.iter().map(|e| e.widget_info().label.clone().unwrap_or_default()));
+        }
+        assert!(heard.iter().any(|l| l == "Cancelar"), "o foco não caiu em Cancelar (ouvido: {heard:?})");
+        assert!(!heard.iter().any(|l| l == "Sair"), "o foco caiu no item destrutivo (ouvido: {heard:?})");
     }
 
     #[test]

@@ -295,12 +295,11 @@ impl App {
         self.chat_box(ui, hub, v, room);
     }
 
-    /// Menu aberto pelo ícone de sair do servidor: um único item vermelho, que serve de confirmação.
+    /// Menu aberto pelo ícone de sair do servidor: já abre na pergunta, com *Cancelar* e o *Sair* vermelho.
     fn server_menu(&mut self, ui: &mut egui::Ui, hub: &clam::server::net::ServerHub, v: &ServerView) {
-        let id = egui::Id::new(("sair-servidor", v.name.as_str()));
         let question = format!("Sair de {}?", v.name);
         let effect = "O servidor some da sua lista. Para voltar, alguém precisa convidar você de novo.";
-        if confirm_item(ui, id, "Sair do servidor", "Pede confirmação antes de sair", &question, effect, "Sair", exit_icon) {
+        if confirm_direct(ui, &question, effect, "Sair", exit_icon) {
             if let Err(e) = hub.try_act(|s, now| s.leave(&v.id, now)) {
                 self.srv.msg = e.to_string();
             }
@@ -359,9 +358,6 @@ impl App {
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 let exit = exit_button(ui, "Sair do servidor");
                                 let menu = menu(&exit).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| self.server_menu(ui, hub, v));
-                                if menu.is_none() {
-                                    reset_confirm(ui, egui::Id::new(("sair-servidor", v.name.as_str())));
-                                }
                                 menu_focus_back(ui, &exit, menu.is_some());
                                 let shown = members_shown(self.srv.members_open, ctx.screen_rect().width());
                                 let members_tip = format!("{} os membros ({})", if shown { "Esconder" } else { "Mostrar" }, ctx.format_shortcut(&MEMBERS_KEY));
@@ -518,25 +514,21 @@ impl App {
                 }
                 if manages {
                     let trash = trash_button(ui, &format!("Apagar a sala {}", room.name));
-                    // Apagar sempre pede certeza: o item vermelho do menu é a confirmação. Na sala em que estou o item
+                    // Apagar sempre pede certeza: o menu já abre na pergunta, com o item vermelho de confirmação. Na sala em que estou o item
                     // fica apagado e diz o motivo, em vez de abrir e dar erro.
-                    let delete = egui::Id::new(("apagar-sala", room.id));
                     let menu = menu(&trash).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
                         if here {
                             menu_row(ui, Some("Você está nesta sala: saia dela antes de apagá-la."), false, Some(pal().error), "Apagar a sala e as mensagens", None, trash_icon);
                             return;
                         }
                         let question = format!("Apagar a sala {}?", room.name);
-                        if confirm_item(ui, delete, "Apagar a sala e as mensagens", "Pede confirmação antes de apagar", &question, "A sala some para todos os membros do servidor.", "Apagar", trash_icon) {
+                        if confirm_direct(ui, &question, "A sala some para todos os membros do servidor.", "Apagar", trash_icon) {
                             if let Err(e) = hub.try_act(|s, now| s.delete_room(&v.id, room.id, now)) {
                                 self.srv.msg = e.to_string();
                             }
                             ui.close();
                         }
                     });
-                    if menu.is_none() {
-                        reset_confirm(ui, delete);
-                    }
                     menu_focus_back(ui, &trash, menu.is_some());
                 }
             });
