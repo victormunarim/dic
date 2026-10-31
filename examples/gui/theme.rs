@@ -568,6 +568,12 @@ pub(crate) fn exit_button(ui: &mut Ui, name: &str) -> egui::Response {
     bare_button(ui, vec2(34.0, 34.0), name, name, |h| if h { pal().red } else { pal().muted }, 18.0, exit_icon)
 }
 
+/// Botão do fone indo para o gancho (sair da sala ou desligar a chamada); vermelho ao passar o mouse. Sem moldura: fica
+/// na barra do pé, ao lado dos outros ícones. O servidor continua com a porta ([`exit_button`]): sair dele não é desligar.
+pub(crate) fn leave_call_button(ui: &mut Ui, name: &str) -> egui::Response {
+    bare_button(ui, vec2(34.0, 34.0), name, name, |h| if h { pal().red } else { pal().muted }, 22.0, hangup_icon)
+}
+
 /// Xis (cancelar, fechar), desenhado.
 pub(crate) fn close_icon(painter: &egui::Painter, c: Pos2, size: f32, color: Color32) {
     let h = size * 0.28;
@@ -1596,7 +1602,7 @@ mod tests {
     #[test]
     fn every_icon_button_has_an_accessible_name() {
         type Draw = fn(&mut Ui) -> egui::Response;
-        let buttons: [(&str, Draw); 13] = [
+        let buttons: [(&str, Draw); 14] = [
             ("n:Novo contato", |ui| plus_button(ui, "n:Novo contato")),
             ("n:Fechar", |ui| close_button(ui, "n:Fechar")),
             ("n:Desligar", |ui| hangup_button(ui, "n:Desligar")),
@@ -1605,6 +1611,7 @@ mod tests {
             ("Parar de assistir", stop_watching_button),
             ("n:Ligar", |ui| phone_button(ui, true, "n:Ligar", BLURPLE)),
             ("n:Sair", |ui| exit_button(ui, "n:Sair")),
+            ("n:Desligar", |ui| leave_call_button(ui, "n:Desligar")),
             ("n:Mais ações de Ana", |ui| dots_button(ui, "n:Mais ações de Ana")),
             ("n:Apagar a sala", |ui| trash_button(ui, "n:Apagar a sala")),
             ("n:Menu", |ui| glyph_button(ui, "n:Menu", "dica", None, gear_icon)),

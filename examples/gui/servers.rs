@@ -480,7 +480,7 @@ impl App {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     ui.add_space(6.0);
-                    if exit_button(ui, leave_tip).clicked() {
+                    if leave_call_button(ui, leave_tip).clicked() {
                         out = Bar::Leave;
                     }
                     // Chamando ainda não há com quem dividir a tela.
