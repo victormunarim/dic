@@ -34,6 +34,8 @@ pub(crate) struct Palette {
     pub yellow: Color32,
     /// Texto de erro.
     pub error: Color32,
+    /// Aro do foco de teclado: o acento claro o bastante para passar de 3:1 sobre a base em cada tema.
+    pub focus: Color32,
 }
 
 const DARK_PALETTE: Palette = Palette {
@@ -51,6 +53,7 @@ const DARK_PALETTE: Palette = Palette {
     red: Color32::from_rgb(0xcf, 0x3d, 0x42),
     yellow: Color32::from_rgb(0xf0, 0xb2, 0x32),
     error: Color32::from_rgb(0xf2, 0x7b, 0x7e),
+    focus: Color32::from_rgb(0x8f, 0x99, 0xff),
 };
 
 /// Tema claro: mesma lógica de relevo, com a luz branca e a sombra azulada; texto escuro (AA sobre a base).
@@ -69,6 +72,7 @@ const LIGHT_PALETTE: Palette = Palette {
     red: Color32::from_rgb(0xc2, 0x34, 0x3a),
     yellow: Color32::from_rgb(0x8f, 0x5f, 0x00),
     error: Color32::from_rgb(0xb0, 0x24, 0x2a),
+    focus: BLURPLE,
 };
 
 static LIGHT_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -235,6 +239,14 @@ pub(crate) fn hovered_fill(fill: Color32) -> Color32 {
     if fill == pal().bg { pal().hover } else { fill.lerp_to_gamma(Color32::BLACK, 0.08) }
 }
 
+/// Aro de foco do teclado, o mesmo em todos os controles desenhados à mão (que não ganham o do egui). Só
+/// aparece com o foco; o raio acompanha o do controle.
+pub(crate) fn focus_ring(ui: &Ui, reply: &egui::Response, radius: u8) {
+    if reply.has_focus() {
+        ui.painter().rect_stroke(reply.rect.expand(2.0), CornerRadius::same(radius.saturating_add(2)), Stroke::new(2.0_f32, pal().focus), egui::StrokeKind::Middle);
+    }
+}
+
 /// Botão macio: elevado em repouso, afundado ao apertar, plano e apagado quando desligado. A cor de `fill`
 /// é a da superfície (a base, para os neutros; o acento ou o semântico para ação principal e destrutiva).
 fn soft_button(ui: &mut Ui, enabled: bool, text: RichText, fill: Color32, min: egui::Vec2) -> egui::Response {
@@ -265,6 +277,7 @@ fn soft_surface(ui: &mut Ui, enabled: bool, fill: Color32, size: egui::Vec2) -> 
             raised(painter, rect, R_BUTTON, surface, 4);
         }
     }
+    focus_ring(ui, &reply, R_BUTTON);
     (reply, rect, pressed)
 }
 
@@ -326,6 +339,7 @@ pub(crate) fn draw_plus(painter: &egui::Painter, center: Pos2, half: f32, color:
 pub(crate) fn plus_button(ui: &mut Ui, tip: &str) -> egui::Response {
     let (rect, reply) = ui.allocate_exact_size(vec2(34.0, 34.0), egui::Sense::click());
     draw_plus(ui.painter(), rect.center(), 8.0, if reply.hovered() { pal().strong } else { pal().text });
+    focus_ring(ui, &reply, 8);
     reply.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
@@ -337,6 +351,7 @@ pub(crate) fn close_button(ui: &mut Ui, tip: &str) -> egui::Response {
     let p = ui.painter();
     p.line_segment([c + vec2(-h, -h), c + vec2(h, h)], ink);
     p.line_segment([c + vec2(-h, h), c + vec2(h, -h)], ink);
+    focus_ring(ui, &reply, 8);
     reply.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
@@ -348,6 +363,7 @@ pub(crate) fn dots_button(ui: &mut Ui) -> egui::Response {
     for dy in [-6.0, 0.0, 6.0] {
         ui.painter().circle_filled(rect.center() + vec2(0.0, dy), 2.0, ink);
     }
+    focus_ring(ui, &reply, 8);
     reply.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
@@ -366,6 +382,7 @@ pub(crate) fn shield_button(ui: &mut Ui, on: bool) -> egui::Response {
         let ink = if reply.hovered() { pal().strong } else { pal().muted };
         ui.painter().add(egui::Shape::convex_polygon(pts, Color32::TRANSPARENT, Stroke::new(1.6_f32, ink)));
     }
+    focus_ring(ui, &reply, 8);
     reply.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
@@ -382,6 +399,7 @@ pub(crate) fn trash_button(ui: &mut Ui) -> egui::Response {
     p.rect_stroke(egui::Rect::from_min_max(c + vec2(-5.0, -5.0), c + vec2(5.0, 8.0)), CornerRadius::same(2), ink, egui::StrokeKind::Middle);
     p.line_segment([c + vec2(-1.8, -2.0), c + vec2(-1.8, 5.0)], ink);
     p.line_segment([c + vec2(1.8, -2.0), c + vec2(1.8, 5.0)], ink);
+    focus_ring(ui, &reply, 8);
     reply.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
@@ -398,6 +416,7 @@ pub(crate) fn exit_button(ui: &mut Ui) -> egui::Response {
     p.line_segment([c + vec2(-2.0, 0.0), c + vec2(8.0, 0.0)], ink);
     p.line_segment([c + vec2(4.0, -4.0), c + vec2(8.0, 0.0)], ink);
     p.line_segment([c + vec2(4.0, 4.0), c + vec2(8.0, 0.0)], ink);
+    focus_ring(ui, &reply, 8);
     reply.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
@@ -411,6 +430,7 @@ pub(crate) fn hangup_button(ui: &mut Ui) -> egui::Response {
     p.circle_stroke(c, 9.0, ink);
     p.line_segment([c + vec2(-3.5, -3.5), c + vec2(3.5, 3.5)], ink);
     p.line_segment([c + vec2(-3.5, 3.5), c + vec2(3.5, -3.5)], ink);
+    focus_ring(ui, &reply, 8);
     reply.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
@@ -425,9 +445,28 @@ pub(crate) fn screen_icon(ui: &mut Ui, color: Color32, filled: bool, sense: egui
     if filled {
         p.rect_filled(screen.shrink(3.5), CornerRadius::same(1), color);
     }
+    focus_ring(ui, &reply, 8);
     p.line_segment([c + vec2(0.0, 5.0), c + vec2(0.0, 9.0)], ink);
     p.line_segment([c + vec2(-5.0, 9.0), c + vec2(5.0, 9.0)], ink);
     reply
+}
+
+/// Monitor riscado (parar de assistir): é o monitor de [`screen_button`] com um traço, para não se confundir com
+/// sair da sala nem desligar. O traço leva um vão da cor da base, para ler em tamanho pequeno.
+pub(crate) fn stop_watching_button(ui: &mut Ui) -> egui::Response {
+    let reply = screen_icon(ui, Color32::TRANSPARENT, false, egui::Sense::click());
+    let color = if reply.hovered() { pal().strong } else { pal().muted };
+    let c = reply.rect.center();
+    let ink = Stroke::new(1.7_f32, color);
+    let p = ui.painter();
+    let screen = Rect::from_center_size(c + vec2(0.0, -2.0), vec2(20.0, 14.0));
+    p.rect_stroke(screen, CornerRadius::same(2), ink, egui::StrokeKind::Middle);
+    p.line_segment([c + vec2(0.0, 5.0), c + vec2(0.0, 9.0)], ink);
+    p.line_segment([c + vec2(-5.0, 9.0), c + vec2(5.0, 9.0)], ink);
+    let (from, to) = (c + vec2(-11.0, 10.0), c + vec2(11.0, -12.0));
+    p.line_segment([from, to], Stroke::new(5.0_f32, pal().bg));
+    p.line_segment([from, to], Stroke::new(1.9_f32, color));
+    reply.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// Monitor desenhado (compartilhar a tela): vermelho e preenchido enquanto transmite, cinza em repouso.
@@ -599,6 +638,7 @@ pub(crate) fn magnifier_icon(painter: &egui::Painter, center: Pos2, size: f32, c
 pub(crate) fn magnifier_button(ui: &mut Ui, tip: &str) -> egui::Response {
     let (rect, reply) = ui.allocate_exact_size(vec2(32.0, 34.0), egui::Sense::click());
     magnifier_icon(ui.painter(), rect.center(), 22.0, if reply.hovered() { pal().strong } else { pal().muted });
+    focus_ring(ui, &reply, 8);
     reply.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
@@ -609,6 +649,7 @@ pub(crate) fn ghost_card(ui: &mut Ui, tip: &str) -> bool {
     ghost.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tip));
     raised(ui.painter(), rect, 12, pal().bg, 3);
     draw_plus(ui.painter(), rect.center(), 8.0, if ghost.hovered() { pal().text } else { pal().muted });
+    focus_ring(ui, &ghost, 12);
     ghost.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
 }
 
@@ -634,6 +675,16 @@ mod tests {
         // O + dos cartões fantasmas usa `muted` cheio; sem a opacidade de antes ele passa de 3:1 nos dois temas.
         for (name, p) in [("escuro", &DARK_PALETTE), ("claro", &LIGHT_PALETTE)] {
             assert!(contrast(p.muted, p.bg) >= 3.0, "o + dos cartões fantasmas some no tema {name}");
+        }
+    }
+
+    #[test]
+    fn focus_ring_passes_3_to_1_on_both_bases_in_both_themes() {
+        for (name, p) in [("escuro", &DARK_PALETTE), ("claro", &LIGHT_PALETTE)] {
+            for (on, bg) in [("bg", p.bg), ("deep", p.deep), ("hover", p.hover)] {
+                let r = contrast(p.focus, bg);
+                assert!(r >= 3.0, "tema {name}: o aro de foco sobre {on} tem contraste {r:.2} (< 3)");
+            }
         }
     }
 

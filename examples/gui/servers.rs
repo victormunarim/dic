@@ -4,7 +4,7 @@ use clam::sync::LockExt;
 use std::sync::atomic::Ordering;
 
 use clam::server::{Output, Role, ServerId, ServerView};
-use eframe::egui::{self, Color32, CornerRadius, Margin, RichText, Stroke, vec2};
+use eframe::egui::{self, Color32, CornerRadius, Margin, RichText, vec2};
 
 use crate::{conf::*, engine::*, theme::*, ui::{App, Tab}};
 
@@ -324,7 +324,7 @@ impl App {
                                 let exit = exit_button(ui).on_hover_text("Sair do servidor");
                                 egui::Popup::menu(&exit).show(|ui| self.server_menu(ui, hub, v));
                                 let shown = members_shown(self.srv.members_open, ctx.screen_rect().width());
-                                if members_toggle(ui, shown).on_hover_text(if shown { "Esconder os membros" } else { "Mostrar os membros" }).clicked() {
+                                if members_toggle(ui, shown).on_hover_text(if shown { "Esconder os membros e o convite" } else { "Mostrar os membros e o convite" }).clicked() {
                                     self.srv.members_open = Some(!shown);
                                 }
                             });
@@ -568,7 +568,7 @@ impl App {
                 if magnifier_button(ui, "Tela cheia (Esc ou o X para sair)").clicked() {
                     self.zoom = Some(who);
                 }
-                if hangup_button(ui).on_hover_text("Parar de assistir").clicked() {
+                if stop_watching_button(ui).on_hover_text("Parar de assistir").clicked() {
                     crate::engine::follow(&self.shared, who, false);
                 }
             });
@@ -814,6 +814,10 @@ fn theme_toggle(ui: &mut egui::Ui) -> egui::Response {
 fn members_toggle(ui: &mut egui::Ui, shown: bool) -> egui::Response {
     let (rect, reply) = ui.allocate_exact_size(vec2(32.0, 34.0), egui::Sense::click());
     let ink = if shown { pal().strong } else if reply.hovered() { pal().text } else { pal().muted };
+    // Aberto = afundado: o estado não depende só da cor do ícone.
+    if shown {
+        sunken(ui.painter(), rect, 10, pal().bg);
+    }
     person_icon(ui.painter(), rect.center() + vec2(4.0, 1.0), 16.0, ink.gamma_multiply(0.7));
     person_icon(ui.painter(), rect.center() + vec2(-3.0, 2.0), 20.0, ink);
     reply.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Membros"));
@@ -830,9 +834,7 @@ fn rail_tile(ui: &mut egui::Ui, active: Option<Color32>, name: &str) -> (egui::R
         None if reply.is_pointer_button_down_on() => sunken(ui.painter(), rect, 18, pal().bg),
         None => raised(ui.painter(), rect, 18, if reply.hovered() { pal().hover } else { pal().bg }, 4),
     }
-    if reply.has_focus() {
-        ui.painter().rect_stroke(rect.expand(3.0), egui::CornerRadius::same(21), Stroke::new(2.0_f32, BLURPLE), egui::StrokeKind::Middle);
-    }
+    focus_ring(ui, &reply, 18);
     (rect, reply.on_hover_cursor(egui::CursorIcon::PointingHand))
 }
 
