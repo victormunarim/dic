@@ -26,11 +26,11 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.label("Priorizar:");
                     let mut changed = ui
-                        .radio_value(&mut self.form.screen_sharp, false, "Fluidez")
+                        .radio_pick(&mut self.form.screen_sharp, false, "Fluidez")
                         .on_hover_text("Mais quadros por segundo (o dobro): bom para jogo e vídeo. A imagem fica um pouco mais grosseira quando se mexe.")
                         .changed();
                     changed |= ui
-                        .radio_value(&mut self.form.screen_sharp, true, "Nitidez")
+                        .radio_pick(&mut self.form.screen_sharp, true, "Nitidez")
                         .on_hover_text("Metade dos quadros por segundo, cada um com o dobro de bits: bom para texto, código e slides. O movimento fica menos suave.")
                         .changed();
                     if changed {
@@ -67,7 +67,7 @@ impl App {
         split(ui, |ui, side| {
             if side == 0 {
                 card(ui, "Dispositivos", "", |ui| {
-                    ui.add_enabled(offline, egui::Checkbox::new(&mut self.form.use_audio, "Usar microfone e alto-falante"))
+                    ui.add_enabled_ui(offline, |ui| ui.check(&mut self.form.use_audio, "Usar microfone e alto-falante")).inner
                         .on_hover_text("Desmarcado, cada lado manda só um tom de teste. Vale ao ficar online.");
                     #[cfg(feature = "audio")]
                     devices_ui(ui, &mut self.form, &mut self.devs);
@@ -78,9 +78,9 @@ impl App {
                         a.muted.store(muted, Ordering::Relaxed);
                     }
                     ui.label("Volume do alto-falante");
-                    ui.add(egui::Slider::new(&mut p.volume, AudioPrefs::VOLUME));
+                    ui.slider(egui::Slider::new(&mut p.volume, AudioPrefs::VOLUME));
                     ui.label("Ganho do microfone");
-                    ui.add(egui::Slider::new(&mut p.mic_gain, AudioPrefs::MIC_GAIN));
+                    ui.slider(egui::Slider::new(&mut p.mic_gain, AudioPrefs::MIC_GAIN));
                     ui.label("Nível do microfone");
                     // Medidor: a linha marca o limiar de sensibilidade; o texto diz se a voz passa dele.
                     let meter = ui.add(
@@ -94,7 +94,7 @@ impl App {
                     let x = meter.rect.left() + meter.rect.width() * voice_meter(p.gate_db);
                     ui.painter().vline(x, meter.rect.y_range(), egui::Stroke::new(2.5_f32, pal().strong));
                     ui.label("Sensibilidade (limiar da voz)");
-                    ui.add(egui::Slider::new(&mut p.gate_db, AudioPrefs::GATE_DB).suffix(" dB"))
+                    ui.slider(egui::Slider::new(&mut p.gate_db, AudioPrefs::GATE_DB).suffix(" dB"))
                         .on_hover_text("A linha laranja no medidor. Quanto mais para a esquerda, mais sensível: sons baixos já contam como voz.");
                     if in_call || testing {
                         note(ui, "Fale e veja o medidor: a linha laranja deve ficar abaixo da sua voz e acima do ruído.");
@@ -128,7 +128,7 @@ impl App {
                         .on_hover_text("Quando o microfone fica abaixo do limiar, o som enviado é reduzido. Ajuste a sensibilidade até a linha ficar logo acima do ruído.");
                     ui.add_enabled_ui(p.gate, |ui| {
                         ui.label("Redução do ruído");
-                        ui.add(egui::Slider::new(&mut p.gate_depth_db, AudioPrefs::GATE_DEPTH_DB).suffix(" dB"));
+                        ui.slider(egui::Slider::new(&mut p.gate_depth_db, AudioPrefs::GATE_DEPTH_DB).suffix(" dB"));
                     });
                     ui.check(&mut p.high_pass, "Cortar graves (ventilador, mesa, sopro)");
                     ui.check(&mut p.agc, "Volume automático (nivela voz baixa e alta)")

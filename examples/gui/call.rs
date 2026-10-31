@@ -37,9 +37,7 @@ impl App {
                 return;
             }
             self.dial_card(ui, offline, busy);
-            card(ui, "Nenhuma chamada em andamento", "Quando você ligar ou atender, ela aparece aqui, com a tela compartilhada.", |ui| {
-                note(ui, "Para ligar a um contato, use o botão de ligar ao lado dele na lista de contatos (ícone de pessoa, no trilho da esquerda).");
-            });
+            card(ui, "Nenhuma chamada em andamento", "Ligue pelo telefone ao lado do contato; a chamada e a tela compartilhada aparecem aqui.", |_| {});
             return;
         }
         let incoming = *self.shared.incoming.lock_unpoisoned();

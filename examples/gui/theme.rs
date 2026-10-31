@@ -187,7 +187,11 @@ pub(crate) fn apply(ctx: &egui::Context) {
         s.spacing.slider_width = 260.0;
         s.spacing.combo_width = 280.0;
         s.spacing.text_edit_width = 320.0;
-        s.spacing.scroll.bar_width = 10.0;
+        // Barra mais fina e afastada do cartão: com 10 px colada nele (inner 4, outer 0) ela parecia parte da moldura. A
+        // cor da alça é a do texto (o egui não deixa trocar), então o contraste fica alto de propósito.
+        s.spacing.scroll.bar_width = 8.0;
+        s.spacing.scroll.bar_inner_margin = 8.0;
+        s.spacing.scroll.bar_outer_margin = 4.0;
         s.spacing.scroll.floating = false;
     });
 }
@@ -279,6 +283,13 @@ fn soft_button(ui: &mut Ui, enabled: bool, text: RichText, fill: Color32, min: e
     reply
 }
 
+/// Preenchimento de um botão desligado: a base com só um sopro da cor da ação. `gamma_multiply` mexia na opacidade, e
+/// por isso o mesmo botão ficava quase vivo sobre a base escura e apagado sobre a clara; misturar com a base apaga igual
+/// nos dois temas, e o texto `muted` segue legível (≥ 3:1, ver o teste).
+fn disabled_fill_with(p: &Palette, fill: Color32) -> Color32 {
+    if fill == p.bg { fill } else { p.bg.lerp_to_gamma(fill, 0.2) }
+}
+
 /// A superfície do botão macio (relevo, hover, apertado, desligado) sem o conteúdo. Devolve a resposta, o
 /// retângulo e se está apertado, para quem desenha o rótulo ou o ícone por cima.
 fn soft_surface(ui: &mut Ui, enabled: bool, fill: Color32, size: egui::Vec2) -> (egui::Response, Rect, bool) {
@@ -290,7 +301,7 @@ fn soft_surface(ui: &mut Ui, enabled: bool, fill: Color32, size: egui::Vec2) -> 
     let pressed = enabled && reply.is_pointer_button_down_on();
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
-        let surface = if !enabled { fill.gamma_multiply(0.55) } else if reply.hovered() && !pressed { hovered_fill(fill) } else { fill };
+        let surface = if !enabled { disabled_fill_with(pal(), fill) } else if reply.hovered() && !pressed { hovered_fill(fill) } else { fill };
         if !enabled {
             painter.rect_filled(rect, CornerRadius::same(R_BUTTON), surface);
         } else if pressed {
@@ -313,7 +324,7 @@ pub(crate) fn big_button(ui: &mut Ui, text: &str, fill: Color32) -> egui::Respon
 pub(crate) fn details(ui: &mut Ui, title: &str, text: &str) {
     // O id vem do texto: dois blocos "Como funciona" no mesmo nível (um por cartão) compartilhariam o do título e
     // abririam e fechariam juntos.
-    egui::CollapsingHeader::new(RichText::new(title).size(13.0).color(pal().muted)).id_salt(text).icon(chevron).show(ui, |ui| note(ui, text));
+    egui::CollapsingHeader::new(RichText::new(title).size(14.0).color(pal().muted)).id_salt(text).icon(chevron).show(ui, |ui| note(ui, text));
 }
 
 /// Seta do bloco recolhido, desenhada: aponta para a direita fechada e gira para baixo ao abrir (`openness` de 0 a 1).
@@ -324,7 +335,7 @@ fn chevron(ui: &mut Ui, openness: f32, response: &egui::Response) {
     let a = openness * std::f32::consts::FRAC_PI_2;
     let (sin, cos) = a.sin_cos();
     let turn = |x: f32, y: f32| c + vec2(x * cos - y * sin, x * sin + y * cos);
-    ui.painter().add(egui::Shape::convex_polygon(vec![turn(-2.5, -4.0), turn(3.5, 0.0), turn(-2.5, 4.0)], ink, Stroke::NONE));
+    ui.painter().add(egui::Shape::convex_polygon(vec![turn(-3.0, -5.0), turn(4.5, 0.0), turn(-3.0, 5.0)], ink, Stroke::NONE));
 }
 
 /// Marca discreta ao lado de um campo que só vale quando o programa abrir de novo (relógio, com a explicação no
@@ -397,23 +408,43 @@ pub(crate) fn phone_button(ui: &mut Ui, enabled: bool, tip: &str, fill: Color32)
     reply.on_hover_text(tip)
 }
 
-/// Caixa de marcar com a caixinha visível: no tema neomórfico o `checkbox` padrão some no fundo (mesma cor
-/// base, sem contorno). Aqui a caixinha fica afundada (`pal().deep`) e com contorno `pal().muted`.
+/// Controles do egui (caixa, rádio, trilho do slider) com o corpo afundado e o contorno visível: no tema neomórfico o
+/// padrão some no fundo (mesma cor base, sem contorno). O corpo fica afundado (`pal().deep`) e o contorno `pal().muted`;
+/// sem isso uma opção de rádio desmarcada não tem círculo e o estado só aparece num ponto.
+fn sunken_controls<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
+    ui.scope(|ui| {
+        let w = &mut ui.visuals_mut().widgets;
+        w.inactive.bg_fill = pal().deep;
+        w.inactive.bg_stroke = Stroke::new(1.5_f32, pal().muted);
+        w.hovered.bg_fill = pal().deep;
+        w.hovered.bg_stroke = Stroke::new(1.5_f32, pal().text);
+        add(ui)
+    })
+    .inner
+}
+
+/// Extensões de `Ui` para os controles de marcar e arrastar com a aparência do tema. As telas usam estas, não as do
+/// egui direto (`checkbox`, `radio_value`, `Slider`), que somem no fundo.
 pub(crate) trait CheckExt {
+    /// Caixa de marcar com a caixinha visível.
     fn check(&mut self, checked: &mut bool, text: impl Into<egui::WidgetText>) -> egui::Response;
+    /// Opção de rádio com o círculo visível, marcada quando `current == alt`.
+    fn radio_pick<V: PartialEq>(&mut self, current: &mut V, alt: V, text: impl Into<egui::WidgetText>) -> egui::Response;
+    /// Slider com o trilho afundado e preenchido com o acento até o botão: o trilho mostra o intervalo e a posição.
+    fn slider(&mut self, slider: egui::Slider<'_>) -> egui::Response;
 }
 
 impl CheckExt for egui::Ui {
     fn check(&mut self, checked: &mut bool, text: impl Into<egui::WidgetText>) -> egui::Response {
-        self.scope(|ui| {
-            let w = &mut ui.visuals_mut().widgets;
-            w.inactive.bg_fill = pal().deep;
-            w.inactive.bg_stroke = Stroke::new(1.5_f32, pal().muted);
-            w.hovered.bg_fill = pal().deep;
-            w.hovered.bg_stroke = Stroke::new(1.5_f32, pal().text);
-            ui.checkbox(checked, text)
-        })
-        .inner
+        sunken_controls(self, |ui| ui.checkbox(checked, text))
+    }
+
+    fn radio_pick<V: PartialEq>(&mut self, current: &mut V, alt: V, text: impl Into<egui::WidgetText>) -> egui::Response {
+        sunken_controls(self, |ui| ui.radio_value(current, alt, text))
+    }
+
+    fn slider(&mut self, slider: egui::Slider<'_>) -> egui::Response {
+        sunken_controls(self, |ui| ui.add(slider.trailing_fill(true)))
     }
 }
 
@@ -1433,6 +1464,20 @@ mod tests {
                     assert!(r >= 4.5, "tema {name}: branco sobre {what} tem contraste {r:.2} (< 4,5)");
                 }
             }
+        }
+    }
+
+    #[test]
+    fn disabled_filled_buttons_fade_into_the_base_in_both_themes() {
+        for (name, p) in [("escuro", &DARK_PALETTE), ("claro", &LIGHT_PALETTE)] {
+            for (what, fill) in [("acento", BLURPLE), ("verde", p.green), ("vermelho", p.red)] {
+                let off = disabled_fill_with(p, fill);
+                let r = contrast(p.muted, off);
+                assert!(r >= 3.0, "tema {name}: texto do botão {what} desligado tem contraste {r:.2} (< 3)");
+                // Perto da base (o botão não parece ativo) e longe da cor cheia.
+                assert!(contrast(off, p.bg) < contrast(fill, p.bg), "tema {name}: botão {what} desligado não apagou");
+            }
+            assert_eq!(disabled_fill_with(p, p.bg), p.bg);
         }
     }
 
