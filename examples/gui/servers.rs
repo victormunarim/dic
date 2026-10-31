@@ -74,6 +74,11 @@ impl ServersUi {
     }
 }
 
+/// Para quem vai o anexo da sala: quem está na sala agora, não sou eu e é contato (a transferência 1:1 só chega a contato).
+fn room_recipients(v: &ServerView, room: &clam::server::RoomView, contacts: &[(String, [u8; 32])]) -> Vec<[u8; 32]> {
+    v.members.iter().filter(|m| !m.is_me && m.online && room.people.contains(&m.id) && contacts.iter().any(|(_, k)| *k == m.key)).map(|m| m.key).collect()
+}
+
 fn role_name(r: Role) -> &'static str {
     match r {
         Role::Owner => "dono",
@@ -735,6 +740,14 @@ impl App {
     fn chat_box(&mut self, ui: &mut egui::Ui, hub: &clam::server::net::ServerHub, v: &ServerView, room: &clam::server::RoomView) {
         let contacts = parse_contacts(&self.form.contacts);
         ui.add_space(6.0);
+        let recipients = room_recipients(v, room, &contacts);
+        // Arquivo solto na janela vira anexo da sala (vai só aos contatos que estão nela).
+        if !recipients.is_empty() {
+            let dropped = ui.ctx().input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect::<Vec<_>>());
+            for path in dropped {
+                self.send(Cmd::RoomFile(v.id, recipients.clone(), path));
+            }
+        }
         // O conteúdo central rola, então não há "altura disponível": a lista de mensagens sempre vai até o pé da janela, menos a linha de envio e a folga da sombra do botão. Assim o campo fica embaixo e a página só rola se a janela for baixa demais; poucas mensagens não criam rolagem.
         let room_height = (ui.clip_rect().bottom() - ui.cursor().top() - 84.0).max(160.0);
         egui::ScrollArea::vertical().id_salt(("bate-papo", room.id)).max_height(room_height).min_scrolled_height(room_height).stick_to_bottom(true).auto_shrink([false, false]).show(ui, |ui| {
@@ -757,6 +770,19 @@ impl App {
         ui.allocate_ui_with_layout(vec2(ui.available_width(), 36.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let ready = !self.srv.chat_draft.trim().is_empty();
             let sent = button(ui, ready, "Enviar", BLURPLE).clicked();
+            let tip = format!("{} O arquivo vai só aos contatos que estão na sala agora ({}); quem não é contato vê o aviso e não o recebe.", crate::conversa::ATTACH_TIP, recipients.len());
+            if crate::conversa::attach_button(ui, !recipients.is_empty(), &tip).clicked() {
+                // O diálogo do sistema bloqueia: roda fora da janela e devolve o caminho como comando.
+                if let Some(r) = &self.running {
+                    let (tx, repaint, id, to) = (r.cmds.clone(), ui.ctx().clone(), v.id, recipients.clone());
+                    std::thread::spawn(move || {
+                        if let Some(path) = rfd::FileDialog::new().set_title("Enviar arquivo à sala").pick_file() {
+                            let _ = tx.send(Cmd::RoomFile(id, to, path));
+                            repaint.request_repaint();
+                        }
+                    });
+                }
+            }
             let reply = ui.add(field(&mut self.srv.chat_draft, "Mensagem para a sala").desired_width(field_beside(ui, 0.0).max(80.0)));
             let enter = reply.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             if (sent || enter) && !self.srv.chat_draft.trim().is_empty() {
@@ -872,6 +898,30 @@ mod tests {
     }
 
     use super::*;
+
+    fn member(n: u8, is_me: bool, online: bool) -> clam::server::MemberView {
+        clam::server::MemberView { id: [n; 8], key: [n; 32], name: String::new(), role: Role::Member, is_me, online, room: None, sharing: false }
+    }
+
+    #[test]
+    fn room_attachment_goes_only_to_online_contacts_in_the_room() {
+        // 1 sou eu; 2 é contato na sala; 3 é contato fora da sala; 4 está na sala mas não é contato; 5 é contato offline.
+        let view = ServerView {
+            id: [0; 16],
+            name: String::new(),
+            me: [1; 8],
+            my_role: None,
+            joining: false,
+            epoch: 0,
+            my_room: Some([9; 16]),
+            members: vec![member(1, true, true), member(2, false, true), member(3, false, true), member(4, false, true), member(5, false, false)],
+            rooms: vec![],
+        };
+        let room = clam::server::RoomView { id: [9; 16], name: String::new(), creator: [1; 8], people: vec![[1; 8], [2; 8], [4; 8], [5; 8]], chat: vec![] };
+        let contacts = vec![("a".to_string(), [2; 32]), ("b".to_string(), [3; 32]), ("c".to_string(), [5; 32])];
+        assert_eq!(room_recipients(&view, &room, &contacts), vec![[2; 32]]);
+        assert!(room_recipients(&view, &room, &[]).is_empty());
+    }
 
     #[test]
     fn members_column_follows_the_window_until_the_person_chooses() {

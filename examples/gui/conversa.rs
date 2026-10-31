@@ -86,7 +86,7 @@ impl App {
             ui.allocate_ui_with_layout(vec2(ui.available_width(), 36.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let ready = sendable && !self.chat_draft.trim().is_empty();
                 let sent = button(ui, ready, "Enviar", BLURPLE).clicked();
-                if attach_button(ui, sendable).clicked()
+                if attach_button(ui, sendable, ATTACH_TIP).clicked()
                     && let Some(r) = &self.running
                 {
                     // O diálogo do sistema bloqueia: roda fora da janela e devolve o caminho como comando.
@@ -143,8 +143,10 @@ fn file_progress(ui: &mut egui::Ui, x: &crate::arquivos::Xfer, cmds: &mut Vec<Cm
     }
 }
 
+pub(crate) const ATTACH_TIP: &str = "Anexar arquivo: abre as pastas do computador (ou arraste o arquivo para a janela). Limite de 32 MB";
+
 /// Clipe de papel desenhado (a fonte pode não ter o glifo): abre o seletor de arquivos do sistema.
-fn attach_button(ui: &mut egui::Ui, enabled: bool) -> egui::Response {
+pub(crate) fn attach_button(ui: &mut egui::Ui, enabled: bool, tip: &str) -> egui::Response {
     let (rect, reply) = ui.allocate_exact_size(vec2(34.0, 34.0), if enabled { egui::Sense::click() } else { egui::Sense::hover() });
     let ink = if !enabled { pal().muted.gamma_multiply(0.5) } else if reply.hovered() { pal().strong } else { pal().text };
     let stroke = egui::Stroke::new(2.0_f32, ink);
@@ -152,7 +154,6 @@ fn attach_button(ui: &mut egui::Ui, enabled: bool) -> egui::Response {
     // Uma alça comprida e a volta interna, como um clipe visto de frente.
     let pts = [vec2(-3.0, 8.0), vec2(-6.0, 5.0), vec2(-6.0, -7.0), vec2(0.0, -10.0), vec2(6.0, -7.0), vec2(6.0, 6.0), vec2(2.0, 9.0), vec2(-2.0, 6.0), vec2(-2.0, -4.0)];
     ui.painter().add(egui::Shape::line(pts.iter().map(|p| c + *p).collect(), stroke));
-    let tip = "Anexar arquivo: abre as pastas do computador (ou arraste o arquivo para a janela). Limite de 32 MB";
     reply.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, "Anexar arquivo"));
     let reply = reply.on_hover_text(tip);
     if enabled { reply.on_hover_cursor(egui::CursorIcon::PointingHand) } else { reply }

@@ -83,6 +83,8 @@ pub(crate) enum Cmd {
     Chat([u8; 32], String),
     /// Envia o arquivo ao contato (ele recebe sem precisar aceitar).
     SendFile([u8; 32], std::path::PathBuf),
+    /// Anexo no bate-papo da sala: avisa a sala e manda o arquivo a cada contato listado (os que estão na sala agora).
+    RoomFile(clam::server::ServerId, Vec<[u8; 32]>, std::path::PathBuf),
     /// Cancela a transferência (minha ou do contato) ou retira a oferta.
     FileCancel([u8; 32], u64, bool),
 }

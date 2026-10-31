@@ -104,6 +104,35 @@ pub(crate) fn start_send(shared: &std::sync::Arc<Shared>, dialer: &Dialer, out: 
     });
 }
 
+/// Arquivo anexado no bate-papo da sala: confere o arquivo uma vez, avisa a sala com uma linha `📎 nome` e manda o
+/// arquivo a cada contato em `peers`. O arquivo vai por transferência 1:1 (`start_send`), então só chega a quem é
+/// contato e aceita (`docs/SERVIDORES.md`); quem não é contato vê a linha e não recebe o arquivo.
+pub(crate) fn room_send(shared: &std::sync::Arc<Shared>, dialer: &Dialer, out: &Sink, hub: &clam::server::net::ServerHub, server: clam::server::ServerId, peers: Vec<[u8; 32]>, path: PathBuf) {
+    let size = std::fs::metadata(&path).ok().filter(std::fs::Metadata::is_file).map(|m| m.len());
+    let name = path.file_name().map(|n| transfer::safe_name(&n.to_string_lossy()));
+    let (Some(size), Some(name)) = (size, name) else {
+        out.line(format!("não consegui ler {}", path.display()));
+        return;
+    };
+    if size == 0 || size > MAX_FILE {
+        out.line(format!("{name}: o arquivo precisa ter de 1 byte a {} MB", MAX_FILE / (1024 * 1024)));
+        return;
+    }
+    if let Err(e) = hub.try_act(|s, now| s.say(&server, &announcement(&name), now)) {
+        out.line(format!("não consegui avisar a sala: {e}"));
+        return;
+    }
+    for peer in peers {
+        start_send(shared, dialer, out, peer, path.clone());
+    }
+    (out.repaint)();
+}
+
+/// A linha que a sala vê quando alguém anexa um arquivo.
+pub(crate) fn announcement(name: &str) -> String {
+    format!("📎 {name}")
+}
+
 /// Trata os quadros de arquivo que chegaram de contatos.
 /// Devolve as ofertas novas (contato, número): o laço as aceita sozinho.
 pub(crate) fn on_frames(shared: &std::sync::Arc<Shared>, rx: &mut Receiving, frames: Vec<([u8; 32], FileFrame)>) -> Vec<([u8; 32], u64)> {
