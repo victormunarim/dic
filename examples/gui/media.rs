@@ -113,10 +113,20 @@ impl App {
                     }
                 });
             } else {
-                card(ui, "Tratamento da voz", "O que o programa faz com o som antes de mandá-lo.", |ui| {
-                    ui.spacing_mut().slider_width = (ui.available_width() - 110.0).max(120.0);
+                // Três cartões por assunto (ruído, eco, nível): oito caixas no mesmo nível não se leem de uma vez.
+                card(ui, "Ruído", "O que o programa faz com o som antes de mandá-lo.", |ui| {
                     ui.check(&mut p.denoise, "Remover ruído (rede neural)")
                         .on_hover_text("Tira teclado, ventilador, estática e vozes ao fundo (RNNoise). Com ela ligada, a porta e o indicador \"voz\" só contam o que a rede reconhece como fala. Adiciona ~10 ms de atraso.");
+                    ui.check(&mut p.gate, "Silenciar o que não é voz")
+                        .on_hover_text("Quando o microfone fica abaixo do limiar, o som enviado é reduzido. Ajuste a sensibilidade até a linha ficar logo acima do ruído.");
+                    ui.add_enabled_ui(p.gate, |ui| {
+                        ui.spacing_mut().slider_width = (ui.available_width() - 110.0).max(120.0);
+                        ui.label("Quanto abaixar o que não é voz");
+                        ui.add(egui::Slider::new(&mut p.gate_depth_db, AudioPrefs::GATE_DEPTH_DB).suffix(" dB"));
+                    });
+                    ui.check(&mut p.high_pass, "Cortar graves (ventilador, mesa, sopro)");
+                });
+                card(ui, "Eco", "", |ui| {
                     ui.check(&mut p.echo_cancel, "Cancelar eco do alto-falante")
                         .on_hover_text("Tira do microfone o que saiu pelo alto-falante, para o outro lado não se ouvir de volta. Leva alguns segundos de conversa para aprender o ambiente. Com fones não é preciso.");
                     ui.check(&mut p.echo_suppress, "Abaixar o microfone enquanto só há eco")
@@ -124,13 +134,8 @@ impl App {
                     if let Some(erle) = a.echo_erle().filter(|_| p.echo_cancel && (in_call || testing)) {
                         note(ui, format!("Eco cancelado: {erle:.0} dB"));
                     }
-                    ui.check(&mut p.gate, "Silenciar o que não é voz")
-                        .on_hover_text("Quando o microfone fica abaixo do limiar, o som enviado é reduzido. Ajuste a sensibilidade até a linha ficar logo acima do ruído.");
-                    ui.add_enabled_ui(p.gate, |ui| {
-                        ui.label("Redução do ruído");
-                        ui.slider(egui::Slider::new(&mut p.gate_depth_db, AudioPrefs::GATE_DEPTH_DB).suffix(" dB"));
-                    });
-                    ui.check(&mut p.high_pass, "Cortar graves (ventilador, mesa, sopro)");
+                });
+                card(ui, "Nível e formato", "", |ui| {
                     ui.check(&mut p.agc, "Volume automático (nivela voz baixa e alta)")
                         .on_hover_text("Reforça quem fala baixo e contém quem fala alto. Não reforça o ruído de fundo.");
                     ui.add_enabled_ui(!in_call, |ui| {

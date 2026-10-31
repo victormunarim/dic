@@ -51,6 +51,12 @@ pub(crate) struct App {
     pub(crate) chat_draft: String,
 }
 
+/// A engrenagem fica marcada nas telas que só se abrem por ela: sem isso a pessoa em Áudio ou Configurações não vê
+/// onde está (o trilho marca a coluna de contatos, não a tela do centro).
+pub(crate) fn gear_marks(tab: Tab) -> bool {
+    matches!(tab, Tab::Video | Tab::Audio | Tab::Settings | Tab::Log)
+}
+
 /// Larguras a partir das quais o conteúdo se divide em duas colunas.
 const TWO_COLUMNS: f32 = 780.0;
 
@@ -195,7 +201,7 @@ impl App {
             let can_toggle = offline || !in_call;
             if can_toggle && me.hovered() {
                 ui.painter().circle_filled(me.rect.center(), me.rect.width() / 2.0, Color32::from_black_alpha(150));
-                theme::power_icon(ui, me.rect, if offline { pal().green } else { pal().red });
+                theme::power_icon(ui, me.rect, if offline { pal().focus } else { pal().red });
             }
             let tip = format!("{name}: {text}{}", if !can_toggle { "" } else if offline { "\nClique para ficar online" } else { "\nClique para ficar offline" });
             let me = me.on_hover_text(tip);
@@ -209,7 +215,10 @@ impl App {
             // Sair da sala e desligar a chamada 1:1 ficam na subseção acima deste painel.
             // Engrenagem e mudo ficam juntos na ponta direita da linha (a engrenagem por último, na borda).
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let gear = glyph_button(ui, "Menu", "Chamada, vídeo, áudio, configurações e atividade", None, gear_icon);
+                // A engrenagem marca a tela aberta quando ela mora no menu (o trilho ao lado só diz qual coluna está à esquerda).
+                let here = gear_marks(self.tab);
+                let gear_tip = if here { format!("{} (aberta). Chamada, vídeo, áudio, configurações e atividade", self.title().0) } else { "Chamada, vídeo, áudio, configurações e atividade".to_string() };
+                let gear = glyph_button_active(ui, "Menu", &gear_tip, here, gear_icon);
                 let calling_1to1 = in_call && !in_room;
                 let menu = theme::menu(&gear).show(|ui| {
                     ui.set_min_width(theme::MENU_WIDTH);
@@ -234,7 +243,7 @@ impl App {
                 theme::menu_focus_back(ui, &gear, menu.is_some());
                 let muted = self.shared.audio.muted.load(Ordering::Relaxed);
                 // Offline o caminho para ficar online fica à vista: sem ele, só o hover do avatar o mostrava.
-                if offline && glyph_button(ui, "Ficar online", "Ficar online", Some(pal().green), power_glyph).clicked() {
+                if offline && glyph_button(ui, "Ficar online", "Ficar online", Some(pal().focus), power_glyph).clicked() {
                     self.go_online(ctx);
                 }
                 let shortcut = ctx.format_shortcut(&MUTE_KEY);
@@ -399,5 +408,21 @@ impl eframe::App for App {
             self.note_slow(format!("janela: um quadro levou {} ms para desenhar", took.as_millis()));
         }
         LAST_FRAME_END.with(|l| l.set(Some(std::time::Instant::now())));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A engrenagem marca só as telas que moram no menu dela; a inicial, a chamada e os servidores ficam de fora.
+    #[test]
+    fn the_gear_marks_only_the_screens_it_opens() {
+        for tab in [Tab::Video, Tab::Audio, Tab::Settings, Tab::Log] {
+            assert!(gear_marks(tab));
+        }
+        for tab in [Tab::Contacts, Tab::Call, Tab::Servers] {
+            assert!(!gear_marks(tab));
+        }
     }
 }

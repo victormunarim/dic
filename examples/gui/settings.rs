@@ -39,7 +39,7 @@ impl App {
             }
             ui.add_space(4.0);
             if offline {
-                if big_button(ui, "Ficar online", pal().green).clicked() {
+                if big_button(ui, "Ficar online", BLURPLE).clicked() {
                     self.go_online(ctx);
                 }
             } else if why_off(button(ui, !in_call, "Ficar offline", pal().bg), !in_call, "Desligue a chamada antes de ficar offline").clicked()
@@ -213,13 +213,16 @@ impl App {
     }
 
     pub(crate) fn log_tab(&mut self, ui: &mut egui::Ui) {
+        // Sem linhas o poço de altura cheia só carregava uma frase no canto: um cartão curto diz o mesmo e o poço
+        // volta quando houver o que listar.
+        if self.log.lock_unpoisoned().is_empty() {
+            card(ui, "Nada ainda", &format!("Fique online pelo {ONLINE_HINT}; o que o programa faz aparece aqui."), |_| {});
+            return;
+        }
         sunken_frame(ui, 12, 14, |ui| {
             ui.set_width(ui.available_width());
             egui::ScrollArea::vertical().auto_shrink(false).stick_to_bottom(true).show(ui, |ui| {
                 let lines = self.log.lock_unpoisoned();
-                if lines.is_empty() {
-                    note(ui, "Nada ainda. Fique online (botão de ligar, no canto inferior esquerdo) e o que o programa faz aparece aqui.");
-                }
                 for l in lines.iter() {
                     ui.label(RichText::new(l).monospace().size(13.5));
                 }
@@ -304,6 +307,47 @@ mod layout_tests {
                     for (b, rb) in &rects[i + 1..] {
                         assert!(!ra.intersects(*rb), "largura {width}, offline {offline}: '{a}' {ra:?} sobrepõe '{b}' {rb:?}");
                     }
+                }
+            }
+        }
+    }
+
+    /// Renderiza `f` numa janela de `size` e devolve os cartões desenhados (título e retângulo).
+    fn cards(size: egui::Vec2, f: impl FnMut(&mut egui::Ui)) -> Vec<(String, egui::Rect)> {
+        let mut f = f;
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        for _ in 0..3 {
+            CARD_RECTS.with(|r| r.borrow_mut().clear());
+            let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)), ..Default::default() };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| f(ui));
+            });
+        }
+        CARD_RECTS.with(|r| r.borrow().clone())
+    }
+
+    /// Atividade sem linhas é um cartão curto, não um poço que ocupa a altura toda.
+    #[test]
+    fn an_empty_activity_log_is_a_short_card() {
+        let mut app = app();
+        let rects = cards(egui::vec2(1000.0, 800.0), |ui| app.log_tab(ui));
+        let (_, rect) = rects.iter().find(|(t, _)| t == "Nada ainda").expect("cartão de log vazio");
+        assert!(rect.height() < 160.0, "o cartão vazio tem {} px", rect.height());
+    }
+
+    /// O tratamento da voz vem em cartões por assunto, sem um sobre o outro, nas duas larguras.
+    #[test]
+    fn voice_settings_are_grouped_in_cards_that_do_not_overlap() {
+        for width in [700.0_f32, 1300.0] {
+            let mut app = app();
+            let rects = cards(egui::vec2(width, 1800.0), |ui| app.audio_tab(ui, true, false, false));
+            for title in ["Ruído", "Eco", "Nível e formato"] {
+                assert!(rects.iter().any(|(t, _)| t == title), "largura {width}: falta o cartão '{title}'");
+            }
+            for (i, (a, ra)) in rects.iter().enumerate() {
+                for (b, rb) in &rects[i + 1..] {
+                    assert!(!ra.intersects(*rb), "largura {width}: '{a}' {ra:?} sobrepõe '{b}' {rb:?}");
                 }
             }
         }

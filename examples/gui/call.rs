@@ -12,8 +12,12 @@ impl App {
     pub(crate) fn dial_card(&mut self, ui: &mut egui::Ui, offline: bool, busy: bool) {
         card(ui, "Ligar para um código", "Cole o código de contato de alguém, ou o nome de um contato.", |ui| {
             let live = !offline && !busy;
-            ui.add_enabled(live, field(&mut self.form.peer, "código de contato ou nome de um contato"));
-            if phone_button(ui, live, "Ligar", pal().green).clicked() {
+            // O botão fica na linha do campo, à direita: é dele que a ação sai, e abaixo ficava solto e apagado.
+            let dial = ui.horizontal(|ui| {
+                ui.add_enabled(live, field(&mut self.form.peer, "código de contato ou nome de um contato").desired_width(field_beside(ui, 44.0)));
+                phone_button(ui, live, "Ligar", pal().green).clicked()
+            });
+            if dial.inner {
                 match self.form.target() {
                     Ok(k) => {
                         self.form.save();

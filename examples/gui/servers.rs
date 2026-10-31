@@ -87,8 +87,8 @@ impl App {
     pub(crate) fn servers_tab(&mut self, ui: &mut egui::Ui, offline: bool) {
         let hub = self.shared.servers.lock_unpoisoned().clone();
         let Some(hub) = hub.filter(|_| !offline) else {
-            card(ui, "Servidores", "Grupos de pessoas com salas de voz, sem servidor no meio.", |ui| {
-                note(ui, "Fique online pelo botão de ligar, no canto inferior esquerdo, para ver e usar os seus servidores.");
+            // O título da página já diz "Servidores": o cartão diz o estado, não repete o nome.
+            card(ui, "Você está offline", &format!("Para ver e usar os seus servidores, fique online pelo {ONLINE_HINT}."), |ui| {
                 details(ui, "Como funciona", "Cada membro guarda o grupo e o mantém de pé enquanto estiver online; não há servidor que o hospede.");
             });
             return;

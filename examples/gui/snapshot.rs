@@ -162,8 +162,9 @@ fn sample_app(tab: Tab) -> App {
         my_name: "Ana".into(),
         secret: "11".repeat(32),
         contacts: format!("Bruno {}\nCarla {}", "ab".repeat(32), "cd".repeat(32)),
-        intros: true,
-        ..Form::default()
+        // Os padrões de quem abre o app pela primeira vez (privacidade da tela ligada, DHT, âncora): a captura mostra o
+        // que a pessoa vê de verdade, não um `Form` zerado que desmarca tudo.
+        ..Form::first_run()
     };
     App {
         rt,
@@ -193,6 +194,14 @@ fn shot(tab: Tab, size: egui::Vec2) -> Frame {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A captura parte dos padrões reais: a privacidade na transmissão da tela vem ligada.
+    #[test]
+    fn sample_app_starts_from_the_real_defaults() {
+        let app = sample_app(Tab::Video);
+        assert!(app.form.screen_private, "o padrão do app é privado");
+        assert!(app.form.use_dht && app.form.auto_online);
+    }
 
     /// O rasterizador pinta: a tela de Configurações em tema escuro tem bem mais que o fundo.
     #[test]

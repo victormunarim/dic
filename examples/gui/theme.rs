@@ -370,6 +370,13 @@ pub(crate) fn why_off(reply: egui::Response, enabled: bool, reason: &str) -> egu
 /// `ink` recebe se o ponteiro está em cima e devolve a tinta; em `Ui` desligado o ícone apaga e não reage. Botão novo
 /// nasce daqui, para não esquecer nome, dica ou foco.
 fn bare_button(ui: &mut Ui, size: egui::Vec2, name: &str, tip: &str, ink: impl FnOnce(bool) -> Color32, icon: f32, draw: impl FnOnce(&egui::Painter, Pos2, f32, Color32)) -> egui::Response {
+    bare_button_state(ui, size, name, tip, false, ink, icon, draw)
+}
+
+/// `bare_button` com estado de "lugar atual": `active` afunda a placa e pinta o ícone no acento, para a pessoa ver em
+/// qual tela está (cor e relevo juntos: o estado nunca fica só na sombra).
+#[allow(clippy::too_many_arguments)]
+fn bare_button_state(ui: &mut Ui, size: egui::Vec2, name: &str, tip: &str, active: bool, ink: impl FnOnce(bool) -> Color32, icon: f32, draw: impl FnOnce(&egui::Painter, Pos2, f32, Color32)) -> egui::Response {
     let enabled = ui.is_enabled();
     let (rect, reply) = ui.allocate_exact_size(size, egui::Sense::click());
     reply.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, name));
@@ -377,10 +384,18 @@ fn bare_button(ui: &mut Ui, size: egui::Vec2, name: &str, tip: &str, ink: impl F
     // qual linha é o menu.
     let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&reply));
     let hovered = enabled && (reply.hovered() || open);
-    if hovered {
+    if active && enabled {
+        sunken(ui.painter(), rect, R_BARE, pal().deep);
+    } else if hovered {
         ui.painter().rect_filled(rect, CornerRadius::same(R_BARE), pal().hover);
     }
-    let color = if enabled { ink(hovered) } else { pal().muted.gamma_multiply(0.5) };
+    let color = if !enabled {
+        pal().muted.gamma_multiply(0.5)
+    } else if active {
+        pal().focus
+    } else {
+        ink(hovered)
+    };
     draw(ui.painter(), rect.center() + press_nudge(&reply), icon, color);
     focus_ring(ui, &reply, R_BARE);
     // `on_hover_text` só aparece com o widget ligado: num ícone desligado a dica (o motivo) vai por `on_disabled_hover_text`.
@@ -882,6 +897,12 @@ pub(crate) fn alert_icon(painter: &egui::Painter, center: Pos2, size: f32, color
 /// `Ui` desligado o ícone apaga e não clica.
 pub(crate) fn glyph_button(ui: &mut Ui, name: &str, tip: &str, color: Option<Color32>, draw: impl FnOnce(&egui::Painter, Pos2, f32, Color32)) -> egui::Response {
     bare_button(ui, vec2(34.0, 34.0), name, tip, |h| color.unwrap_or(if h { pal().strong } else { pal().text }), 20.0, draw)
+}
+
+/// `glyph_button` que marca o lugar atual: `active` afunda a placa e põe o ícone no acento (a engrenagem, quando a
+/// tela aberta é uma das que moram no menu dela).
+pub(crate) fn glyph_button_active(ui: &mut Ui, name: &str, tip: &str, active: bool, draw: impl FnOnce(&egui::Painter, Pos2, f32, Color32)) -> egui::Response {
+    bare_button_state(ui, vec2(34.0, 34.0), name, tip, active, |h| if h { pal().strong } else { pal().text }, 20.0, draw)
 }
 
 /// Linha de menu com ícone desenhado à esquerda; `selected` marca a linha como o item atual e `tint` fixa a
