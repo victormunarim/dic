@@ -650,7 +650,7 @@ impl App {
         if my_room.is_some_and(|(server, _)| server == v.id) {
             let (sharing, note_text) = (self.shared.screen.sharing.load(Ordering::Relaxed), self.shared.screen.note.lock_unpoisoned().clone());
             let wanted = self.shared.screen.want_share.load(Ordering::Relaxed);
-            if wanted || !self.screen_tex.is_empty() || !note_text.is_empty() {
+            {
                 let names = self.form.names();
                 let diag = self.shared.screen.diagnostics();
                 card(ui, "Telas da sala", "Vídeo cifrado, direto com quem transmite.", |ui| {
@@ -661,7 +661,7 @@ impl App {
                     if !wanted && !note_text.is_empty() {
                         ui.colored_label(pal().error, note_text);
                     }
-                    self.screen_sound_toggles(ui, wanted, !self.screen_tex.is_empty());
+                    self.screen_sound_toggles(ui, true, true);
                     if !diag.is_empty() {
                         ui.label(RichText::new(diag).monospace().size(13.0).color(pal().muted));
                     }

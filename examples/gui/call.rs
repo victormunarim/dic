@@ -159,7 +159,6 @@ impl App {
                 if !wanted && !sharing && !note_text.is_empty() {
                     ui.colored_label(pal().error, note_text);
                 }
-                self.screen_sound_toggles(ui, true, false);
                 if !diag.is_empty() {
                     ui.label(RichText::new(diag).monospace().size(13.0).color(pal().muted));
                 }
@@ -167,9 +166,9 @@ impl App {
         }
 
         let names = self.form.names();
-        if !self.screen_tex.is_empty() {
-            card(ui, "Som das telas", "", |ui| self.screen_sound_toggles(ui, false, true));
-        }
+        // Sempre à vista na chamada, com ou sem tela rodando: as duas chaves começam ligadas e a pessoa precisa ver
+        // onde estão antes de a transmissão começar (quem assiste só recebe imagem depois).
+        card(ui, "Som da tela", "Enviar o som do computador a quem assiste e ouvir o som das telas que você assiste.", |ui| self.screen_sound_toggles(ui, true, true));
         let mut order: Vec<_> = self.screen_tex.iter().collect();
         order.sort_by_key(|(k, _)| **k);
         for (who, (_, tex)) in order {
