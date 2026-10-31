@@ -804,6 +804,14 @@ pub(crate) fn speaker_icon(painter: &egui::Painter, center: Pos2, size: f32, col
     }
 }
 
+/// Alto-falante riscado (sem som): o risco leva um vão da cor da base para ler em tamanho pequeno.
+pub(crate) fn speaker_off_icon(p: &egui::Painter, c: Pos2, size: f32, color: Color32) {
+    speaker_icon(p, c, size, color);
+    let (from, to) = (c + vec2(-size * 0.5, size * 0.5), c + vec2(size * 0.5, -size * 0.5));
+    p.line_segment([from, to], Stroke::new(size * 0.25, pal().bg));
+    p.line_segment([from, to], Stroke::new(size * 0.095, color));
+}
+
 /// Alto-falante com a seta de saída: o som do computador vai para quem assiste.
 pub(crate) fn send_sound_icon(p: &egui::Painter, c: Pos2, size: f32, color: Color32) {
     speaker_icon(p, c + vec2(-size * 0.12, 0.0), size * 0.9, color);
@@ -1609,7 +1617,7 @@ mod tests {
             ("n:Apagar a sala", |ui| trash_button(ui, "n:Apagar a sala")),
             ("n:Menu", |ui| glyph_button(ui, "n:Menu", "dica", None, gear_icon)),
             ("n:Bate-papo", |ui| glyph_button(ui, "n:Bate-papo", "dica", Some(BLURPLE), chat_icon)),
-            ("n:Só imagem", |ui| choice_button(ui, "n:Só imagem", "dica", BLURPLE, monitor_icon)),
+            ("n:Só imagem", |ui| choice_button(ui, "n:Só imagem", "dica", BLURPLE, speaker_off_icon)),
         ];
         for (want, draw) in buttons {
             let heard = heard(draw);

@@ -312,7 +312,8 @@ impl App {
                 // Sem nome ainda, o começo da chave é provisório: o texto diz isso e a chave fica no hover.
                 let shown_name = if pending { "Novo contato".to_string() } else { name.clone() };
                 let ink = if dim || pending { pal().muted } else { pal().text };
-                let label = ui.add_sized([ui.available_width() - 110.0 - marks, 32.0], egui::Label::new(RichText::new(shown_name).strong().color(ink)).truncate().sense(NO_TAB_STOP));
+                // Alinhado à esquerda, colado no avatar: `add_sized` centraria o nome na caixa.
+                let label = ui.allocate_ui_with_layout(vec2(ui.available_width() - 110.0 - marks, 32.0), egui::Layout::left_to_right(egui::Align::Center), |ui| ui.add(egui::Label::new(RichText::new(shown_name).strong().color(ink)).truncate().sense(NO_TAB_STOP))).inner;
                 let label = label.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(format!("{}…\nAbrir o bate-papo", &hex(key)[..16]));
                 if label.clicked() || face.clicked() {
                     self.open_chat(*key);
@@ -504,10 +505,10 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 12.0;
                     let (with_fill, without_fill) = if default_sound { (BLURPLE, pal().bg) } else { (pal().bg, BLURPLE) };
-                    if choice_button(ui, "Com som do computador", &with_sound, with_fill, send_sound_icon).clicked() {
+                    if choice_button(ui, "Com som do computador", &with_sound, with_fill, speaker_icon).clicked() {
                         answer = Some(Some(true));
                     }
-                    if choice_button(ui, "Só imagem, sem som", "Só imagem, sem o som do computador", without_fill, monitor_icon).clicked() {
+                    if choice_button(ui, "Só imagem, sem som", "Só imagem, sem o som do computador", without_fill, speaker_off_icon).clicked() {
                         answer = Some(Some(false));
                     }
                     if choice_button(ui, "Cancelar", "Cancelar (Esc): não transmitir agora", pal().bg, close_icon).clicked() {
