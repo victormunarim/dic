@@ -123,7 +123,7 @@ impl App {
         ui.horizontal(|ui| {
             if send {
                 let on = self.form.screen_audio;
-                if sound_toggle(ui, on, true, "Enviar o som do computador", "Enviar o som do computador. Quem assiste ouve o que toca no seu computador (música, jogo, vídeo, notificações), menos o que o próprio programa toca: a voz do contato e o som de tela de outros. A exclusão não é perfeita, sobra um resto fraco da voz do contato; com fones some. Usa cerca de 10% da banda do vídeo (2,5% sem privacidade) e, sem privacidade, quem observa a rede vê quando há som. Só no Linux (precisa de gstreamer1.0-tools com o plugin do PulseAudio). Vale na hora; a imagem se ajusta à banda na próxima transmissão.") {
+                if sound_toggle(ui, on, true, "Enviar o som do computador", "Enviar o som do computador. Quem assiste ouve o que toca no seu computador (música, jogo, vídeo, notificações), menos o que o próprio programa toca: a voz do contato e o som de tela de outros. A exclusão não é perfeita, sobra um resto fraco da voz do contato; com fones some. Usa cerca de 10% da banda do vídeo (2,5% sem privacidade) e, sem privacidade, quem observa a rede vê quando há som. No Linux precisa de gstreamer1.0-tools com o plugin do PulseAudio; no Windows não precisa de nada além do programa. Vale na hora; a imagem se ajusta à banda na próxima transmissão.") {
                     self.form.screen_audio = !on;
                     changed = true;
                 }

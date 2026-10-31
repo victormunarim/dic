@@ -1,7 +1,7 @@
 //! Áudio do computador para a transmissão de tela, sem o que o próprio programa toca.
 //!
 //! Captura o que o sistema manda ao alto-falante (Linux: o monitor da saída padrão do PulseAudio/PipeWire,
-//! lido por um `gst-launch-1.0` filho) e tira dele o que o programa mesmo tocou (voz do contato e áudio de
+//! lido por um `gst-launch-1.0` filho; Windows: loopback do WASAPI na saída padrão, pelo `cpal`) e tira dele o que o programa mesmo tocou (voz do contato e áudio de
 //! tela de outros), com um filtro adaptativo que só subtrai: a referência é o que saiu pelo alto-falante
 //! do programa ([`Audio::speaker_reference`]). Sem isso, quem assiste ouviria a própria voz de volta.
 //!
@@ -10,12 +10,18 @@
 
 use std::{
     collections::VecDeque,
-    process::Child,
     sync::{Arc, Mutex},
 };
 
 #[cfg(unix)]
-use std::{io::Read, process::{Command, Stdio}};
+use std::{io::Read, process::{Child, Command, Stdio}};
+
+#[cfg(windows)]
+use std::{
+    sync::atomic::{AtomicBool, Ordering},
+    thread::JoinHandle,
+    time::Duration,
+};
 
 use crate::{
     audio::{AudioError, SpeakerReference},
@@ -27,7 +33,7 @@ pub const RATE: u32 = 16_000;
 /// Amostras de um quadro de 20 ms.
 pub const FRAME: usize = (RATE / 50) as usize;
 /// Áudio capturado e ainda não lido: mais que 1 s é atraso que ninguém quer ouvir, o mais antigo cai.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 const MAX_QUEUED: usize = RATE as usize;
 
 /// Filtros de 200 ms: cobrem o atraso entre o programa escrever na placa e o monitor devolver o som.
@@ -118,8 +124,99 @@ impl Excluder {
 /// Áudio do sistema capturado, já sem o do programa, em quadros de 20 ms a 16 kHz mono.
 pub struct SystemAudio {
     queue: Arc<Mutex<VecDeque<i16>>>,
+    #[cfg(unix)]
     child: Child,
+    #[cfg(windows)]
+    capture: Loopback,
     excluder: Excluder,
+}
+
+/// Loopback do WASAPI: uma thread dona do `Stream` do `cpal` (que não precisa ser `Send`), parada por `stop`.
+/// `dead` sobe se o dispositivo some ou o stream dá erro.
+#[cfg(windows)]
+struct Loopback {
+    stop: Arc<AtomicBool>,
+    dead: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+/// Abre o loopback da saída padrão numa thread e espera dizer se deu certo. O `cpal` trata uma saída aberta
+/// como entrada como loopback, e ele entrega o que o sistema toca, na taxa e canais do mixer (que a conversão
+/// abaixo reduz a 16 kHz mono).
+#[cfg(windows)]
+fn open_loopback(queue: Arc<Mutex<VecDeque<i16>>>) -> Result<Loopback, AudioError> {
+    use cpal::{
+        SampleFormat,
+        traits::{DeviceTrait, HostTrait, StreamTrait},
+    };
+
+    fn build<T>(dev: &cpal::Device, cfg: cpal::StreamConfig, q: Arc<Mutex<VecDeque<i16>>>, dead: Arc<AtomicBool>) -> Result<cpal::Stream, AudioError>
+    where
+        T: cpal::SizedSample,
+        f32: cpal::FromSample<T>,
+    {
+        let ch = usize::from(cfg.channels).max(1);
+        let mut down = crate::audio::Downsampler::new(cfg.sample_rate, RATE);
+        dev.build_input_stream(
+            cfg,
+            move |data: &[T], _| {
+                let mut q = q.lock_unpoisoned();
+                for frame in data.chunks(ch) {
+                    let mono = frame.iter().map(|s| s.to_sample::<f32>()).sum::<f32>() / ch as f32;
+                    if let Some(v) = down.push(mono) {
+                        q.push_back(v);
+                    }
+                }
+                if q.len() > MAX_QUEUED {
+                    let extra = q.len() - MAX_QUEUED;
+                    q.drain(..extra);
+                }
+            },
+            move |_| dead.store(true, Ordering::Relaxed),
+            None,
+        )
+        .map_err(|e| AudioError(format!("loopback do WASAPI: {e}")))
+    }
+
+    let (stop, dead) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+    let (stop_t, dead_t) = (stop.clone(), dead.clone());
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), AudioError>>();
+    let thread = std::thread::spawn(move || {
+        let open = || -> Result<cpal::Stream, AudioError> {
+            let dev = cpal::default_host().default_output_device().ok_or_else(|| AudioError("não achei a saída de som padrão do sistema".into()))?;
+            let cfg = dev.default_output_config().map_err(|e| AudioError(format!("saída de som padrão: {e}")))?;
+            let sc: cpal::StreamConfig = cfg.clone().into();
+            let stream = match cfg.sample_format() {
+                SampleFormat::F32 => build::<f32>(&dev, sc, queue, dead_t.clone())?,
+                SampleFormat::I16 => build::<i16>(&dev, sc, queue, dead_t.clone())?,
+                SampleFormat::I32 => build::<i32>(&dev, sc, queue, dead_t.clone())?,
+                SampleFormat::U16 => build::<u16>(&dev, sc, queue, dead_t.clone())?,
+                f => return Err(AudioError(format!("formato da saída não suportado: {f}"))),
+            };
+            stream.play().map_err(|e| AudioError(format!("loopback do WASAPI: {e}")))?;
+            Ok(stream)
+        };
+        match open() {
+            Ok(stream) => {
+                let _ = ready_tx.send(Ok(()));
+                while !stop_t.load(Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                drop(stream);
+            }
+            Err(e) => {
+                let _ = ready_tx.send(Err(e));
+            }
+        }
+    });
+    match ready_rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(Ok(())) => Ok(Loopback { stop, dead, thread: Some(thread) }),
+        Ok(Err(e)) => Err(e),
+        Err(_) => {
+            stop.store(true, Ordering::Relaxed);
+            Err(AudioError("o WASAPI não respondeu ao abrir o loopback".into()))
+        }
+    }
 }
 
 /// Argumentos do `gst-launch-1.0` que leem o monitor `source` e escrevem PCM de 16 bits no stdout.
@@ -157,7 +254,7 @@ impl SystemAudio {
     ///
     /// # Errors
     ///
-    /// Sem `gst-launch-1.0`/`pactl`, sem saída de som padrão, ou fora do Linux (ainda não implementado).
+    /// Sem `gst-launch-1.0`, sem saída de som padrão ou com o servidor de som recusando o monitor.
     #[cfg(unix)]
     pub fn open(reference: SpeakerReference) -> Result<Self, AudioError> {
         let source = default_monitor()?;
@@ -196,15 +293,33 @@ impl SystemAudio {
         Ok(Self { queue, child, excluder: Excluder::new(reference) })
     }
 
-    /// Windows e demais: ainda não há captura do áudio do sistema.
-    #[cfg(not(unix))]
-    pub fn open(_: SpeakerReference) -> Result<Self, AudioError> {
-        Err(AudioError("áudio da tela ainda só existe no Linux".into()))
+    /// Começa a capturar o áudio do sistema (loopback do WASAPI), subtraindo o que `reference` diz que o
+    /// programa tocou.
+    ///
+    /// # Errors
+    ///
+    /// Sem saída de som padrão ou com o WASAPI recusando o loopback.
+    #[cfg(windows)]
+    pub fn open(reference: SpeakerReference) -> Result<Self, AudioError> {
+        let queue = Arc::new(Mutex::new(VecDeque::new()));
+        let capture = open_loopback(queue.clone())?;
+        Ok(Self { queue, capture, excluder: Excluder::new(reference) })
     }
 
-    /// O capturador morreu (sem saída de som, `gst-launch-1.0` caiu)?
+    /// Demais sistemas: ainda não há captura do áudio do sistema.
+    #[cfg(not(any(unix, windows)))]
+    pub fn open(_: SpeakerReference) -> Result<Self, AudioError> {
+        Err(AudioError("áudio da tela só existe no Linux e no Windows".into()))
+    }
+
+    /// O capturador morreu (sem saída de som, `gst-launch-1.0` caiu, dispositivo removido)?
     pub fn is_dead(&mut self) -> bool {
-        matches!(self.child.try_wait(), Ok(Some(_)) | Err(_))
+        #[cfg(unix)]
+        return matches!(self.child.try_wait(), Ok(Some(_)) | Err(_));
+        #[cfg(windows)]
+        return self.capture.dead.load(Ordering::Relaxed);
+        #[cfg(not(any(unix, windows)))]
+        true
     }
 
     /// Próximo quadro de 20 ms, já sem o áudio do programa, se já houver.
@@ -223,8 +338,18 @@ impl SystemAudio {
 
 impl Drop for SystemAudio {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        #[cfg(unix)]
+        {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+        #[cfg(windows)]
+        {
+            self.capture.stop.store(true, Ordering::Relaxed);
+            if let Some(t) = self.capture.thread.take() {
+                let _ = t.join();
+            }
+        }
     }
 }
 
