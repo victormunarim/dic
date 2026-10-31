@@ -707,7 +707,14 @@ impl App {
                                     }
                                 }
                                 let effect = "O segredo do servidor é trocado para quem fica: a pessoa não vê mais o que vier depois.";
-                                if confirm_item(ui, ask, "Remover do servidor", "Pede confirmação antes de remover", &format!("Remover {who} do servidor?"), effect, "Remover", trash_icon) {
+                                let question = format!("Remover {who} do servidor?");
+                                // Sem o Promover/Rebaixar (só o dono muda papéis) o menu tem um item só: abre na pergunta.
+                                let removed = if v.my_role == Some(Role::Owner) {
+                                    confirm_item(ui, ask, "Remover do servidor", "Pede confirmação antes de remover", &question, effect, "Remover", trash_icon)
+                                } else {
+                                    confirm_direct(ui, &question, effect, "Remover", trash_icon)
+                                };
+                                if removed {
                                     if let Err(e) = hub.try_act(|s, now| s.remove_member(&v.id, m.id, now)) {
                                         self.srv.msg = e.to_string();
                                     }
