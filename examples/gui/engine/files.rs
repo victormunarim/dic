@@ -38,7 +38,11 @@ pub(crate) fn start_send(shared: &std::sync::Arc<Shared>, dialer: &Dialer, out: 
         return;
     }
     let id = dialer.next_chat_id();
-    shared.transfers.lock_unpoisoned().add_out(peer, id, name.clone(), size);
+    {
+        let mut t = shared.transfers.lock_unpoisoned();
+        t.add_out(peer, id, name.clone(), size);
+        t.set_source(&peer, id, path.clone());
+    }
     // A mensagem do arquivo entra já no histórico; a conversa mostra o carregando ao lado enquanto anda.
     shared.chats.lock_unpoisoned().push_mine(peer, id, format!("📎 {name}"));
     (out.repaint)();

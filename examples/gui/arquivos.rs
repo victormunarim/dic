@@ -2,7 +2,7 @@
 //! pessoa, o que anda e como terminou. Só estado de exibição; os bytes e o disco ficam no laço do nó
 //! (`engine/node.rs`, via `clam::transfer`).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Quantas transferências já encerradas se guardam para a tela.
 const KEEP_DONE: usize = 20;
@@ -41,6 +41,19 @@ pub(crate) struct Xfer {
     /// Resposta do contato à minha oferta, ainda não vista pela tarefa de envio.
     answer: Option<bool>,
     cancel: bool,
+    /// Onde está o arquivo que enviei (para a miniatura); o do contato vem em `Phase::Done`.
+    source: Option<PathBuf>,
+}
+
+impl Xfer {
+    /// O arquivo no disco, quando já dá para mostrá-lo: o que enviei, ou o que terminou de chegar.
+    pub(crate) fn media_path(&self) -> Option<&Path> {
+        match (&self.phase, self.mine) {
+            (Phase::Done(Some(p)), false) => Some(p),
+            (Phase::Done(_), true) => self.source.as_deref(),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -55,7 +68,14 @@ impl Transfers {
 
     /// Oferta minha, esperando resposta.
     pub(crate) fn add_out(&mut self, peer: [u8; 32], id: u64, name: String, size: u64) {
-        self.push(Xfer { id, peer, name, size, mine: true, phase: Phase::Offering, bytes: 0, answer: None, cancel: false });
+        self.push(Xfer { id, peer, name, size, mine: true, phase: Phase::Offering, bytes: 0, answer: None, cancel: false, source: None });
+    }
+
+    /// Guarda o caminho do arquivo que enviei, para mostrar a miniatura.
+    pub(crate) fn set_source(&mut self, peer: &[u8; 32], id: u64, path: PathBuf) {
+        if let Some(x) = self.find(peer, id, true) {
+            x.source = Some(path);
+        }
     }
 
     /// Oferta do contato. `false` se é repetida (a oferta é reenviada quando o ack se perde).
@@ -63,7 +83,7 @@ impl Transfers {
         if self.find(&peer, id, false).is_some() {
             return false;
         }
-        self.push(Xfer { id, peer, name, size, mine: false, phase: Phase::Asking, bytes: 0, answer: None, cancel: false });
+        self.push(Xfer { id, peer, name, size, mine: false, phase: Phase::Asking, bytes: 0, answer: None, cancel: false, source: None });
         true
     }
 
@@ -190,6 +210,19 @@ mod tests {
         let all = t.of(&p);
         assert!(all.iter().any(|x| x.id == 0), "a viva fica");
         assert!(all.len() <= KEEP_DONE + 2);
+    }
+
+    #[test]
+    fn media_path_exists_only_when_the_file_is_there() {
+        let (p, mut t) = ([1u8; 32], Transfers::default());
+        t.add_out(p, 1, "a.png".into(), 1);
+        t.set_source(&p, 1, "/x/a.png".into());
+        assert!(t.of(&p)[0].media_path().is_none(), "em andamento ainda não");
+        t.phase(&p, 1, true, Phase::Done(None));
+        assert_eq!(t.of(&p)[0].media_path(), Some(Path::new("/x/a.png")));
+        t.add_in(p, 2, "b.png".into(), 1);
+        t.phase(&p, 2, false, Phase::Done(Some("/d/b.png".into())));
+        assert_eq!(t.of(&p).iter().find(|x| !x.mine).and_then(|x| x.media_path()), Some(Path::new("/d/b.png")));
     }
 
     #[test]

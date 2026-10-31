@@ -31,6 +31,7 @@ nnnoiseless = { version = "0.5.2", default-features = false, optional = true }
 opus-pure = "0.2.2"
 # Seletor de arquivos do sistema (portal no Unix, diálogo nativo no Windows e macOS).
 rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"], optional = true }
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp"], optional = true }
 
 [target.'cfg(unix)'.dependencies]
 x11rb = { version = "0.14.0", optional = true }
@@ -50,7 +51,7 @@ unsafe_op_in_unsafe_fn = "deny"
 undocumented_unsafe_blocks = "warn"
 
 [features]
-gui = ["net", "capture", "portal", "hotkey", "dep:eframe", "dep:rfd", "dep:keyring", "dep:nnnoiseless"]
+gui = ["net", "capture", "portal", "hotkey", "dep:eframe", "dep:rfd", "dep:image", "dep:keyring", "dep:nnnoiseless"]
 audio = ["dep:cpal", "dep:sonora"]
 net = ["dep:igd-next", "dep:libp2p", "dep:tokio", "dep:futures", "dep:snow", "dep:mainline"]
 video = ["net", "dep:openh264", "dep:openh264-sys2"]

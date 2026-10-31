@@ -80,6 +80,12 @@ impl App {
                             State::Sent | State::Received => ui.label(""),
                         };
                     });
+                    // Imagem à vista e vídeo com play, quando o arquivo já está no disco.
+                    if let Some(x) = xfers.iter().find(|x| x.id == m.id && x.mine == m.mine() && x.media_path().is_some())
+                        && let Some(path) = x.media_path()
+                    {
+                        crate::midia::show(ui, &x.name, path);
+                    }
                 }
             });
             ui.add_space(4.0);

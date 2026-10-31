@@ -21,6 +21,7 @@ mod arquivos;
 mod atalhos;
 mod chats;
 mod conversa;
+mod midia;
 mod contacts;
 mod media;
 mod settings;
