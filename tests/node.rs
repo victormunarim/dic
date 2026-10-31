@@ -1185,3 +1185,36 @@ async fn file_travels_to_an_online_contact_and_never_from_a_stranger() {
     assert!(b.take_files().is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Medição (não roda no CI): vazão de um arquivo de 260 KB em loopback contra o teto de ~61 KB/s do ritmo da tela.
+#[tokio::test]
+#[ignore]
+async fn measure_file_throughput() {
+    use clam::transfer;
+    let (sa, sb) = (key(), key());
+    let (pa, pb) = (*PublicKey::from(&sa).as_bytes(), *PublicKey::from(&sb).as_bytes());
+    let a = Node::start(fixed(sa, free_port(), vec![pb])).await.unwrap();
+    let b = Node::start(fixed(sb, free_port(), vec![pa])).await.unwrap();
+    a.add_hint(pb, b.relay_info().unwrap());
+    b.add_hint(pa, a.relay_info().unwrap());
+    let dir = std::env::temp_dir().join(format!("clam-rate-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = dir.join("o.bin");
+    let size = 260_000u64;
+    std::fs::write(&src, vec![7u8; size as usize]).unwrap();
+    let t = std::time::Instant::now();
+    let dialer = a.dialer();
+    let stream = transfer::stream(&dialer, pb, 1, &src, size, |_| {}, || false);
+    tokio::pin!(stream);
+    // Quem recebe precisa esvaziar a fila do app, senão o telefone não confirma.
+    let r = loop {
+        tokio::select! {
+            r = &mut stream => break r,
+            () = tokio::time::sleep(Duration::from_millis(20)) => { let _ = b.take_files(); }
+        }
+    };
+    r.unwrap();
+    let s = t.elapsed().as_secs_f64();
+    eprintln!("VAZAO {:.1} KB/s em {s:.1} s (teto ~61)", size as f64 / 1000.0 / s);
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -5,6 +5,8 @@ use std::time::Duration;
 
 /// Quadros mandados de uma vez antes de esperar o cover esvaziar (a fila dele guarda 16 células).
 const PACE_BURST: usize = 8;
+/// Sem ack novo por este tempo, um lote com ritmo para de esperar o que falta.
+const ACK_IDLE: Duration = Duration::from_millis(1500);
 
 use x25519_dalek::PublicKey;
 
@@ -152,20 +154,30 @@ impl Dialer {
                 tokio::time::sleep(pace * PACE_BURST as u32).await;
             }
         }
-        let _ = tokio::time::timeout(wait, async {
-            while got.iter().any(|g| !g) {
-                match client.next_event().await {
-                    Some(Event::Data(d)) => {
-                        if let Some(i) = (0..frames.len()).find(|i| !got[*i] && acked(*i, &d)) {
-                            got[i] = true;
-                        }
-                    }
-                    Some(_) => {}
-                    None => return,
-                }
+        // Com ritmo (lote de arquivo), a fila do cover descarta algumas células e o ack delas nunca vem: esperar o prazo
+        // inteiro por elas custava ~20 s por janela (6 KB/s em vez de ~60). Passado `ACK_IDLE` sem ack novo, desiste
+        // do que falta e o chamador reenvia só isso.
+        let idle = if pace.is_zero() { wait } else { wait.min(ACK_IDLE) };
+        // O relógio do ocioso conta desde o último ack, não desde o último evento: o cover também gera eventos.
+        let deadline = tokio::time::Instant::now() + wait;
+        let mut last_ack = tokio::time::Instant::now();
+        while got.iter().any(|g| !g) {
+            let now = tokio::time::Instant::now();
+            let left = deadline.saturating_duration_since(now).min(idle.saturating_sub(now.saturating_duration_since(last_ack)));
+            if left.is_zero() {
+                break;
             }
-        })
-        .await;
+            match tokio::time::timeout(left, client.next_event()).await {
+                Ok(Some(Event::Data(d))) => {
+                    if let Some(i) = (0..frames.len()).find(|i| !got[*i] && acked(*i, &d)) {
+                        got[i] = true;
+                        last_ack = tokio::time::Instant::now();
+                    }
+                }
+                Ok(Some(_)) => {}
+                Ok(None) | Err(_) => break,
+            }
+        }
         client.stop();
         if got.iter().any(|g| *g) {
             self.remember(&peer, used);
