@@ -130,9 +130,11 @@ pub(crate) struct Form {
     pub(crate) screen_sharp: bool,
     /// Codifica a tela na GPU quando o computador tem (veja `clam::hwenc`); senão, openh264. Desligado de início.
     pub(crate) screen_hardware: bool,
-    /// Leva o som do computador (sem o do programa) junto da tela. Desligado de início: o que toca no
-    /// computador (notificações, outros aplicativos) iria a quem assiste.
+    /// Leva o som do computador (sem o do programa) junto da tela. Ligado de início; a chave guarda o "não"
+    /// (`no_screen_audio`). Liga e desliga na própria transmissão, não nas configurações.
     pub(crate) screen_audio: bool,
+    /// Toca o som das telas que se assiste. Ligado de início; a chave guarda o "não" (`no_screen_hear`).
+    pub(crate) screen_hear: bool,
     /// Codec de voz das chamadas que esta pessoa inicia: Opus (32 kbps) em vez do G.722 (64 kbps).
     /// Quem atende usa o que o convite pedir. Ligado de início.
     pub(crate) voice_opus: bool,
@@ -520,7 +522,7 @@ pub(crate) fn save_known(book: &Book) -> std::io::Result<()> {
 impl Form {
     /// Primeira abertura: já nasce com uma identidade, para a pessoa não precisar gerar nada.
     pub(crate) fn first_run() -> Self {
-        Form { secret: hex(&StaticSecret::random_from_rng(OsRng).to_bytes()), intros: true, use_dht: true, anchor: true, screen_private: true, voice_opus: true, auto_online: true, ..Form::default() }
+        Form { secret: hex(&StaticSecret::random_from_rng(OsRng).to_bytes()), intros: true, use_dht: true, anchor: true, screen_private: true, voice_opus: true, auto_online: true, screen_audio: true, screen_hear: true, ..Form::default() }
     }
 
     pub(crate) fn load() -> Self {
@@ -559,7 +561,8 @@ impl Form {
             },
             screen_sharp: get("screen_sharp") == "1",
             screen_hardware: get("screen_hardware") == "1",
-            screen_audio: get("screen_audio") == "1",
+            screen_audio: get("no_screen_audio") != "1",
+            screen_hear: get("no_screen_hear") != "1",
             // Ligado de início: a chave guarda o "não", então o arquivo antigo, sem ela, também aceita.
             voice_opus: get("no_opus") != "1",
             // Ligado de início: a chave guarda o "não", então o arquivo antigo, sem ela, também aceita.
@@ -585,7 +588,7 @@ impl Form {
         let secret = self.secret_to_write(vault_set);
         let secret = secret.as_str();
         let text = format!(
-            "audio={}\nsecret={}\ncontacts={}\npeer={}\npublic_addr={}\nno_dht={}\ndht_circuit={}\nname={}\nintros={}\nno_anchor={}\nno_screen_privacy={}\nscreen_sharp={}\nscreen_hardware={}\nscreen_audio={}\nanchors={}\ninput_dev={}\noutput_dev={}\nno_opus={}\nno_auto_online={}\ntrusted={}\nblocked={}\nlight={}\n{}",
+            "audio={}\nsecret={}\ncontacts={}\npeer={}\npublic_addr={}\nno_dht={}\ndht_circuit={}\nname={}\nintros={}\nno_anchor={}\nno_screen_privacy={}\nscreen_sharp={}\nscreen_hardware={}\nno_screen_audio={}\nno_screen_hear={}\nanchors={}\ninput_dev={}\noutput_dev={}\nno_opus={}\nno_auto_online={}\ntrusted={}\nblocked={}\nlight={}\n{}",
             u8::from(self.use_audio),
             secret,
             self.contacts.trim().replace('\n', ";"),
@@ -599,7 +602,8 @@ impl Form {
             u8::from(!self.screen_private),
             u8::from(self.screen_sharp),
             u8::from(self.screen_hardware),
-            u8::from(self.screen_audio),
+            u8::from(!self.screen_audio),
+            u8::from(!self.screen_hear),
             self.anchors.trim().replace('\n', ";"),
             self.input_dev.trim(),
             self.output_dev.trim(),
@@ -819,6 +823,12 @@ mod tests {
         // Fora da faixa, ilegível ou não finito: limita ou volta ao padrão.
         let bad = AudioPrefs::from_kv(&kv("volume=99\nmic_gain=abc\ngate_db=NaN\ngate_depth_db=-5\n"));
         assert_eq!((bad.volume, bad.mic_gain, bad.gate_db, bad.gate_depth_db), (2.0, 1.0, -45.0, 6.0));
+    }
+
+    #[test]
+    fn screen_sound_starts_on_both_ways() {
+        let f = Form::first_run();
+        assert!(f.screen_audio && f.screen_hear);
     }
 
     #[test]

@@ -107,6 +107,19 @@ impl AudioTx {
     }
 }
 
+/// Acompanha a chave "enviar o som" da janela durante a transmissão: desligada, solta a captura; ligada de novo,
+/// abre-a. `gave_up` marca captura que falhou ou morreu, para não reabrir (e repetir o aviso) a cada 10 ms: só
+/// desligar e ligar a chave tenta outra vez.
+pub(crate) fn follow_audio_switch(audio: &mut Option<AudioTx>, gave_up: &mut bool, shared: &Shared, out: &Sink) {
+    if !shared.screen.audio.load(Ordering::Relaxed) {
+        *audio = None;
+        *gave_up = false;
+    } else if audio.is_none() && !*gave_up {
+        *audio = AudioTx::open(shared, out);
+        *gave_up = audio.is_none();
+    }
+}
+
 /// Dorme até `until` em fatias curtas, chamando `tick` entre elas: o som sai a cada 20 ms enquanto o laço
 /// de vídeo espera o próximo quadro (que pode estar a 60 ms ou mais).
 pub(crate) fn nap_until(until: std::time::Instant, mut tick: impl FnMut()) {

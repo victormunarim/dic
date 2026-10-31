@@ -370,6 +370,7 @@ impl eframe::App for App {
         st.sharp.store(self.form.screen_sharp, Ordering::Relaxed);
         st.hardware.store(self.form.screen_hardware, Ordering::Relaxed);
         st.audio.store(self.form.screen_audio, Ordering::Relaxed);
+        st.silenced.store(!self.form.screen_hear, Ordering::Relaxed);
         let status = self.shared.status.lock_unpoisoned().clone();
 
         self.server_rail(ctx, offline);

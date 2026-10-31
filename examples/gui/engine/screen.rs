@@ -44,6 +44,9 @@ pub(crate) struct ScreenState {
     pub(crate) hardware: AtomicBool,
     /// A pessoa quer levar o som do computador junto; a janela copia a escolha da configuração a cada quadro.
     pub(crate) audio: AtomicBool,
+    /// A pessoa não quer ouvir o som das telas que assiste (o padrão é ouvir, por isso a chave é a negação); a
+    /// janela copia a escolha da configuração a cada quadro.
+    pub(crate) silenced: AtomicBool,
     /// O que o alto-falante do programa tocou, para tirar do som do computador (`None` sem áudio aberto).
     pub(crate) speaker: Mutex<Option<Speaker>>,
     /// Som de tela recebido, por quem transmite, esperando a vez de tocar.
@@ -68,6 +71,11 @@ impl ScreenState {
     pub(crate) fn hear(&self, who: [u8; 32], a: clam::media::screen::ScreenAudio) {
         use clam::media::codec::Codec;
         let mut m = self.heard.lock_unpoisoned();
+        // Sem som: nada é decodificado nem guardado, e o que já esperava para tocar é descartado.
+        if self.silenced.load(Ordering::Relaxed) {
+            m.clear();
+            return;
+        }
         let h = m.entry(who).or_insert_with(Heard::new);
         let missing = h.last.map_or(0, |l| a.seq.wrapping_sub(l).wrapping_sub(1));
         // Lacuna grande é reinício do outro lado, não perda: não vale esconder centenas de quadros.
@@ -286,6 +294,8 @@ pub(crate) async fn share_task(dialer: Dialer, peer: [u8; 32], keys: clam::media
     });
     let flag = shared.clone();
     let mut audio = AudioTx::open(&shared, &out);
+    let mut audio_gave_up = audio.is_none() && shared.screen.audio.load(Ordering::Relaxed);
+    let audio_out = out.clone();
     // Capturar e codificar pesa: fora do executor.
     let share = tokio::task::spawn_blocking(move || {
         let every = Duration::from_secs_f32(1.0 / enc.fps());
@@ -321,6 +331,7 @@ pub(crate) async fn share_task(dialer: Dialer, peer: [u8; 32], keys: clam::media
             );
             next += every;
             nap_until(next, || {
+                follow_audio_switch(&mut audio, &mut audio_gave_up, &flag, &audio_out);
                 if let Some(a) = audio.as_mut()
                     && !a.pump(|d| {
                         let _ = share.push_audio(d);
@@ -328,6 +339,7 @@ pub(crate) async fn share_task(dialer: Dialer, peer: [u8; 32], keys: clam::media
                 {
                     *flag.screen.note.lock_unpoisoned() = "o som do computador parou de ser capturado".into();
                     audio = None;
+                    audio_gave_up = true;
                 }
             });
         }
@@ -372,6 +384,8 @@ pub(crate) async fn start_room_capture(shared: Arc<Shared>, out: Sink) -> Option
         }
     };
     let mut audio = AudioTx::open(&shared, &out);
+    let mut audio_gave_up = audio.is_none() && shared.screen.audio.load(Ordering::Relaxed);
+    let audio_out = out.clone();
     let (ctl, rx) = std::sync::mpsc::channel::<ShareCtl>();
     let handle = tokio::runtime::Handle::current();
     tokio::task::spawn_blocking(move || {
@@ -401,6 +415,7 @@ pub(crate) async fn start_room_capture(shared: Arc<Shared>, out: Sink) -> Option
             shared.screen.sharing.store(!shares.is_empty(), Ordering::Relaxed);
             if shares.is_empty() {
                 // Ninguém assiste: o som capturado é jogado fora, para não chegar velho a quem entrar.
+                follow_audio_switch(&mut audio, &mut audio_gave_up, &shared, &audio_out);
                 if let Some(a) = audio.as_mut() {
                     a.pump(|_| {});
                 }
@@ -420,6 +435,7 @@ pub(crate) async fn start_room_capture(shared: Arc<Shared>, out: Sink) -> Option
             );
             next += every;
             nap_until(next, || {
+                follow_audio_switch(&mut audio, &mut audio_gave_up, &shared, &audio_out);
                 if let Some(a) = audio.as_mut()
                     && !a.pump(|d| {
                         for s in shares.values() {
@@ -429,6 +445,7 @@ pub(crate) async fn start_room_capture(shared: Arc<Shared>, out: Sink) -> Option
                 {
                     *shared.screen.note.lock_unpoisoned() = "o som do computador parou de ser capturado".into();
                     audio = None;
+                    audio_gave_up = true;
                 }
             });
         }
@@ -521,6 +538,23 @@ mod tests {
         let f = enc.encode(&frame(32, 32, [1, 2, 3]), false).unwrap().unwrap();
         assert!(on_screen_event(&st, WHO, &mut dec, ScreenEvent::Frame(ScreenFrame { data: f.data, keyframe: true })));
         assert!(st.images.lock_unpoisoned().contains_key(&WHO));
+    }
+
+    #[test]
+    fn silenced_screen_sound_is_dropped_and_not_kept() {
+        use clam::media::{codec::{Codec, Opus}, screen::ScreenAudio};
+        let st = ScreenState::default();
+        let data = Opus::new().encode(&[1000i16; 320]).unwrap();
+        st.hear([1; 32], ScreenAudio { seq: 0, data: data.clone() });
+        assert!(st.next_audio().is_some());
+        st.hear([1; 32], ScreenAudio { seq: 1, data: data.clone() });
+        st.silenced.store(true, Ordering::Relaxed);
+        st.hear([1; 32], ScreenAudio { seq: 2, data: data.clone() });
+        // O que esperava para tocar também some, e nada novo entra.
+        assert!(st.next_audio().is_none());
+        st.silenced.store(false, Ordering::Relaxed);
+        st.hear([1; 32], ScreenAudio { seq: 3, data });
+        assert!(st.next_audio().is_some());
     }
 
     #[test]

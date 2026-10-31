@@ -625,6 +625,8 @@ impl App {
         let names = self.form.names();
         let mut order: Vec<_> = self.screen_tex.iter().map(|(k, (_, tex))| (*k, tex.clone())).collect();
         order.sort_by_key(|(k, _)| *k);
+        let sending = self.shared.screen.want_share.load(Ordering::Relaxed);
+        ui.horizontal(|ui| self.screen_sound_toggles(ui, sending, true));
         let each = (ui.available_height() / order.len().max(1) as f32 - 8.0).max(120.0);
         for (who, tex) in order {
             ui.horizontal(|ui| {
@@ -659,6 +661,7 @@ impl App {
                     if !wanted && !note_text.is_empty() {
                         ui.colored_label(pal().error, note_text);
                     }
+                    self.screen_sound_toggles(ui, wanted, !self.screen_tex.is_empty());
                     if !diag.is_empty() {
                         ui.label(RichText::new(diag).monospace().size(13.0).color(pal().muted));
                     }
