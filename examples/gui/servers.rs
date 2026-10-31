@@ -237,7 +237,7 @@ impl App {
         });
     }
 
-    /// Tela central de um servidor: as telas da sala (quando há) e o bate-papo da sala em que estou. Presença e
+    /// Tela central de um servidor: a tela que assisto (cobrindo o centro) ou o bate-papo da sala em que estou. Presença e
     /// sair do servidor ficam no menu ⋮ do cabeçalho da coluna de salas.
     fn server_view(&mut self, ui: &mut egui::Ui, hub: &clam::server::net::ServerHub, v: &ServerView) {
         if v.joining {
@@ -252,9 +252,6 @@ impl App {
         if in_this_server && !self.screen_tex.is_empty() && !self.srv.chat_over_screen {
             self.screen_cover(ui);
             return;
-        }
-        if in_this_server {
-            self.screens_card(ui, v);
         }
         self.room_chat(ui, hub, v);
     }
@@ -640,42 +637,6 @@ impl App {
             });
             if self.zoom != Some(who) {
                 ui.add(egui::Image::new(&tex).max_size(vec2(ui.available_width(), each)).corner_radius(CornerRadius::same(8)).shrink_to_fit());
-            }
-        }
-    }
-
-    /// Telas que estou assistindo ou transmitindo na sala em que estou.
-    fn screens_card(&mut self, ui: &mut egui::Ui, v: &ServerView) {
-        let my_room = self.shared.room.lock_unpoisoned().at;
-        if my_room.is_some_and(|(server, _)| server == v.id) {
-            let (sharing, note_text) = (self.shared.screen.sharing.load(Ordering::Relaxed), self.shared.screen.note.lock_unpoisoned().clone());
-            let wanted = self.shared.screen.want_share.load(Ordering::Relaxed);
-            {
-                let names = self.form.names();
-                let diag = self.shared.screen.diagnostics();
-                card(ui, "Telas da sala", "Vídeo cifrado, direto com quem transmite.", |ui| {
-                    if wanted {
-                        ui.colored_label(pal().green, if sharing { "● sua tela está sendo vista" } else { "Sua tela está disponível" })
-                            .on_hover_text("Quem está na sala vê o botão de assistir ao lado do seu nome. Cada espectador abre um circuito de vídeo próprio, cifrado, direto com você (até 3 por transmissão).");
-                    }
-                    if !wanted && !note_text.is_empty() {
-                        ui.colored_label(pal().error, note_text);
-                    }
-                    if !diag.is_empty() {
-                        ui.label(RichText::new(diag).monospace().size(13.0).color(pal().muted));
-                    }
-                    let mut order: Vec<_> = self.screen_tex.iter().collect();
-                    order.sort_by_key(|(k, _)| **k);
-                    for (who, (_, tex)) in order {
-                        ui.label(RichText::new(format!("Tela de {}", member_name(&names, who))).strong());
-                        if magnifier_button(ui, "Tela cheia (Esc ou o X para sair)").clicked() {
-                            self.zoom = Some(*who);
-                        }
-                        if self.zoom != Some(*who) {
-                            ui.add(egui::Image::new(tex).max_width(ui.available_width()).corner_radius(CornerRadius::same(8)).shrink_to_fit());
-                        }
-                    }
-                });
             }
         }
     }

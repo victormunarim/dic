@@ -223,9 +223,10 @@ impl App {
         }
         card(ui, "Transmissão da tela", "", |ui| {
             if sharing {
-                ui.colored_label(pal().green, "sua tela está sendo vista");
+                ui.colored_label(pal().green, "sua tela está sendo vista")
+                    .on_hover_text("Cada espectador abre um circuito de vídeo próprio, cifrado, direto com você (até 3 por transmissão).");
             } else if wanted {
-                note(ui, "ligando o circuito de vídeo...");
+                note(ui, "Sua tela está disponível: quem está na sala ou na chamada vê o botão de assistir ao lado do seu nome.");
             } else if !note_text.is_empty() {
                 ui.colored_label(pal().error, note_text);
             }
