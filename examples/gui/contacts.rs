@@ -6,8 +6,24 @@ use eframe::egui::{self, RichText, vec2};
 
 use crate::{conf::*, engine::*, theme::*, ui::*};
 
+/// Pedido de foco para a busca: `rooms_panel` consome o Ctrl+K (vale em qualquer tela) e a lista de contatos, ao
+/// desenhar, entrega o foco.
+pub(crate) fn focus_search_id() -> egui::Id {
+    egui::Id::new("focar-busca")
+}
+
 /// Clicável com o mouse, mas fora da ordem do Tab: avatar e nome abrem o mesmo bate-papo do botão da linha, que é a parada.
 const NO_TAB_STOP: egui::Sense = egui::Sense::CLICK;
+
+/// Subtítulo da coluna de contatos: quantos estão online ajuda a decidir se vale abrir a lista.
+pub(crate) fn people_label(total: usize, online: usize) -> String {
+    let people = match total {
+        0 => return "ninguém ainda".to_string(),
+        1 => "1 pessoa".to_string(),
+        n => format!("{n} pessoas"),
+    };
+    if online == 0 { people } else { format!("{online} online · {people}") }
+}
 
 /// Estado de um contato na lista. O ponto verde só diz "online"; os outros três estados ficam no texto do avatar,
 /// para a cor não carregar sozinha a informação.
@@ -170,7 +186,7 @@ impl App {
             let search = ui.add(field(&mut query, "Buscar contato"));
             let tip = format!("Buscar contato ({})", ui.ctx().format_shortcut(&SEARCH_KEY));
             search.clone().on_hover_text(tip);
-            if ui.ctx().input_mut(|i| i.consume_shortcut(&SEARCH_KEY)) {
+            if ui.data_mut(|d| d.remove_temp::<bool>(focus_search_id())).is_some() {
                 search.request_focus();
             }
             ui.data_mut(|d| d.insert_temp(search_id, query.clone()));
@@ -225,8 +241,8 @@ impl App {
                 let pending = *name == hex(key)[..8];
                 let trusted = self.form.is_trusted(key);
                 let marks = 22.0 * (usize::from(pending) + usize::from(trusted)) as f32;
-                // Sem nome ainda, o começo da chave é provisório: o texto diz isso em vez de parecer defeito.
-                let shown_name = if pending { format!("Novo contato · {name}") } else { name.clone() };
+                // Sem nome ainda, o começo da chave é provisório: o texto diz isso e a chave fica no hover.
+                let shown_name = if pending { "Novo contato".to_string() } else { name.clone() };
                 let ink = if dim || pending { pal().muted } else { pal().text };
                 let label = ui.add_sized([ui.available_width() - 110.0 - marks, 32.0], egui::Label::new(RichText::new(shown_name).strong().color(ink)).truncate().sense(NO_TAB_STOP));
                 let label = label.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(format!("{}…\nAbrir o bate-papo", &hex(key)[..16]));
@@ -273,12 +289,12 @@ impl App {
                         }
                     });
                     let unread = unread[key];
-                    let chat = glyph_button(ui, "Bate-papo", (unread > 0).then_some(pal().focus), chat_icon);
+                    // Leitor de tela e teclado não passam pelo hover do avatar: o estado do contato vai no nome do botão.
+                    let chat = glyph_button(ui, &format!("Bate-papo com {name}, {}", status.tip().to_lowercase()), (unread > 0).then_some(pal().focus), chat_icon);
                     let tip = if unread > 0 { format!("Bate-papo ({unread} nova(s))") } else { "Bate-papo".to_string() };
                     if chat.on_hover_text(tip).clicked() {
                         self.open_chat(*key);
                     }
-                    let call = ui.add_enabled_ui(online && !in_call && up, |ui| glyph_button(ui, "Ligar", None, phone_icon)).inner;
                     let off_tip = if ringing == Some(*key) {
                         "Chamando…"
                     } else if online && !in_call {
@@ -286,6 +302,9 @@ impl App {
                     } else {
                         "Fique online e sem chamada para ligar"
                     };
+                    let can_call = online && !in_call && up;
+                    let call_name = if can_call { format!("Ligar para {name}") } else { format!("Ligar para {name} (indisponível: {})", off_tip.to_lowercase()) };
+                    let call = ui.add_enabled_ui(can_call, |ui| glyph_button(ui, &call_name, None, phone_icon)).inner;
                     if call.on_hover_text("Ligar").on_disabled_hover_text(off_tip).clicked() {
                         self.dial(*key);
                     }
@@ -364,14 +383,24 @@ impl App {
                 if button(ui, true, "Remover", pal().red).clicked() {
                     answer = Some(if block { Remove::AndBlock } else { Remove::Only });
                 }
-                if button(ui, true, "Cancelar", pal().bg).clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                let cancel = button(ui, true, "Cancelar", pal().bg);
+                // O foco entra pelo padrão seguro: quem usa teclado cai na pergunta, e Enter não remove.
+                let asked = egui::Id::new("remover-foco");
+                if ui.data(|d| d.get_temp::<bool>(asked)).is_none() {
+                    cancel.request_focus();
+                    ui.data_mut(|d| d.insert_temp(asked, true));
+                }
+                if cancel.clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                     answer = Some(Remove::Cancel);
                 }
             });
         });
         if let Some(choice) = answer {
             self.remove_ask = None;
-            ui.data_mut(|d| d.remove::<bool>(egui::Id::new("remover-e-bloquear")));
+            ui.data_mut(|d| {
+                d.remove::<bool>(egui::Id::new("remover-e-bloquear"));
+                d.remove::<bool>(egui::Id::new("remover-foco"));
+            });
             if choice != Remove::Cancel {
                 self.remove_contact_now(key);
             }
@@ -470,6 +499,15 @@ mod tests {
         assert!(matches_search("Ana", &key, "abab"));
         assert!(!matches_search("Ana", &key, "bruno"));
         assert!(!matches_search("Ana", &key, "baba"));
+    }
+
+    #[test]
+    fn people_label_counts_online_only_when_there_are_some() {
+        assert_eq!(people_label(0, 0), "ninguém ainda");
+        assert_eq!(people_label(1, 0), "1 pessoa");
+        assert_eq!(people_label(5, 0), "5 pessoas");
+        assert_eq!(people_label(5, 2), "2 online · 5 pessoas");
+        assert_eq!(people_label(1, 1), "1 online · 1 pessoa");
     }
 
     #[test]

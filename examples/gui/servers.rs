@@ -316,6 +316,11 @@ impl App {
         let call_bar = (in_call && room_bar.is_none() && my_room.is_none())
             .then(|| incoming.or(ringing).or(*self.shared.peer.lock_unpoisoned()).map(|k| member_name(&self.form.names(), &k)))
             .flatten();
+        // O atalho vale em qualquer tela: leva à lista de contatos e a busca recebe o foco ao ser desenhada.
+        if ctx.input_mut(|i| i.consume_shortcut(&crate::ui::SEARCH_KEY)) {
+            self.tab = Tab::Contacts;
+            ctx.data_mut(|d| d.insert_temp(crate::contacts::focus_search_id(), true));
+        }
         egui::SidePanel::left("salas")
             .show_separator_line(true)
             .exact_width(300.0)
@@ -393,13 +398,14 @@ impl App {
 
     /// Cabeçalho "Contatos" com o +, e a lista que rola no espaço acima do `footer`.
     fn contacts_column(&mut self, ui: &mut egui::Ui, footer: f32, offline: bool, in_call: bool) {
-                let count = parse_contacts(&self.form.contacts).len();
+                let contacts = parse_contacts(&self.form.contacts);
+                let online_now = if offline { 0 } else { let up = self.online_contacts(&contacts); contacts.iter().filter(|(_, k)| up.contains(k)).count() };
                 ui.add_space(2.0);
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
                         ui.spacing_mut().item_spacing.y = 2.0;
                         ui.label(RichText::new("Contatos").strong().size(17.0).color(pal().strong));
-                        ui.label(RichText::new(match count { 0 => "ninguém ainda".to_string(), 1 => "1 pessoa".to_string(), n => format!("{n} pessoas") }).size(13.0).color(pal().muted));
+                        ui.label(RichText::new(crate::contacts::people_label(contacts.len(), online_now)).size(13.0).color(pal().muted));
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let plus = plus_button(ui, "Novo contato");
