@@ -178,6 +178,7 @@ fn sample_app(tab: Tab) -> App {
         tab,
         audio_dirty: false,
         screen_tex: Default::default(),
+        screen_thumb: Default::default(),
         zoom: None,
         trust_ask: None,
         chat_with: None,
@@ -210,6 +211,7 @@ fn shot_in_call(size: egui::Vec2) -> Frame {
             let (w, h) = (320, 180);
             let px: Vec<Color32> = (0..w * h).map(|i| Color32::from_rgb((i % w * 255 / w) as u8, (i / w * 255 / h) as u8, 140)).collect();
             let tex = ctx.load_texture("tela-teste", egui::ColorImage::new([w, h], px), egui::TextureOptions::LINEAR);
+            app.screen_thumb.insert(peer, tex.clone());
             app.screen_tex.insert(peer, (1, tex));
             made = true;
         }

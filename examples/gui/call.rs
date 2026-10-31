@@ -3,7 +3,7 @@
 use clam::sync::LockExt;
 use std::sync::atomic::Ordering;
 
-use eframe::egui::{self, CornerRadius, RichText};
+use eframe::egui::{self, Color32, CornerRadius, Rect, RichText, pos2, vec2};
 
 use crate::{conf::parse_contacts, engine::*, theme::*, ui::*};
 
@@ -81,6 +81,7 @@ impl App {
         {
             let images = st.images.lock_unpoisoned();
             self.screen_tex.retain(|k, _| images.contains_key(k));
+            self.screen_thumb.retain(|k, _| images.contains_key(k));
             for (who, (seq, img)) in images.iter() {
                 if self.screen_tex.get(who).is_none_or(|(n, _)| n != seq) {
                     shown.push((*who, *seq, egui::ColorImage::from_rgba_unmultiplied([img.width, img.height], &img.rgba)));
@@ -94,6 +95,9 @@ impl App {
                 tex.set(color, egui::TextureOptions::LINEAR);
                 *n = seq;
             } else {
+                // A miniatura é uma textura à parte, criada uma vez: fica parada no que a tela mostrava ao chegar.
+                let thumb = ctx.load_texture(format!("mini-{}", who[0]), color.clone(), egui::TextureOptions::LINEAR);
+                self.screen_thumb.insert(who, thumb);
                 let tex = ctx.load_texture(format!("tela-{}", who[0]), color, egui::TextureOptions::LINEAR);
                 self.screen_tex.insert(who, (seq, tex));
             }
@@ -148,8 +152,8 @@ impl App {
                     if hangup_button(ui, if ringing { "Cancelar a chamada" } else { "Desligar a chamada" }).clicked() {
                         self.shared.hangup.store(true, Ordering::Relaxed);
                     }
-                    if !ringing {
-                        // Sempre à vista, com ou sem tela rodando: as duas chaves começam ligadas e a pessoa precisa
+                    if !ringing && self.screen_thumb.is_empty() {
+                        // Com miniatura, as chaves moram nela. Sempre à vista, com ou sem tela rodando: as duas chaves começam ligadas e a pessoa precisa
                         // ver onde estão antes de a transmissão começar. Em ordem de leitura: enviar, ouvir.
                         // Layout explícito: dentro de um right_to_left o `horizontal` herdaria a direção e inverteria a ordem.
                         ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| self.screen_sound_toggles(ui, true, true));
@@ -182,29 +186,39 @@ impl App {
         ui.add_space(14.0);
     }
 
-    /// As telas de quem transmite para você: o nome e a tela cheia na mesma linha, e a imagem logo abaixo.
+    /// As telas de quem transmite para você: uma miniatura parada, pequena. Assistir é clicar nela (tela cheia); as chaves
+    /// do som ficam no canto de baixo, dentro da própria miniatura.
     fn screens_ui(&mut self, ui: &mut egui::Ui) {
         let names = self.form.names();
-        let mut order: Vec<_> = self.screen_tex.iter().collect();
-        order.sort_by_key(|(k, _)| **k);
-        for (who, (_, tex)) in order {
-            ui.add_space(4.0);
-            raised_frame(ui, R_CARD, 16, |ui| {
-                ui.set_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(format!("Tela de {}", member_name(&names, who))).strong().size(16.0).color(pal().strong));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if magnifier_button(ui, "Tela cheia (Esc ou o X para sair)").clicked() {
-                            self.zoom = Some(*who);
-                        }
-                    });
-                });
-                // Em tela cheia a miniatura sai: a imagem não é desenhada duas vezes.
-                if self.zoom != Some(*who) {
-                    ui.add_space(8.0);
-                    ui.add(egui::Image::new(tex).max_width(ui.available_width()).corner_radius(CornerRadius::same(8)).shrink_to_fit());
-                }
-            });
+        let mut order: Vec<_> = self.screen_thumb.iter().map(|(k, t)| (*k, t.clone())).collect();
+        order.sort_by_key(|(k, _)| *k);
+        for (who, tex) in order {
+            let size = tex.size_vec2();
+            let w = ui.available_width().min(260.0);
+            let (rect, resp) = ui.allocate_exact_size(vec2(w, w * size.y / size.x.max(1.0)), egui::Sense::click());
+            let radius = CornerRadius::same(12);
+            let p = ui.painter();
+            egui::Image::new(&tex).corner_radius(radius).paint_at(ui, rect);
+            let hot = resp.hovered();
+            p.rect_filled(rect, radius, Color32::from_black_alpha(if hot { 70 } else { 30 }));
+            // Triângulo de "assistir" desenhado: o glifo da fonte pode faltar.
+            let c = rect.center();
+            p.circle_filled(c, 20.0, Color32::from_black_alpha(150));
+            p.add(egui::Shape::convex_polygon(vec![c + vec2(-6.0, -10.0), c + vec2(-6.0, 10.0), c + vec2(10.0, 0.0)], Color32::WHITE, egui::Stroke::NONE));
+            // Nome no canto de cima, sobre um fundo escuro para ler em qualquer imagem.
+            let label = p.layout_no_wrap(member_name(&names, &who), egui::FontId::proportional(13.0), Color32::WHITE);
+            let tag = Rect::from_min_size(rect.min + vec2(8.0, 8.0), label.size() + vec2(12.0, 6.0));
+            p.rect_filled(tag, CornerRadius::same(8), Color32::from_black_alpha(150));
+            p.galley(tag.min + vec2(6.0, 3.0), label, Color32::WHITE);
+            let resp = resp.on_hover_text("Assistir a tela (Esc ou o X para sair)").on_hover_cursor(egui::CursorIcon::PointingHand);
+            if resp.clicked() {
+                self.zoom = Some(who);
+            }
+            // Chaves do som no canto de baixo, num fundo escuro; ficam por cima do clique da miniatura.
+            let strip = Rect::from_min_size(pos2(rect.right() - 84.0, rect.bottom() - 42.0), vec2(80.0, 38.0));
+            ui.painter().rect_filled(strip, CornerRadius::same(10), Color32::from_black_alpha(150));
+            let mut inner = ui.new_child(egui::UiBuilder::new().max_rect(strip.shrink(2.0)).layout(egui::Layout::left_to_right(egui::Align::Center)));
+            self.screen_sound_toggles(&mut inner, true, true);
             ui.add_space(14.0);
         }
     }

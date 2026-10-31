@@ -44,6 +44,8 @@ pub(crate) struct App {
     pub(crate) srv: crate::servers::ServersUi,
     /// Textura da tela de quem transmite para você e o número da imagem que ela mostra.
     pub(crate) screen_tex: std::collections::HashMap<[u8; 32], (u64, egui::TextureHandle)>,
+    /// Miniatura estática de cada tela que chega: o primeiro quadro, parado. Assistir é clicar (tela cheia).
+    pub(crate) screen_thumb: std::collections::HashMap<[u8; 32], egui::TextureHandle>,
     /// Contato que a pessoa acabou de marcar como de confiança e ainda não confirmou o aviso do IP.
     pub(crate) trust_ask: Option<[u8; 32]>,
     /// Contato cuja conversa 1:1 está aberta no centro, e o texto ainda não enviado.
@@ -387,10 +389,16 @@ impl eframe::App for App {
             if self.tab != Tab::Settings {
                 ctx.data_mut(|d| d.remove_temp::<bool>(crate::settings::show_secret_id()));
             }
+            // A chamada não rola: o único que rola ali é o bate-papo, dentro do próprio painel.
+            if matches!(self.tab, Tab::Contacts | Tab::Call) {
+                ui.set_max_width(ui.available_width().min(1500.0));
+                self.call_tab(ui, offline, calling, calling && !in_room);
+                return;
+            }
             egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
                 ui.set_max_width(ui.available_width().min(1500.0));
                 match self.tab {
-                    Tab::Contacts | Tab::Call => self.call_tab(ui, offline, calling, calling && !in_room),
+                    Tab::Contacts | Tab::Call => {}
                     Tab::Servers => self.servers_tab(ui, offline),
                     Tab::Video => self.video_tab(ui),
                     Tab::Audio => self.audio_tab(ui, offline, calling, testing),
