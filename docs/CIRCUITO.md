@@ -439,7 +439,22 @@ Medido em loopback, 5 relays, cover ligado e voz nos dois sentidos (`cargo test 
 | Quadros entregues de 150 | 150 |
 | Jitter em torno do ritmo de 20 ms | p50 0,1 a 0,4 ms, p95 ≈ 1 ms |
 
-Como ler: em loopback não há rede, então isto é o custo do protocolo (um Diffie-Hellman por salto, os dois circuitos, o `Noise` do link) mais a quantização do cover (5 ms por link e sentido, em média). **A rede real soma por cima**: o encontro usa **dois circuitos de 2 saltos** (o de C e o de D) unidos no relay de encontro, então o caminho passa por mais relays do que o circuito direto. Estimativa (não medida): montagem ≈ 6 a 8 idas e voltas de rede, e latência de voz de ida ≈ o dobro de saltos do circuito de 2 saltos (some ~5 ms de cover por link). Banda: cada circuito continua com uma célula de 256 B a cada 20 ms por sentido (≈ 100 kbps, como em "Custo"), então nenhum link carrega mais do que antes, mas a chamada gasta **o dobro de banda no total da rede** (dois circuitos em vez de um), e a introdução é um custo único de poucas células. **Falta** medir entre máquinas distintas com o roteiro de "Medir entre máquinas reais" (o `measure` ainda não tem o modo de encontro).
+Como ler: em loopback não há rede, então isto é o custo do protocolo (um Diffie-Hellman por salto, os dois circuitos, o `Noise` do link) mais a quantização do cover (5 ms por link e sentido, em média). **A rede real soma por cima**: o encontro usa **dois circuitos de 2 saltos** (o de C e o de D) unidos no relay de encontro, então o caminho passa por mais relays do que o circuito direto. Estimativa (não medida): montagem ≈ 6 a 8 idas e voltas de rede, e latência de voz de ida ≈ o dobro de saltos do circuito de 2 saltos (some ~5 ms de cover por link). Banda: cada circuito continua com uma célula de 256 B a cada 20 ms por sentido (≈ 100 kbps, como em "Custo"), então nenhum link carrega mais do que antes, mas a chamada gasta **o dobro de banda no total da rede** (dois circuitos em vez de um), e a introdução é um custo único de poucas células. **Falta** medir entre máquinas distintas; o `measure` agora tem o modo de encontro (abaixo).
+
+**Medir o encontro com o `measure`** (`hub`, `service`, `meet`). Os relays precisam sair para os serviços `intro:9` e `rv:9`, que o `hub` serve; D é o `service` (liga cada encontro a um eco, o `contact`); C é o `meet`, que não recebe nenhum endereço de D, só a `auth_key`. Use pelo menos 3 relays (o primeiro salto de C e de D é de terceiro, e o ponto de introdução e o de encontro também são relays do conjunto).
+
+```sh
+# máquina H: eco, hub e relays (cada relay imprime a sua linha addr,onion,link)
+measure contact 0.0.0.0:9100 &
+measure hub 0.0.0.0:9101 0.0.0.0:9102 &
+measure relay 0.0.0.0:9111 H:9111 intro:9=127.0.0.1:9101 rv:9=127.0.0.1:9102   # repita por relay, portas e máquinas diferentes
+# D: espera; imprime auth_key=...
+measure service H:9100 <relayIntro> <relay>...
+# C: monta o encontro e mede o eco pelo circuito do encontro
+measure meet <auth_key> <relayIntro> <relayRv> <relay>... --seconds 60
+```
+
+Em loopback (5 relays, 8 s): encontro montado em ≈ 240 ms, RTT do quadro de 128 B p50 ≈ 109 ms, p95 ≈ 120 ms, perda 1,5 % (6 de 401, no encerramento). Compare com o `probe` da mesma máquina para ver o custo dos dois circuitos; o resultado entre máquinas reais ainda não foi coletado.
 
 ### Fuzzing guiado por cobertura (`fuzz/`, `cargo-fuzz`)
 

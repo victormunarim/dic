@@ -7,6 +7,13 @@
 //! measure probe <relayA> <relayB> [--seconds N] [--interval-ms N] [--no-cover] [--no-circuit-cover] [--profile off|economy|standard|strong]   # cliente
 //! measure direct <host:porta> [--seconds N] [--interval-ms N]      # linha de base sem circuito
 //! ```
+//! Encontro às cegas ("2 relays", `docs/CIRCUITO.md`, "Custo do encontro às cegas"): os relays saem para os serviços
+//! `intro:9` e `rv:9`, que o `hub` serve; D (o `service`) espera e o cliente (`meet`) chega sem endereço de D.
+//! ```text
+//! measure hub <escuta-intro> <escuta-rv>                          # serve intro:9 e rv:9 (na máquina dos relays)
+//! measure service <eco host:porta> <relayIntro> <relay>...        # D: espera; imprime a auth_key para o meet
+//! measure meet <auth_key> <relayIntro> <relayRv> <relay>... [--seconds N] [--interval-ms N]   # C: monta e mede
+//! ```
 //! `relayX` é a linha `addr,onion,link` que o comando `relay` imprime.
 
 use std::{collections::HashMap, time::Duration};
@@ -16,6 +23,8 @@ use clam::circuit::{
     relay::{RelayConfig, RelayNode},
 };
 use clam::cover::CoverProfile;
+use clam::meet::{HiddenService, IntroTarget, ServiceConfig, meet};
+use clam::x25519_dalek::PublicKey;
 use clam::transport::{CircuitClient, ClientOptions, RelayServer, ServerConfig, allow_list};
 use clam::{rand_core::OsRng, x25519_dalek::StaticSecret};
 use tokio::{
@@ -155,6 +164,12 @@ async fn probe(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         // A ordem dos relays é sorteada; mostra a que valeu nesta medição.
         println!("caminho: cliente -> {first} -> {second} -> destino");
     }
+    echo_run(c, secs, every).await;
+    Ok(())
+}
+
+/// Manda um quadro de 128 B a cada `every` ms por `secs` s e imprime RTT, perda e failovers. Encerra o cliente.
+async fn echo_run(mut c: CircuitClient, secs: u64, every: u64) {
     let (mut sent, mut seq, mut failovers) = (0usize, 0u64, 0usize);
     let mut at: HashMap<u64, Instant> = HashMap::new();
     let mut rtts = Samples::default();
@@ -189,7 +204,6 @@ async fn probe(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     ctrl.report("pings de controle do gerente", ctrl.0.len());
     println!("failovers: {failovers}");
     c.stop();
-    Ok(())
 }
 
 /// Linha de base: mesmo eco por TCP direto, sem relays.
@@ -231,6 +245,58 @@ async fn direct(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Chaves fixas só desta ferramenta de medição: C e D se conhecem sem trocar nada além da `auth_key`.
+fn measure_secret(who: u8) -> StaticSecret {
+    StaticSecret::from([who; 32])
+}
+
+/// Serve os pontos de introdução e de encontro; os relays devem sair para estes endereços (`intro:9=...`, `rv:9=...`).
+async fn hub(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let intro = TcpListener::bind(args.first().ok_or("falta <escuta-intro>")?).await?;
+    let rv = TcpListener::bind(args.get(1).ok_or("falta <escuta-rv>")?).await?;
+    eprintln!("intro em {}, encontro em {}", intro.local_addr()?, rv.local_addr()?);
+    tokio::spawn(clam::hidden::serve_intro(intro));
+    clam::hidden::serve_rendezvous(rv).await;
+    Ok(())
+}
+
+/// D: espera num ponto de introdução e liga cada encontro ao eco. Imprime a `auth_key` que o `meet` precisa.
+async fn service(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let echo = args.first().ok_or("falta <eco host:porta>")?;
+    let intro = parse_candidate(args.get(1).ok_or("falta <relayIntro>")?)?;
+    let pool = args[1..].iter().map(|a| parse_candidate(a)).collect::<Result<Vec<_>, _>>()?;
+    let caller = PublicKey::from(&measure_secret(0xC1));
+    let svc = HiddenService::start(ServiceConfig {
+        secret: measure_secret(0xD1),
+        phone: echo.parse()?,
+        contacts: std::sync::Arc::new(std::sync::Mutex::new(vec![*caller.as_bytes()])),
+        pool,
+        intros: vec![intro],
+    })
+    .await?;
+    let point = svc.points().first().ok_or("o ponto de introdução não subiu")?;
+    println!("auth_key={}", hex(&point.auth_key));
+    eprintln!("esperando encontros. Ctrl-C encerra.");
+    std::future::pending::<()>().await;
+    Ok(())
+}
+
+/// C: chega a D por introdução e encontro (sem nenhum endereço de D) e mede o eco pelo circuito do encontro.
+async fn meet_probe(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let auth_key = unhex(args.first().ok_or("falta <auth_key>")?)?;
+    let intro = parse_candidate(args.get(1).ok_or("falta <relayIntro>")?)?;
+    let rv = parse_candidate(args.get(2).ok_or("falta <relayRv>")?)?;
+    let pool = args[1..].iter().take_while(|a| !a.starts_with("--")).map(|a| parse_candidate(a)).collect::<Result<Vec<_>, _>>()?;
+    let secs: u64 = opt(args, "--seconds", 60);
+    let every: u64 = opt(args, "--interval-ms", 20);
+    let via = IntroTarget { relay: intro, auth_key };
+    let t0 = Instant::now();
+    let c = timeout(Duration::from_secs(30), meet(&measure_secret(0xC1), &PublicKey::from(&measure_secret(0xD1)), &via, &rv, &pool)).await.map_err(|_| "encontro não completou em 30 s")??;
+    println!("encontro montado em {} ms", t0.elapsed().as_millis());
+    echo_run(c, secs, every).await;
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -239,7 +305,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("relay") => relay(&args[1..]).await?,
         Some("probe") => probe(&args[1..]).await?,
         Some("direct") => direct(&args[1..]).await?,
-        _ => eprintln!("uso: measure contact|relay|probe|direct (veja o cabeçalho do arquivo)"),
+        Some("hub") => hub(&args[1..]).await?,
+        Some("service") => service(&args[1..]).await?,
+        Some("meet") => meet_probe(&args[1..]).await?,
+        _ => eprintln!("uso: measure contact|relay|probe|direct|hub|service|meet (veja o cabeçalho do arquivo)"),
     }
     Ok(())
 }
