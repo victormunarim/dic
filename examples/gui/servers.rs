@@ -30,6 +30,8 @@ pub(crate) struct ServersUi {
     pub(crate) adding_room: bool,
     /// Quem a pessoa clicou para assistir: a tela cheia abre assim que o primeiro quadro chega (`zoom_window`).
     pub(crate) open_screen: Option<[u8; 32]>,
+    /// Quando a pessoa clicou em assistir: se o primeiro quadro não chega em `OPEN_SCREEN_WAIT`, a espera vira aviso.
+    pub(crate) open_screen_since: Option<std::time::Instant>,
     /// O menu de convite do cabeçalho está aberto.
     pub(crate) inviting: bool,
     /// Escolha da pessoa para a coluna de membros; `None` segue a largura da janela (`members_fit`).
@@ -560,6 +562,8 @@ impl App {
             if let Some(key) = action {
                 crate::engine::follow(&self.shared, key, true);
                 self.srv.open_screen = Some(key);
+                self.srv.open_screen_since = Some(std::time::Instant::now());
+                self.log.lock_unpoisoned().push("tela: pedi para assistir; esperando o primeiro quadro...".into());
             }
             });
             ui.add_space(8.0);

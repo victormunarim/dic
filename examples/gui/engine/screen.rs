@@ -247,7 +247,18 @@ async fn start_capture(shared: &Arc<Shared>, out: &Sink, slot: Duration) -> Resu
         bitrate = (f64::from(bitrate) * (1.0 - audio_share(slot))) as u32;
     }
     let priority = if st.sharp.load(Ordering::Relaxed) { Priority::Sharpness } else { Priority::Smoothness };
-    let started = match open_source(priority.fps(bitrate)).await {
+    out.line("tela: abrindo a captura da tela...");
+    // No Wayland o portal espera a pessoa escolher a tela numa janela do sistema; sem este aviso a espera é muda.
+    let opening = open_source(priority.fps(bitrate));
+    tokio::pin!(opening);
+    let opened = match tokio::time::timeout(Duration::from_secs(8), &mut opening).await {
+        Ok(r) => r,
+        Err(_) => {
+            out.line("tela: ainda esperando a captura abrir (no Wayland, escolha a tela na janela do sistema; se ela não apareceu, o portal de captura não está respondendo)");
+            opening.await
+        }
+    };
+    let started = match opened {
         Ok(src) => H264Encoder::with_priority(bitrate, priority).map(|e| (src, e)).map_err(|e| e.to_string()),
         Err(e) => Err(e),
     };

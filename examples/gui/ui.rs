@@ -59,6 +59,8 @@ pub(crate) fn gear_marks(tab: Tab) -> bool {
 
 /// Larguras a partir das quais o conteúdo se divide em duas colunas.
 const TWO_COLUMNS: f32 = 780.0;
+/// Quanto a pessoa espera o primeiro quadro depois de clicar em assistir antes de ver um aviso na Atividade.
+const OPEN_SCREEN_WAIT: Duration = Duration::from_secs(10);
 
 /// Chama `f` para a coluna da esquerda (0) e a da direita (1): lado a lado se couber, uma sobre a outra se não.
 pub(crate) fn split(ui: &mut egui::Ui, mut f: impl FnMut(&mut egui::Ui, usize)) {
@@ -305,6 +307,12 @@ impl App {
                 self.srv.open_screen = None;
             } else if !self.shared.room.lock_unpoisoned().watching.contains(&who) {
                 self.srv.open_screen = None;
+            } else if self.srv.open_screen_since.is_some_and(|t| t.elapsed() >= OPEN_SCREEN_WAIT) {
+                // Sem este aviso o clique em assistir parece não fazer nada: quem transmite pode não ter aberto
+                // o circuito de vídeo (porta 4001 inalcançável, relay antigo) ou nem estar capturando.
+                self.log.lock_unpoisoned().push(format!("tela: {}s sem quadro de quem transmite; o circuito de vídeo dele não abriu ou ele não está capturando (veja a Atividade dele)", OPEN_SCREEN_WAIT.as_secs()));
+                self.srv.open_screen = None;
+                self.srv.open_screen_since = None;
             }
         }
         let was = ctx.data_mut(|d| d.get_temp::<bool>(flag)).unwrap_or(false);
