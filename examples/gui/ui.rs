@@ -44,6 +44,8 @@ pub(crate) struct App {
     pub(crate) srv: crate::servers::ServersUi,
     /// Textura da tela de quem transmite para você e o número da imagem que ela mostra.
     pub(crate) screen_tex: std::collections::HashMap<[u8; 32], (u64, egui::TextureHandle)>,
+    /// Quadros por segundo que chegam de cada tela, para o selo da tela cheia.
+    pub(crate) screen_rate: std::collections::HashMap<[u8; 32], crate::call::FrameRate>,
     /// Contato cuja conversa 1:1 está aberta no centro, e o texto ainda não enviado.
     pub(crate) chat_with: Option<[u8; 32]>,
     pub(crate) chat_draft: String,
@@ -340,6 +342,10 @@ impl App {
             let fit = (screen.width() / size.x).min(screen.height() / size.y);
             let image = egui::Rect::from_center_size(screen.center(), size * fit);
             ui.put(image, egui::Image::new(&tex).fit_to_exact_size(image.size()));
+            // Selo no canto: o que está chegando de verdade (resolução decodificada e quadros por segundo).
+            let fps = self.zoom.and_then(|w| self.screen_rate.get(&w)).map_or(0.0, |r| r.fps());
+            let label = format!("{}×{} · {:.0} fps", tex.size()[0], tex.size()[1], fps);
+            ui.painter().text(egui::pos2(screen.min.x + 16.0, screen.min.y + 16.0), egui::Align2::LEFT_TOP, label, egui::FontId::proportional(14.0), Color32::from_white_alpha(200));
             let corner = egui::Rect::from_min_size(egui::pos2(screen.max.x - 48.0, screen.min.y + 12.0), vec2(32.0, 34.0));
             if ui.put(corner, |ui: &mut egui::Ui| theme::close_button(ui, "Sair da tela cheia (Esc)")).clicked() {
                 close = true;

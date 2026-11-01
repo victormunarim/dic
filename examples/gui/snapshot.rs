@@ -213,6 +213,7 @@ fn sample_app(tab: Tab) -> App {
         tab,
         audio_dirty: false,
         screen_tex: Default::default(),
+        screen_rate: Default::default(),
         zoom: None,
         chat_with: None,
         chat_draft: String::new(),

@@ -78,7 +78,9 @@ impl App {
         {
             let images = st.images.lock_unpoisoned();
             self.screen_tex.retain(|k, _| images.contains_key(k));
+            self.screen_rate.retain(|k, _| images.contains_key(k));
             for (who, (seq, img)) in images.iter() {
+                self.screen_rate.entry(*who).or_insert_with(|| FrameRate::new(*seq)).seen(*seq);
                 if self.screen_tex.get(who).is_none_or(|(n, _)| n != seq) {
                     shown.push((*who, *seq, egui::ColorImage::from_rgba_unmultiplied([img.width, img.height], &img.rgba)));
                 }
@@ -95,5 +97,58 @@ impl App {
                 self.screen_tex.insert(who, (seq, tex));
             }
         }
+    }
+}
+
+/// Mede quantos quadros por segundo uma tela entrega: conta quantos `seq` novos chegaram numa janela
+/// de ~1 s e guarda o último resultado (a janela é curta para o selo reagir, longa para não tremer).
+pub(crate) struct FrameRate {
+    since: std::time::Instant,
+    first: u64,
+    last: u64,
+    fps: f32,
+}
+
+impl FrameRate {
+    const WINDOW: std::time::Duration = std::time::Duration::from_millis(1000);
+
+    pub(crate) fn new(seq: u64) -> Self {
+        Self { since: std::time::Instant::now(), first: seq, last: seq, fps: 0.0 }
+    }
+
+    /// Registra o `seq` do quadro mais novo; fecha a janela quando passou o tempo.
+    pub(crate) fn seen(&mut self, seq: u64) {
+        self.seen_at(seq, std::time::Instant::now());
+    }
+
+    fn seen_at(&mut self, seq: u64, now: std::time::Instant) {
+        self.last = seq;
+        let elapsed = now.saturating_duration_since(self.since);
+        if elapsed >= Self::WINDOW {
+            self.fps = self.last.saturating_sub(self.first) as f32 / elapsed.as_secs_f32();
+            self.since = now;
+            self.first = self.last;
+        }
+    }
+
+    pub(crate) fn fps(&self) -> f32 {
+        self.fps
+    }
+}
+
+#[cfg(test)]
+mod frame_rate_tests {
+    use super::FrameRate;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn counts_new_sequence_numbers_per_second() {
+        let t0 = Instant::now();
+        let mut r = FrameRate::new(10);
+        r.since = t0;
+        r.seen_at(20, t0 + Duration::from_millis(500));
+        assert_eq!(r.fps(), 0.0, "janela ainda aberta");
+        r.seen_at(40, t0 + Duration::from_secs(2));
+        assert_eq!(r.fps(), 15.0, "30 quadros em 2 s");
     }
 }
