@@ -357,13 +357,16 @@ pub struct Intro {
     pub seq: u64,
     /// Como o apresentador quer ser chamado (até [`MAX_NAME`] bytes; corta no fim se faltar espaço).
     pub name: String,
-    pub reach: Reach,
+    /// O relay do apresentador. `None` com a opção "2 relays" ligada: o cartão não entrega endereço (vai com tamanho 0 e
+    /// `onion` e `link` zerados) e quem recebe acha o apresentador pelos pontos de introdução, não pelo relay.
+    pub reach: Option<Reach>,
 }
 
-/// Quadro de apresentação de `my_static` para `peer`. Falha se o endereço for vazio ou passar de [`MAX_ADDR`].
+/// Quadro de apresentação de `my_static` para `peer`. Falha se o endereço passar de [`MAX_ADDR`] ou, com `reach`, for vazio.
 pub fn seal_intro(my_static: &StaticSecret, peer: &PublicKey, intro: &Intro) -> Result<Frame, MediaError> {
-    let Reach { addr, onion, link } = &intro.reach;
-    if addr.is_empty() || addr.len() > MAX_ADDR {
+    let none = Reach { addr: String::new(), onion: [0; 32], link: [0; 32] };
+    let Reach { addr, onion, link } = intro.reach.as_ref().unwrap_or(&none);
+    if (intro.reach.is_some() && addr.is_empty()) || addr.len() > MAX_ADDR {
         return Err(MediaError::Malformed);
     }
     let name = clip(intro.name.trim(), MAX_NAME.min(INTRO_TEXT - addr.len()));
@@ -402,17 +405,21 @@ pub fn open_intro(my_static: &StaticSecret, frame: &[u8]) -> Option<([u8; 32], I
     let seq = r.u64()?;
     r.u8()?;
     let (addr_len, name_len) = (usize::from(r.u8()?), usize::from(r.u8()?));
-    if addr_len == 0 || addr_len > MAX_ADDR || addr_len + name_len > INTRO_TEXT {
+    if addr_len > MAX_ADDR || addr_len + name_len > INTRO_TEXT {
         return None;
     }
-    let (onion, link) = (r.array()?, r.array()?);
+    let (onion, link): ([u8; 32], [u8; 32]) = (r.array()?, r.array()?);
     let (addr, name) = r.take(addr_len + name_len)?.split_at_checked(addr_len)?;
     let addr = String::from_utf8(addr.to_vec()).ok()?;
     let name = String::from_utf8(name.to_vec()).ok().filter(|n| !n.chars().any(char::is_control))?;
+    // Sem endereço, `onion` e `link` têm de vir zerados: outro valor é lixo, não um cartão.
+    if addr_len == 0 {
+        return (onion == [0; 32] && link == [0; 32]).then_some((author, Intro { seq, name, reach: None }));
+    }
     if !valid_addr(&addr) {
         return None;
     }
-    Some((author, Intro { seq, name, reach: Reach { addr, onion, link } }))
+    Some((author, Intro { seq, name, reach: Some(Reach { addr, onion, link }) }))
 }
 
 /// Quadro de remoção de `my_static` para `peer`, com o carimbo `stamp_ms` (milissegundos Unix de agora).
@@ -1016,7 +1023,7 @@ mod tests {
     }
 
     fn intro(seq: u64) -> Intro {
-        Intro { seq, name: "Ana".into(), reach: Reach { addr: "203.0.113.7:4001".into(), onion: [3; 32], link: [4; 32] } }
+        Intro { seq, name: "Ana".into(), reach: Some(Reach { addr: "203.0.113.7:4001".into(), onion: [3; 32], link: [4; 32] }) }
     }
 
     #[test]
@@ -1072,7 +1079,7 @@ mod tests {
         let (a, b) = ids();
         let pb = PublicKey::from(&b);
         for (name, addr) in [("Ana\u{7}", "203.0.113.7:4001"), ("Ana", "169.254.169.254:80")] {
-            let bad = Intro { name: name.into(), reach: Reach { addr: addr.into(), onion: [3; 32], link: [4; 32] }, ..intro(1) };
+            let bad = Intro { name: name.into(), reach: Some(Reach { addr: addr.into(), onion: [3; 32], link: [4; 32] }), ..intro(1) };
             let frame = seal_intro(&a, &pb, &bad).unwrap();
             assert!(open_intro(&b, &frame).is_none(), "{name:?} {addr}");
         }
@@ -1082,17 +1089,21 @@ mod tests {
     fn the_introduction_trims_the_name_to_fit() {
         let (a, b) = ids();
         let pb = PublicKey::from(&b);
-        let long = Intro { seq: 2, name: "é".repeat(40), reach: Reach { addr: "casa.exemplo.com:4001".into(), onion: [5; 32], link: [6; 32] } };
+        let long = Intro { seq: 2, name: "é".repeat(40), reach: Some(Reach { addr: "casa.exemplo.com:4001".into(), onion: [5; 32], link: [6; 32] }) };
         let (_, got) = open_intro(&b, &seal_intro(&a, &pb, &long).unwrap()).unwrap();
         assert_eq!(got.reach, long.reach);
         assert!(got.name.len() <= MAX_NAME && got.name.chars().all(|c| c == 'é') && !got.name.is_empty());
         // Endereço no limite: o nome encolhe para caber, o endereço não perde nada.
-        let tight = Intro { seq: 3, name: "x".repeat(MAX_NAME), reach: Reach { addr: format!("{}:4001", "h".repeat(MAX_ADDR - 5)), onion: [1; 32], link: [2; 32] } };
+        let tight = Intro { seq: 3, name: "x".repeat(MAX_NAME), reach: Some(Reach { addr: format!("{}:4001", "h".repeat(MAX_ADDR - 5)), onion: [1; 32], link: [2; 32] }) };
         let (_, got) = open_intro(&b, &seal_intro(&a, &pb, &tight).unwrap()).unwrap();
         assert_eq!(got.reach, tight.reach);
         assert_eq!(got.name.len(), INTRO_TEXT - MAX_ADDR);
+        // Com endereço, vazio não vale; sem endereço (`reach: None`) vale, e volta sem endereço.
+        let bare = Intro { reach: None, ..intro(4) };
+        let (_, got) = open_intro(&b, &seal_intro(&a, &pb, &bare).unwrap()).unwrap();
+        assert_eq!(got, bare);
         for addr in ["", &"x".repeat(MAX_ADDR + 1)] {
-            let bad = Intro { reach: Reach { addr: addr.to_string(), onion: [3; 32], link: [4; 32] }, ..intro(1) };
+            let bad = Intro { reach: Some(Reach { addr: addr.to_string(), onion: [3; 32], link: [4; 32] }), ..intro(1) };
             assert_eq!(seal_intro(&a, &pb, &bad), Err(MediaError::Malformed));
         }
     }
@@ -1110,6 +1121,10 @@ mod tests {
     fn address_limits_are_enforced() {
         let (a, b) = ids();
         let pb = PublicKey::from(&b);
+        // Com endereço, vazio não vale; sem endereço (`reach: None`) vale, e volta sem endereço.
+        let bare = Intro { reach: None, ..intro(4) };
+        let (_, got) = open_intro(&b, &seal_intro(&a, &pb, &bare).unwrap()).unwrap();
+        assert_eq!(got, bare);
         for addr in ["", &"x".repeat(MAX_ADDR + 1)] {
             let r = AddressRecord { addr: addr.to_string(), ..record(1) };
             assert_eq!(seal_update(&a, &pb, &r), Err(MediaError::Malformed));

@@ -465,11 +465,12 @@ pub(crate) fn name_contact(text: &str, key: &[u8; 32], name: &str) -> Option<Str
 }
 
 /// A linha de contato de quem se apresentou: o nome que ele deu (limpo) e o código que a apresentação traz.
-pub(crate) fn intro_line(name: &str, key: &[u8; 32], reach: &clam::media::update::Reach) -> String {
+pub(crate) fn intro_line(name: &str, key: &[u8; 32], reach: Option<&clam::media::update::Reach>) -> String {
     use clam::media::update::Reach;
     let name = clean_contact_name(name);
     let name = if name.is_empty() { hex(key)[..8].to_string() } else { name };
-    let Reach { addr, onion, link } = reach;
+    // Sem relay (quem se apresentou usa "2 relays"): a linha leva só a chave, e o nó o acha pelos pontos de introdução.
+    let Some(Reach { addr, onion, link }) = reach else { return format!("{name} {}", hex(key)) };
     format!("{name} {}#{addr}#{}#{}", hex(key), hex(onion), hex(link))
 }
 
@@ -898,12 +899,16 @@ mod tests {
         use clam::media::update::Reach;
         let key = [9u8; 32];
         let relay = Reach { addr: "203.0.113.7:4001".into(), onion: [1; 32], link: [2; 32] };
-        let line = intro_line("Ana  Maria; #x", &key, &relay);
+        let line = intro_line("Ana  Maria; #x", &key, Some(&relay));
         assert_eq!(parse_contacts(&line), vec![("Ana Maria x".to_string(), key)]);
         let (k, r) = split_direct(line.split_whitespace().last().unwrap()).unwrap();
         assert_eq!((k, r.unwrap().addr), (key, "203.0.113.7:4001".to_string()));
-        let line = intro_line("", &key, &relay);
+        let line = intro_line("", &key, Some(&relay));
         assert_eq!(parse_contacts(&line), vec![(hex(&key)[..8].to_string(), key)]);
+        // Sem relay (quem se apresentou usa "2 relays"): só a chave, e a linha ainda lê de volta, sem endereço.
+        let line = intro_line("Bia", &key, None);
+        assert_eq!(parse_contacts(&line), vec![("Bia".to_string(), key)]);
+        assert!(!line.contains('#'));
     }
 
     #[test]

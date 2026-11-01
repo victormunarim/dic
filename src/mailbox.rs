@@ -171,7 +171,7 @@ mod tests {
     fn parts(id: u64) -> ([u8; 32], Vec<CustodyPart>) {
         let (a, keeper, b) = (StaticSecret::random_from_rng(OsRng), StaticSecret::random_from_rng(OsRng), StaticSecret::random_from_rng(OsRng));
         let pb = PublicKey::from(&b);
-        let intro = Intro { seq: id, name: "Ana".into(), reach: Reach { addr: "203.0.113.7:4001".into(), onion: [3; 32], link: [4; 32] } };
+        let intro = Intro { seq: id, name: "Ana".into(), reach: Some(Reach { addr: "203.0.113.7:4001".into(), onion: [3; 32], link: [4; 32] }) };
         let mail = seal_intro(&a, &pb, &intro).unwrap();
         let frames = seal_custody(&a, &PublicKey::from(&keeper), id, &mailbox_master(pb.as_bytes()), &mail).unwrap();
         let got: Vec<_> = frames.iter().map(|f| open_custody(&keeper, f).unwrap()).collect();
@@ -255,7 +255,7 @@ mod tests {
         let (mut c, from, master) = (Custody::new(), [1u8; 32], [9u8; 32]);
         let mail = |n: u8| {
             let (a, b) = (StaticSecret::random_from_rng(OsRng), StaticSecret::random_from_rng(OsRng));
-            seal_intro(&a, &PublicKey::from(&b), &Intro { seq: u64::from(n), name: "Bia".into(), reach: Reach { addr: "203.0.113.8:4001".into(), onion: [5; 32], link: [6; 32] } }).unwrap()
+            seal_intro(&a, &PublicKey::from(&b), &Intro { seq: u64::from(n), name: "Bia".into(), reach: Some(Reach { addr: "203.0.113.8:4001".into(), onion: [5; 32], link: [6; 32] }) }).unwrap()
         };
         let (m1, m2, m3) = (mail(1), mail(2), mail(3));
         assert!(c.accept_reply(from, NOW, master, &m1, NOW));
@@ -272,7 +272,7 @@ mod tests {
     fn a_reply_goes_away_with_its_depositor() {
         let (mut c, from) = (Custody::new(), [1u8; 32]);
         let (a, b) = (StaticSecret::random_from_rng(OsRng), StaticSecret::random_from_rng(OsRng));
-        let mail = seal_intro(&a, &PublicKey::from(&b), &Intro { seq: 1, name: "Bia".into(), reach: Reach { addr: "203.0.113.8:4001".into(), onion: [5; 32], link: [6; 32] } }).unwrap();
+        let mail = seal_intro(&a, &PublicKey::from(&b), &Intro { seq: 1, name: "Bia".into(), reach: Some(Reach { addr: "203.0.113.8:4001".into(), onion: [5; 32], link: [6; 32] }) }).unwrap();
         assert!(c.accept_reply(from, NOW, [9; 32], &mail, NOW));
         let back = Custody::import(c.export().iter().map(String::as_str), NOW);
         assert_eq!(back.held(NOW), c.held(NOW), "a resposta sobrevive ao disco");

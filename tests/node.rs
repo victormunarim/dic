@@ -600,7 +600,7 @@ async fn adding_a_contact_introduces_us_to_it() {
     assert_eq!(got.len(), 1);
     let relay = a.relay_info().unwrap();
     assert_eq!((got[0].peer, got[0].name.as_str()), (pa, "Ana"));
-    assert_eq!(got[0].reach, Reach { addr: relay.addr.clone(), onion: relay.onion, link: relay.link });
+    assert_eq!(got[0].reach, Some(Reach { addr: relay.addr.clone(), onion: relay.onion, link: relay.link }));
     until("A recebe o ack", || a.pending_introductions().is_empty().then_some(())).await;
 
     // O app de B decide adicionar: agora os dois se ligam.
@@ -1029,6 +1029,36 @@ async fn the_screen_with_two_relays_on_arrives_without_knowing_the_address() {
     drop(b);
 }
 
+/// Com "2 relays" ligada, a apresentação chega sem endereço (por encontro, pois os dois já se alcançam) e o código de
+/// contato de quem a enviou leva só a chave: o relay não sai do nó.
+#[tokio::test]
+async fn an_introduction_with_two_relays_on_carries_no_address() {
+    let Blind { a, b, pa, pb, _others } = blind_pair().await;
+    assert!(a.relay_info().is_none() && b.relay_info().is_none(), "o código de contato não leva endereço");
+    a.introduce(pb);
+    let got = until("B recebe a apresentação", || Some(b.take_introductions()).filter(|v| !v.is_empty())).await;
+    assert_eq!((got[0].peer, got[0].reach.clone()), (pa, None), "a apresentação não leva o relay");
+    until("A recebe o ack", || a.pending_introductions().is_empty().then_some(())).await;
+}
+
+/// Com "2 relays" ligada, o convite de quem está offline vai para a caixa de correio sem endereço: A convida B, que
+/// não está no ar, e sai; B sobe depois, acha o cartão na DHT e ele não leva o relay de A.
+#[tokio::test]
+async fn the_mailbox_with_two_relays_on_keeps_the_card_without_an_address() {
+    use clam::rendezvous::DhtOptions;
+    let testnet = mainline::Testnet::new(5).unwrap();
+    let dht = || Some(DhtOptions { bootstrap: testnet.bootstrap.clone(), bind: Some(std::net::Ipv4Addr::LOCALHOST), circuit: false });
+    let (sa, sb) = (key(), key());
+    let (pa, pb) = (*PublicKey::from(&sa).as_bytes(), *PublicKey::from(&sb).as_bytes());
+    let a = Node::start(NodeConfig { updates: false, two_relays: true, dht: dht(), name: "Ana".into(), ..fixed(sa, free_port(), vec![pb]) }).await.unwrap();
+    a.introduce(pb);
+    // Dá tempo de A gravar na caixa: o item aparece quando B lê.
+    let b = Node::start(NodeConfig { updates: false, two_relays: true, dht: dht(), mail_poll: Duration::from_millis(300), ..fixed(sb, free_port(), vec![]) }).await.unwrap();
+    let got = until("B acha o cartão na caixa", || Some(b.take_introductions()).filter(|v| !v.is_empty())).await;
+    assert_eq!((got[0].peer, got[0].name.as_str(), got[0].reach.clone()), (pa, "Ana", None));
+    a.stop();
+}
+
 /// Opção ligada e o contato não deixou pontos de introdução: falha com o motivo, sem usar o relay que se tem dele.
 #[tokio::test]
 async fn two_relays_does_not_fall_back_to_the_stored_relay_when_the_contact_has_no_points() {
@@ -1107,7 +1137,7 @@ async fn the_acceptance_comes_back_through_the_keeper_of_the_invite() {
 
     let b = Node::start(NodeConfig { updates: false, dht: dht(), name: "Beto".into(), mail_poll: poll, ..fixed(sb, free_port(), vec![]) }).await.unwrap();
     let got = until("B acha o convite", || Some(b.take_introductions()).filter(|v| !v.is_empty())).await;
-    let r = &got[0].reach;
+    let r = got[0].reach.as_ref().unwrap();
     b.add_contact(pa, Some(clam::node::RelayInfo { addr: r.addr.clone(), onion: r.onion, link: r.link }));
     // C recolhe a resposta do buraco: passa a segurar o convite e a resposta.
     let held = until("C recolhe a resposta", || Some(c.custody_export()).filter(|v| v.len() == 2)).await;

@@ -122,7 +122,8 @@ pub type PeerKey = [u8; 32];
 pub struct Introduced {
     pub peer: [u8; 32],
     pub name: String,
-    pub reach: update::Reach,
+    /// O relay de quem se apresentou; `None` se ele usa "2 relays" (então só se acha por introdução e encontro).
+    pub reach: Option<update::Reach>,
 }
 
 /// Espera a confirmação de uma apresentação (como [`UPDATE_ACK_WAIT`]).
@@ -326,7 +327,7 @@ impl Node {
         }
         background.extend(servers);
         phone.accept_introductions(introductions);
-        let server_hub = ServerHub::start(restore(secret.clone(), saved_servers.as_deref()), dialer.clone(), &phone, own.clone());
+        let server_hub = ServerHub::start(restore(secret.clone(), saved_servers.as_deref()), dialer.clone(), &phone, if two_relays { Arc::default() } else { own.clone() });
         if publishes && !two_relays {
             background.push(tokio::spawn(server_publisher(dialer.clone(), server_hub.clone(), current)));
         }
@@ -579,9 +580,13 @@ impl Node {
     }
 
     /// Relay desta máquina como os outros o alcançam (endereço público ou, na falta, o da rede local), para
-    /// montar o código de contato direto. `None` se não há endereço que alguém de fora use.
+    /// montar o código de contato direto. `None` se não há endereço que alguém de fora use ou se a opção "2 relays"
+    /// está ligada: o código então leva só a chave, porque o endereço não pode sair daqui.
     #[must_use]
     pub fn relay_info(&self) -> Option<RelayInfo> {
+        if self.dialer.two_relays() {
+            return None;
+        }
         self.own.lock_unpoisoned().clone()
     }
 

@@ -407,10 +407,9 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
         let introduced = node.take_introductions();
         if !introduced.is_empty() {
             for i in &introduced {
-                let r = &i.reach;
                 // Quem já era contato e se apresenta é a aceitação do convite que esta pessoa deixou (pela caixa, se estava offline).
                 let accepted = node.is_contact(&i.peer);
-                node.add_contact(i.peer, Some(clam::node::RelayInfo { addr: r.addr.clone(), onion: r.onion, link: r.link }));
+                node.add_contact(i.peer, i.reach.as_ref().map(|r| clam::node::RelayInfo { addr: r.addr.clone(), onion: r.onion, link: r.link }));
                 // Quem já era contato e se apresenta pode ainda não ter o nome desta pessoa (adicionou só pelo código):
                 // uma apresentação de volta por execução, senão as duas pontas ficariam se apresentando para sempre.
                 if introduced_back.insert(i.peer) {

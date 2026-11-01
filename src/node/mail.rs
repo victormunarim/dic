@@ -110,8 +110,10 @@ impl Introducer {
                         break;
                     }
                     // O relay é o de agora (pode ter mudado entre as tentativas); sem endereço que alguém de fora use, espera.
-                    let reach = own.lock_unpoisoned().clone().map(|r| update::Reach { addr: r.addr, onion: r.onion, link: r.link });
-                    if let Some(reach) = reach {
+                    // Com "2 relays" o cartão vai sem endereço: o relay não pode sair daqui nem pela caixa de correio.
+                    let hidden = dialer.two_relays();
+                    let reach = if hidden { None } else { own.lock_unpoisoned().clone().map(|r| update::Reach { addr: r.addr, onion: r.onion, link: r.link }) };
+                    if hidden || reach.is_some() {
                         let intro = Intro { seq, name: name.clone(), reach };
                         if dialer.deliver_intro(peer, &intro, INTRO_ACK_WAIT).await {
                             break;
@@ -333,7 +335,7 @@ mod tests {
     use super::*;
 
     fn intro(seq: u64) -> Intro {
-        Intro { seq, name: "Ana".into(), reach: update::Reach { addr: "127.0.0.1:4001".into(), onion: [1; 32], link: [2; 32] } }
+        Intro { seq, name: "Ana".into(), reach: Some(update::Reach { addr: "127.0.0.1:4001".into(), onion: [1; 32], link: [2; 32] }) }
     }
 
     #[test]

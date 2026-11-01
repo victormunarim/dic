@@ -103,6 +103,6 @@ pub enum ServerError {
     InRoom,
     #[error("membro desconhecido")]
     UnknownMember,
-    #[error("o seu endereço ainda não é conhecido (espere o relay ficar pronto)")]
+    #[error("o seu endereço ainda não é conhecido (espere o relay ficar pronto) ou a opção \"2 relays\" está ligada: convite de servidor leva o endereço, e ela o esconde")]
     NoAddress,
 }

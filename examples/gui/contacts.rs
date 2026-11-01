@@ -130,10 +130,10 @@ impl App {
                 if !self.form.contacts.trim().is_empty() {
                     self.form.contacts.push('\n');
                 }
-                self.form.contacts.push_str(&intro_line(&i.name, &i.peer, &i.reach));
+                self.form.contacts.push_str(&intro_line(&i.name, &i.peer, i.reach.as_ref()));
                 if let Some(r) = &self.running {
-                    let relay = clam::node::RelayInfo { addr: i.reach.addr.clone(), onion: i.reach.onion, link: i.reach.link };
-                    let _ = r.cmds.send(Cmd::Contact(i.peer, Some(relay)));
+                    let relay = i.reach.as_ref().map(|r| clam::node::RelayInfo { addr: r.addr.clone(), onion: r.onion, link: r.link });
+                    let _ = r.cmds.send(Cmd::Contact(i.peer, relay));
                 }
                 added = true;
             } else if let Some(text) = name_contact(&self.form.contacts, &i.peer, &i.name) {

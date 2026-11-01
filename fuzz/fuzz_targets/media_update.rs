@@ -94,12 +94,22 @@ fuzz_target!(|input: Input| {
                     assert_eq!(open_server_record(&[3; 32], &[4; 16], &peer_pk.to_bytes(), &value), Some(record.clone()));
                 }
             }
-            let intro = Intro { seq: f.seq, name: f.name, reach: Reach { addr: f.addr, onion: f.onion, link: f.link } };
+            let intro = Intro { seq: f.seq, name: f.name, reach: Some(Reach { addr: f.addr, onion: f.onion, link: f.link }) };
             if let Ok(frame) = seal_intro(&peer, &me_pk, &intro) {
                 if let Some((from, got)) = open_intro(&me, &frame) {
                     assert_eq!(from, peer_pk.to_bytes());
-                    assert!(valid_addr(&got.reach.addr) && !got.name.chars().any(char::is_control));
+                    assert!(got.reach.as_ref().is_some_and(|r| valid_addr(&r.addr)) && !got.name.chars().any(char::is_control));
                     assert_eq!(got.seq, intro.seq);
+                }
+            }
+            // Sem endereço ("2 relays"): o cartão abre igual e volta sem relay.
+            let bare = Intro { reach: None, ..intro.clone() };
+            if let Ok(frame) = seal_intro(&peer, &me_pk, &bare) {
+                // Nome com caractere de controle sela mas não abre (como no cartão com endereço).
+                if let Some((_, got)) = open_intro(&me, &frame) {
+                    assert_eq!((got.reach, got.seq), (None, bare.seq));
+                } else {
+                    assert!(bare.name.chars().any(char::is_control));
                 }
             }
             if let Ok(frame) = seal_removal(&peer, &me_pk, f.seq) {
