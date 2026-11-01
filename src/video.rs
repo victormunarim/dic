@@ -426,9 +426,14 @@ impl H264Encoder {
             .qp(QpRange::new(qp, qp))
             .max_frame_rate(FrameRate::from_hz(fps))
             .skip_frames(false)
-            // A detecção de cena do openh264 manda quadro-chave sozinho em vídeo pesado (10× um quadro comum); o
-            // quadro-chave é decisão deste módulo (`need_key`), que sabe o que o circuito aguenta.
-            .scene_change_detect(false)
+            // Em conteúdo de tela o openh264 liga a detecção de cena de qualquer jeito (e avisa no stderr se vier
+            // desligada), então ela é pedida ligada. Quadro-chave grande segue sendo decisão deste módulo
+            // (`need_key`), que sabe o que o circuito aguenta; a medição de quadros-chave espontâneos está nos testes.
+            .scene_change_detect(true)
+            // Em conteúdo de tela o openh264 não aceita estes dois e os desliga sozinho, avisando no stderr a cada
+            // abertura; desligar aqui diz o mesmo sem o aviso.
+            .adaptive_quantization(false)
+            .background_detection(false)
             .max_slice_len(SLICE_LEN)
             // Quadro-chave grande (dezenas de kB) leva segundos no circuito e congela a imagem: só periódico
             // de longe em longe; perda e quem entra pedem o seu por `WANT_KEY`.
