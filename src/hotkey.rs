@@ -168,7 +168,10 @@ mod portal {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|e| e.to_string())?;
         rt.block_on(async {
             let err = |e: ashpd::Error| format!("o ambiente de trabalho não oferece atalhos globais (portal GlobalShortcuts): {e}");
-            let proxy = GlobalShortcuts::new().await.map_err(err)?;
+            // Conexão própria: a compartilhada do ashpd nasce no primeiro runtime que a pede e morre com ele. Este
+            // runtime é desta thread e some quando os atalhos acabam; a captura de tela, em outro, ficaria sem D-Bus.
+            let cnx = ashpd::zbus::Connection::session().await.map_err(|e| err(e.into()))?;
+            let proxy = GlobalShortcuts::with_connection(cnx).await.map_err(err)?;
             let session = proxy.create_session(Default::default()).await.map_err(err)?;
             let triggers: Vec<String> = bindings.iter().map(|b| b.combo.xdg_trigger()).collect();
             let news: Vec<NewShortcut> = bindings.iter().zip(&triggers).map(|(b, t)| NewShortcut::new(b.id.to_string(), b.label.clone()).preferred_trigger(Some(t.as_str()))).collect();

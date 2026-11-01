@@ -151,7 +151,12 @@ impl PortalScreen {
 
     /// Como [`Self::open`], capturando a `fps` quadros por segundo.
     pub async fn open_with(fps: f32) -> Result<Self, PortalError> {
-        let proxy = step("conectar ao portal", STEP_WAIT, Screencast::new()).await?;
+        // Conexão própria, presa ao runtime desta captura (ver o mesmo cuidado em `hotkey`).
+        let proxy = step("conectar ao portal", STEP_WAIT, async {
+            let cnx = ashpd::zbus::Connection::session().await?;
+            Screencast::with_connection(cnx).await
+        })
+        .await?;
         let session = step("criar a sessão", STEP_WAIT, proxy.create_session(Default::default())).await?;
         let selected = proxy
             .select_sources(
