@@ -207,10 +207,14 @@ pub(crate) fn on_screen_event(state: &ScreenState, who: [u8; 32], dec: &mut Opti
     }
 }
 
-/// Abre a captura da tela: no Windows pelo GDI; no Unix pelo portal (PipeWire) no Wayland e pelo
+/// Abre a captura da tela: no Windows pelo DXGI (GDI de reserva); no Unix pelo portal (PipeWire) no Wayland e pelo
 /// X11 nos outros casos, e se a primeira falhar tenta a outra. Fora daqui só há o trait `ScreenSource`.
 #[cfg(windows)]
 async fn open_source(_fps: f32) -> Result<Box<dyn ScreenSource + Send>, String> {
+    // DXGI só entrega quando a tela muda e não refaz `BitBlt`; sem ele (sessão remota, driver) o GDI.
+    if let Ok(s) = clam::capture::DxgiScreen::open() {
+        return Ok(Box::new(s));
+    }
     clam::capture::GdiScreen::open().map(|s| Box::new(s) as Box<dyn ScreenSource + Send>).map_err(|e| e.to_string())
 }
 

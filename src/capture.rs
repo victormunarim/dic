@@ -1,4 +1,4 @@
-//! Captura da tela inteira: X11 (`GetImage` na janela raiz) no Unix e GDI no Windows.
+//! Captura da tela inteira: X11 (`GetImage` na janela raiz) no Unix e DXGI Desktop Duplication (com GDI de reserva) no Windows.
 //!
 //! Sob Wayland o X11 só enxerga janelas do XWayland: o Wayland não deixa um programa ler a tela
 //! sem o portal do compositor ([`crate::portal`]).
@@ -10,7 +10,11 @@ mod x11;
 #[cfg(unix)]
 pub use x11::X11Screen;
 #[cfg(windows)]
+mod dxgi;
+#[cfg(windows)]
 mod gdi;
+#[cfg(windows)]
+pub use dxgi::DxgiScreen;
 #[cfg(windows)]
 pub use gdi::GdiScreen;
 
@@ -24,4 +28,6 @@ pub enum CaptureError {
     Format(u8, u8),
     #[error("o Windows não deixou ler a tela")]
     Gdi,
+    #[error("a duplicação de tela do DXGI não abriu")]
+    Dxgi,
 }
