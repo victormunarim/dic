@@ -815,8 +815,8 @@ async fn an_anchor_lets_two_moved_contacts_find_each_other() {
     cb.hangup();
 }
 
-/// Liga A a B, A transmite a tela e B tem de receber o quadro. Com `two_relays`, A e B têm também um terceiro
-/// contato C, cujo relay é o primeiro salto. Devolve o caminho tomado e se o quadro chegou igual.
+/// Liga B a A, A transmite a tela e B tem de receber o quadro (opção "2 relays" desligada; ligada, a tela só vai por
+/// encontro, testada à parte). Devolve o caminho tomado e se o quadro chegou igual.
 async fn screen_arrives(two_relays: bool) -> (PathMode, bool) {
     use clam::phone::ScreenEvent;
     let (sa, sb, sc) = (key(), key(), key());
@@ -863,10 +863,20 @@ async fn the_screen_goes_straight_to_the_contact_when_two_relays_is_off() {
     assert_eq!(screen_arrives(false).await, (PathMode::Direct, true));
 }
 
-/// Opção ligada: a tela passa pelo relay de outro contato.
+/// Opção ligada e o contato sem pontos de introdução: o circuito de tela não abre e não usa o relay guardado dele (que
+/// mostraria o IP). Com pontos, a tela chega por encontro (`the_screen_with_two_relays_on_arrives_...`).
 #[tokio::test]
-async fn the_screen_goes_through_a_third_party_relay_when_two_relays_is_on() {
-    assert_eq!(screen_arrives(true).await, (PathMode::TwoHop, true));
+async fn the_screen_with_two_relays_on_never_uses_the_stored_relay() {
+    let (sa, sb, sc, sd) = (key(), key(), key(), key());
+    let pk = |s: &StaticSecret| *PublicKey::from(s).as_bytes();
+    let (pb, pc, pd) = (pk(&sb), pk(&sc), pk(&sd));
+    let b = Node::start(fixed(sb, free_port(), vec![])).await.unwrap();
+    let c = Node::start(fixed(sc, free_port(), vec![])).await.unwrap();
+    let d = Node::start(fixed(sd, free_port(), vec![])).await.unwrap();
+    let known = vec![(pb, b.relay_info().unwrap()), (pc, c.relay_info().unwrap()), (pd, d.relay_info().unwrap())];
+    let a = Node::start(NodeConfig { two_relays: true, known, ..fixed(sa, free_port(), vec![pb, pc, pd]) }).await.unwrap();
+    // O circuito de tela (o mesmo que leva o arquivo) não abre: B está no `known` de A, mas o endereço não é usado.
+    assert!(a.dialer().open_file_pipe(pb).await.is_none());
 }
 
 /// Opção ligada e nenhum relay de terceiro: falha com o motivo, em vez de cair para um caminho que mostra o IP.
@@ -922,6 +932,101 @@ async fn a_call_with_two_relays_on_reaches_the_contact_without_knowing_its_addre
     assert!(a.known().iter().all(|(k, _)| *k != pb) && a.hints().iter().all(|(k, _)| *k != pb), "A nunca aprende o relay de B");
     assert!(b.known().iter().all(|(k, _)| *k != pa) && b.hints().iter().all(|(k, _)| *k != pa), "B nunca aprende o relay de A");
     talk(ca, cb).await;
+}
+
+/// Dois nós com "2 relays" ligada, sem nunca saber o relay um do outro, e três relays de terceiros (C, D, E). Devolve
+/// quando os dois já gravaram a presença (cada um consegue achar os pontos do outro).
+struct Blind {
+    a: Node,
+    b: Node,
+    pa: [u8; 32],
+    pb: [u8; 32],
+    _others: Vec<Node>,
+}
+
+async fn blind_pair() -> Blind {
+    use clam::rendezvous::DhtOptions;
+    let testnet = Box::leak(Box::new(mainline::Testnet::new(5).unwrap()));
+    let dht = || Some(DhtOptions { bootstrap: testnet.bootstrap.clone(), bind: Some(std::net::Ipv4Addr::LOCALHOST), circuit: false });
+    let (sa, sb, sc, sd, se) = (key(), key(), key(), key(), key());
+    let pk = |s: &StaticSecret| *PublicKey::from(s).as_bytes();
+    let (pa, pb, pc, pd, pe) = (pk(&sa), pk(&sb), pk(&sc), pk(&sd), pk(&se));
+    let mut others = Vec::new();
+    let mut relays = Vec::new();
+    for (s, p) in [(sc, pc), (sd, pd), (se, pe)] {
+        let n = Node::start(NodeConfig { updates: false, ..fixed(s, free_port(), vec![pa, pb]) }).await.unwrap();
+        relays.push((p, n.relay_info().unwrap()));
+        others.push(n);
+    }
+    let cfg = |s, contacts| NodeConfig { updates: false, two_relays: true, dht: dht(), known: relays.clone(), ..fixed(s, free_port(), contacts) };
+    let a = Node::start(cfg(sa, vec![pb, pc, pd, pe])).await.unwrap();
+    let b = Node::start(cfg(sb, vec![pa, pc, pd, pe])).await.unwrap();
+    // Cada um sobe o serviço e grava a presença em segundo plano: espera os dois acharem os pontos um do outro.
+    let (da, db) = (a.dialer(), b.dialer());
+    for _ in 0..90 {
+        if da.is_online(&pb).await && db.is_online(&pa).await {
+            return Blind { a, b, pa, pb, _others: others };
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    panic!("a presença dos dois não apareceu");
+}
+
+/// Com "2 relays" ligada, bate-papo, oferta de arquivo e a sondagem de presença chegam por encontro, nos dois sentidos,
+/// e nenhum dos dois aprende o relay do outro.
+#[tokio::test]
+async fn chat_and_files_with_two_relays_on_arrive_without_knowing_the_address() {
+    use clam::media::update::FileFrame;
+    let Blind { a, b, pa, pb, _others } = blind_pair().await;
+    let (da, db) = (a.dialer(), b.dialer());
+    assert!(da.send_chat(pb, da.next_chat_id(), "ida", Duration::from_secs(20)).await);
+    assert!(db.send_chat(pa, db.next_chat_id(), "volta", Duration::from_secs(20)).await);
+    let offer = FileFrame::Offer { id: da.next_chat_id(), size: 10, name: "x.bin".into() };
+    assert!(da.send_file_frame(pb, &offer, Duration::from_secs(20)).await);
+    let (mut at_b, mut at_a, mut files) = (Vec::new(), Vec::new(), Vec::new());
+    until("as mensagens e a oferta chegam", || {
+        at_b.extend(b.take_chats());
+        at_a.extend(a.take_chats());
+        files.extend(b.take_files());
+        (!at_b.is_empty() && !at_a.is_empty() && !files.is_empty()).then_some(())
+    })
+    .await;
+    assert_eq!((at_b[0].0, at_b[0].1.text.as_str()), (pa, "ida"));
+    assert_eq!((at_a[0].0, at_a[0].1.text.as_str()), (pb, "volta"));
+    assert_eq!(files[0], (pa, offer));
+    assert!(a.known().iter().all(|(k, _)| *k != pb) && a.hints().iter().all(|(k, _)| *k != pb), "A nunca aprende o relay de B");
+    assert!(b.known().iter().all(|(k, _)| *k != pa) && b.hints().iter().all(|(k, _)| *k != pa), "B nunca aprende o relay de A");
+}
+
+/// Com "2 relays" ligada, a tela de A chega a B por encontro (um circuito só dela, com o cover no ritmo dos slots).
+#[tokio::test]
+async fn the_screen_with_two_relays_on_arrives_without_knowing_the_address() {
+    use clam::phone::ScreenEvent;
+    let Blind { a, mut b, pb, _others, .. } = blind_pair().await;
+    let answer = tokio::spawn(async move {
+        let inc = timeout(Duration::from_secs(60), b.next_incoming()).await.unwrap().unwrap();
+        (inc.accept(Mulaw::new()).await.unwrap(), b)
+    });
+    let dialer = a.dialer();
+    let ca = dialer.dial(pb, Mulaw::new(), Duration::from_secs(30)).await.unwrap();
+    let (mut cb, b) = answer.await.unwrap();
+    let share = dialer.share_screen_keys(pb, &ca.next_share_keys(), Duration::from_secs(30)).await.unwrap();
+    let frame: Vec<u8> = (0..900).map(|i| (i as u8).wrapping_mul(7)).collect();
+    assert!(share.push(&frame, true).unwrap());
+    let got = timeout(Duration::from_secs(20), async {
+        loop {
+            match cb.next_screen().await {
+                Some(ScreenEvent::Frame(f)) => return Some(f.data),
+                Some(_) => {}
+                None => return None,
+            }
+        }
+    })
+    .await
+    .expect("o quadro de tela não chegou");
+    share.stop().await;
+    assert_eq!(got.as_deref(), Some(frame.as_slice()));
+    drop(b);
 }
 
 /// Opção ligada e o contato não deixou pontos de introdução: falha com o motivo, sem usar o relay que se tem dele.

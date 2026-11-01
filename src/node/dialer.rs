@@ -134,25 +134,47 @@ impl Dialer {
         set_known(&self.known, &self.history, peer, used);
     }
 
-    /// Primeiro relay de `peer` cujo circuito fica pronto: os guardados e, se nenhum responder, o que o
-    /// contato deixou na DHT ou nas âncoras. O `bool` diz se algum endereço foi tentado (muda o motivo do erro de quem liga).
-    pub(super) async fn reachable_client(&self, peer: &[u8; 32], options: fn() -> ClientOptions) -> (Option<(CircuitClient, RelayInfo)>, bool) {
+    /// O circuito até `peer`, pelo único caminho que a opção "2 relays" permite. Ligada: só introdução e encontro,
+    /// nunca o relay guardado (que mostraria o IP). Desligada: os relays guardados e, se nenhum responder, o que o
+    /// contato deixou na DHT ou nas âncoras. O `bool` diz se algum endereço foi tentado (muda o motivo do erro de quem
+    /// liga). O `RelayInfo` é o relay que funcionou e só existe fora do modo "2 relays": no encontro ninguém aprende o do outro.
+    pub(super) async fn reachable_client(&self, peer: &[u8; 32], options: fn() -> ClientOptions) -> (Option<(CircuitClient, Option<RelayInfo>)>, bool) {
+        match self.open_circuit(peer, options).await {
+            Ok(found) => (Some(found), true),
+            Err(DialError::NoAddress { tried_stored }) => (None, tried_stored),
+            Err(_) => (None, true),
+        }
+    }
+
+    /// Como [`Self::reachable_client`], com o motivo da falha.
+    pub(super) async fn open_circuit(&self, peer: &[u8; 32], options: fn() -> ClientOptions) -> Result<(CircuitClient, Option<RelayInfo>), DialError> {
+        if self.two_relays {
+            return Ok((self.hidden_client(peer, options).await?, None));
+        }
+        self.check_relays(peer)?;
         let stored = self.stored_for(peer);
         let mut tried = !stored.is_empty();
-        if let Some(found) = self.stored_client(peer, stored.clone(), options).await {
-            return (Some(found), tried);
+        if let Some((client, used)) = self.stored_client(peer, stored.clone(), options).await {
+            return Ok((client, Some(used)));
         }
         if let Some(record) = self.rendezvous_record(peer).await {
             let relay = RelayInfo { addr: record.addr.clone(), onion: record.onion, link: record.link };
             self.apply_update(&AddressUpdate { peer: *peer, record });
             if !stored.contains(&relay) {
                 tried = true;
-                if let Some(found) = self.stored_client(peer, vec![relay], options).await {
-                    return (Some(found), tried);
+                if let Some((client, used)) = self.stored_client(peer, vec![relay], options).await {
+                    return Ok((client, Some(used)));
                 }
             }
         }
-        (None, tried)
+        Err(DialError::NoAddress { tried_stored: tried })
+    }
+
+    /// Como [`Self::remember`], para quem pode não ter relay a guardar (encontro às cegas).
+    pub(super) fn remember_used(&self, peer: &[u8; 32], used: Option<RelayInfo>) {
+        if let Some(used) = used {
+            self.remember(peer, used);
+        }
     }
 
     /// Relays de terceiros para o primeiro salto: os relays guardados dos outros contatos, nunca o de `peer`, o `exit`
@@ -212,16 +234,9 @@ impl Dialer {
     ///
     /// [`DialError::NoAddress`] se nenhum relay do contato foi achado; [`DialError::Call`] se a chamada falhou (circuito, sem resposta, recusada).
     pub async fn dial<C: Codec + Send + 'static>(&self, peer: [u8; 32], codec: C, wait: Duration) -> Result<ActiveCall, DialError> {
-        if self.two_relays {
-            // Sem IP dos dois lados: só por introdução e encontro, nunca pelo relay guardado do contato.
-            let client = self.hidden_client(&peer).await?;
-            return Ok(call_linked(client, &self.secret, &PublicKey::from(peer), codec, wait, Some(&self.link)).await?);
-        }
-        self.check_relays(&peer)?;
-        let (found, tried_stored) = self.reachable_client(&peer, ClientOptions::default).await;
-        let Some((client, k)) = found else { return Err(DialError::NoAddress { tried_stored }) };
+        let (client, used) = self.open_circuit(&peer, ClientOptions::default).await?;
         let call = call_linked(client, &self.secret, &PublicKey::from(peer), codec, wait, Some(&self.link)).await?;
-        self.remember(&peer, k);
+        self.remember_used(&peer, used);
         Ok(call)
     }
 
@@ -243,11 +258,9 @@ impl Dialer {
     ///
     /// Como [`Self::share_screen`].
     pub async fn share_screen_keys(&self, peer: [u8; 32], keys: &CallKeys, wait: Duration) -> Result<ScreenShare, DialError> {
-        self.check_relays(&peer)?;
-        let (found, tried_stored) = self.reachable_client(&peer, screen_client_options).await;
-        let Some((client, used)) = found else { return Err(DialError::NoAddress { tried_stored }) };
+        let (client, used) = self.open_circuit(&peer, screen_client_options).await?;
         let share = share_screen_slot(client, keys, wait, SCREEN_SLOT).await?;
-        self.remember(&peer, used);
+        self.remember_used(&peer, used);
         Ok(share)
     }
 

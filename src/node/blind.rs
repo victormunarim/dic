@@ -18,12 +18,12 @@ use crate::{
     DEFAULT_EPOCH_SECS,
     circuit::manager::Candidate,
     epoch_of,
-    meet::{HiddenService, IntroTarget, ServiceConfig, meet},
+    meet::{HiddenService, IntroTarget, ServiceConfig, meet_with},
     pairing::PresenceKeys,
     phone::Contacts,
     presence::{self, IntroPointV2},
     rendezvous,
-    transport::CircuitClient,
+    transport::{CircuitClient, ClientOptions},
 };
 use super::dialer::{DialError, Dialer};
 use super::util::{unix_millis, unix_secs};
@@ -78,7 +78,7 @@ impl Dialer {
         let targets: Vec<([u8; 32], [u8; 32])> = epochs
             .iter()
             .map(|e| {
-                let (seed, salt) = keys.dht_target(*e);
+                let (seed, salt) = keys.dht_target(*e, peer);
                 (rendezvous::public_key(&seed), salt)
             })
             .collect();
@@ -100,7 +100,7 @@ impl Dialer {
     ///
     /// [`DialError::NoRelays`] sem relay de terceiro; [`DialError::NoHiddenPoints`] se o contato não publicou pontos
     /// (ou a opção está desligada nele); [`DialError::Meet`] se nenhum ponto levou ao encontro.
-    pub(super) async fn hidden_client(&self, peer: &[u8; 32]) -> Result<CircuitClient, DialError> {
+    pub(super) async fn hidden_client(&self, peer: &[u8; 32], options: fn() -> ClientOptions) -> Result<CircuitClient, DialError> {
         let pool = self.hidden_pool(Some(peer));
         if pool.len() < POOL_MIN {
             return Err(DialError::NoRelays);
@@ -116,7 +116,7 @@ impl Dialer {
             // O encontro é em outro relay que o do ponto, escolhido entre os de quem liga.
             let others: Vec<&Candidate> = pool.iter().filter(|c| c.addr != via.relay.addr).collect();
             let Some(rv) = others.get(OsRng.next_u64() as usize % others.len().max(1)) else { continue };
-            match meet(&self.secret, &callee, &via, rv, &pool).await {
+            match meet_with(&self.secret, &callee, &via, rv, &pool, options()).await {
                 Ok(client) => return Ok(client),
                 Err(e) => last = Some(e),
             }
@@ -172,7 +172,7 @@ pub(super) async fn hidden_publisher(dialer: Dialer, contacts: Contacts, points:
             let (mut signed, mut sent) = (Vec::new(), Vec::new());
             for (i, k) in due.iter().enumerate() {
                 let pair = PresenceKeys::derive(&dialer.secret, &PublicKey::from(*k));
-                let (seed, salt) = pair.dht_target(epoch);
+                let (seed, salt) = pair.dht_target(epoch, &me);
                 let Ok(value) = presence::seal_v2(&pair, &pair.owner_signing_key(&me), &pair.lookup_id(epoch), &wire) else { continue };
                 signed.push(rendezvous::sign(&seed, &salt, &value, base + i as i64));
                 sent.push(*k);

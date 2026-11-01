@@ -261,14 +261,14 @@ impl Seen {
 
 /// Um circuito de 2 saltos até `exit`, com o primeiro salto num relay de `pool` (nunca o próprio `exit`) e o destino
 /// `dest` no relay de saída. Sem relay de terceiro, falha em vez de montar um circuito direto.
-fn circuit(pool: &[Candidate], exit: &Candidate, dest: &str) -> Result<CircuitClient, MeetError> {
+fn circuit(pool: &[Candidate], exit: &Candidate, dest: &str, options: ClientOptions) -> Result<CircuitClient, MeetError> {
     let mut relays: Vec<Candidate> = pool.iter().filter(|c| c.addr != exit.addr).cloned().collect();
     if relays.is_empty() {
         return Err(MeetError::NoPool);
     }
     relays.push(exit.clone());
     let cfg = ManagerConfig { exit_addr: Some(exit.addr.clone()), ..Default::default() };
-    Ok(CircuitClient::spawn_with(CircuitManager::new(cfg, dest, relays), Duration::from_secs(3), ClientOptions::default()))
+    Ok(CircuitClient::spawn_with(CircuitManager::new(cfg, dest, relays), Duration::from_secs(3), options))
 }
 
 /// Circuito mais o acumulador das mensagens `u16 tamanho ‖ corpo` que chegam em pedaços.
@@ -279,8 +279,8 @@ struct Talk {
 }
 
 impl Talk {
-    async fn open(pool: &[Candidate], exit: &Candidate, dest: &str) -> Result<Self, MeetError> {
-        let mut client = circuit(pool, exit, dest)?;
+    async fn open(pool: &[Candidate], exit: &Candidate, dest: &str, options: ClientOptions) -> Result<Self, MeetError> {
+        let mut client = circuit(pool, exit, dest, options)?;
         let up = timeout(READY_WAIT, async {
             while let Some(event) = client.next_event().await {
                 if matches!(event, Event::Ready { .. }) {
@@ -367,15 +367,25 @@ impl From<&IntroPointV2> for IntroTarget {
 /// [`MeetError::NoPool`] sem relay de terceiro; [`MeetError::NoCircuit`], [`MeetError::NoReply`] ou
 /// [`MeetError::Refused`] quando um ponto não atende; [`MeetError::NoMeeting`] se D não chegou ao encontro.
 pub async fn meet(secret: &StaticSecret, callee: &PublicKey, via: &IntroTarget, rv: &Candidate, pool: &[Candidate]) -> Result<CircuitClient, MeetError> {
+    meet_with(secret, callee, via, rv, pool, ClientOptions::default()).await
+}
+
+/// Como [`meet`], com as opções (cover, perfil) do circuito do encontro, que é o que volta e carrega a tela ou o arquivo.
+/// A conversa com o ponto de introdução usa sempre as opções padrão.
+///
+/// # Errors
+///
+/// Como [`meet`].
+pub async fn meet_with(secret: &StaticSecret, callee: &PublicKey, via: &IntroTarget, rv: &Candidate, pool: &[Candidate], options: ClientOptions) -> Result<CircuitClient, MeetError> {
     let mut cookie = [0u8; 32];
     OsRng.fill_bytes(&mut cookie);
     let blob = seal_meeting(secret, callee, rv, cookie, now_ms())?;
 
-    let mut waiting = Talk::open(pool, rv, RV_DEST).await?;
+    let mut waiting = Talk::open(pool, rv, RV_DEST, options).await?;
     waiting.say(&RvRequest::Establish { cookie }.encode()).await?;
     expect_waiting(&waiting.hear(REPLY_WAIT).await?)?;
 
-    let mut intro = Talk::open(pool, &via.relay, INTRO_DEST).await?;
+    let mut intro = Talk::open(pool, &via.relay, INTRO_DEST, ClientOptions::default()).await?;
     intro.say(&IntroRequest::Introduce { auth_key: via.auth_key, blob }.encode()).await?;
     let reply = IntroReply::parse(&intro.hear(REPLY_WAIT).await?);
     intro.client.stop();
@@ -508,7 +518,7 @@ async fn keep_waiting(shared: Arc<Shared>, target: IntroTarget, signer: SigningK
 
 /// Um circuito de espera, do registro até cair. `true` se chegou a registrar.
 async fn wait_at(shared: &Arc<Shared>, target: &IntroTarget, signer: &SigningKey, index: usize, up: &mpsc::Sender<usize>) -> bool {
-    let Ok(mut talk) = Talk::open(&shared.pool, &target.relay, INTRO_DEST).await else { return false };
+    let Ok(mut talk) = Talk::open(&shared.pool, &target.relay, INTRO_DEST, ClientOptions::default()).await else { return false };
     if register(&mut talk, target, signer).await.is_err() {
         talk.client.stop();
         return false;
@@ -548,7 +558,7 @@ async fn attend(shared: Arc<Shared>, blob: Vec<u8>) {
         return;
     }
     let Ok(_slot) = shared.slots.clone().try_acquire_owned() else { return };
-    let Ok(mut talk) = Talk::open(&shared.pool, &meeting.rv, RV_DEST).await else { return };
+    let Ok(mut talk) = Talk::open(&shared.pool, &meeting.rv, RV_DEST, ClientOptions::default()).await else { return };
     if talk.say(&RvRequest::Join { cookie: meeting.cookie }.encode()).await.is_err() {
         return;
     }
@@ -710,8 +720,8 @@ mod tests {
     async fn without_a_third_party_relay_nothing_is_built() {
         let exit = relay();
         let alone = vec![exit.clone()];
-        assert!(matches!(circuit(&alone, &exit, RV_DEST), Err(MeetError::NoPool)), "só o próprio destino não é terceiro");
-        assert!(matches!(circuit(&[], &exit, RV_DEST), Err(MeetError::NoPool)));
+        assert!(matches!(circuit(&alone, &exit, RV_DEST, ClientOptions::default()), Err(MeetError::NoPool)), "só o próprio destino não é terceiro");
+        assert!(matches!(circuit(&[], &exit, RV_DEST, ClientOptions::default()), Err(MeetError::NoPool)));
         let (c, d) = keys();
         let via = IntroTarget { relay: exit.clone(), auth_key: [1; 32] };
         assert!(matches!(meet(&c, &PublicKey::from(&d), &via, &exit, &[]).await, Err(MeetError::NoPool)));

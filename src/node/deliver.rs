@@ -44,7 +44,8 @@ impl Dialer {
         let stored = self.stored_for(&peer);
         let pk = PublicKey::from(peer);
         let Ok(frame) = update::seal_update(&self.secret, &pk, record) else { return false };
-        let Some((mut client, used)) = self.stored_client(&peer, stored, ClientOptions::default).await else { return false };
+        let found = if self.two_relays { self.reachable_client(&peer, ClientOptions::default).await.0 } else { self.stored_client(&peer, stored, ClientOptions::default).await.map(|(c, u)| (c, Some(u))) };
+        let Some((mut client, used)) = found else { return false };
         let acked = client.send(&frame).await.is_ok()
             && tokio::time::timeout(wait, async {
                 loop {
@@ -59,7 +60,7 @@ impl Dialer {
             .unwrap_or(false);
         client.stop();
         if acked {
-            self.remember(&peer, used);
+            self.remember_used(&peer, used);
         }
         acked
     }
@@ -98,7 +99,7 @@ impl Dialer {
 
     /// Guarda `used` como o endereço que funcionou para `peer` (o arquivo chegou).
     pub fn remember_file_route(&self, peer: &[u8; 32], pipe: FilePipe) {
-        self.remember(peer, pipe.used);
+        self.remember_used(peer, pipe.used);
         pipe.client.stop();
     }
 
@@ -128,7 +129,7 @@ impl Dialer {
             .unwrap_or(false);
         client.stop();
         if acked {
-            self.remember(&peer, used);
+            self.remember_used(&peer, used);
         }
         acked
     }
@@ -143,7 +144,7 @@ impl Dialer {
 
     /// Como [`Dialer::deliver_batch`], com as opções do circuito e o `pace` entre quadros (zero = sem espera) à escolha e o resultado de cada quadro (`true` = confirmado).
     pub(crate) async fn deliver_batch_with(&self, peer: [u8; 32], frames: &[crate::media::signal::Frame], acked: impl Fn(usize, &[u8]) -> bool, wait: Duration, search: bool, (options, pace): (fn() -> ClientOptions, Duration)) -> Vec<bool> {
-        let found = if search { self.reachable_client(&peer, options).await.0 } else { self.stored_client(&peer, self.stored_for(&peer), options).await };
+        let found = if search || self.two_relays { self.reachable_client(&peer, options).await.0 } else { self.stored_client(&peer, self.stored_for(&peer), options).await.map(|(c, u)| (c, Some(u))) };
         let Some((mut client, used)) = found else { return vec![false; frames.len()] };
         let mut got = vec![false; frames.len()];
         for (n, f) in frames.iter().enumerate() {
@@ -181,7 +182,7 @@ impl Dialer {
         }
         client.stop();
         if got.iter().any(|g| *g) {
-            self.remember(&peer, used);
+            self.remember_used(&peer, used);
         }
         got
     }
@@ -194,7 +195,7 @@ pub struct PipeClosed;
 /// Circuito de tela aberto para um arquivo: manda pedaços no ritmo do cover e devolve os acks que chegam enquanto isso.
 pub struct FilePipe {
     client: crate::transport::CircuitClient,
-    used: RelayInfo,
+    used: Option<RelayInfo>,
     secret: x25519_dalek::StaticSecret,
     pk: PublicKey,
     /// Quando o próximo lote pode sair. Conta por prazo, não por espera fixa: o tempo gasto lendo o disco ou tratando
