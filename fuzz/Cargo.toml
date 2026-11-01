@@ -131,3 +131,10 @@ path = "fuzz_targets/hidden_point.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "meet_blob"
+path = "fuzz_targets/meet_blob.rs"
+test = false
+doc = false
+bench = false

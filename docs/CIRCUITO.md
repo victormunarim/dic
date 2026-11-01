@@ -449,6 +449,7 @@ Além dos testes determinísticos de `tests/fuzz.rs`, o diretório `fuzz/` tem a
 | `media_screen` | `ScreenStream` com pacotes autênticos de carga arbitrária (fragmentos fora de ordem, duplicados, pedidos de reenvio), lixo e passos de envio | sem pânico; todo pacote que sai tem 200 B |
 | `hidden_frames` | `IntroRequest`, `IntroReply`, `RvRequest`, `RvReply` (`parse`) e `Messages::push` com cortes variados | sem pânico; mensagem aceita reproduz a entrada |
 | `hidden_point` | `IntroPoint` e `RvPoint` com pedidos arbitrários e relógio irregular | sem pânico; tabelas ≤ 256 entradas; `cookie` de uso único |
+| `meet_blob` | `open_meeting` com bytes arbitrários e com blob de introdução válido adulterado | sem pânico; blob adulterado nunca é aceito |
 
 ```sh
 cargo install cargo-fuzz

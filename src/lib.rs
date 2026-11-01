@@ -19,6 +19,7 @@
 //! | `node` | `Node`: relay + telefone + fila de endereços; liga só com a chave do outro e o relay dele (feature `net`) |
 //! | `rendezvous` | Ponto de encontro na DHT Mainline (BEP 44) e âncoras, para reencontrar um contato que mudou de endereço (feature `net`) |
 //! | `hidden` | Pontos de introdução (`intro:9`) e de encontro (`rv:9`) do relay, para a opção "2 relays" (feature `net`) |
+//! | `meet` | Introdução e encontro às cegas: blob selado, `meet` (quem liga) e `HiddenService` (quem atende), etapa 3 de "2 relays" (feature `net`) |
 //! | `video` | Codificação H.264 da tela: controle de taxa, qualidade e NACK (feature `video`) |
 //! | `scroll` | Mensagem de rolagem da tela: desloca a imagem em vez de recodificá-la (feature `video`) |
 //! | `sysaudio` | Áudio do computador para a tela, sem o que o programa toca (feature `audio`, Linux e Windows) |
@@ -87,6 +88,8 @@ pub mod transfer;
 pub mod rendezvous;
 #[cfg(feature = "net")]
 pub mod hidden;
+#[cfg(feature = "net")]
+pub mod meet;
 #[cfg(feature = "net")]
 pub mod timer;
 #[cfg(feature = "hotkey")]
