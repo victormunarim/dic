@@ -157,8 +157,27 @@ impl App {
             while let Some(i) = parse_contacts(&self.form.contacts).iter().position(|(_, k)| *k == key) {
                 self.form.contacts = remove_contact(&self.form.contacts, i);
             }
+            self.forget_chat(key);
         }
         self.form.save();
+    }
+
+    /// Apaga a conversa com `key` da memória e do arquivo na hora (sem esperar o nó, que pode nem estar ligado)
+    /// e fecha o bate-papo se era o aberto. Vale dos dois lados: quem remove e quem é removido.
+    fn forget_chat(&mut self, key: [u8; 32]) {
+        let text = {
+            let mut book = self.shared.chats.lock_unpoisoned();
+            book.forget(&key);
+            book.take_dirty()
+        };
+        if let Some(text) = text
+            && let Err(e) = crate::chats::save_chats(&text)
+        {
+            self.error = format!("não deu para apagar a conversa em {}: {e}", crate::chats::chats_path().display());
+        }
+        if self.chat_with == Some(key) {
+            self.chat_with = None;
+        }
     }
 
     /// Formulário de novo contato, dentro do menu do + do cabeçalho da coluna.
@@ -399,6 +418,8 @@ impl App {
         self.form.contacts = remove_contact(&self.form.contacts, i);
         // O endereço guardado do contato vai junto (a menos que a mesma chave ainda esteja na lista).
         if !parse_contacts(&self.form.contacts).iter().any(|(_, k)| *k == key) {
+            // A conversa some aqui e, pelo aviso abaixo, no outro lado.
+            self.forget_chat(key);
             // O outro lado é avisado e também tira esta pessoa da lista dele. Offline, o aviso fica na fila
             // (`.clam-gui.removed`) e o endereço dele continua guardado até a entrega no próximo início.
             match &self.running {

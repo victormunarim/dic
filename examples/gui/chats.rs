@@ -77,6 +77,14 @@ impl ChatBook {
         self.unread.remove(peer);
     }
 
+    /// Apaga a conversa inteira com `peer` (mensagens e não lidas): contato removido não deixa histórico.
+    pub(crate) fn forget(&mut self, peer: &[u8; 32]) {
+        self.unread.remove(peer);
+        if self.chats.remove(peer).is_some() {
+            self.dirty = true;
+        }
+    }
+
     /// Mensagem minha, a caminho.
     pub(crate) fn push_mine(&mut self, peer: [u8; 32], id: u64, text: String) {
         self.push(peer, Msg { id, text, state: State::Sending });
@@ -195,6 +203,24 @@ pub(crate) fn split_text(text: &str, max: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn forgetting_a_contact_drops_only_that_conversation_and_marks_it_for_saving() {
+        let (a, b) = ([1u8; 32], [2u8; 32]);
+        let mut book = ChatBook::default();
+        book.push_mine(a, 1, "oi".into());
+        book.push_received(a, 2, "olá".into());
+        book.push_received(b, 3, "e aí".into());
+        book.take_dirty();
+        book.forget(&a);
+        assert!(book.with(&a).is_empty());
+        assert_eq!(book.unread(&a), 0);
+        assert_eq!(book.with(&b).len(), 1, "a conversa dos outros fica");
+        let saved = book.take_dirty().expect("a remoção precisa chegar ao arquivo");
+        assert!(!saved.contains(&hex(&a)) && saved.contains(&hex(&b)));
+        book.forget(&a);
+        assert!(book.take_dirty().is_none(), "sem conversa, nada a gravar");
+    }
 
     #[test]
     fn splits_without_cutting_characters() {
