@@ -138,13 +138,28 @@ impl RawFrame {
     }
 }
 
-/// Fragmentos na fila (≈ 40 ms de circuito) acima dos quais [`pump_all`] adia o quadro: a imagem
-/// seguinte só é capturada e codificada quando o circuito já escoou o quadro anterior.
+/// Fragmentos na fila (≈ 40 ms de circuito no slot de 2 ms) acima dos quais [`pump_all`] adia o quadro:
+/// a imagem seguinte só é capturada e codificada quando o circuito já escoou o quadro anterior. É o piso de
+/// [`gate_backlog`].
 const GATE_BACKLOG: usize = 20;
+/// Quanto de circuito a fila pode ter antes de o quadro seguinte esperar.
+const GATE_TIME: std::time::Duration = std::time::Duration::from_millis(40);
+/// Teto do portão em fragmentos: o resto da fila precisa caber um quadro-chave de recuperação ([`FRAME_LIMIT`]).
+const GATE_MAX: usize = 80;
+
+/// Fragmentos na fila acima dos quais o quadro espera, para um circuito com um pacote a cada `slot`. O portão
+/// mede tempo, não fragmentos: com o slot de 0,5 ms os mesmos 20 fragmentos escoam em 10 ms, e segurar o
+/// quadro por eles deixava o circuito vazio à espera do codificador.
+#[must_use]
+pub fn gate_backlog(slot: std::time::Duration) -> usize {
+    let by_time = (GATE_TIME.as_micros() / slot.as_micros().max(1)) as usize;
+    by_time.clamp(GATE_BACKLOG, GATE_MAX)
+}
+
 /// Maior quadro que o circuito aceita com a fila no limite do adiamento: acima disso `push` o recusaria
 /// (a fila passaria de [`MAX_QUEUE`]) e o quadro-chave de recuperação seria igualmente recusado.
 pub const FRAME_LIMIT: usize = {
-    let by_queue = (MAX_QUEUE - GATE_BACKLOG) * FRAGMENT_PAYLOAD;
+    let by_queue = (MAX_QUEUE - GATE_MAX) * FRAGMENT_PAYLOAD;
     if by_queue < MAX_FRAME { by_queue } else { MAX_FRAME }
 };
 
@@ -930,7 +945,7 @@ pub fn pump_all(source: &mut dyn ScreenSource, encoder: &mut H264Encoder, shares
     }
     // O circuito ainda escoa o quadro anterior: capturar agora só criaria um quadro velho na fila.
     // O pedido de quadro-chave fica guardado para o próximo quadro que sair.
-    if shares.iter().any(|s| s.queued() > GATE_BACKLOG) {
+    if shares.iter().any(|s| s.queued() > gate_backlog(s.slot())) {
         encoder.need_key |= wanted;
         encoder.held += 1;
         return Ok(0);
@@ -1815,6 +1830,19 @@ mod tests {
 
     /// Medição com quadros pré-gerados (`CLAM_FRAMES`: pares `nome__prev.rgba`/`nome__cur.rgba`, 1280x720):
     /// o que o detector acha em rolagens com antialiasing, cursor, ruído, vídeo e reescala.
+    #[test]
+    fn the_gate_follows_the_slot_in_time() {
+        use std::time::Duration;
+        // 2 ms é o padrão e mantém os 20 fragmentos de sempre.
+        assert_eq!(gate_backlog(Duration::from_millis(2)), GATE_BACKLOG);
+        assert_eq!(gate_backlog(Duration::from_millis(1)), 40);
+        assert_eq!(gate_backlog(Duration::from_micros(500)), GATE_MAX);
+        // Slot lento não baixa do piso; slot absurdamente curto não passa do teto.
+        assert_eq!(gate_backlog(Duration::from_millis(50)), GATE_BACKLOG);
+        assert_eq!(gate_backlog(Duration::ZERO), GATE_MAX);
+        const { assert!(FRAME_LIMIT + GATE_MAX * FRAGMENT_PAYLOAD <= MAX_QUEUE * FRAGMENT_PAYLOAD) };
+    }
+
     #[test]
     #[ignore = "medição, precisa de CLAM_FRAMES"]
     fn real_scroll_detection() {

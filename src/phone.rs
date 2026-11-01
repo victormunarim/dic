@@ -517,9 +517,17 @@ pub struct ScreenShare {
     stream: Arc<Mutex<ScreenStream>>,
     stopping: Arc<AtomicBool>,
     task: JoinHandle<()>,
+    /// Intervalo entre pacotes deste circuito: o portão de [`crate::video::pump_all`] mede a fila em tempo.
+    slot: Duration,
 }
 
 impl ScreenShare {
+    /// Intervalo entre os pacotes de vídeo deste circuito.
+    #[must_use]
+    pub fn slot(&self) -> Duration {
+        self.slot
+    }
+
     /// Entrega um quadro codificado. `Ok(false)`: descartado porque a fila encheu e falta um quadro-chave.
     ///
     /// # Errors
@@ -677,7 +685,7 @@ pub async fn share_screen_slot(mut client: CircuitClient, keys: &CallKeys, wait:
             client.stop();
         })
     };
-    Ok(ScreenShare { stream, stopping, task })
+    Ok(ScreenShare { stream, stopping, task, slot })
 }
 
 /// Convite de um contato conhecido. Responda com [`accept`](Self::accept) ou [`reject`](Self::reject).
