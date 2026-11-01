@@ -37,7 +37,7 @@ Valem para os módulos `pairing`, `presence`, `service`, `circle`, `intro` e `re
 | [docs/GUI.md](docs/GUI.md) | A janela: abas, contatos, áudio, tela, opções |
 | [docs/ENCONTRO.md](docs/ENCONTRO.md) | Reencontrar contatos sem servidor: aviso de endereço novo e ponto de encontro na DHT, âncoras e contato de duas vias |
 | [docs/SERVIDORES.md](docs/SERVIDORES.md) | Servidores e salas de voz com presença, tela na sala e reencontro por servidor, tudo P2P |
-| [docs/DOIS-RELAYS.md](docs/DOIS-RELAYS.md) | Opção "2 relays": etapas 1 a 4 prontas e a 5 em andamento (voz, tela, bate-papo, arquivos, apresentação, caixa de correio e servidores sem IP no `Node`; primeiro salto num relay de outro contato; serviços `intro:9` e `rv:9` no relay; introdução e encontro e presença v2 na biblioteca, ainda fora do `Node`; desligada, conexão direta); o resto (nenhum lado sabe o IP do outro) é desenho |
+| [docs/DOIS-RELAYS.md](docs/DOIS-RELAYS.md) | Opção "2 relays": etapas 1 a 5 prontas (a 5 sem a medição em rede real) (voz, tela, bate-papo, arquivos, apresentação, caixa de correio e servidores sem IP no `Node`; primeiro salto num relay de outro contato; serviços `intro:9` e `rv:9` no relay; introdução e encontro e presença v2 na biblioteca, ainda fora do `Node`; desligada, conexão direta); o resto (nenhum lado sabe o IP do outro) é desenho |
 | [docs/SEGURANCA.md](docs/SEGURANCA.md) | Garantias, limites, chaveiro |
 | [docs/LINUX.md](docs/LINUX.md) / [docs/WINDOWS.md](docs/WINDOWS.md) | Instalação por sistema |
 
