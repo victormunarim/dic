@@ -79,7 +79,7 @@ Malha: cada pessoa envia e recebe N-1 fluxos, cerca de 100 kbps por par e direç
 
 - Quem transmite clica em *Compartilhar tela* na própria linha da sala. A presença passa a dizer que ele transmite, e os outros veem *Assistir* ao lado do nome.
 - Quem clica em *Assistir* manda `Watch` e repete a cada 5 s até a imagem chegar. Quem transmite abre um **circuito de tela por espectador** (chaves novas da chamada com aquela pessoa) e manda o **mesmo quadro codificado** a todos; um codificador só, a taxa segue o pior espectador. Limite de **3 espectadores**; os outros ficam sem imagem. Um pedido repetido com o circuito aberto há mais de 8 s o reabre.
-- As escolhas da aba *Vídeo* (privacidade, fluidez ou nitidez, placa de vídeo) valem aqui também.
+- As escolhas da aba *Vídeo* (privacidade, alta qualidade, placa de vídeo) valem aqui também.
 - Como no contato, **não há miniatura**: quem transmite mostra o monitor verde na linha dele, e clicar abre a tela cheia (Esc ou o X fecham). O clique manda `Watch`; a imagem abre quando o primeiro quadro chega, e fechar a tela cheia **para de assistir** (manda o `Watch` desligado), então nada é recebido sem estar à vista. O bate-papo fica sempre no centro. O estado da sua própria transmissão (sendo vista, disponível, falha e diagnóstico) fica na aba *Atividade*, no cartão *Transmissão da tela*; não há cartão de telas na sala.
 
 ## Bate-papo da sala

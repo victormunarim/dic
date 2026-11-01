@@ -39,27 +39,6 @@ pub fn fps_for(bitrate: u32) -> f32 {
     if bitrate >= HIGH_FPS_BITRATE { HIGH_FPS } else { FPS }
 }
 
-/// O que a transmissão prioriza quando a banda não dá para os dois: mais quadros por segundo ou mais
-/// nitidez em cada quadro. A taxa de bits é a mesma; muda como ela é repartida.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Priority {
-    /// Movimento fluido (jogo, vídeo): o dobro de quadros por segundo, cada um com menos bits.
-    #[default]
-    Smoothness,
-    /// Imagem nítida (texto, código, slides): metade dos quadros por segundo, cada um com o dobro de bits.
-    Sharpness,
-}
-
-impl Priority {
-    /// Quadros por segundo desta prioridade numa taxa de vídeo de `bitrate` bits/s.
-    pub fn fps(self, bitrate: u32) -> f32 {
-        match self {
-            Priority::Smoothness => fps_for(bitrate),
-            Priority::Sharpness => fps_for(bitrate) / 2.0,
-        }
-    }
-}
-
 /// Largura máxima enviada: telas maiores são reduzidas por média de blocos, senão o quadro-chave
 /// passa de [`MAX_FRAME`] e nada chega a quem assiste.
 pub const MAX_WIDTH: usize = 1920;
@@ -397,14 +376,10 @@ impl H264Encoder {
         u32::try_from(ScreenStream::capacity_bps(slot) * 9 / 10).unwrap_or(u32::MAX)
     }
 
+    /// Codificador para `bitrate` bits/s, com os quadros por segundo de [`fps_for`].
     pub fn new(bitrate: u32) -> Result<Self, VideoError> {
-        Self::with_priority(bitrate, Priority::default())
-    }
-
-    /// Como [`Self::new`], com a taxa de quadros que `priority` pede para essa taxa de vídeo.
-    pub fn with_priority(bitrate: u32, priority: Priority) -> Result<Self, VideoError> {
         let qp = QP_START;
-        let fps = priority.fps(bitrate);
+        let fps = fps_for(bitrate);
         Ok(Self {
             inner: Self::open(qp, fps)?,
             size: None,
@@ -1428,37 +1403,6 @@ mod tests {
     }
 
     #[test]
-    fn sharpness_halves_the_frame_rate_and_gives_each_frame_a_finer_qp() {
-        let bitrate = H264Encoder::default_bitrate();
-        assert_eq!(Priority::Smoothness.fps(bitrate), FPS);
-        assert_eq!(Priority::Sharpness.fps(bitrate), FPS / 2.0);
-        let open = H264Encoder::bitrate_for(std::time::Duration::from_micros(500));
-        assert_eq!((Priority::Smoothness.fps(open), Priority::Sharpness.fps(open)), (HIGH_FPS, HIGH_FPS / 2.0));
-        // Um trecho de texto que muda a cada instante sobre uma página parada: cada quadro custa o mesmo,
-        // com 15 ou 8 quadros por segundo, então menos quadros deixam mais bits para cada um.
-        let (w, h, pw, ph) = (960usize, 540usize, 320usize, 160usize);
-        let page = text_page(w, h, 5);
-        let patches: Vec<Vec<u8>> = (0..40).map(|t| text_page(pw, ph, 100 + t)).collect();
-        let mean_qp = |priority| {
-            let mut enc = H264Encoder::with_priority(bitrate, priority).unwrap();
-            let mut qps = Vec::new();
-            for (t, patch) in patches.iter().enumerate() {
-                let mut rgba = page.clone();
-                for y in 0..ph {
-                    rgba[(y * w) * 4..][..pw * 4].copy_from_slice(&patch[y * pw * 4..][..pw * 4]);
-                }
-                enc.encode(&RawFrame::new(w, h, rgba).unwrap(), false).unwrap();
-                if t >= 20 {
-                    qps.push(enc.qp() as f32);
-                }
-            }
-            qps.iter().sum::<f32>() / qps.len() as f32
-        };
-        let (smooth, sharp) = (mean_qp(Priority::Smoothness), mean_qp(Priority::Sharpness));
-        assert!(sharp + 4.0 < smooth, "QP nítido {sharp}, fluido {smooth}");
-    }
-
-    #[test]
     fn the_hardware_path_hands_out_decodable_frames_and_can_be_switched_off() {
         let mut enc = H264Encoder::new(H264Encoder::default_bitrate()).unwrap();
         assert!(!enc.set_hardware(Some("nao-existe")) && enc.hardware().is_none());
@@ -1635,13 +1579,13 @@ mod tests {
     #[test]
     #[ignore]
     fn after_scroll_timeline() {
-        for (label, slot, prio) in [("privado 2 ms", SCREEN_SLOT, Priority::Smoothness), ("aberto 0,5 ms", FAST_SLOT, Priority::Smoothness), ("aberto 0,5 ms nitidez", FAST_SLOT, Priority::Sharpness)] {
+        for (label, slot) in [("privado 2 ms", SCREEN_SLOT), ("aberto 0,5 ms", FAST_SLOT)] {
             let bitrate = H264Encoder::bitrate_for(slot);
-            let mut enc = H264Encoder::with_priority(bitrate, prio).unwrap();
+            let mut enc = H264Encoder::new(bitrate).unwrap();
             enc.set_scroll(true);
             let mut dec = ScreenDecoder::new().unwrap();
             let (w, h) = (1280, 720);
-            let fps = prio.fps(bitrate);
+            let fps = fps_for(bitrate);
             let dt = 1.0 / fps;
             let cap = ScreenStream::capacity_bps(slot) as f32 / 8.0;
             println!("\n== {label}: {bitrate} bps, {fps} fps, circuito {:.0} kB/s", cap / 1000.0);
@@ -1776,7 +1720,7 @@ mod tests {
             enc.set_scroll(true);
             let mut dec = ScreenDecoder::new().unwrap();
             let (w, h) = (1920, 1080);
-            let fps = Priority::Smoothness.fps(bitrate) as usize;
+            let fps = fps_for(bitrate) as usize;
             let cap = ScreenStream::capacity_bps(slot) as f32 / 8.0;
             println!("\n== {label}: {bitrate} bps, {fps} fps, circuito {:.0} kB/s", cap / 1000.0);
             let mut queue = 0.0f32;

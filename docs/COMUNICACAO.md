@@ -84,7 +84,7 @@ A tela anda num **circuito só dela**, aberto por quem transmite até o telefone
 | Quadros por segundo (fluidez) | 15 |
 | O que um observador vê | taxa constante, a tela parada ou mexendo; desligada a opção, também o seu IP falando com o relay do contato (o conteúdo segue cifrado) |
 
-- **Fluidez ou nitidez** (`video::Priority`): a taxa de bits é uma só; fluidez a reparte em mais quadros por segundo, nitidez em metade dos quadros com o dobro de bits.
+- **Quadros por segundo:** a taxa de bits é uma só e `video::fps_for` a reparte em quadros: 15 por segundo até 1 Mbps, 30 acima. Não há escolha entre fluidez e nitidez (a opção de nitidez, com metade dos quadros, foi retirada: derrubava o fps sem que a pessoa percebesse).
 - **Perda:** quem assiste pede de volta o que faltou (`NACK`, no pacote de preenchimento) e o emissor reenvia os últimos 660 fragmentos que guardou, à frente da fila, em pacote novo. Sem FEC. Reparo que não vem em 800 ms abandona o quadro e pede um quadro-chave.
 - **Taxa adaptativa:** a cada 0,5 s quem assiste devolve a fração perdida; o emissor aplica AIMD (`video::RateControl`).
 - **Codec:** H.264 por openh264 com controle de QP próprio, ou, opcional e só no Linux, pela placa de vídeo (`src/hwenc.rs`, via `gst-launch-1.0`).

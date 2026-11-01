@@ -125,9 +125,6 @@ pub(crate) struct Form {
     pub(crate) blocked: String,
     /// Tema escolhido pela pessoa: `None` segue o do sistema (escuro se o sistema não disser).
     pub(crate) light: Option<bool>,
-    /// Nitidez em vez de fluidez na transmissão da tela: metade dos quadros por segundo, cada um mais fino
-    /// (veja `video::Priority`). Desligada (fluidez) de início.
-    pub(crate) screen_sharp: bool,
     /// Codifica a tela na GPU quando o computador tem (veja `clam::hwenc`); senão, openh264. Desligado de início.
     pub(crate) screen_hardware: bool,
     /// Leva o som do computador (sem o do programa) junto da tela. Ligado de início; a chave guarda o "não"
@@ -566,7 +563,6 @@ impl Form {
                 "0" => Some(false),
                 _ => None,
             },
-            screen_sharp: get("screen_sharp") == "1",
             screen_hardware: get("screen_hardware") == "1",
             screen_audio: get("no_screen_audio") != "1",
             screen_hear: get("no_screen_hear") != "1",
@@ -598,7 +594,7 @@ impl Form {
         let secret = self.secret_to_write(vault_set);
         let secret = secret.as_str();
         let text = format!(
-            "audio={}\nsecret={}\ncontacts={}\npeer={}\npublic_addr={}\nno_dht={}\nname={}\nintros={}\nno_anchor={}\ntwo_relays={}\nspeed_first={}\nhq_screen={}\nscreen_sharp={}\nscreen_hardware={}\nno_screen_audio={}\nno_screen_hear={}\nanchors={}\ninput_dev={}\noutput_dev={}\nno_opus={}\nno_auto_online={}\nblocked={}\nlight={}\nmute_key={}\ndeafen_key={}\nauto_files={}\n{}",
+            "audio={}\nsecret={}\ncontacts={}\npeer={}\npublic_addr={}\nno_dht={}\nname={}\nintros={}\nno_anchor={}\ntwo_relays={}\nspeed_first={}\nhq_screen={}\nscreen_hardware={}\nno_screen_audio={}\nno_screen_hear={}\nanchors={}\ninput_dev={}\noutput_dev={}\nno_opus={}\nno_auto_online={}\nblocked={}\nlight={}\nmute_key={}\ndeafen_key={}\nauto_files={}\n{}",
             u8::from(self.use_audio),
             secret,
             self.contacts.trim().replace('\n', ";"),
@@ -611,7 +607,6 @@ impl Form {
             u8::from(self.two_relays),
             u8::from(self.speed_first),
             u8::from(self.hq_screen),
-            u8::from(self.screen_sharp),
             u8::from(self.screen_hardware),
             u8::from(!self.screen_audio),
             u8::from(!self.screen_hear),

@@ -433,7 +433,6 @@ impl eframe::App for App {
         let in_room = self.shared.room.lock_unpoisoned().at.is_some();
         // As preferências de tela são lidas ao começar a transmissão, esteja a pessoa em que aba estiver.
         let st = &self.shared.screen;
-        st.sharp.store(self.form.screen_sharp, Ordering::Relaxed);
         st.hardware.store(self.form.screen_hardware, Ordering::Relaxed);
         st.audio.store(self.form.screen_audio, Ordering::Relaxed);
         // O som da tela só toca com ela aberta (tela cheia), na chamada e na sala: miniatura e quadro solto são mudos,

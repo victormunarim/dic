@@ -16,20 +16,6 @@ impl App {
                 note(ui, "Há uma transmissão em andamento: pare de compartilhar para mudar.");
             }
             ui.add_enabled_ui(!busy, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("Priorizar:");
-                    let mut changed = ui
-                        .radio_pick(&mut self.form.screen_sharp, false, "Fluidez")
-                        .on_hover_text("Mais quadros por segundo (o dobro): bom para jogo e vídeo. A imagem fica um pouco mais grosseira quando se mexe.")
-                        .changed();
-                    changed |= ui
-                        .radio_pick(&mut self.form.screen_sharp, true, "Nitidez")
-                        .on_hover_text("Metade dos quadros por segundo, cada um com o dobro de bits: bom para texto, código e slides. O movimento fica menos suave.")
-                        .changed();
-                    if changed {
-                        self.form.save();
-                    }
-                });
                 if ui
                     .check(&mut self.form.hq_screen, "Tela em alta qualidade")
                     .on_hover_text("Dobra a banda de vídeo da tela (de ~0,6 para ~1,2 Mbps), com o mesmo tráfego constante: quem observa a rede continua sem ver quando a imagem se mexe. Em troca, a transmissão ocupa 256 kB/s (~2 Mbps) de upload o tempo todo, mesmo com a tela parada; com menos upload que isso, prejudica a voz. Vale ao reiniciar a conexão. Com “Priorizar velocidade” ligada (sem “2 relays”) ela já é superada por um slot ainda menor.")

@@ -7,7 +7,7 @@ use super::*;
 use clam::{
     node::Dialer,
     phone::{ScreenEvent, ScreenShare},
-    video::{H264Encoder, Priority, RawFrame, ScreenDecoder, ScreenSource, pump, pump_all},
+    video::{H264Encoder, RawFrame, ScreenDecoder, ScreenSource, pump, pump_all},
 };
 
 /// Som de uma tela recebida: o decodificador e o que já foi decodificado e ainda não tocou.
@@ -33,9 +33,6 @@ pub(crate) struct ScreenState {
     pub(crate) want_share: AtomicBool,
     /// Há uma tarefa de transmissão viva (ligando ou enviando).
     pub(crate) share_task: AtomicBool,
-    /// A pessoa prefere nitidez a fluidez (metade dos quadros por segundo); a janela copia a escolha da
-    /// configuração a cada quadro, e ela vale a partir da próxima transmissão.
-    pub(crate) sharp: AtomicBool,
     /// A pessoa pediu codificação por hardware; a janela copia a escolha da configuração a cada quadro.
     pub(crate) hardware: AtomicBool,
     /// A pessoa quer levar o som do computador junto; a janela copia a escolha da configuração a cada quadro.
@@ -259,10 +256,9 @@ async fn start_capture(shared: &Arc<Shared>, out: &Sink, slot: Duration) -> Resu
         // O som toma slots do mesmo circuito: o vídeo cede essa parte, para a fila não encher.
         bitrate = (f64::from(bitrate) * (1.0 - audio_share(slot))) as u32;
     }
-    let priority = if st.sharp.load(Ordering::Relaxed) { Priority::Sharpness } else { Priority::Smoothness };
     out.line("tela: abrindo a captura da tela...");
     // No Wayland o portal espera a pessoa escolher a tela numa janela do sistema; sem este aviso a espera é muda.
-    let opening = open_source(priority.fps(bitrate));
+    let opening = open_source(clam::video::fps_for(bitrate));
     tokio::pin!(opening);
     let opened = match tokio::time::timeout(Duration::from_secs(8), &mut opening).await {
         Ok(r) => r,
@@ -272,7 +268,7 @@ async fn start_capture(shared: &Arc<Shared>, out: &Sink, slot: Duration) -> Resu
         }
     };
     let started = match opened {
-        Ok(src) => H264Encoder::with_priority(bitrate, priority).map(|e| (src, e)).map_err(|e| e.to_string()),
+        Ok(src) => H264Encoder::new(bitrate).map(|e| (src, e)).map_err(|e| e.to_string()),
         Err(e) => Err(e),
     };
     let (src, mut enc) = started.map_err(|e| format!("não deu para capturar a tela ({e})"))?;
@@ -325,7 +321,6 @@ pub(crate) async fn share_task(dialer: Dialer, peer: [u8; 32], keys: clam::media
     st.sharing.store(true, Ordering::Relaxed);
     out.line(if dialer.two_relays() { "tela: transmitindo (por um relay de outro contato)" } else { "tela: transmitindo (direto ao contato, que vê o seu IP)" });
     let slot = dialer.screen_slot();
-    let sharp = shared.screen.sharp.load(Ordering::Relaxed);
     let flag = shared.clone();
     let mut audio = AudioTx::open(&shared, &out);
     let mut audio_gave_up = audio.is_none() && shared.screen.audio.load(Ordering::Relaxed);
@@ -360,8 +355,8 @@ pub(crate) async fn share_task(dialer: Dialer, peer: [u8; 32], keys: clam::media
                 (mark, mark_packets, mark_bytes) = (std::time::Instant::now(), t.packets_sent, t.payload_bytes);
             }
             *flag.screen.tx_info.lock_unpoisoned() = format!(
-                "{}, enviados {pushed}, pulados {skipped} ({} pelo codificador, {} adiados com o circuito cheio), descartados na fila {}, saindo {rate:.0} pacotes/s, taxa {} kbps, QP {}, imagem 1/{}, codificar leva {:.0} ms, captura leva {:.0} ms, {fps:.0} quadros/s (meta {:.0}, prioridade {}), a captura entrega {source_fps:.0} imagens/s, sem imagem nova {}, imagem igual {}, codificador {}",
-                pipe_line(slot, rate, kbps_useful, share.queued(), &t), enc.skipped, enc.held, t.frames_dropped, enc.bitrate() / 1000, enc.qp(), enc.scale(), enc.encode_ms, enc.grab_ms, enc.fps(), if sharp { "nitidez, metade dos quadros" } else { "fluidez" }, enc.no_frame, enc.same,
+                "{}, enviados {pushed}, pulados {skipped} ({} pelo codificador, {} adiados com o circuito cheio), descartados na fila {}, saindo {rate:.0} pacotes/s, taxa {} kbps, QP {}, imagem 1/{}, codificar leva {:.0} ms, captura leva {:.0} ms, {fps:.0} quadros/s (meta {:.0}), a captura entrega {source_fps:.0} imagens/s, sem imagem nova {}, imagem igual {}, codificador {}",
+                pipe_line(slot, rate, kbps_useful, share.queued(), &t), enc.skipped, enc.held, t.frames_dropped, enc.bitrate() / 1000, enc.qp(), enc.scale(), enc.encode_ms, enc.grab_ms, enc.fps(), enc.no_frame, enc.same,
                 match (enc.hardware(), &enc.hw_note) {
                     (Some(name), _) => format!("hardware ({name})"),
                     (None, Some(why)) => format!("openh264 (o hardware parou: {why})"),

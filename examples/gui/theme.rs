@@ -450,8 +450,6 @@ fn sunken_controls<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
 pub(crate) trait CheckExt {
     /// Caixa de marcar com a caixinha visível.
     fn check(&mut self, checked: &mut bool, text: impl Into<egui::WidgetText>) -> egui::Response;
-    /// Opção de rádio com o círculo visível, marcada quando `current == alt`.
-    fn radio_pick<V: PartialEq>(&mut self, current: &mut V, alt: V, text: impl Into<egui::WidgetText>) -> egui::Response;
     /// Slider com o trilho afundado e preenchido com o acento até o botão: o trilho mostra o intervalo e a posição.
     fn slider(&mut self, slider: egui::Slider<'_>) -> egui::Response;
 }
@@ -466,10 +464,6 @@ impl CheckExt for egui::Ui {
             }
             ui.checkbox(checked, text)
         })
-    }
-
-    fn radio_pick<V: PartialEq>(&mut self, current: &mut V, alt: V, text: impl Into<egui::WidgetText>) -> egui::Response {
-        sunken_controls(self, |ui| ui.radio_value(current, alt, text))
     }
 
     fn slider(&mut self, slider: egui::Slider<'_>) -> egui::Response {
