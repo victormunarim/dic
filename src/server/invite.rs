@@ -29,11 +29,12 @@ const HEAD: usize = 16 + 32 + 32;
 /// Dicas de relay de outros membros que o convite leva, além de quem convida.
 pub const MAX_HINTS: usize = 2;
 
-/// Como alcançar um membro: a chave dele e o relay dele.
+/// Como alcançar um membro: a chave dele e o relay dele. Sem relay (`None`) é quem usa a opção "2 relays": o convite
+/// não entrega endereço, e ele só se alcança por introdução e encontro (veja `docs/DOIS-RELAYS.md`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Hint {
     pub key: [u8; 32],
-    pub reach: Reach,
+    pub reach: Option<Reach>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -62,7 +63,13 @@ fn cipher(me: &StaticSecret, peer: &[u8; 32], server: &ServerId) -> Option<ChaCh
     Some(ChaCha20Poly1305::new(Key::from_slice(&k)))
 }
 
-fn put_reach(v: &mut Vec<u8>, r: &Reach) {
+fn put_reach(v: &mut Vec<u8>, r: Option<&Reach>) {
+    let Some(r) = r else {
+        // Sem relay: tamanho 0 e os dois campos de chave zerados.
+        v.push(0);
+        v.extend_from_slice(&[0; 64]);
+        return;
+    };
     v.push(r.addr.len() as u8);
     v.extend_from_slice(r.addr.as_bytes());
     v.extend_from_slice(&r.onion);
@@ -79,13 +86,17 @@ fn take_u8(b: &mut &[u8]) -> Option<u8> {
     take(b, 1)?.first().copied()
 }
 
-fn take_reach(b: &mut &[u8]) -> Option<Reach> {
+/// `Some(None)`: sem relay (tamanho 0 e chaves zeradas). `None`: inválido.
+fn take_reach(b: &mut &[u8]) -> Option<Option<Reach>> {
     let n = take_u8(b)? as usize;
-    if n == 0 || n > MAX_ADDR {
+    if n > MAX_ADDR {
         return None;
     }
+    if n == 0 {
+        return take(b, 64)?.iter().all(|x| *x == 0).then_some(None);
+    }
     let addr = String::from_utf8(take(b, n)?.to_vec()).ok().filter(|a| valid_addr(a))?;
-    Some(Reach { addr, onion: take(b, 32)?.try_into().ok()?, link: take(b, 32)?.try_into().ok()? })
+    Some(Some(Reach { addr, onion: take(b, 32)?.try_into().ok()?, link: take(b, 32)?.try_into().ok()? }))
 }
 
 pub(crate) fn hex(b: &[u8]) -> String {
@@ -111,11 +122,11 @@ impl Invite {
         plain.extend_from_slice(&self.owner_vk);
         plain.push(self.name.len() as u8);
         plain.extend_from_slice(self.name.as_bytes());
-        put_reach(&mut plain, &self.inviter.reach);
+        put_reach(&mut plain, self.inviter.reach.as_ref());
         plain.push(self.hints.len() as u8);
         for h in &self.hints {
             plain.extend_from_slice(&h.key);
-            put_reach(&mut plain, &h.reach);
+            put_reach(&mut plain, h.reach.as_ref());
         }
         let mut raw = Vec::new();
         raw.extend_from_slice(&self.server);
@@ -194,8 +205,8 @@ mod tests {
             secret: [3; 32],
             owner_vk: [4; 32],
             invitee: *PublicKey::from(invitee).as_bytes(),
-            inviter: Hint { key: *PublicKey::from(inviter).as_bytes(), reach: reach(5) },
-            hints: vec![Hint { key: [6; 32], reach: reach(6) }, Hint { key: [7; 32], reach: reach(7) }],
+            inviter: Hint { key: *PublicKey::from(inviter).as_bytes(), reach: Some(reach(5)) },
+            hints: vec![Hint { key: [6; 32], reach: Some(reach(6)) }, Hint { key: [7; 32], reach: Some(reach(7)) }],
         }
     }
 

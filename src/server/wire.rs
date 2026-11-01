@@ -66,7 +66,7 @@ pub enum Msg {
     /// Endereço do próprio remetente.
     MyAddr { seq: u64, reach: Reach },
     /// Quem recebeu um convite pede para entrar, com a chave de verificação das suas assinaturas e o seu relay.
-    Join { vk: [u8; 32], reach: Reach },
+    Join { vk: [u8; 32], reach: Option<Reach> },
     /// O convite foi aceito; as operações vêm em seguida.
     Joined,
     /// O segredo novo do servidor, depois de um `Rekey`.
@@ -101,6 +101,22 @@ fn put_reach(v: &mut Vec<u8>, reach: &Reach) {
     v.extend_from_slice(reach.addr.as_bytes());
     v.extend_from_slice(&reach.onion);
     v.extend_from_slice(&reach.link);
+}
+
+/// Como [`put_reach`], mas `None` vai com tamanho 0 e as chaves zeradas ("2 relays": sem endereço).
+fn put_reach_opt(v: &mut Vec<u8>, reach: Option<&Reach>) {
+    match reach {
+        Some(r) => put_reach(v, r),
+        None => v.extend_from_slice(&[0; 65]),
+    }
+}
+
+/// Como [`take_reach`]; `Some(None)` é o relay ausente (tamanho 0, chaves zeradas).
+fn take_reach_opt(b: &[u8]) -> Option<Option<Reach>> {
+    if b.first() == Some(&0) {
+        return (b.len() == 65 && b.iter().all(|x| *x == 0)).then_some(None);
+    }
+    take_reach(b).map(Some)
 }
 
 fn take_reach(b: &[u8]) -> Option<Reach> {
@@ -147,7 +163,7 @@ pub fn encode(msg: &Msg) -> Vec<u8> {
         Msg::Join { vk, reach } => {
             v.push(6);
             v.extend_from_slice(vk);
-            put_reach(&mut v, reach);
+            put_reach_opt(&mut v, reach.as_ref());
         }
         Msg::Joined => v.push(7),
         Msg::Gift { epoch, secret } => {
@@ -223,7 +239,7 @@ pub fn decode(b: &[u8]) -> Option<Msg> {
         5 => Msg::MyAddr { seq: u64::from_be_bytes(b.get(..8)?.try_into().ok()?), reach: take_reach(b.get(8..)?)? },
         6 if b.len() > 32 => {
             let (vk, reach) = b.split_at_checked(32)?;
-            Msg::Join { vk: vk.try_into().ok()?, reach: take_reach(reach)? }
+            Msg::Join { vk: vk.try_into().ok()?, reach: take_reach_opt(reach)? }
         }
         7 if b.is_empty() => Msg::Joined,
         8 if b.len() == 34 => {
@@ -327,7 +343,8 @@ mod tests {
             Msg::Vector { page: 1, pages: 3, entries: (0..VECTOR_PER_FRAME as u8).map(|i| ([i; 8], 1000 + i as u16)).collect() },
             Msg::Op(op),
             Msg::MyAddr { seq: u64::MAX, reach: Reach { addr: format!("{}:4001", "a".repeat(MAX_ADDR - 5)), onion: [8; 32], link: [9; 32] } },
-            Msg::Join { vk: [4; 32], reach: Reach { addr: format!("{}:4001", "a".repeat(MAX_ADDR - 5)), onion: [8; 32], link: [9; 32] } },
+            Msg::Join { vk: [4; 32], reach: Some(Reach { addr: format!("{}:4001", "a".repeat(MAX_ADDR - 5)), onion: [8; 32], link: [9; 32] }) },
+            Msg::Join { vk: [4; 32], reach: None },
             Msg::Joined,
             Msg::Gift { epoch: 2, secret: [7; 32] },
             Msg::Ack([3; 8]),

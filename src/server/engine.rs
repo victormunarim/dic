@@ -229,6 +229,8 @@ pub struct Servers {
     visible: bool,
     name: String,
     reach: Option<(u64, Reach)>,
+    /// Opção "2 relays": convite e `Join` saem sem endereço (`reach: None`) e nada exige o relay deste nó.
+    hidden: bool,
     servers: BTreeMap<ServerId, Server>,
     /// Convites que estou entregando, por servidor e convidado.
     deliveries: BTreeMap<(ServerId, MemberId), Delivery>,
@@ -253,11 +255,25 @@ impl Servers {
     pub fn new(secret: StaticSecret) -> Self {
         let key = *PublicKey::from(&secret).as_bytes();
         let sk = signing_key(&secret);
-        Servers { me: Me { id: member_id(&key), key, secret, sk }, visible: true, name: String::new(), reach: None, servers: BTreeMap::new(), deliveries: BTreeMap::new(), assembling: Vec::new(), pending: BTreeMap::new(), declined: Default::default() }
+        Servers { me: Me { id: member_id(&key), key, secret, sk }, visible: true, name: String::new(), reach: None, hidden: false, servers: BTreeMap::new(), deliveries: BTreeMap::new(), assembling: Vec::new(), pending: BTreeMap::new(), declined: Default::default() }
     }
 
     pub fn my_key(&self) -> [u8; 32] {
         self.me.key
+    }
+
+    /// Meu endereço para convite e `Join`: `None` no modo escondido; sem relay e sem o modo, falta endereço.
+    fn own_reach(&self) -> Result<Option<Reach>, ServerError> {
+        if self.hidden {
+            return Ok(None);
+        }
+        self.reach.as_ref().map(|r| Some(r.1.clone())).ok_or(ServerError::NoAddress)
+    }
+
+    /// Liga ou desliga o modo "2 relays": convite e `Join` passam a sair sem endereço e a falta de relay deixa de
+    /// ser erro. Sem o endereço, os membros só se alcançam por introdução e encontro (quem é contato um do outro).
+    pub fn set_hidden(&mut self, hidden: bool) {
+        self.hidden = hidden;
     }
 
     pub fn visible(&self) -> bool {
@@ -397,7 +413,7 @@ impl Servers {
 
     /// Texto de convite para `invitee`, que precisa ser levado a ele por fora (ou pelo contato).
     pub fn invite(&mut self, server: &ServerId, invitee: [u8; 32], now: u64) -> Result<String, ServerError> {
-        let reach = self.reach.as_ref().map(|r| r.1.clone()).ok_or(ServerError::NoAddress)?;
+        let reach = self.own_reach()?;
         let s = self.servers.get_mut(server).ok_or(ServerError::UnknownServer)?;
         if !s.has(&self.me.key) {
             return Err(ServerError::NotMember);
@@ -409,11 +425,13 @@ impl Servers {
         if !s.invited.contains_key(&id) && s.reg.state().members.len() + s.invited.len() >= super::MAX_MEMBERS {
             return Err(ServerError::Full);
         }
+        // Dica é endereço de outro membro: no modo escondido o convite não leva nenhuma.
+        let hidden = self.hidden;
         let hints = s
             .peers
             .values()
-            .filter(|p| s.has(&p.key) && p.online(now) && p.key != invitee)
-            .filter_map(|p| p.reach.as_ref().map(|r| Hint { key: p.key, reach: r.1.clone() }))
+            .filter(|p| !hidden && s.has(&p.key) && p.online(now) && p.key != invitee)
+            .filter_map(|p| p.reach.as_ref().map(|r| Hint { key: p.key, reach: Some(r.1.clone()) }))
             .take(MAX_HINTS)
             .collect();
         let invite = Invite {
@@ -434,7 +452,7 @@ impl Servers {
 
     /// Aceita um convite: o servidor aparece na lista e o `Join` segue para quem convidou.
     pub fn accept(&mut self, text: &str, now: u64) -> Result<(ServerId, Output), ServerError> {
-        let reach = self.reach.as_ref().map(|r| r.1.clone()).ok_or(ServerError::NoAddress)?;
+        let reach = self.own_reach()?;
         let inv = Invite::open(text, &self.me.secret)?;
         if self.servers.contains_key(&inv.server) {
             return Err(ServerError::AlreadyIn);
@@ -457,8 +475,11 @@ impl Servers {
         };
         let mut out = Output::default();
         for h in std::iter::once(&inv.inviter).chain(inv.hints.iter()) {
-            s.peer(h.key).reach = Some((0, h.reach.clone()));
-            out.events.push(Event::Address { key: h.key, reach: h.reach.clone() });
+            s.peer(h.key);
+            if let Some(r) = &h.reach {
+                s.peer(h.key).reach = Some((0, r.clone()));
+                out.events.push(Event::Address { key: h.key, reach: r.clone() });
+            }
         }
         out.send.extend(seal_to(&self.me, &s, &inv.inviter.key, &Msg::Join { vk: self.me.sk.verifying_key().to_bytes(), reach }));
         let id = s.id;
@@ -736,6 +757,11 @@ impl Servers {
             self.reach = None;
             return out;
         };
+        if self.hidden {
+            // O relay não sai daqui: nem para quem já é membro.
+            self.reach = None;
+            return out;
+        }
         self.reach = Some((seq, reach.clone()));
         for s in self.servers.values().filter(|s| s.member) {
             for p in s.peers.values().filter(|p| p.online(now) && s.has(&p.key)) {
@@ -746,7 +772,7 @@ impl Servers {
         let vk = self.me.sk.verifying_key().to_bytes();
         for s in self.servers.values_mut() {
             if let Some(h) = s.joining.clone().filter(|_| s.last_join.is_none()) {
-                out.send.extend(seal_to(&self.me, s, &h.key, &Msg::Join { vk, reach: reach.clone() }));
+                out.send.extend(seal_to(&self.me, s, &h.key, &Msg::Join { vk, reach: Some(reach.clone()) }));
                 s.last_join = Some(now);
             }
         }
@@ -757,7 +783,8 @@ impl Servers {
     pub fn tick(&mut self, now: u64) -> Output {
         let mut out = Output::default();
         let vk = self.me.sk.verifying_key().to_bytes();
-        let reach = self.reach.as_ref().map(|r| r.1.clone());
+        // `Some(None)`: modo escondido, o `Join` sai sem endereço; `None`: falta o relay, espera.
+        let join_reach: Option<Option<Reach>> = if self.hidden { Some(None) } else { self.reach.as_ref().map(|r| Some(r.1.clone())) };
         let visible = self.visible;
         self.deliveries.retain(|(sid, who), d| now < d.first + INVITE_TTL && self.servers.get(sid).is_some_and(|s| s.invited.contains_key(who)));
         let due: Vec<(ServerId, [u8; 32])> = self
@@ -776,7 +803,7 @@ impl Servers {
         }
         for s in self.servers.values_mut() {
             if let Some(h) = s.joining.clone() {
-                if let Some(reach) = reach.clone().filter(|_| s.last_join.is_none_or(|t| now >= t + PROBE)) {
+                if let Some(reach) = join_reach.clone().filter(|_| s.last_join.is_none_or(|t| now >= t + PROBE)) {
                     out.send.extend(seal_to(&self.me, s, &h.key, &Msg::Join { vk, reach }));
                     s.last_join = Some(now);
                 }
@@ -970,8 +997,10 @@ impl Servers {
                 if !mine || !s.has(&me.key) {
                     return out;
                 }
-                s.peer(key).reach = Some((0, reach.clone()));
-                out.events.push(Event::Address { key, reach });
+                if let Some(reach) = reach {
+                    s.peer(key).reach = Some((0, reach.clone()));
+                    out.events.push(Event::Address { key, reach });
+                }
                 if !s.has(&key) {
                     let Some(added) = s.reg.make(&me.sk, me.id, Action::AddMember { key, vk }) else { return out };
                     s.sync_peers(me);
@@ -1133,7 +1162,10 @@ impl Servers {
     pub fn export(&self) -> String {
         let mut t = String::new();
         for s in self.servers.values() {
-            let joining = s.joining.as_ref().map_or("-".to_string(), |h| format!("{}:{}:{}:{}", hex(&h.key), hex(h.reach.addr.as_bytes()), hex(&h.reach.onion), hex(&h.reach.link)));
+            let joining = s.joining.as_ref().map_or("-".to_string(), |h| match &h.reach {
+                Some(r) => format!("{}:{}:{}:{}", hex(&h.key), hex(r.addr.as_bytes()), hex(&r.onion), hex(&r.link)),
+                None => format!("{}:::", hex(&h.key)),
+            });
             t.push_str(&format!("servidor|{}|{}|{}|{}|{}|{}\n", hex(&s.id), s.epoch, hex(&s.secret), hex(s.reg.owner_vk()), hex(s.name.as_bytes()), joining));
             for op in s.reg.ops() {
                 t.push_str(&format!("op|{}\n", hex(&op.encode())));
@@ -1165,8 +1197,11 @@ impl Servers {
         let mut me = Servers::new(secret);
         let mut cur: Option<Server> = None;
         let mut done = Vec::new();
-        let reach_of = |addr: &str, onion: &str, link: &str| -> Option<Reach> {
-            Some(Reach { addr: String::from_utf8(unhex(addr)?).ok()?, onion: unhex(onion)?.try_into().ok()?, link: unhex(link)?.try_into().ok()? })
+        let reach_of = |addr: &str, onion: &str, link: &str| -> Option<Option<Reach>> {
+            if addr.is_empty() && onion.is_empty() && link.is_empty() {
+                return Some(None);
+            }
+            Some(Some(Reach { addr: String::from_utf8(unhex(addr)?).ok()?, onion: unhex(onion)?.try_into().ok()?, link: unhex(link)?.try_into().ok()? }))
         };
         for line in text.lines() {
             let f: Vec<&str> = line.split('|').collect();
@@ -1232,7 +1267,7 @@ impl Servers {
                     }
                 }
                 ["par", key, seq, addr, onion, link] => {
-                    if let (Some(s), Some(k), Ok(seq), Some(r)) = (cur.as_mut(), unhex(key).and_then(|b| <[u8; 32]>::try_from(b).ok()), seq.parse::<u64>(), reach_of(addr, onion, link)) {
+                    if let (Some(s), Some(k), Ok(seq), Some(r)) = (cur.as_mut(), unhex(key).and_then(|b| <[u8; 32]>::try_from(b).ok()), seq.parse::<u64>(), reach_of(addr, onion, link).flatten()) {
                         s.peer(k).reach = Some((seq, r));
                     }
                 }

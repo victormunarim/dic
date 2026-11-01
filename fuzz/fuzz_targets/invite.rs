@@ -56,7 +56,7 @@ fuzz_target!(|input: Input| {
             let _ = Invite::open(&format!("{PREFIX}{}", hex(&raw)), &me);
         }
         Input::Sealed(f) => {
-            let hints: Vec<Hint> = f.hints.into_iter().map(|(key, addr)| Hint { key, reach: Reach { addr, onion: key, link: key } }).collect();
+            let hints: Vec<Hint> = f.hints.into_iter().map(|(key, addr)| Hint { key, reach: Some(Reach { addr, onion: key, link: key }) }).collect();
             let invite = Invite {
                 server: f.server,
                 name: f.name,
@@ -64,17 +64,18 @@ fuzz_target!(|input: Input| {
                 secret: f.secret,
                 owner_vk: f.owner_vk,
                 invitee: me_pk,
-                inviter: Hint { key: inviter_pk, reach: Reach { addr: f.addr, onion: f.onion, link: f.link } },
+                // Um bit da entrada escolhe o convite sem endereço (opção "2 relays").
+                inviter: Hint { key: inviter_pk, reach: if f.onion.first().is_some_and(|b| b & 1 == 1) { None } else { Some(Reach { addr: f.addr, onion: f.onion, link: f.link }) } },
                 hints,
             };
             let Some(text) = invite.seal(&inviter) else { return };
             let opened = Invite::open(&text, &me);
-            let fits = valid_name(&invite.name) && valid_addr(&invite.inviter.reach.addr) && invite.hints.iter().all(|h| valid_addr(&h.reach.addr));
+            let fits = valid_name(&invite.name) && invite.inviter.reach.as_ref().is_none_or(|r| valid_addr(&r.addr)) && invite.hints.iter().all(|h| h.reach.as_ref().is_none_or(|r| valid_addr(&r.addr)));
             if fits {
                 assert_eq!(opened.as_ref(), Ok(&invite), "convite dentro do formato deve abrir igual");
             }
             if let Ok(got) = opened {
-                assert!(valid_name(&got.name) && valid_addr(&got.inviter.reach.addr) && got.hints.iter().all(|h| valid_addr(&h.reach.addr)));
+                assert!(valid_name(&got.name) && got.inviter.reach.as_ref().is_none_or(|r| valid_addr(&r.addr)) && got.hints.iter().all(|h| h.reach.as_ref().is_none_or(|r| valid_addr(&r.addr))));
                 let again = got.seal(&inviter).expect("convite aberto deve selar de novo");
                 assert_eq!(Invite::open(&again, &me).as_ref(), Ok(&got));
             }

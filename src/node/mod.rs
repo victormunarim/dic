@@ -327,7 +327,9 @@ impl Node {
         }
         background.extend(servers);
         phone.accept_introductions(introductions);
-        let server_hub = ServerHub::start(restore(secret.clone(), saved_servers.as_deref()), dialer.clone(), &phone, if two_relays { Arc::default() } else { own.clone() });
+        let mut servers = restore(secret.clone(), saved_servers.as_deref());
+        servers.set_hidden(two_relays);
+        let server_hub = ServerHub::start(servers, dialer.clone(), &phone, if two_relays { Arc::default() } else { own.clone() });
         if publishes && !two_relays {
             background.push(tokio::spawn(server_publisher(dialer.clone(), server_hub.clone(), current)));
         }

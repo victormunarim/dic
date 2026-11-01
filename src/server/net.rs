@@ -314,7 +314,7 @@ async fn deliver(inner: &Inner, peer: [u8; 32], batch: Vec<Outbound>) {
         searched.retain(|_, at| at.elapsed() < SEARCH_EVERY);
         !shared.is_empty() && searched.insert(peer, Instant::now()).is_none()
     };
-    if due && inner.dialer.find_member(&peer, &shared).await {
+    if due && !inner.dialer.two_relays() && inner.dialer.find_member(&peer, &shared).await {
         inner.dialer.deliver_batch(peer, &frames, acked, ACK_WAIT, false).await;
     }
 }

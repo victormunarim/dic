@@ -605,3 +605,24 @@ fn room_chat_reaches_only_the_room_and_is_forgotten_when_it_empties() {
         assert!(lines(&net, i).is_empty(), "nó {i} esqueceu");
     }
 }
+
+/// Opção "2 relays": ninguém tem relay, convite e `Join` saem sem endereço e o servidor se forma do mesmo jeito.
+#[test]
+fn with_two_relays_on_a_server_forms_without_any_address() {
+    let secrets: Vec<StaticSecret> = (0..2).map(|_| StaticSecret::random_from_rng(OsRng)).collect();
+    let mut nodes: Vec<Servers> = secrets.iter().map(|s| Servers::new(s.clone())).collect();
+    for n in &mut nodes {
+        n.set_hidden(true);
+    }
+    let mut net = Net { nodes, secrets, down: HashSet::new(), events: vec![Vec::new(); 2], now: 1000, block_gifts: None };
+    let (server, out) = net.nodes[0].create("Amigos", net.now).unwrap();
+    net.run(0, out);
+    let (key, now) = (net.key(1), net.now);
+    let text = net.nodes[0].invite(&server, key, now).unwrap();
+    let (_, out) = net.nodes[1].accept(&text, net.now).unwrap();
+    net.run(1, out);
+    net.advance(2);
+    assert!(!net.view(1, &server).joining, "convidado entrou sem endereço");
+    assert_eq!(net.view(0, &server).members.len(), 2);
+    assert!(net.events.iter().flatten().all(|e| !matches!(e, Event::Address { .. })), "nenhum endereço circulou");
+}
