@@ -40,6 +40,8 @@ pub const INVITE_CHUNKS: usize = 8;
 pub const MAX_CHAT: usize = BUDGET - 1;
 /// Bytes de texto que o quadro de histórico leva: o corpo tem ainda autor (8), idade (4) e sala (4).
 pub const MAX_BACKLOG: usize = MAX_CHAT - 16;
+/// Etiquetas de linha que um selo leva: o corpo tem ainda autor (8), sala (4), quantidade (1) e a assinatura (64).
+pub const SEAL_TAGS: usize = (MAX_CHAT - 8 - 4 - 1 - 64) / 8;
 /// Autores que cabem num quadro de vetor.
 pub const VECTOR_PER_FRAME: usize = (BUDGET - 4) / 10;
 /// Maior endereço (`host:porta`) que o quadro de endereço leva.
@@ -88,6 +90,12 @@ pub enum Msg {
     /// `age` os segundos desde que a linha foi dita (os relógios não precisam bater) e `room` os 4 primeiros bytes da
     /// sala, para uma linha atrasada não cair em outra sala.
     Backlog { from: MemberId, room: [u8; 4], age: u32, text: String },
+    /// Selo do autor: assinatura dele sobre as etiquetas (veja `engine::line_tag`) das linhas que disse na sala. Quem o
+    /// recebe o guarda e o repassa com o histórico, e assim a linha de quem já saiu continua provada por ele.
+    Seal { author: MemberId, room: [u8; 4], tags: Vec<[u8; 8]>, sig: [u8; 64] },
+    /// Havia uma linha aqui que não dá para provar (o autor saiu sem selar): mostra-se só que ela existiu, sem texto e
+    /// sem autor, para ninguém ficar com uma frase atribuída a quem não a disse.
+    Erased { room: [u8; 4], age: u32 },
 }
 
 fn cipher(me: &StaticSecret, peer: &[u8; 32], server: &ServerId) -> Option<ChaCha20Poly1305> {
@@ -200,6 +208,21 @@ pub fn encode(msg: &Msg) -> Vec<u8> {
             v.extend_from_slice(&age.to_be_bytes());
             v.extend_from_slice(text.as_bytes());
         }
+        Msg::Seal { author, room, tags, sig } => {
+            v.push(15);
+            v.extend_from_slice(author);
+            v.extend_from_slice(room);
+            v.push(tags.len() as u8);
+            for t in tags {
+                v.extend_from_slice(t);
+            }
+            v.extend_from_slice(sig);
+        }
+        Msg::Erased { room, age } => {
+            v.push(16);
+            v.extend_from_slice(room);
+            v.extend_from_slice(&age.to_be_bytes());
+        }
     }
     v
 }
@@ -292,6 +315,22 @@ pub fn decode(b: &[u8]) -> Option<Msg> {
             }
             Msg::Backlog { from: *from, room: *room, age: u32::from_be_bytes(*age), text: text.to_string() }
         }
+        15 => {
+            let (author, rest) = b.split_first_chunk::<8>()?;
+            let (room, rest) = rest.split_first_chunk::<4>()?;
+            let (&n, rest) = rest.split_first()?;
+            let n = n as usize;
+            if n == 0 || n > SEAL_TAGS || rest.len() != n * 8 + 64 {
+                return None;
+            }
+            let (tags, sig) = rest.split_at_checked(n * 8)?;
+            let tags = tags.as_chunks::<8>().0.to_vec();
+            Msg::Seal { author: *author, room: *room, tags, sig: sig.try_into().ok()? }
+        }
+        16 => {
+            let (room, rest) = b.split_first_chunk::<4>()?;
+            Msg::Erased { room: *room, age: u32::from_be_bytes(rest.try_into().ok()?) }
+        }
         _ => return None,
     })
 }
@@ -382,6 +421,9 @@ mod tests {
             Msg::Bye,
             Msg::Backlog { from: [1; 8], room: [2; 4], age: u32::MAX, text: "x".repeat(MAX_BACKLOG) },
             Msg::Backlog { from: [1; 8], room: [2; 4], age: 7, text: "olá".into() },
+            Msg::Seal { author: [1; 8], room: [2; 4], tags: vec![[3; 8]; SEAL_TAGS], sig: [4; 64] },
+            Msg::Seal { author: [1; 8], room: [2; 4], tags: vec![[3; 8]], sig: [4; 64] },
+            Msg::Erased { room: [2; 4], age: u32::MAX },
         ]
     }
 
@@ -436,6 +478,26 @@ mod tests {
         assert_eq!(decode(&[head.as_slice(), b"a\n"].concat()), None, "controle");
         assert_eq!(decode(&[head.as_slice(), &[b'a'; MAX_BACKLOG + 1]].concat()), None, "grande demais");
         assert!(decode(&[head.as_slice(), b"ok"].concat()).is_some());
+    }
+
+    #[test]
+    fn bad_seals_and_erased_markers_are_refused() {
+        let seal = |n: usize, extra: usize| {
+            let mut v = vec![15u8, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, n as u8];
+            v.extend(vec![9u8; n * 8 + 64 + extra]);
+            v
+        };
+        assert!(decode(&seal(1, 0)).is_some());
+        assert!(decode(&seal(SEAL_TAGS, 0)).is_some());
+        assert_eq!(decode(&seal(0, 0)), None, "sem etiqueta");
+        assert_eq!(decode(&seal(SEAL_TAGS + 1, 0)), None, "etiquetas demais");
+        assert_eq!(decode(&seal(2, 1)), None, "sobra byte");
+        let short = seal(2, 0);
+        assert_eq!(decode(short.get(..short.len() - 1).unwrap()), None, "falta byte da assinatura");
+        const { assert!(1 + 8 + 4 + 1 + SEAL_TAGS * 8 + 64 <= BUDGET, "o selo cheio cabe no quadro") };
+        assert!(decode(&[16, 2, 2, 2, 2, 0, 0, 0, 1]).is_some());
+        assert_eq!(decode(&[16, 2, 2, 2, 2, 0, 0, 1]), None, "idade curta");
+        assert_eq!(decode(&[16, 2, 2, 2, 2, 0, 0, 0, 1, 7]), None, "sobra byte");
     }
 
     #[test]

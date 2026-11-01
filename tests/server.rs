@@ -658,6 +658,104 @@ fn whoever_enters_a_busy_room_later_gets_what_was_said_before_and_only_once() {
     assert!(lines(&net, 3).is_empty());
 }
 
+/// Entrega ao nó `to` uma mensagem montada à mão, como se `from` a tivesse mandado (para testar quem mente).
+fn forge(net: &mut Net, from: usize, to: usize, server: &ServerId, msg: &Msg) {
+    let frame = wire::seal(&net.secrets[from], &net.key(to), server, msg).expect("cabe");
+    let contacts: Vec<[u8; 32]> = (0..net.nodes.len()).map(|j| net.key(j)).collect();
+    let out = net.nodes[to].handle_with(&frame, net.now, &contacts);
+    net.run(to, out);
+}
+
+/// `(autor, texto, apagada)` do bate-papo da primeira sala, como o nó `i` o vê.
+fn chat_of(net: &Net, i: usize, server: &ServerId) -> Vec<(MemberId, String, bool)> {
+    net.view(i, server).rooms[0].chat.iter().map(|l| (l.from, l.text.clone(), l.erased)).collect()
+}
+
+/// Três nós; 0 e 1 entram numa sala, 0 fala e depois alguém sai: devolve a rede, o servidor e a sala.
+fn two_in_a_room(says: &[&str]) -> (Net, ServerId, [u8; 16]) {
+    let (mut net, server) = Net::group(3);
+    net.advance(2);
+    let (room, out) = net.nodes[0].create_room(&server, "Voz", net.now).unwrap();
+    net.run(0, out);
+    for i in [0, 1] {
+        let out = net.nodes[i].join_room(&server, Some(room), net.now).unwrap();
+        net.run(i, out);
+    }
+    for text in says {
+        let out = net.nodes[0].say(&server, text, net.now).unwrap();
+        net.run(0, out);
+        net.advance(1);
+    }
+    (net, server, room)
+}
+
+#[test]
+fn the_line_of_someone_who_left_reaches_a_newcomer_proved_by_the_authors_seal_even_in_a_room_of_two() {
+    let (mut net, server, room) = two_in_a_room(&["primeira", "segunda"]);
+    // O autor sai: o selo vai a quem fica, que fica sozinho na sala.
+    let out = net.nodes[0].join_room(&server, None, net.now).unwrap();
+    net.run(0, out);
+    net.advance(1);
+    let out = net.nodes[2].join_room(&server, Some(room), net.now).unwrap();
+    net.run(2, out);
+    let expected = vec![(net.id(0), "primeira".to_string(), false), (net.id(0), "segunda".to_string(), false)];
+    assert_eq!(chat_of(&net, 2, &server), expected, "o recém-chegado recebe as linhas de quem saiu, com o autor certo");
+    assert_eq!(chat_of(&net, 1, &server), expected, "quem ficou segue com elas, sem duplicar");
+}
+
+#[test]
+fn leaving_with_bye_also_seals_the_lines() {
+    let (mut net, server, room) = two_in_a_room(&["oi"]);
+    let out = net.nodes[0].bye(net.now);
+    net.run(0, out);
+    net.down.insert(0);
+    net.advance(1);
+    let out = net.nodes[2].join_room(&server, Some(room), net.now).unwrap();
+    net.run(2, out);
+    assert_eq!(chat_of(&net, 2, &server), vec![(net.id(0), "oi".to_string(), false)]);
+}
+
+#[test]
+fn a_line_whose_author_vanished_without_sealing_becomes_a_mark_with_no_text_or_author() {
+    let (mut net, server, room) = two_in_a_room(&["segredo", "outra"]);
+    // Cai sem `Bye` e sem selo: a presença só expira.
+    net.down.insert(0);
+    net.advance(LEASE + HEARTBEAT);
+    assert!(net.view(1, &server).rooms[0].people.len() == 1, "0 já saiu da sala para o nó 1");
+    let out = net.nodes[2].join_room(&server, Some(room), net.now).unwrap();
+    net.run(2, out);
+    let seen = chat_of(&net, 2, &server);
+    assert_eq!(seen.len(), 2, "uma marca por linha que existiu");
+    assert!(seen.iter().all(|(from, text, erased)| *erased && text.is_empty() && *from == [0; 8]), "{seen:?}");
+    let kept = chat_of(&net, 1, &server);
+    assert_eq!(kept.iter().map(|l| l.1.as_str()).collect::<Vec<_>>(), ["segredo", "outra"], "quem estava lá continua vendo o que viu");
+}
+
+#[test]
+fn a_member_cannot_put_words_in_the_mouth_of_someone_who_left() {
+    let (mut net, server, room) = two_in_a_room(&["verdadeira"]);
+    let out = net.nodes[0].join_room(&server, None, net.now).unwrap();
+    net.run(0, out);
+    net.advance(1);
+    let out = net.nodes[2].join_room(&server, Some(room), net.now).unwrap();
+    net.run(2, out);
+    let short: [u8; 4] = room[..4].try_into().unwrap();
+    let ids = [net.id(0), net.id(1), net.id(2)];
+    // O nó 1 (que está na sala) tenta atribuir uma frase ao 0: sem selo que a cubra, não entra.
+    forge(&mut net, 1, 2, &server, &Msg::Backlog { from: ids[0], room: short, age: 3, text: "inventada".into() });
+    // Um selo com assinatura que não é do 0 também não vale, nem o selo de verdade com outro conteúdo.
+    forge(&mut net, 1, 2, &server, &Msg::Seal { author: ids[0], room: short, tags: vec![[7; 8]], sig: [9; 64] });
+    forge(&mut net, 1, 2, &server, &Msg::Backlog { from: ids[0], room: short, age: 3, text: "inventada".into() });
+    // Uma marca falsa é só uma marca: não leva texto nem autor.
+    assert_eq!(chat_of(&net, 2, &server), vec![(net.id(0), "verdadeira".to_string(), false)]);
+    // Quem se diz autor de si mesmo vale pelo canal, sem selo.
+    forge(&mut net, 1, 2, &server, &Msg::Backlog { from: ids[1], room: short, age: 0, text: "minha".into() });
+    assert!(chat_of(&net, 2, &server).iter().any(|l| l.0 == net.id(1) && l.1 == "minha"));
+    // Quem não é da sala em que o selo foi feito não o aproveita: a etiqueta amarra a sala e o autor.
+    forge(&mut net, 1, 2, &server, &Msg::Backlog { from: ids[2], room: short, age: 0, text: "do outro".into() });
+    assert!(!chat_of(&net, 2, &server).iter().any(|l| l.1 == "do outro"), "o nó 1 não fala em nome do 2");
+}
+
 /// Opção "2 relays": ninguém tem relay, convite e `Join` saem sem endereço e o servidor se forma do mesmo jeito.
 #[test]
 fn with_two_relays_on_a_server_forms_without_any_address() {

@@ -773,6 +773,12 @@ impl App {
             for (n, line) in room.chat.iter().enumerate() {
                 let who = v.members.iter().find(|m| m.id == line.from).map_or("?".to_string(), |m| if m.name.is_empty() { member_name(&contacts, &m.key) } else { m.name.clone() });
                 let mine = v.me == line.from;
+                if line.erased {
+                    // Havia uma fala aqui que ninguém pode provar (quem a disse saiu sem confirmá-la): fica só o lugar dela.
+                    ui.label(RichText::new("mensagem apagada").italics().size(13.0).color(pal().muted))
+                        .on_hover_text("Alguém disse algo aqui antes de você entrar, mas saiu sem deixar a prova de que foi ele. Para ninguém ser acusado de uma frase que não disse, o texto não é mostrado.");
+                    continue;
+                }
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     ui.label(RichText::new(format!("{who}:")).strong().color(if mine { pal().green } else { pal().strong }));

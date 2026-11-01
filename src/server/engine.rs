@@ -9,7 +9,8 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
-use ed25519_dalek::SigningKey;
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use sha2::{Digest, Sha256};
 use rand_core::{OsRng, RngCore};
 use x25519_dalek::{PublicKey, StaticSecret};
 
@@ -19,7 +20,7 @@ use super::{
     op::{Action, Op, Role},
     registry::{Insert, Registry},
     secret_commit, signing_key, valid_name,
-    wire::{self, Hello, INVITE_CHUNK, INVITE_CHUNKS, INVITE_SERVER, MAX_CHAT, Msg, VECTOR_PER_FRAME},
+    wire::{self, Hello, INVITE_CHUNK, INVITE_CHUNKS, INVITE_SERVER, MAX_CHAT, Msg, SEAL_TAGS, VECTOR_PER_FRAME},
 };
 use crate::media::{signal::Frame, update::Reach};
 
@@ -132,13 +133,71 @@ const CHAT_KEEP: usize = 100;
 /// o atraso do histórico é só o da rede, e uma fala repetida pela mesma pessoa no mesmo texto fora dessa janela conta como outra.
 const BACKLOG_SLACK: u64 = 10;
 
+/// Selos que cada sala guarda (os de quem saiu e os que repassam); os mais antigos saem primeiro.
+const SEAL_KEEP: usize = 64;
+
 /// Uma linha do bate-papo da sala.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChatLine {
     pub from: MemberId,
+    /// Vazio quando `erased`.
     pub text: String,
     /// Quando chegou (ou quando eu a mandei), no relógio do `now` que a engine recebe.
     pub at: u64,
+    /// Havia uma linha aqui, mas ninguém pôde prová-la (o autor saiu sem selar): só o lugar dela foi guardado, sem
+    /// texto e sem autor (`from` zerado).
+    pub erased: bool,
+}
+
+impl ChatLine {
+    fn said(from: MemberId, text: String, at: u64) -> Self {
+        ChatLine { from, text, at, erased: false }
+    }
+}
+
+/// O que cabe de uma linha no histórico: corta no limite do quadro sem partir um caractere ao meio.
+fn clip(text: &str) -> &str {
+    let mut cut = text.len().min(wire::MAX_BACKLOG);
+    while !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    text.get(..cut).unwrap_or_default()
+}
+
+/// Etiqueta de uma linha dentro do selo: amarra servidor, sala, autor e texto (já cortado por [`clip`]), então a
+/// assinatura não serve para outra sala, outro autor nem outra frase.
+fn line_tag(server: &ServerId, room: &RoomId, author: &MemberId, text: &str) -> [u8; 8] {
+    let mut h = Sha256::new();
+    h.update(b"clam/selo/linha/v1");
+    h.update(server);
+    h.update(room);
+    h.update(author);
+    h.update(text.as_bytes());
+    let d = h.finalize();
+    let mut t = [0u8; 8];
+    t.copy_from_slice(d.get(..8).unwrap_or_default());
+    t
+}
+
+/// O que o autor assina num selo.
+fn seal_message(server: &ServerId, room: &RoomId, author: &MemberId, tags: &[[u8; 8]]) -> Vec<u8> {
+    let mut m = b"clam/selo/v1".to_vec();
+    m.extend_from_slice(server);
+    m.extend_from_slice(room);
+    m.extend_from_slice(author);
+    m.push(tags.len() as u8);
+    for t in tags {
+        m.extend_from_slice(t);
+    }
+    m
+}
+
+/// Selo guardado: a prova, assinada pelo autor, de que ele disse as linhas de `tags`.
+#[derive(Clone, Debug)]
+struct StoredSeal {
+    author: MemberId,
+    tags: Vec<[u8; 8]>,
+    sig: [u8; 64],
 }
 
 struct Server {
@@ -161,6 +220,8 @@ struct Server {
     mesh: (Option<RoomId>, Vec<[u8; 32]>),
     /// Bate-papo de cada sala, só em memória: some quando a sala fica sem ninguém.
     chat: BTreeMap<RoomId, VecDeque<ChatLine>>,
+    /// Selos que valem para o bate-papo de cada sala; somem junto com ele.
+    seals: BTreeMap<RoomId, VecDeque<StoredSeal>>,
 }
 
 impl Server {
@@ -179,6 +240,36 @@ impl Server {
         self.peers.retain(|id, p| keep(id, p));
     }
 
+    /// Esquece a conversa da sala e os selos dela.
+    fn forget_room(&mut self, room: &RoomId) {
+        self.chat.remove(room);
+        self.seals.remove(room);
+    }
+
+    /// Algum selo guardado prova que `author` disse `text` em `room`?
+    fn sealed(&self, room: &RoomId, author: &MemberId, text: &str) -> bool {
+        let tag = line_tag(&self.id, room, author, clip(text));
+        self.seals.get(room).is_some_and(|v| v.iter().any(|x| x.author == *author && x.tags.contains(&tag)))
+    }
+
+    /// Guarda um selo de `author` se a assinatura confere com a chave dele no registro. `false` se não vale ou já o tinha.
+    fn keep_seal(&mut self, room: RoomId, author: MemberId, tags: Vec<[u8; 8]>, sig: [u8; 64]) -> bool {
+        let Some(m) = self.reg.state().members.get(&author) else { return false };
+        let Ok(vk) = VerifyingKey::from_bytes(&m.vk) else { return false };
+        if vk.verify(&seal_message(&self.id, &room, &author, &tags), &Signature::from_bytes(&sig)).is_err() {
+            return false;
+        }
+        let seals = self.seals.entry(room).or_default();
+        if seals.iter().any(|x| x.sig == sig) {
+            return false;
+        }
+        seals.push_back(StoredSeal { author, tags, sig });
+        while seals.len() > SEAL_KEEP {
+            seals.pop_front();
+        }
+        true
+    }
+
     fn keep_line(&mut self, room: RoomId, line: ChatLine) {
         let lines = self.chat.entry(room).or_default();
         lines.push_back(line);
@@ -190,7 +281,9 @@ impl Server {
     /// Põe uma linha do histórico no lugar certo do tempo, a menos que eu já a tenha (ao vivo, ou de outro que a mandou também).
     fn merge_backlog(&mut self, room: RoomId, line: ChatLine) -> bool {
         let lines = self.chat.entry(room).or_default();
-        if lines.iter().any(|l| l.from == line.from && l.text == line.text && l.at.abs_diff(line.at) <= BACKLOG_SLACK) {
+        // Uma marca não tem texto que a distinga: só a mesma hora exata a repete (duas falas seguidas valem duas marcas).
+        let slack = if line.erased { 0 } else { BACKLOG_SLACK };
+        if lines.iter().any(|l| l.erased == line.erased && l.from == line.from && l.text == line.text && l.at.abs_diff(line.at) <= slack) {
             return false;
         }
         let at = lines.partition_point(|l| l.at <= line.at);
@@ -201,21 +294,70 @@ impl Server {
         true
     }
 
-    /// O histórico da sala em `Backlog`, do mais antigo ao mais novo.
-    fn backlog(&self, room: &RoomId, now: u64) -> Vec<Msg> {
-        self.chat.get(room).into_iter().flatten().filter_map(|l| {
-            // Corta no limite do quadro sem partir um caractere ao meio.
-            let mut cut = l.text.len().min(wire::MAX_BACKLOG);
-            while !l.text.is_char_boundary(cut) {
-                cut -= 1;
+    /// O que mando a quem acabou de entrar em `room`, do mais antigo ao mais novo.
+    ///
+    /// Cada um manda as linhas que disse: o canal já prova de quem são, sem assinatura. O remetente designado
+    /// (`designated`) cuida do resto: antes, os selos que guarda; depois, as linhas dos outros que ele pode provar
+    /// (o autor saiu e deixou selo) e, no lugar das que não pode, um `Erased`. As linhas de quem está presente ficam com
+    /// o próprio autor, que as manda.
+    fn history_for(&self, me: MemberId, newcomer: &MemberId, room: &RoomId, now: u64, designated: bool) -> Vec<Msg> {
+        let Some(short) = room.get(..4).and_then(|r| <[u8; 4]>::try_from(r).ok()) else { return Vec::new() };
+        let age = |at: u64| now.saturating_sub(at).min(u32::MAX as u64) as u32;
+        let mut out = Vec::new();
+        if designated {
+            for x in self.seals.get(room).into_iter().flatten() {
+                out.push(Msg::Seal { author: x.author, room: short, tags: x.tags.clone(), sig: x.sig });
             }
-            let text = l.text.get(..cut)?;
-            let room: [u8; 4] = room.get(..4)?.try_into().ok()?;
-            Some(Msg::Backlog { from: l.from, room, age: now.saturating_sub(l.at).min(u32::MAX as u64) as u32, text: text.to_string() })
-        }).collect()
+        }
+        let present = |id: &MemberId| self.peers.get(id).is_some_and(|p| id != newcomer && self.has(&p.key) && p.online(now) && p.room.as_ref() == Some(room));
+        for l in self.chat.get(room).into_iter().flatten() {
+            if l.erased {
+                if designated {
+                    out.push(Msg::Erased { room: short, age: age(l.at) });
+                }
+            } else if l.from == me {
+                out.push(Msg::Backlog { from: l.from, room: short, age: age(l.at), text: clip(&l.text).to_string() });
+            } else if designated {
+                let proved = self.sealed(room, &l.from, &l.text);
+                if proved {
+                    out.push(Msg::Backlog { from: l.from, room: short, age: age(l.at), text: clip(&l.text).to_string() });
+                } else if !present(&l.from) {
+                    out.push(Msg::Erased { room: short, age: age(l.at) });
+                }
+            }
+        }
+        out
     }
 
-    /// Sou eu quem manda o histórico a quem entrou em `room`? Um só da sala manda (o de menor id, fora o recém-chegado),
+    /// Meu selo da sala em que estou: uma assinatura por até [`SEAL_TAGS`] linhas minhas. Vazio se não falei.
+    fn my_seals(&self, me: &Me) -> Vec<Msg> {
+        let Some(room) = self.room else { return Vec::new() };
+        let Some(short) = room.get(..4).and_then(|r| <[u8; 4]>::try_from(r).ok()) else { return Vec::new() };
+        let mut tags: Vec<[u8; 8]> = Vec::new();
+        for l in self.chat.get(&room).into_iter().flatten().filter(|l| !l.erased && l.from == me.id) {
+            let t = line_tag(&self.id, &room, &me.id, clip(&l.text));
+            if !tags.contains(&t) {
+                tags.push(t);
+            }
+        }
+        tags.chunks(SEAL_TAGS).map(|c| Msg::Seal { author: me.id, room: short, tags: c.to_vec(), sig: me.sk.sign(&seal_message(&self.id, &room, &me.id, c)).to_bytes() }).collect()
+    }
+
+    /// Entrego meus selos da sala em que estou a quem está nela: é o que prova minhas falas depois que eu sair.
+    fn send_my_seals(&self, me: &Me, now: u64, out: &mut Output) {
+        let Some(room) = self.room else { return };
+        let seals = self.my_seals(me);
+        if seals.is_empty() {
+            return;
+        }
+        for p in self.peers.values().filter(|p| self.has(&p.key) && p.online(now) && p.room == Some(room)) {
+            for m in &seals {
+                out.send.extend(seal_to(me, self, &p.key, m));
+            }
+        }
+    }
+
+    /// Sou eu quem manda o resto do histórico a quem entrou em `room`? Um só da sala manda (o de menor id, fora o recém-chegado),
     /// para não repetir 100 quadros por membro; se as visões divergirem e dois mandarem, o receptor descarta a repetição.
     fn sends_backlog(&self, me: MemberId, newcomer: &MemberId, room: &RoomId, now: u64) -> bool {
         self.room.as_ref() == Some(room)
@@ -375,6 +517,7 @@ impl Servers {
             sharing: false,
             mesh: (None, Vec::new()),
             chat: BTreeMap::new(),
+            seals: BTreeMap::new(),
         };
         s.reg.make(&self.me.sk, self.me.id, Action::AddMember { key: self.me.key, vk: owner_vk }).ok_or(ServerError::Forbidden)?;
         s.member = true;
@@ -511,6 +654,7 @@ impl Servers {
             sharing: false,
             mesh: (None, Vec::new()),
             chat: BTreeMap::new(),
+            seals: BTreeMap::new(),
         };
         let mut out = Output::default();
         for h in std::iter::once(&inv.inviter).chain(inv.hints.iter()) {
@@ -660,6 +804,8 @@ impl Servers {
             return out;
         }
         for s in self.servers.values_mut().filter(|s| s.member) {
+            // O selo vai antes do `Bye`: quem sai assina o que disse enquanto ainda tem canal com os outros.
+            s.send_my_seals(&self.me, now, &mut out);
             let keys: Vec<[u8; 32]> = s.peers.values().filter(|p| s.has(&p.key) && p.online(now)).map(|p| p.key).collect();
             for k in keys {
                 out.send.extend(seal_to(&self.me, s, &k, &Msg::Bye));
@@ -682,20 +828,25 @@ impl Servers {
                 return Err(ServerError::Full);
             }
         }
+        // Quem sai de uma sala deixa o selo das próprias falas com quem fica: é o que prova depois, a quem entrar, que
+        // as linhas são dele (veja `Msg::Seal`). Tem de sair antes de a conversa daqui ser apagada.
+        let mut out = Output::default();
+        for o in self.servers.values().filter(|o| o.member && (o.id != *server || o.room.is_some_and(|old| room != Some(old)))) {
+            o.send_my_seals(&self.me, now, &mut out);
+        }
         // Uma sala por vez, em qualquer servidor.
         // Quem sai de uma sala não leva a conversa: ela some daqui, senão sobraria no computador de quem saiu primeiro
         // depois que a sala esvaziasse. Se a sala segue ocupada, o histórico volta de quem ficou ao reentrar.
         for other in self.servers.values_mut().filter(|o| o.id != *server) {
             if let Some(old) = other.room.take() {
-                other.chat.remove(&old);
+                other.forget_room(&old);
             }
         }
         let s = self.servers.get_mut(server).expect("existe");
         if let Some(old) = s.room.filter(|old| room != Some(*old)) {
-            s.chat.remove(&old);
+            s.forget_room(&old);
         }
         s.room = room;
-        let mut out = Output::default();
         out.events.push(Event::Changed(*server));
         out.merge(self.hello_all(now, true));
         Ok(self.finish(now, out))
@@ -751,7 +902,7 @@ impl Servers {
         for k in peers {
             out.send.extend(seal_to(&self.me, s, &k, &Msg::Chat(text.clone())));
         }
-        s.keep_line(room, ChatLine { from: self.me.id, text, at: now });
+        s.keep_line(room, ChatLine::said(self.me.id, text, now));
         out.events.push(Event::Changed(*server));
         Ok(out)
     }
@@ -991,9 +1142,10 @@ impl Servers {
                 // Quem entrou na minha sala agora recebe o que foi dito antes (o bate-papo vale para todos da sala).
                 if arrived
                     && let Some(room) = h.room
-                    && s.sends_backlog(me.id, &id, &room, now)
+                    && s.room == Some(room)
                 {
-                    for m in s.backlog(&room, now) {
+                    let designated = s.sends_backlog(me.id, &id, &room, now);
+                    for m in s.history_for(me.id, &id, &room, now, designated) {
                         out.send.extend(seal_to(me, s, &key, &m));
                     }
                 }
@@ -1102,16 +1254,35 @@ impl Servers {
                 // Só quem está na minha sala fala comigo; fora dela a linha não tem onde aparecer.
                 let together = s.room.is_some() && s.peers.get(&id).is_some_and(|p| p.online(now) && p.room == s.room);
                 if let (true, true, Some(room)) = (is_member, together, s.room) {
-                    s.keep_line(room, ChatLine { from: id, text, at: now });
+                    s.keep_line(room, ChatLine::said(id, text, now));
                     out.events.push(Event::Changed(sid));
                 }
             }
             Msg::Backlog { from, room, age, text } => {
-                // Vale de membro, para a sala em que estou agora, e só de autor que conheço.
+                // Vale de membro, para a sala em que estou agora, e só de autor que conheço. A autoria tem de estar
+                // provada: ou o autor mesmo a manda (o canal prova), ou há um selo dele que cobre a linha.
                 if let (true, Some(mine)) = (is_member, s.room)
                     && mine.get(..4) == Some(room.as_slice())
                     && s.reg.state().members.contains_key(&from)
-                    && s.merge_backlog(mine, ChatLine { from, text, at: now.saturating_sub(age as u64) })
+                    && (from == id || s.sealed(&mine, &from, &text))
+                    && s.merge_backlog(mine, ChatLine::said(from, text, now.saturating_sub(age as u64)))
+                {
+                    out.events.push(Event::Changed(sid));
+                }
+            }
+            Msg::Seal { author, room, tags, sig } => {
+                if let (true, Some(mine)) = (is_member, s.room)
+                    && mine.get(..4) == Some(room.as_slice())
+                    && s.keep_seal(mine, author, tags, sig)
+                {
+                    // Pode ter chegado depois das linhas que prova, mas as linhas só entram com o selo já guardado.
+                    out.events.push(Event::Changed(sid));
+                }
+            }
+            Msg::Erased { room, age } => {
+                if let (true, Some(mine)) = (is_member, s.room)
+                    && mine.get(..4) == Some(room.as_slice())
+                    && s.merge_backlog(mine, ChatLine { from: [0; 8], text: String::new(), at: now.saturating_sub(age as u64), erased: true })
                 {
                     out.events.push(Event::Changed(sid));
                 }
@@ -1156,7 +1327,7 @@ impl Servers {
             let rooms: Vec<RoomId> = s.chat.keys().copied().collect();
             for r in rooms {
                 if !s.reg.state().rooms.contains_key(&r) || s.people_in(&r, now) == 0 {
-                    s.chat.remove(&r);
+                    s.forget_room(&r);
                     out.events.push(Event::Changed(id));
                 }
             }
@@ -1298,6 +1469,7 @@ impl Servers {
                             sharing: false,
                             mesh: (None, Vec::new()),
             chat: BTreeMap::new(),
+            seals: BTreeMap::new(),
                         })
                     })();
                     cur = parsed;
