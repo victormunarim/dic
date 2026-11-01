@@ -20,7 +20,7 @@ Visão ponta a ponta, do clique em *Ligar* ao áudio e à tela do outro lado: qu
  ───────────────────────────────────────────────────────────────────────────────────────────────
  telefone (Phone)             quadros [u16 BE tamanho][dados] sobre um TCP local          src/phone.rs
  ───────────────────────────────────────────────────────────────────────────────────────────────
- circuito de 2 saltos         célula de 256 B, camadas AEAD por salto (handshake ntor)     src/circuit/
+ circuito (1 ou 2 saltos)    célula de 256 B, camadas AEAD por salto (handshake ntor)     src/circuit/
  ───────────────────────────────────────────────────────────────────────────────────────────────
  link entre dois relays       TCP + Noise NK, quadro de 279 B a cada 10 ms (cover)         src/link.rs, src/transport/
 ```
@@ -33,7 +33,7 @@ Cada relay tem **duas chaves diferentes**: a de circuito (`onion_key`, usada na 
 
 ### 2. Circuito
 
-O circuito tem **2 saltos** e células de `CELL_LEN = 256` bytes, com **203 bytes** de dados por célula. Cada salto faz o seu handshake X25519 autenticado pela chave de circuito do relay (estilo ntor), com sigilo adiante. Cada camada tem contador explícito e janela anti-replay; o preenchimento é aleatório a cada salto, então o tamanho no fio não diz em que salto a célula está.
+O circuito tem **1 salto** (direto ao relay do contato, o padrão; o contato vê o seu IP) ou **2 saltos** (opção "2 relays": o primeiro é o relay de outro contato). As células são de `CELL_LEN = 256` bytes, com **203 bytes** de dados por célula. Cada salto faz o seu handshake X25519 autenticado pela chave de circuito do relay (estilo ntor), com sigilo adiante. Cada camada tem contador explícito e janela anti-replay; o preenchimento é aleatório a cada salto, então o tamanho no fio não diz em que salto a célula está.
 
 O desenho ao ligar para alguém:
 
@@ -129,7 +129,7 @@ O endereço de um relay muda (IP novo, outra porta). Para o código antigo não 
 ## Limites conhecidos
 
 - O primeiro salto é o seu relay (com a opção "2 relays" ligada, o de outro contato; desligada, a conexão é direta ao relay do contato): o contato vê o seu IP. O circuito esconde o conteúdo e o destino de quem observa, mas não o seu IP do contato.
-- Quem está no caminho (provedor, Wi-Fi, roteadores) vê o seu IP falando com o IP do relay do contato, que é o IP do contato: os 2 saltos escondem conteúdo, ritmo e a chave do destino, não o par de IPs. Esconder o IP de um lado do outro exige relays de terceiros e pontos de introdução e de encontro; o desenho está em [DOIS-RELAYS.md](DOIS-RELAYS.md) e **não está implementado**.
+- Quem está no caminho (provedor, Wi-Fi, roteadores) vê o seu IP falando com o IP do relay do contato, que é o IP do contato: a cifra em camadas e o cover escondem conteúdo, ritmo e a chave do destino, não o par de IPs (no modo direto); com "2 relays" quem observa o seu lado vê o IP do relay de terceiro, não o do contato. Esconder o IP de um lado do outro exige relays de terceiros e pontos de introdução e de encontro; o desenho está em [DOIS-RELAYS.md](DOIS-RELAYS.md) e **não está implementado**.
 - Sem CGNAT/porta alcançável não se recebe chamada. Não há furo de NAT.
 - Quem controla o primeiro salto e a saída do mesmo circuito liga as pontas. Como os relays são os dos próprios contatos, isso exige que ambos sejam o mesmo adversário.
 - Com a opção "2 relays" **desligada** (padrão) toda ligação, a tela inclusa, vai direta ao relay do contato: ele e quem observa a rede veem o seu IP, e um relay de versão antiga recusa o circuito de um salto. Ligada, o primeiro salto é o relay de outro contato; sem nenhum, a ligação falha. Não há mais tela "sem privacidade" nem contato "de confiança".

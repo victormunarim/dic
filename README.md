@@ -1,6 +1,6 @@
 # clam
 
-Chamadas de voz e de tela P2P em Rust, **sem servidor nem diretório**: cada pessoa é o relay de si mesma, e toda chamada passa por um circuito de 2 saltos cifrado em camadas, com tráfego de cobertura.
+Chamadas de voz e de tela P2P em Rust, **sem servidor nem diretório**: cada pessoa é o relay de si mesma, e a mídia anda cifrada em camadas, com tráfego de cobertura: por padrão direto ao relay do contato (1 salto, ele vê o seu IP) e, com a opção "2 relays", por um circuito de 2 saltos pelo relay de outro contato.
 O aplicativo (`examples/gui`) liga com a chave pública do contato e o endereço do relay dele; como a comunicação funciona está em [docs/COMUNICACAO.md](docs/COMUNICACAO.md).
 Além do aplicativo, o crate tem uma camada de biblioteca (presença cifrada na DHT libp2p, círculos, reputação de relays) que o aplicativo ainda não usa; veja os [Conceitos](#conceitos-da-camada-de-biblioteca) e as [Limitações](docs/SEGURANCA.md#limitações).
 
@@ -24,7 +24,7 @@ Valem para os módulos `pairing`, `presence`, `service`, `circle`, `intro` e `re
 - **Registro de presença:** contém só pontos de introdução (endereços de relays), nunca o IP. É cifrado (ChaCha20-Poly1305), assinado (ed25519) e tem sempre 668 bytes, qualquer que seja o conteúdo. O endereço entra como dado autenticado, então o registro não vale em outro endereço.
 - **Consultas falsas:** cada busca real vem misturada e embaralhada com consultas a endereços aleatórios.
 - **Círculos:** os tópicos de presença e de anúncio de call vêm do segredo do grupo. Quem não é membro não os deriva.
-- **Modos de caminho:** 2 saltos e direto. O aplicativo escolhe pela opção "2 relays" (desligada de início: conexão direta, o contato vê o seu IP).
+- **Modos de caminho:** direto (1 salto, o padrão) e 2 saltos. O aplicativo escolhe pela opção "2 relays" (desligada de início: conexão direta, o contato vê o seu IP).
 
 ## Documentação
 
@@ -32,7 +32,7 @@ Valem para os módulos `pairing`, `presence`, `service`, `circle`, `intro` e `re
 |---|---|
 | [docs/COMUNICACAO.md](docs/COMUNICACAO.md) | **Como a comunicação funciona**, ponta a ponta: link, circuito, chamada, tela, reencontro e o que cada parte vê |
 | [docs/PRIVACIDADE.md](docs/PRIVACIDADE.md) | Camada de biblioteca: pareamento, presença cifrada, busca, círculos |
-| [docs/CIRCUITO.md](docs/CIRCUITO.md) | Circuito de 2 saltos, transporte, cover traffic, reputação, fuzzing |
+| [docs/CIRCUITO.md](docs/CIRCUITO.md) | Circuito (1 ou 2 saltos), transporte, cover traffic, reputação, fuzzing |
 | [docs/CHAMADAS.md](docs/CHAMADAS.md) | Voz, telefone, tela, conexão sem servidor |
 | [docs/GUI.md](docs/GUI.md) | A janela: abas, contatos, áudio, tela, opções |
 | [docs/ENCONTRO.md](docs/ENCONTRO.md) | Reencontrar contatos sem servidor: aviso de endereço novo e ponto de encontro na DHT, âncoras e contato de duas vias |
@@ -57,7 +57,7 @@ Para ligar a alguém: rode o `examples/gui` (veja [docs/GUI.md](docs/GUI.md)) ou
 | `src/cover.rs` | `CoverProfile`: perfis de custo do cover (`Off`, `Economy`, `Standard`, `Strong`) |
 | `src/reputation.rs` | `Reputation`, `ReputationConfig`, `RelayStats` |
 | `src/intro.rs` | `IntroSelector`, `IntroConfig`, `Selection` |
-| `src/circuit/` | `crypto`, `client::ClientCircuit`, `relay::RelayNode`, `manager::CircuitManager` (circuito de 2 saltos, reserva e failover) |
+| `src/circuit/` | `crypto`, `client::ClientCircuit`, `relay::RelayNode`, `manager::CircuitManager` (circuito de 1 ou 2 saltos, reserva e failover) |
 | `src/link.rs` | Noise NK do link (feature `net`) |
 | `src/transport/` | `RelayServer`, `CircuitClient`, `ExitPolicy` (TCP, feature `net`) |
 | `tests/fuzz.rs` | fuzzing determinístico dos parsers e do relay |

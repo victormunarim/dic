@@ -1,4 +1,4 @@
-# Circuito de 2 saltos (Fase 3)
+# Circuito (Fase 3)
 
 Relays, gerente de circuitos, transporte TCP, descritores, descoberta, reputação, cover traffic, medições e fuzzing.
 
@@ -6,9 +6,11 @@ Relays, gerente de circuitos, transporte TCP, descritores, descoberta, reputaç�
 
 Para ver como as peças se encaixam numa chamada (link, circuito, telefone, pacotes, tela, reencontro de contatos), leia antes [COMUNICACAO.md](COMUNICACAO.md). Este documento detalha cada peça do transporte.
 
-**O que o aplicativo usa.** O `Node` (e a GUI) usa o circuito de 2 saltos, o link Noise, os dois covers, o gerente com reserva e failover e a política de saída. A reputação medida (`reputation`) é opcional e o `Node` não a liga, porque só conhece os relays dos contatos. Os relays são os dos próprios contatos, então o aplicativo **não** usa descritores assinados nem a descoberta por GossipSub (`descriptor`, `discovery`, `net`): eles são a camada de biblioteca para quem quiser uma rede aberta de relays e estão aqui por completude.
+**O que o aplicativo usa.** O `Node` (e a GUI) usa o circuito (direto ao relay do contato, 1 salto, por padrão; de 2 saltos com a opção "2 relays"), o link Noise, os dois covers, o gerente com reserva e failover e a política de saída. A reputação medida (`reputation`) é opcional e o `Node` não a liga, porque só conhece os relays dos contatos. Os relays são os dos próprios contatos, então o aplicativo **não** usa descritores assinados nem a descoberta por GossipSub (`descriptor`, `discovery`, `net`): eles são a camada de biblioteca para quem quiser uma rede aberta de relays e estão aqui por completude.
 
-## Fase 3: circuito de 2 saltos (`clam::circuit`)
+## Fase 3: circuito de 1 ou 2 saltos (`clam::circuit`)
+
+O desenho abaixo descreve o circuito de 2 saltos (modo privado, "2 relays" ligada). Com a opção desligada (padrão do app) o `Dialer` monta um circuito **direto**, de 1 salto, ao relay do contato (`ClientOptions::direct`, `ManagerConfig::direct`): a mesma cifra e o mesmo cover, sem relay no meio, e o contato vê o IP de quem liga.
 
 Núcleo do modo privado: você → relay A → relay B → destino. É *sans-IO*: as máquinas de estado recebem células e devolvem ações, e o transporte fica por sua conta. O transporte real (TCP + Noise NK, `clam::transport`) e o failover automático (`clam::circuit::manager`) já existem e estão descritos nas seções seguintes.
 

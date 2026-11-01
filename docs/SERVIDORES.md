@@ -1,6 +1,6 @@
 # Servidores e salas
 
-Um **servidor** como o do Discord, sem servidor de verdade: um grupo de pessoas com salas de voz, onde se vê quem está online e quem está em cada sala. Tudo P2P, sobre o que já existe (relay de si mesmo, circuito de 2 saltos, telefone).
+Um **servidor** como o do Discord, sem servidor de verdade: um grupo de pessoas com salas de voz, onde se vê quem está online e quem está em cada sala. Tudo P2P, sobre o que já existe (relay de si mesmo, circuito, telefone).
 
 Estado: **implementado** (biblioteca em `src/server/`, rede em `src/server/net.rs`, janela na aba *Servidores*). Como a comunicação funciona por baixo está em [COMUNICACAO.md](COMUNICACAO.md).
 

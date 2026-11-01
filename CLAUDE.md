@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Chamadas de voz e de tela P2P em Rust (crate `clam`), sem servidor nem diretório. Cada pessoa é o relay de si mesma; a mídia anda em circuitos de 2 saltos cifrados em camadas. Visão geral em `README.md`; como tudo funciona em `docs/COMUNICACAO.md`.
+Chamadas de voz e de tela P2P em Rust (crate `clam`), sem servidor nem diretório. Cada pessoa é o relay de si mesma; a mídia anda em circuitos cifrados em camadas (direto ao relay do contato, 1 salto, por padrão; 2 saltos com a opção "2 relays"). Visão geral em `README.md`; como tudo funciona em `docs/COMUNICACAO.md`.
 
 ## Stack
 

@@ -26,7 +26,7 @@
 //! | `hwenc` | Codificador por hardware opcional, via `gst-launch` (feature `video`, Linux) |
 //! | `capture`, `portal` | Captura da tela: X11 e GDI; portal do desktop no Wayland (features `capture`, `portal`) |
 //! | `phone` | Chamado (`Phone`) e chamador (`call`) sobre o circuito (feature `net`) |
-//! | [`path`] | Modos de caminho: 2 saltos (padrão), direto |
+//! | [`path`] | Modos de caminho: direto (1 salto, padrão do app), 2 saltos |
 //!
 //! ```
 //! use clam::{

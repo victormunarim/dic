@@ -1,4 +1,4 @@
-//! Circuito de 2 saltos (modo privado): você → relay A → relay B → destino.
+//! Circuito de 2 saltos (modo privado; o modo direto, de 1 salto, é `ClientOptions::direct`): você → relay A → relay B → destino.
 //!
 //! Tudo aqui é *sans-IO*: as máquinas de estado recebem células e devolvem
 //! ações; quem move bytes (libp2p, UDP, simulador) fica por fora.

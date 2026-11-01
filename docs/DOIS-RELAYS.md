@@ -27,7 +27,7 @@
 
 Uma opção **2 relays** em Configurações, **desligada** por padrão:
 
-- **Desligada:** o comportamento de hoje. O conteúdo é cifrado de ponta a ponta e o caminho é de 2 saltos com cover.
+- **Desligada:** o comportamento de hoje. O conteúdo é cifrado de ponta a ponta e o caminho é direto ao relay do contato (1 salto) com cover.
 - **Ligada:** a chamada, a tela, o bate-papo, os arquivos e os convites passam por **2 relays reais**, de terceiros, e **quem liga nunca fica sabendo o IP de quem atende, nem o contrário**, inclusive nos convites.
 
 ## O que a opção desligada cobre de verdade
@@ -133,7 +133,7 @@ Enquadramento igual ao do gateway: o relay de saída põe `[u16 tamanho][pedaço
 - O `cookie` é de **uso único** (sai da tabela no `Join`), vence em 60 s e um `Establish` repetido não toma o lugar do primeiro. Capacidade: 256 `cookie`s; 600 pedidos por minuto.
 - Depois do `Joined`, o que passa é o tráfego cifrado de ponta a ponta de C e D; o ponto de encontro não tem as chaves.
 
-Alvos de fuzz: `hidden_frames` (os quatro parsers e o acumulador de pedaços) e `hidden_point` (sequências de pedidos contra as duas tabelas, tempo variável). Testes: sans-IO e loopback em `src/hidden.rs`; por circuito real de 2 saltos em `tests/hidden.rs`.
+Alvos de fuzz: `hidden_frames` (os quatro parsers e o acumulador de pedaços) e `hidden_point` (sequências de pedidos contra as duas tabelas, tempo variável). Testes: sans-IO e loopback em `src/hidden.rs`; por circuito real de 2 saltos (relay de terceiro) em `tests/hidden.rs`.
 
 #### Introdução e encontro (formato da etapa 3)
 
@@ -195,7 +195,7 @@ Sem esta camada, o IP volta pelo texto. Ela toca todo lugar da tabela "Onde o IP
 
 ## Custos
 
-- **Latência:** o caminho passa de 2 para cerca de 5 relays efetivos (R1 e R2 de C, `M`, R2 e R1 de D). Soma-se a introdução: vários segundos para estabelecer a chamada. O alvo de voz (200 ms em 2 saltos) tende a ficar acima, e deve ser medido com `examples/measure` antes de ser prometido.
+- **Latência:** o caminho passa de 1 (direto) ou 2 para cerca de 5 relays efetivos (R1 e R2 de C, `M`, R2 e R1 de D). Soma-se a introdução: vários segundos para estabelecer a chamada. O alvo de voz (200 ms em 2 saltos) tende a ficar acima, e deve ser medido com `examples/measure` antes de ser prometido.
 - **Banda:** cada circuito consome ≈ 100 kbps por sentido (célula de 256 B a cada 20 ms). Uma chamada tem 2 circuitos, mais os 3 de espera de D, ≈ 300 kbps contínuos enquanto D está online.
 - **Relays de terceiros:** quem serve gasta banda e abre-se a abuso. Os limites de `RelayConfig` (256 circuitos, 800 kB/s por circuito, 2 MB/s no relay, 20 criações/s) valem, e o destino de saída é restrito a `dht:9`, `anchor:9`, `intro:9` e `rv:9`: nunca vira proxy aberto.
 - **Disponibilidade:** com poucos contatos de confiança online, não há relays suficientes. O erro é explícito.

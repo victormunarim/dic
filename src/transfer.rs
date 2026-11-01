@@ -1,5 +1,5 @@
 //! Transferência de arquivo entre dois contatos online: quem envia lê o arquivo em pedaços e os manda por circuitos
-//! de 2 saltos (`Dialer::open_file_pipe`); quem recebe junta os pedaços num arquivo parcial e, completo, dá o nome
+//! (direto ou de 2 saltos, `Dialer::open_file_pipe`); quem recebe junta os pedaços num arquivo parcial e, completo, dá o nome
 //! final. Os quadros estão em [`crate::media::update::FileFrame`]; a decisão de aceitar é da pessoa (o app).
 //!
 //! - **Só contato, só online, só se a pessoa aceita.** A oferta não escreve nada no disco; o arquivo parcial só nasce
