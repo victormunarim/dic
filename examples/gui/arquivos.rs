@@ -163,6 +163,32 @@ impl Transfers {
     }
 }
 
+/// Liga cada linha `📎 nome` do bate-papo da sala à transferência que a acompanha, para a sala mostrar o mesmo que a
+/// conversa 1:1 (progresso, baixar, imagem, vídeo). `lines`: por linha, `Some(contato)` se veio de outro membro ou `None`
+/// se é minha. Devolve, por linha, o índice em `xfers`. De outro membro: a transferência dele com aquele nome, casando as
+/// linhas repetidas pela ordem (a mais nova com a mais nova). Minha: qualquer envio meu com aquele nome, preferindo o que
+/// já tem arquivo à vista (o mesmo arquivo sai a vários contatos, então só um serve para mostrar).
+pub(crate) fn pair_room_files(lines: &[(Option<[u8; 32]>, &str)], xfers: &[Xfer]) -> Vec<Option<usize>> {
+    let mut out = vec![None; lines.len()];
+    for (i, (from, text)) in lines.iter().enumerate() {
+        let Some(name) = text.strip_prefix("📎 ") else { continue };
+        let mut cands: Vec<usize> = xfers.iter().enumerate().filter(|(_, x)| x.name == name && match from {
+            Some(k) => !x.mine && x.peer == *k,
+            None => x.mine,
+        }).map(|(j, _)| j).collect();
+        cands.sort_by_key(|&j| xfers.get(j).map_or(0, |x| x.id));
+        out[i] = match from {
+            None => cands.iter().copied().find(|&j| xfers.get(j).is_some_and(|x| x.media_path().is_some())).or(cands.last().copied()),
+            Some(k) => {
+                // Posição desta linha entre as iguais do mesmo membro, contada do fim.
+                let later = lines.iter().skip(i + 1).filter(|(f, t)| *f == Some(*k) && *t == *text).count();
+                cands.len().checked_sub(1 + later).and_then(|p| cands.get(p).copied())
+            }
+        };
+    }
+    out
+}
+
 /// Tamanho para a tela: `1,5 MB`.
 pub(crate) fn size_text(bytes: u64) -> String {
     const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
@@ -247,6 +273,29 @@ mod tests {
         t.add_in(p, 2, "b.png".into(), 1);
         t.phase(&p, 2, false, Phase::Done(Some("/d/b.png".into())));
         assert_eq!(t.of(&p).iter().find(|x| !x.mine).and_then(|x| x.media_path()), Some(Path::new("/d/b.png")));
+    }
+
+    #[test]
+    fn room_lines_pair_with_their_own_transfers() {
+        let (a, b, mut t) = ([1u8; 32], [2u8; 32], Transfers::default());
+        t.add_in(a, 1, "x.png".into(), 1);
+        t.add_in(a, 2, "x.png".into(), 1);
+        t.add_in(b, 3, "x.png".into(), 1);
+        t.add_out(b, 9, "y.mp4".into(), 1);
+        t.add_out(a, 8, "y.mp4".into(), 1);
+        t.set_source(&a, 8, "/s/y.mp4".into());
+        t.phase(&a, 8, true, Phase::Done(None));
+        let mut all = t.of(&a);
+        all.extend(t.of(&b));
+        let lines = [(Some(a), "📎 x.png"), (Some(b), "oi"), (Some(a), "📎 x.png"), (None, "📎 y.mp4"), (Some(a), "📎 sumiu.txt")];
+        let got = pair_room_files(&lines, &all);
+        let id = |i: usize| got[i].map(|j| all[j].id);
+        assert_eq!((id(0), id(2)), (Some(1), Some(2)), "linhas repetidas casam pela ordem");
+        assert_eq!(id(1), None, "texto comum não tem arquivo");
+        assert_eq!(id(3), Some(8), "o envio meu que já tem arquivo à vista");
+        assert_eq!(id(4), None, "sem transferência");
+        assert_eq!(pair_room_files(&[(Some(a), "📎 x.png")], &all[..1]), vec![Some(0)]);
+        assert_eq!(pair_room_files(&[(Some(a), "📎 x.png"), (Some(a), "📎 x.png"), (Some(a), "📎 x.png")], &all[..2]), vec![None, Some(0), Some(1)], "linha antiga sem transferência guardada");
     }
 
     #[test]

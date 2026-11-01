@@ -756,20 +756,41 @@ impl App {
         // O conteúdo central rola, então não há "altura disponível": a lista de mensagens sempre vai até o pé da janela, menos a linha de envio e a folga da sombra do botão. Assim o campo fica embaixo e a página só rola se a janela for baixa demais; poucas mensagens não criam rolagem.
         let uploads = self.live_uploads(&recipients);
         let room_height = (ui.clip_rect().bottom() - ui.cursor().top() - 84.0 - crate::anexo::height(ui.ctx(), key) - 20.0 * uploads.len() as f32).max(160.0);
+        // As transferências dos membros, para cada linha `📎 nome` mostrar o mesmo que a conversa 1:1: progresso, baixar,
+        // imagem à vista e vídeo com play.
+        let xfers: Vec<crate::arquivos::Xfer> = {
+            let t = self.shared.transfers.lock_unpoisoned();
+            v.members.iter().filter(|m| m.id != v.me).flat_map(|m| t.of(&m.key)).collect()
+        };
+        let who_of = |id| v.members.iter().find(|m| m.id == id);
+        let raw: Vec<(Option<[u8; 32]>, &str)> = room.chat.iter().map(|l| (if l.from == v.me { None } else { who_of(l.from).map(|m| m.key) }, l.text.as_str())).collect();
+        let files = crate::arquivos::pair_room_files(&raw, &xfers);
+        let mut file_cmds: Vec<Cmd> = Vec::new();
         egui::ScrollArea::vertical().id_salt(("bate-papo", room.id)).max_height(room_height).min_scrolled_height(room_height).stick_to_bottom(true).auto_shrink([false, false]).show(ui, |ui| {
             if room.chat.is_empty() {
                 ui.label(RichText::new("Sem mensagens. A conversa some quando a sala fica vazia.").size(13.0).color(pal().muted));
             }
-            for line in &room.chat {
+            for (n, line) in room.chat.iter().enumerate() {
                 let who = v.members.iter().find(|m| m.id == line.from).map_or("?".to_string(), |m| if m.name.is_empty() { member_name(&contacts, &m.key) } else { m.name.clone() });
                 let mine = v.me == line.from;
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     ui.label(RichText::new(format!("{who}:")).strong().color(if mine { pal().green } else { pal().strong }));
                     ui.label(RichText::new(&line.text).color(pal().text));
+                    if let Some(x) = files.get(n).copied().flatten().and_then(|j| xfers.get(j)).filter(|x| !x.mine && x.phase.live()) {
+                        crate::conversa::file_progress(ui, x, &mut file_cmds);
+                    }
                 });
+                if let Some(x) = files.get(n).copied().flatten().and_then(|j| xfers.get(j))
+                    && let Some(path) = x.media_path()
+                {
+                    crate::midia::show(ui, &x.name, x.size, path);
+                }
             }
         });
+        for c in file_cmds {
+            self.send(c);
+        }
         Self::show_uploads(ui, uploads);
         crate::anexo::chips(ui, key);
         // O botão é medido primeiro (da direita para a esquerda) e o campo ocupa só o que sobra: com largura

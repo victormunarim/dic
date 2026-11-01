@@ -141,7 +141,7 @@ impl App {
 
 /// Ao lado da mensagem do arquivo, enquanto ele não terminou. Quem envia vê o carregando e o X de cancelar.
 /// Quem recebe vê o pedido com o ícone de baixar e o X de recusar; enquanto baixa também vê o X, de cancelar.
-fn file_progress(ui: &mut egui::Ui, x: &crate::arquivos::Xfer, cmds: &mut Vec<Cmd>) {
+pub(crate) fn file_progress(ui: &mut egui::Ui, x: &crate::arquivos::Xfer, cmds: &mut Vec<Cmd>) {
     if x.phase == Phase::Asking {
         ui.label(RichText::new(format!("pedido de arquivo · {}", size_text(x.size))).size(12.0).color(pal().muted));
         if download_button(ui, "Baixar: o arquivo só vem para este computador depois do clique").clicked() {
