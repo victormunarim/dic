@@ -285,6 +285,12 @@ const CHANGE_DELTA: u8 = 24;
 pub trait ScreenSource {
     /// Imagem atual; `None` quando não deu para capturar agora (a transmissão pula o quadro).
     fn grab(&mut self) -> Option<RawFrame>;
+
+    /// Quantas imagens a captura já produziu, contando as que o codificador não chegou a pegar
+    /// (diagnóstico: separa "a tela não mudou" de "a captura é lenta"). 0 se a fonte não conta.
+    fn captured(&self) -> u64 {
+        0
+    }
 }
 
 /// Quadro codificado, pronto para [`ScreenShare::push`].

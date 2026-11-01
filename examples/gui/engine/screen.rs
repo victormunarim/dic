@@ -337,6 +337,7 @@ pub(crate) async fn share_task(dialer: Dialer, peer: [u8; 32], keys: clam::media
         let (mut pushed, mut skipped) = (0u64, 0u64);
         let (mut mark, mut mark_packets, mut mark_bytes, mut rate, mut kbps_useful) = (std::time::Instant::now(), 0u64, 0u64, 0.0f64, 0.0f64);
         let (mut pushed_in_span, mut fps) = (0u64, 0.0f64);
+        let (mut mark_captured, mut source_fps) = (0u64, 0.0f64);
         while flag.screen.want_share.load(Ordering::Relaxed) && !flag.hangup.load(Ordering::Relaxed) {
             match pump(src.as_mut(), &mut enc, &share) {
                 Ok(true) => {
@@ -352,11 +353,14 @@ pub(crate) async fn share_task(dialer: Dialer, peer: [u8; 32], keys: clam::media
                 rate = (t.packets_sent - mark_packets) as f64 / span;
                 kbps_useful = (t.payload_bytes - mark_bytes) as f64 * 8.0 / 1000.0 / span;
                 fps = pushed_in_span as f64 / span;
+                let captured = src.captured();
+                source_fps = (captured - mark_captured) as f64 / span;
+                mark_captured = captured;
                 pushed_in_span = 0;
                 (mark, mark_packets, mark_bytes) = (std::time::Instant::now(), t.packets_sent, t.payload_bytes);
             }
             *flag.screen.tx_info.lock_unpoisoned() = format!(
-                "{}, enviados {pushed}, pulados {skipped} ({} pelo codificador, {} adiados com o circuito cheio), descartados na fila {}, saindo {rate:.0} pacotes/s, taxa {} kbps, QP {}, imagem 1/{}, codificar leva {:.0} ms, captura leva {:.0} ms, {fps:.0} quadros/s (meta {:.0}, prioridade {}), sem imagem nova {}, imagem igual {}, codificador {}",
+                "{}, enviados {pushed}, pulados {skipped} ({} pelo codificador, {} adiados com o circuito cheio), descartados na fila {}, saindo {rate:.0} pacotes/s, taxa {} kbps, QP {}, imagem 1/{}, codificar leva {:.0} ms, captura leva {:.0} ms, {fps:.0} quadros/s (meta {:.0}, prioridade {}), a captura entrega {source_fps:.0} imagens/s, sem imagem nova {}, imagem igual {}, codificador {}",
                 pipe_line(slot, rate, kbps_useful, share.queued(), &t), enc.skipped, enc.held, t.frames_dropped, enc.bitrate() / 1000, enc.qp(), enc.scale(), enc.encode_ms, enc.grab_ms, enc.fps(), if sharp { "nitidez, metade dos quadros" } else { "fluidez" }, enc.no_frame, enc.same,
                 match (enc.hardware(), &enc.hw_note) {
                     (Some(name), _) => format!("hardware ({name})"),

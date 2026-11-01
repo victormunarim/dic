@@ -10,7 +10,7 @@ use crate::{sync::LockExt, video::{RawFrame, ScreenSource}};
 use std::{
     sync::{
         Arc, Condvar, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread::JoinHandle,
     time::{Duration, Instant},
@@ -25,6 +25,7 @@ type Slot = Arc<(Mutex<Option<RawFrame>>, Condvar)>;
 pub struct Prefetch {
     latest: Slot,
     stop: Arc<AtomicBool>,
+    captured: Arc<AtomicU64>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -33,13 +34,15 @@ impl Prefetch {
     pub fn new(mut source: Box<dyn ScreenSource + Send>, fps: f32) -> Self {
         let latest: Slot = Arc::default();
         let stop = Arc::new(AtomicBool::new(false));
+        let captured = Arc::new(AtomicU64::new(0));
         let every = Duration::from_secs_f32(1.0 / fps.max(1.0));
         let thread = {
-            let (latest, stop) = (latest.clone(), stop.clone());
+            let (latest, stop, captured) = (latest.clone(), stop.clone(), captured.clone());
             std::thread::spawn(move || {
                 let mut next = Instant::now();
                 while !stop.load(Ordering::Relaxed) {
                     if let Some(frame) = source.grab() {
+                        captured.fetch_add(1, Ordering::Relaxed);
                         let (slot, news) = &*latest;
                         *slot.lock_unpoisoned() = Some(frame);
                         news.notify_one();
@@ -54,7 +57,7 @@ impl Prefetch {
                 }
             })
         };
-        Self { latest, stop, thread: Some(thread) }
+        Self { latest, stop, captured, thread: Some(thread) }
     }
 }
 
@@ -64,6 +67,10 @@ impl ScreenSource for Prefetch {
         let guard = slot.lock_unpoisoned();
         let (mut guard, _) = news.wait_timeout_while(guard, WAIT, |f| f.is_none()).ok()?;
         guard.take()
+    }
+
+    fn captured(&self) -> u64 {
+        self.captured.load(Ordering::Relaxed)
     }
 }
 
@@ -110,6 +117,17 @@ mod tests {
         let second = wait_for_frame(&mut p);
         assert!(second.width >= first.width + 4, "{} depois de {}", second.width, first.width);
         assert!(p.latest.0.lock_unpoisoned().is_none(), "a imagem entregue sai do escaninho");
+    }
+
+    #[test]
+    fn it_counts_the_images_the_source_produced() {
+        let mut p = Prefetch::new(Box::new(Slow(0, Duration::from_millis(1))), 200.0);
+        wait_for_frame(&mut p);
+        let end = Instant::now() + Duration::from_secs(5);
+        while p.captured() < 3 {
+            assert!(Instant::now() < end, "a fonte não produziu 3 imagens em 5 s");
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 
     #[test]
