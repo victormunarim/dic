@@ -143,7 +143,7 @@ impl ScreenSource for DxgiScreen {
             }
             // SAFETY: desfaz o `Map` acima.
             unsafe { self.ctx.Unmap(&stage, 0) };
-            Some(RawFrame::new(w as u32, h as u32, rgba))
+            RawFrame::new(w, h, rgba).ok()
         })();
         // SAFETY: libera o quadro adquirido, haja ou não imagem.
         let _ = unsafe { self.dup.ReleaseFrame() };
