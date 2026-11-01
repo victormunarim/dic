@@ -325,6 +325,7 @@ pub(crate) async fn share_task(dialer: Dialer, peer: [u8; 32], keys: clam::media
     st.sharing.store(true, Ordering::Relaxed);
     out.line(if dialer.two_relays() { "tela: transmitindo (por um relay de outro contato)" } else { "tela: transmitindo (direto ao contato, que vê o seu IP)" });
     let slot = dialer.screen_slot();
+    let sharp = shared.screen.sharp.load(Ordering::Relaxed);
     let flag = shared.clone();
     let mut audio = AudioTx::open(&shared, &out);
     let mut audio_gave_up = audio.is_none() && shared.screen.audio.load(Ordering::Relaxed);
@@ -355,8 +356,8 @@ pub(crate) async fn share_task(dialer: Dialer, peer: [u8; 32], keys: clam::media
                 (mark, mark_packets, mark_bytes) = (std::time::Instant::now(), t.packets_sent, t.payload_bytes);
             }
             *flag.screen.tx_info.lock_unpoisoned() = format!(
-                "{}, enviados {pushed}, pulados {skipped} ({} pelo codificador, {} adiados com o circuito cheio), descartados na fila {}, saindo {rate:.0} pacotes/s, taxa {} kbps, QP {}, imagem 1/{}, codificar leva {:.0} ms, captura leva {:.0} ms, {fps:.0} quadros/s, sem imagem nova {}, imagem igual {}, codificador {}",
-                pipe_line(slot, rate, kbps_useful, share.queued(), &t), enc.skipped, enc.held, t.frames_dropped, enc.bitrate() / 1000, enc.qp(), enc.scale(), enc.encode_ms, enc.grab_ms, enc.no_frame, enc.same,
+                "{}, enviados {pushed}, pulados {skipped} ({} pelo codificador, {} adiados com o circuito cheio), descartados na fila {}, saindo {rate:.0} pacotes/s, taxa {} kbps, QP {}, imagem 1/{}, codificar leva {:.0} ms, captura leva {:.0} ms, {fps:.0} quadros/s (meta {:.0}, prioridade {}), sem imagem nova {}, imagem igual {}, codificador {}",
+                pipe_line(slot, rate, kbps_useful, share.queued(), &t), enc.skipped, enc.held, t.frames_dropped, enc.bitrate() / 1000, enc.qp(), enc.scale(), enc.encode_ms, enc.grab_ms, enc.fps(), if sharp { "nitidez, metade dos quadros" } else { "fluidez" }, enc.no_frame, enc.same,
                 match (enc.hardware(), &enc.hw_note) {
                     (Some(name), _) => format!("hardware ({name})"),
                     (None, Some(why)) => format!("openh264 (o hardware parou: {why})"),
