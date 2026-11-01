@@ -41,6 +41,19 @@ pub enum PortalError {
     Gstreamer(String),
 }
 
+/// Prazo das etapas que não esperam ninguém; só o `start` abre a janela do sistema e espera a pessoa.
+const STEP_WAIT: Duration = Duration::from_secs(10);
+/// Prazo do `start`, que espera a pessoa escolher a tela na janela do sistema.
+const CHOOSE_WAIT: Duration = Duration::from_secs(120);
+
+/// Roda uma etapa do portal com prazo; estourar diz qual etapa travou (sem isso a GUI fica muda).
+async fn step<T>(name: &str, wait: Duration, f: impl std::future::Future<Output = Result<T, ashpd::Error>>) -> Result<T, PortalError> {
+    match tokio::time::timeout(wait, f).await {
+        Ok(r) => r.map_err(|e| PortalError::Portal(format!("{name}: {}", portal_msg(&e)))),
+        Err(_) => Err(PortalError::Portal(format!("{name}: o portal não respondeu em {} s", wait.as_secs()))),
+    }
+}
+
 fn portal_err(e: ashpd::Error) -> PortalError {
     PortalError::Portal(portal_msg(&e))
 }
@@ -138,9 +151,9 @@ impl PortalScreen {
 
     /// Como [`Self::open`], capturando a `fps` quadros por segundo.
     pub async fn open_with(fps: f32) -> Result<Self, PortalError> {
-        let proxy = Screencast::new().await.map_err(portal_err)?;
-        let session = proxy.create_session(Default::default()).await.map_err(portal_err)?;
-        proxy
+        let proxy = step("conectar ao portal", STEP_WAIT, Screencast::new()).await?;
+        let session = step("criar a sessão", STEP_WAIT, proxy.create_session(Default::default())).await?;
+        let selected = proxy
             .select_sources(
                 &session,
                 SelectSourcesOptions::default()
@@ -148,14 +161,14 @@ impl PortalScreen {
                     .set_sources(SourceType::Monitor | SourceType::Window)
                     .set_multiple(false)
                     .set_persist_mode(PersistMode::DoNot),
-            )
-            .await
-            .map_err(portal_err)?;
-        let streams = proxy.start(&session, None, Default::default()).await.map_err(portal_err)?.response().map_err(portal_err)?;
+            );
+        step("escolher as fontes", STEP_WAIT, selected).await?;
+        let started = step("abrir a janela de escolha da tela", CHOOSE_WAIT, proxy.start(&session, None, Default::default())).await?;
+        let streams = started.response().map_err(portal_err)?;
         let stream = streams.streams().first().ok_or(PortalError::NoStream)?;
         let (sw, sh) = stream.size().ok_or(PortalError::NoSize)?;
         let size = target_size(sw.max(0) as usize, sh.max(0) as usize).ok_or(PortalError::NoSize)?;
-        let remote = proxy.open_pipe_wire_remote(&session, Default::default()).await.map_err(portal_err)?;
+        let remote = step("abrir o PipeWire", STEP_WAIT, proxy.open_pipe_wire_remote(&session, Default::default())).await?;
         // `dup` não marca o descritor como "fechar ao executar", então o filho o herda.
         let inherited = rustix::io::dup(&remote).map_err(|e| PortalError::Gstreamer(e.to_string()))?;
         let mut child = Command::new("gst-launch-1.0")
@@ -247,6 +260,13 @@ mod tests {
         let f = slot.0.lock_unpoisoned().take().expect("quadro");
         assert!(f.rgba.iter().all(|b| *b == 2));
         assert!(slot.0.lock_unpoisoned().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_stuck_step_fails_naming_itself() {
+        let e = step::<()>("criar a sessão", Duration::from_millis(20), std::future::pending()).await.unwrap_err();
+        let msg = e.to_string();
+        assert!(msg.contains("criar a sessão") && msg.contains("não respondeu"), "{msg}");
     }
 
     /// Manual: abre o diálogo do portal de verdade. `cargo test --features portal -- --ignored real_portal`.
