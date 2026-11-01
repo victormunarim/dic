@@ -48,6 +48,27 @@ pub fn fps_for(bitrate: u32) -> f32 {
 /// passa de [`MAX_FRAME`] e nada chega a quem assiste.
 pub const MAX_WIDTH: usize = 1920;
 const MAX_SHRINK: usize = 8;
+/// Redução máxima que o tempo de CPU pode pedir sozinho (1/4 da largura: abaixo disso o texto some).
+const MAX_CPU_K: usize = 3;
+/// Fração do período do quadro que o codificador pode gastar antes de a imagem encolher.
+const CPU_BUDGET: f32 = 0.9;
+/// Só volta a um fator menor se, no tamanho maior, ele gastaria menos que esta fração do período.
+const CPU_RELAX: f32 = 0.6;
+
+/// Fator de redução que cabe no tempo: sobe um passo quando `ms` passa do orçamento e desce quando
+/// sobra folga mesmo com mais pixels (custo ~ pixels, ou seja, `k²`). Função pura, para testar sem relógio.
+fn cpu_step(k: usize, ms: f32, period_ms: f32) -> usize {
+    if ms > period_ms * CPU_BUDGET && k < MAX_CPU_K {
+        return k + 1;
+    }
+    if k > 1 {
+        let at_lower = ms * (k as f32 / (k - 1) as f32).powi(2);
+        if at_lower < period_ms * CPU_RELAX {
+            return k - 1;
+        }
+    }
+    k
+}
 /// Maior imagem que o decodificador aceita (~16 MB em RGBA): o codificador nunca passa de [`MAX_WIDTH`] de largura.
 pub const MAX_DECODED_PIXELS: usize = MAX_WIDTH * 2160;
 
@@ -332,6 +353,10 @@ pub struct H264Encoder {
     /// Fator de redução extra durante movimento brusco que nem o QP mais grosseiro segura: menos pixels,
     /// menos bits por quadro, mais quadros por segundo. Volta a 1 depois de 1 s (`fps` quadros) de imagem parada.
     motion_k: usize,
+    /// Fator de redução pedido pelo tempo de codificação (CPU lenta ou tela grande); ver [`cpu_step`].
+    time_k: usize,
+    /// Quadros codificados desde a última mudança de `time_k`: dá tempo de a média se acertar.
+    time_frames: u32,
     heavy: u32,
     /// Tamanho do último quadro-chave em resolução cheia: estima o que a próxima troca de página custa.
     key_bytes: f32,
@@ -400,6 +425,8 @@ impl H264Encoder {
             applied_qp: qp,
             floor: QP_MIN,
             motion_k: 1,
+            time_k: 1,
+            time_frames: 0,
             heavy: 0,
             key_bytes: 0.0,
             calm: 0,
@@ -516,7 +543,7 @@ impl H264Encoder {
 
     /// Fator de redução da imagem enviada (1 = tamanho cheio), para diagnóstico.
     pub fn scale(&self) -> usize {
-        self.min_k.max(self.motion_k)
+        self.min_k.max(self.motion_k).max(self.time_k)
     }
 
     /// Fração (0 a 1) de pixels amostrados que mudaram em relação ao último quadro codificado; guarda a
@@ -592,17 +619,40 @@ impl H264Encoder {
         let sent = out.as_ref().ok().and_then(Option::as_ref).map_or(0, |f| f.data.len());
         self.debt = (self.debt + sent as f32 - self.target).max(0.0);
         self.encode_ms += (started.elapsed().as_secs_f32() * 1000.0 - self.encode_ms) * 0.1;
+        // Nos testes da biblioteca o relógio de uma máquina carregada encolheria a imagem e quebraria as
+        // comparações de tamanho; `fit_to_cpu` é testada direto, sem relógio.
+        if self.hw.is_none() && !cfg!(test) {
+            self.fit_to_cpu();
+        }
         if matches!(out, Ok(None)) {
             self.skipped += 1;
         }
         out
     }
 
+    /// Encolhe a imagem quando o openh264 não dá conta do ritmo (59 ms por quadro a 30 quadros/s, por
+    /// exemplo): menos pixels custam proporcionalmente menos CPU, e quadros por segundo valem mais que
+    /// nitidez em movimento. Volta ao tamanho maior quando a folga aparece. O hardware não passa por
+    /// aqui: o tempo dele é de outro processo.
+    fn fit_to_cpu(&mut self) {
+        self.time_frames = self.time_frames.saturating_add(1);
+        // Esperar a média assentar: subir é rápido (10 quadros), descer é devagar (4 s), para não oscilar.
+        let k = self.time_k;
+        let next = cpu_step(k, self.encode_ms, 1000.0 / self.fps);
+        let settled = if next > k { self.time_frames >= 10 } else { self.time_frames as f32 >= self.fps * 4.0 };
+        if next != k && settled {
+            // A média acompanha o novo tamanho de imediato, senão ela ainda mostraria o custo do antigo.
+            self.encode_ms *= (k as f32 / next as f32).powi(2);
+            self.time_k = next;
+            self.time_frames = 0;
+        }
+    }
+
     fn encode_inner(&mut self, frame: &RawFrame, force_key: bool) -> Result<Option<EncodedFrame>, VideoError> {
         if self.hw.is_some() {
             return self.encode_hardware(frame, force_key);
         }
-        let small = frame.shrunk(self.min_k.max(self.motion_k));
+        let small = frame.shrunk(self.scale());
         let frame = small.as_ref().unwrap_or(frame);
         let frame = frame.even().ok_or(VideoError::Size(frame.width, frame.height))?;
         let dims = (frame.width, frame.height);
@@ -1246,6 +1296,41 @@ mod tests {
         let key = (0..10).find_map(|t| enc.encode(&detailed(t), false).unwrap()).expect("um quadro-chave acaba cabendo");
         assert!(key.keyframe && key.data.len() <= MAX_FRAME);
         assert!(enc.min_k > 1);
+    }
+
+    #[test]
+    fn the_image_shrinks_when_encoding_is_slower_than_the_frame_period() {
+        // 30 quadros/s: período de 33 ms.
+        assert_eq!(cpu_step(1, 59.0, 33.3), 2, "59 ms não cabe em 33 ms");
+        assert_eq!(cpu_step(1, 20.0, 33.3), 1, "dentro do orçamento");
+        assert_eq!(cpu_step(MAX_CPU_K, 500.0, 33.3), MAX_CPU_K, "tem teto");
+        // Em k=2 gasta 15 ms; no tamanho cheio gastaria 60 ms, mais que o período: não volta.
+        assert_eq!(cpu_step(2, 15.0, 33.3), 2);
+        // Em k=2 gasta 4 ms; no cheio gastaria 16 ms (< 60% de 33 ms): volta.
+        assert_eq!(cpu_step(2, 4.0, 33.3), 1);
+    }
+
+    #[test]
+    fn the_encoder_shrinks_after_slow_frames_and_grows_back_after_a_calm_stretch() {
+        let mut enc = H264Encoder::new(H264Encoder::default_bitrate()).unwrap();
+        assert_eq!(enc.scale(), 1);
+        // 1,8 período por quadro, qualquer que seja o ritmo do codificador.
+        enc.encode_ms = 1800.0 / enc.fps();
+        for _ in 0..9 {
+            enc.fit_to_cpu();
+        }
+        assert_eq!(enc.scale(), 1, "espera a média assentar");
+        enc.fit_to_cpu();
+        assert_eq!(enc.time_k, 2);
+        assert!(enc.encode_ms < 1000.0 / enc.fps(), "a média já reflete o tamanho novo: {}", enc.encode_ms);
+        // Folga: a média cai e, depois de ~4 s, a imagem volta.
+        enc.encode_ms = 3.0;
+        for _ in 0..(enc.fps() as u32 * 4 - 1) {
+            enc.fit_to_cpu();
+        }
+        assert_eq!(enc.time_k, 2, "descer é devagar");
+        enc.fit_to_cpu();
+        assert_eq!(enc.time_k, 1);
     }
 
     /// Página de texto sintético, `w` de largura por `h` de altura.
