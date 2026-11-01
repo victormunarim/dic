@@ -25,11 +25,14 @@ use thiserror::Error;
 
 /// Quadros por segundo da transmissão quando o circuito é estreito (com cover).
 pub const FPS: f32 = 15.0;
-/// Quadros por segundo quando o circuito aguenta pelo menos [`HIGH_FPS_BITRATE`] (sem privacidade).
+/// Quadros por segundo quando o circuito aguenta pelo menos [`HIGH_FPS_BITRATE`] (slot de 1 ms ou menos).
 pub const HIGH_FPS: f32 = 30.0;
 /// Taxa de vídeo, em bits/s, a partir da qual a transmissão passa a [`HIGH_FPS`]: abaixo disso, mais
 /// quadros por segundo só dividiriam os mesmos bits em quadros piores.
-pub const HIGH_FPS_BITRATE: u32 = 1_500_000;
+///
+/// 1 Mbps: o slot de 1 ms ("Tela em alta qualidade") dá 1,23 Mbps e ficava em 15 quadros/s com o corte
+/// anterior de 1,5 Mbps; o slot padrão de 2 ms (0,6 Mbps) continua em 15.
+pub const HIGH_FPS_BITRATE: u32 = 1_000_000;
 
 /// Quadros por segundo adequados a uma taxa de vídeo.
 pub fn fps_for(bitrate: u32) -> f32 {
@@ -1581,6 +1584,13 @@ mod tests {
         let after = enc.target;
         enc.report_silence();
         assert_eq!(enc.target, after, "no máximo um corte a cada 2 s");
+    }
+
+    #[test]
+    fn high_quality_slot_gets_30_fps_and_the_default_slot_stays_at_15() {
+        let hq = H264Encoder::bitrate_for(crate::phone::HQ_SCREEN_SLOT);
+        assert_eq!(fps_for(hq), HIGH_FPS, "{hq}");
+        assert_eq!(fps_for(H264Encoder::bitrate_for(SCREEN_SLOT)), FPS);
     }
 
     #[test]
