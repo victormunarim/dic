@@ -73,6 +73,12 @@ pub struct NodeConfig {
     /// Opção "2 relays". Desligada (padrão): a ligação é direta, sem relay no meio, e o contato e quem vê o fio
     /// sabem o seu IP. Ligada: o primeiro salto é o relay de outro contato, e o destino não vê o seu IP (veja `docs/DOIS-RELAYS.md`).
     pub two_relays: bool,
+    /// Opção "Priorizar velocidade". Ligada **e** com "2 relays" desligada, nenhum fluxo usa o ritmo constante: sem
+    /// cover no link nem no circuito (voz, bate-papo, arquivo e tela saem na hora) e a tela e o arquivo andam no
+    /// slot rápido ([`OPEN_SCREEN_SLOT`](crate::phone::OPEN_SCREEN_SLOT)). Quem observa a rede passa a ver quando há
+    /// chamada, voz, arquivo e tela, e o tamanho da rajada (veja `docs/SEGURANCA.md`). Com "2 relays" ligada é
+    /// ignorada: a privacidade não se perde em silêncio. Padrão: desligada.
+    pub speed_first: bool,
 }
 
 /// Segredos do relay do nó: o do circuito (`onion`) e o do link (Noise NK).
@@ -92,6 +98,6 @@ impl RelayKeys {
 impl NodeConfig {
     #[must_use]
     pub fn new(secret: StaticSecret, contacts: Vec<[u8; 32]>) -> Self {
-        Self { secret, contacts, relay_port: DEFAULT_RELAY_PORT, public_addr: None, upnp: true, known: Vec::new(), hints: Vec::new(), relay_keys: None, history: Vec::new(), updates: true, update_retry: UPDATE_RETRY, dht: None, name: String::new(), introductions: true, anchor: false, anchors: Vec::new(), servers: None, custody: Vec::new(), tombstones: Vec::new(), blocked: Vec::new(), mail_poll: MAIL_POLL, two_relays: false }
+        Self { secret, contacts, relay_port: DEFAULT_RELAY_PORT, public_addr: None, upnp: true, known: Vec::new(), hints: Vec::new(), relay_keys: None, history: Vec::new(), updates: true, update_retry: UPDATE_RETRY, dht: None, name: String::new(), introductions: true, anchor: false, anchors: Vec::new(), servers: None, custody: Vec::new(), tombstones: Vec::new(), blocked: Vec::new(), mail_poll: MAIL_POLL, two_relays: false, speed_first: false }
     }
 }

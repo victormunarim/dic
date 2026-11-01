@@ -115,6 +115,9 @@ pub(crate) struct Form {
     /// Opção "2 relays" (veja `NodeConfig::two_relays` e `docs/DOIS-RELAYS.md`). Desligada (padrão), a ligação é direta e
     /// o contato vê o IP; ligada, passa pelo relay de outro contato.
     pub(crate) two_relays: bool,
+    /// Opção "Priorizar velocidade" (veja `NodeConfig::speed_first`): tira o ritmo constante de todos os fluxos. Só vale com
+    /// "2 relays" desligada; desligada (padrão) mantém o tráfego constante.
+    pub(crate) speed_first: bool,
     /// Chaves bloqueadas, em hex (com `=nome` opcional) separadas por `;`: não voltam como contato sozinhas, por apresentação ou convite
     /// (veja `Node::block`). Só adicionar a chave de novo, de propósito, desbloqueia.
     pub(crate) blocked: String,
@@ -553,6 +556,7 @@ impl Form {
             // Ligada de início: a chave guarda o "não", então o arquivo antigo, sem ela, também aceita.
             // `dht_circuit` era a caixa própria da DHT; agora a opção é uma só, e quem a tinha ligada fica com "2 relays" ligada.
             two_relays: get("two_relays") == "1" || get("dht_circuit") == "1",
+            speed_first: get("speed_first") == "1",
             blocked: get("blocked"),
             light: match get("light").as_str() {
                 "1" => Some(true),
@@ -591,7 +595,7 @@ impl Form {
         let secret = self.secret_to_write(vault_set);
         let secret = secret.as_str();
         let text = format!(
-            "audio={}\nsecret={}\ncontacts={}\npeer={}\npublic_addr={}\nno_dht={}\nname={}\nintros={}\nno_anchor={}\ntwo_relays={}\nscreen_sharp={}\nscreen_hardware={}\nno_screen_audio={}\nno_screen_hear={}\nanchors={}\ninput_dev={}\noutput_dev={}\nno_opus={}\nno_auto_online={}\nblocked={}\nlight={}\nmute_key={}\ndeafen_key={}\nauto_files={}\n{}",
+            "audio={}\nsecret={}\ncontacts={}\npeer={}\npublic_addr={}\nno_dht={}\nname={}\nintros={}\nno_anchor={}\ntwo_relays={}\nspeed_first={}\nscreen_sharp={}\nscreen_hardware={}\nno_screen_audio={}\nno_screen_hear={}\nanchors={}\ninput_dev={}\noutput_dev={}\nno_opus={}\nno_auto_online={}\nblocked={}\nlight={}\nmute_key={}\ndeafen_key={}\nauto_files={}\n{}",
             u8::from(self.use_audio),
             secret,
             self.contacts.trim().replace('\n', ";"),
@@ -602,6 +606,7 @@ impl Form {
             u8::from(self.intros),
             u8::from(!self.anchor),
             u8::from(self.two_relays),
+            u8::from(self.speed_first),
             u8::from(self.screen_sharp),
             u8::from(self.screen_hardware),
             u8::from(!self.screen_audio),
@@ -915,6 +920,13 @@ mod tests {
     fn two_relays_starts_off() {
         assert!(!Form::default().two_relays, "o padrão é desligado");
         assert!(!Form::first_run().two_relays, "a primeira abertura também começa desligada");
+    }
+
+    /// "Priorizar velocidade" abre desligada e sobrevive ao salvar e ler.
+    #[test]
+    fn speed_first_starts_off() {
+        assert!(!Form::default().speed_first);
+        assert!(!Form::first_run().speed_first);
     }
 
     #[test]

@@ -123,9 +123,10 @@ async fn two_circuits_meet_at_the_rendezvous_and_talk() {
     let mut at_c = Vec::new();
     timeout(Duration::from_secs(5), async {
         while at_d.len() < 5 || at_c.len() < 5 {
+            // Evento que não é dado (ou um lado já completo) não pode desativar o ramo: o `select!` entraria em pânico.
             tokio::select! {
-                Some(Event::Data(x)) = d.next_event(), if at_d.len() < 5 => at_d.extend_from_slice(&x),
-                Some(Event::Data(x)) = c.next_event(), if at_c.len() < 5 => at_c.extend_from_slice(&x),
+                ev = d.next_event(), if at_d.len() < 5 => if let Some(Event::Data(x)) = ev { at_d.extend_from_slice(&x) },
+                ev = c.next_event(), if at_c.len() < 5 => if let Some(Event::Data(x)) = ev { at_c.extend_from_slice(&x) },
             }
         }
     })

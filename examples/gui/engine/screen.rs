@@ -6,7 +6,7 @@ use std::{collections::HashMap, sync::atomic::AtomicU64};
 use super::*;
 use clam::{
     node::Dialer,
-    phone::{SCREEN_SLOT, ScreenEvent, ScreenShare},
+    phone::{ScreenEvent, ScreenShare},
     video::{H264Encoder, Priority, RawFrame, ScreenDecoder, ScreenSource, pump, pump_all},
 };
 
@@ -239,9 +239,8 @@ async fn open_source(fps: f32) -> Result<Box<dyn ScreenSource + Send>, String> {
 }
 
 /// Abre a captura e o codificador conforme as escolhas da janela.
-async fn start_capture(shared: &Arc<Shared>, out: &Sink) -> Result<(Box<dyn ScreenSource + Send>, H264Encoder), String> {
+async fn start_capture(shared: &Arc<Shared>, out: &Sink, slot: Duration) -> Result<(Box<dyn ScreenSource + Send>, H264Encoder), String> {
     let st = &shared.screen;
-    let slot = SCREEN_SLOT;
     let mut bitrate = H264Encoder::bitrate_for(slot);
     if st.audio.load(Ordering::Relaxed) {
         // O som toma slots do mesmo circuito: o vídeo cede essa parte, para a fila não encher.
@@ -277,7 +276,7 @@ pub(crate) async fn share_task(dialer: Dialer, peer: [u8; 32], keys: clam::media
     };
     st.note.lock_unpoisoned().clear();
     let wanted = || st.want_share.load(Ordering::Relaxed) && !shared.hangup.load(Ordering::Relaxed);
-    let (mut src, mut enc) = match start_capture(&shared, &out).await {
+    let (mut src, mut enc) = match start_capture(&shared, &out, dialer.screen_slot()).await {
         Ok(x) => x,
         Err(e) => {
             fail(e);
@@ -379,10 +378,10 @@ pub(crate) struct RoomCapture {
 }
 
 /// Abre a captura e deixa uma thread à espera dos espectadores: só captura quando há ao menos um.
-pub(crate) async fn start_room_capture(shared: Arc<Shared>, out: Sink) -> Option<RoomCapture> {
+pub(crate) async fn start_room_capture(shared: Arc<Shared>, out: Sink, slot: Duration) -> Option<RoomCapture> {
     let st = &shared.screen;
     st.note.lock_unpoisoned().clear();
-    let (mut src, mut enc) = match start_capture(&shared, &out).await {
+    let (mut src, mut enc) = match start_capture(&shared, &out, slot).await {
         Ok(x) => x,
         Err(e) => {
             out.line(format!("tela: {e}"));

@@ -62,6 +62,12 @@ use crate::{
 
 /// Intervalo entre pacotes do circuito da tela: 500 pacotes/s, ≈ 680 kbps de vídeo.
 pub const SCREEN_SLOT: Duration = Duration::from_millis(2);
+/// Intervalo entre pacotes da tela e do arquivo com "Priorizar velocidade" (sem cover): 2000 pacotes/s, 512 kB/s no
+/// fio, abaixo do teto de 800 kB/s por circuito do relay (`RelayConfig::circuit_bytes_per_sec`).
+pub const OPEN_SCREEN_SLOT: Duration = Duration::from_micros(500);
+/// Pacotes seguidos que o slot rápido pode mandar de uma vez para recuperar atraso do relógio (o temporizador do
+/// sistema acorda a cada 1 ms, ou pior, e o intervalo é menor que isso).
+const OPEN_SCREEN_BURST: f64 = 8.0;
 
 /// Maior quadro `[u16][dados]` aceito do circuito; os de mídia e sinalização têm 200 B.
 const MAX_FRAME: usize = 1024;
@@ -606,8 +612,8 @@ pub async fn share_screen_slot(mut client: CircuitClient, keys: &CallKeys, wait:
     .await
     .map_err(|_| CallError::NoCircuit)??;
 
-    // Com cover o circuito só aceita um pacote por intervalo.
-    let max_burst = 1.0;
+    // Com cover o circuito só aceita um pacote por intervalo; o slot rápido não tem cover e pode recuperar atraso.
+    let max_burst = if slot < SCREEN_SLOT { OPEN_SCREEN_BURST } else { 1.0 };
     let stream = Arc::new(Mutex::new(ScreenStream::new(keys)));
     let stopping = Arc::new(AtomicBool::new(false));
     let hello = stream.lock_unpoisoned().next_packet()?;

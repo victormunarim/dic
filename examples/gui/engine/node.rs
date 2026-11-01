@@ -34,6 +34,10 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
     cfg.tombstones = load_tombs();
     cfg.blocked = form.blocked_keys();
     cfg.two_relays = form.two_relays;
+    cfg.speed_first = form.speed_first && !form.two_relays;
+    if cfg.speed_first {
+        out.line("velocidade priorizada: sem ritmo constante; quem observa a rede vê quando e quanto você envia");
+    }
     out.line(if form.two_relays { "2 relays ligado: as ligações passam pelo relay de outro contato, que não vê o conteúdo" } else { "2 relays desligado: as ligações são diretas e o contato vê o seu IP" });
     if form.use_dht {
         cfg.dht = Some(clam::rendezvous::DhtOptions { circuit: form.two_relays, ..Default::default() });

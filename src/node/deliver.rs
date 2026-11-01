@@ -96,7 +96,7 @@ impl Dialer {
         let stream = update::FileStream::sending(&self.secret, &pk, id)?;
         let (found, _) = self.reachable_client(&peer, crate::phone::screen_client_options).await;
         let (client, used) = found?;
-        Some(FilePipe { client, used, secret: self.secret.clone(), pk, stream, bound: false, next_slot: tokio::time::Instant::now() })
+        Some(FilePipe { client, used, secret: self.secret.clone(), pk, stream, bound: false, slot: self.screen_slot(), next_slot: tokio::time::Instant::now() })
     }
 
     /// Guarda `used` como o endereço que funcionou para `peer` (o arquivo chegou).
@@ -204,6 +204,8 @@ pub struct FilePipe {
     stream: update::FileStream,
     /// O primeiro ack chegou: o telefone já ligou o circuito à transferência, e o `Bind` não precisa mais sair.
     bound: bool,
+    /// Intervalo entre pedaços ([`Dialer::screen_slot`]): o ritmo constante da tela ou o rápido.
+    slot: Duration,
     /// Quando o próximo lote pode sair. Conta por prazo, não por espera fixa: o tempo gasto lendo o disco ou tratando
     /// acks não pode atrasar o ritmo (nem deixar a fila do cover esvaziar).
     next_slot: tokio::time::Instant,
@@ -227,7 +229,7 @@ impl FilePipe {
             self.client.send(&frame).await.map_err(|_| PipeClosed)?;
             cells += 1;
         }
-        let step = crate::phone::SCREEN_SLOT * cells.clamp(1, PACE_BURST + 1) as u32;
+        let step = self.slot * cells.clamp(1, PACE_BURST + 1) as u32;
         let now = tokio::time::Instant::now();
         // Atrasado mais que um lote: recomeça do agora em vez de despachar uma rajada para "compensar".
         self.next_slot = if self.next_slot + step < now { now + step } else { self.next_slot + step };

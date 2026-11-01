@@ -15,7 +15,7 @@ use crate::{
         codec::Codec,
         keys::CallKeys,
     },
-    phone::{ActiveCall, AddressUpdate, CallError, PhoneLink, ScreenShare, call_linked, screen_client_options, share_screen_slot, SCREEN_SLOT},
+    phone::{ActiveCall, AddressUpdate, CallError, PhoneLink, ScreenShare, call_linked, screen_client_options, share_screen_slot, OPEN_SCREEN_SLOT, SCREEN_SLOT},
     rendezvous::Rendezvous,
     transport::{CircuitClient, ClientOptions},
 };
@@ -59,6 +59,8 @@ pub struct Dialer {
     pub(super) anchors: Vec<RelayInfo>,
     /// Opção "2 relays" (veja [`NodeConfig::two_relays`]): ligada, o primeiro salto é o relay de outro contato; desligada, a ligação é direta.
     pub(super) two_relays: bool,
+    /// "Priorizar velocidade" já efetiva (veja [`NodeConfig::speed_first`]): só vale com "2 relays" desligada.
+    pub(super) speed_first: bool,
     /// Último carimbo de bate-papo usado (veja [`Dialer::next_chat_id`]).
     pub(super) chat_stamp: Arc<std::sync::atomic::AtomicU64>,
 }
@@ -194,6 +196,9 @@ impl Dialer {
     /// circuito não monta, em vez de cair para um caminho que mostre o IP.
     fn client_with(&self, peer: &[u8; 32], exit: &RelayInfo, mut options: ClientOptions) -> CircuitClient {
         options.direct = !self.two_relays;
+        if self.speed_first {
+            options = fast_options(options);
+        }
         let mut relays = if self.two_relays { self.third_party_relays(peer, exit) } else { Vec::new() };
         relays.push(exit.candidate());
         let cfg = ManagerConfig { exit_addr: Some(exit.addr.clone()), direct: options.direct, ..Default::default() };
@@ -259,14 +264,47 @@ impl Dialer {
     /// Como [`Self::share_screen`].
     pub async fn share_screen_keys(&self, peer: [u8; 32], keys: &CallKeys, wait: Duration) -> Result<ScreenShare, DialError> {
         let (client, used) = self.open_circuit(&peer, screen_client_options).await?;
-        let share = share_screen_slot(client, keys, wait, SCREEN_SLOT).await?;
+        let share = share_screen_slot(client, keys, wait, self.screen_slot()).await?;
         self.remember_used(&peer, used);
         Ok(share)
+    }
+
+    /// Se "Priorizar velocidade" está valendo: ligada e com "2 relays" desligada (veja [`NodeConfig::speed_first`]).
+    #[must_use]
+    pub fn speed_first(&self) -> bool {
+        self.speed_first
+    }
+
+    /// Intervalo entre pacotes da tela e do arquivo: [`SCREEN_SLOT`] no ritmo constante, [`OPEN_SCREEN_SLOT`] com
+    /// "Priorizar velocidade". Quem codifica vídeo usa o mesmo valor em [`H264Encoder::bitrate_for`](crate::video::H264Encoder::bitrate_for).
+    #[must_use]
+    pub fn screen_slot(&self) -> Duration {
+        if self.speed_first { OPEN_SCREEN_SLOT } else { SCREEN_SLOT }
     }
 
     /// Se a opção "2 relays" está ligada (veja [`NodeConfig::two_relays`]).
     #[must_use]
     pub fn two_relays(&self) -> bool {
         self.two_relays
+    }
+}
+
+/// Opções do cliente sem o ritmo constante ("Priorizar velocidade"): sem cover no link e no circuito, então só sai
+/// o que há para enviar e o relay do contato também não devolve padding. O resto das opções fica como estava.
+fn fast_options(options: ClientOptions) -> ClientOptions {
+    ClientOptions { cover: None, circuit_cover: None, profile: None, ..options }
+}
+
+#[cfg(test)]
+mod fast_tests {
+    use super::*;
+
+    #[test]
+    fn fast_options_drop_every_cover_and_keep_the_path() {
+        let base = ClientOptions { direct: true, ..ClientOptions::default() };
+        assert!(base.cover.is_some() && base.circuit_cover.is_some(), "o padrão tem cover");
+        let fast = fast_options(base);
+        assert!(fast.cover.is_none() && fast.circuit_cover.is_none() && fast.profile.is_none());
+        assert!(fast.direct, "a velocidade não muda o caminho");
     }
 }

@@ -292,9 +292,9 @@ pub(crate) async fn run_room(mut rx: mpsc::UnboundedReceiver<RoomCmd>, me_tx: mp
                 Some(RoomCmd::Share(true)) => {
                     if capture.is_none() && !capturing {
                         capturing = true;
-                        let (sh, o, tx) = (shared.clone(), out.clone(), me_tx.clone());
+                        let (sh, o, tx, slot) = (shared.clone(), out.clone(), me_tx.clone(), dialer.screen_slot());
                         tokio::spawn(async move {
-                            let _ = tx.send(RoomCmd::Capture(start_room_capture(sh, o).await));
+                            let _ = tx.send(RoomCmd::Capture(start_room_capture(sh, o, slot).await));
                         });
                     }
                 }

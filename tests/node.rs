@@ -817,14 +817,14 @@ async fn an_anchor_lets_two_moved_contacts_find_each_other() {
 
 /// Liga B a A, A transmite a tela e B tem de receber o quadro (opção "2 relays" desligada; ligada, a tela só vai por
 /// encontro, testada à parte). Devolve o caminho tomado e se o quadro chegou igual.
-async fn screen_arrives(two_relays: bool) -> (PathMode, bool) {
+async fn screen_arrives(two_relays: bool, speed_first: bool) -> (PathMode, bool) {
     use clam::phone::ScreenEvent;
     let (sa, sb, sc) = (key(), key(), key());
     let (pa, pb, pc) = (*PublicKey::from(&sa).as_bytes(), *PublicKey::from(&sb).as_bytes(), *PublicKey::from(&sc).as_bytes());
     let c = Node::start(fixed(sc, free_port(), vec![pa, pb])).await.unwrap();
     // O relay de C só entra como primeiro salto se A já o conhece (`known`).
-    let a = Node::start(NodeConfig { two_relays, known: vec![(pc, c.relay_info().unwrap())], ..fixed(sa, free_port(), vec![pb, pc]) }).await.unwrap();
-    let b = Node::start(fixed(sb, free_port(), vec![pa, pc])).await.unwrap();
+    let a = Node::start(NodeConfig { two_relays, speed_first, known: vec![(pc, c.relay_info().unwrap())], ..fixed(sa, free_port(), vec![pb, pc]) }).await.unwrap();
+    let b = Node::start(NodeConfig { speed_first, ..fixed(sb, free_port(), vec![pa, pc]) }).await.unwrap();
     // Quem liga é B (opção desligada): com "2 relays" ligada em A a chamada dele seria sempre por encontro, e este teste
     // é do caminho da tela, que segue o relay guardado de B.
     b.add_hint(pa, a.relay_info().unwrap());
@@ -860,7 +860,13 @@ async fn screen_arrives(two_relays: bool) -> (PathMode, bool) {
 /// Opção desligada: a tela vai direto ao relay do contato, sem relay no meio.
 #[tokio::test]
 async fn the_screen_goes_straight_to_the_contact_when_two_relays_is_off() {
-    assert_eq!(screen_arrives(false).await, (PathMode::Direct, true));
+    assert_eq!(screen_arrives(false, false).await, (PathMode::Direct, true));
+}
+
+/// "Priorizar velocidade" (chamada e tela sem cover, slot rápido): a chamada abre e o quadro de tela chega igual.
+#[tokio::test]
+async fn the_call_and_the_screen_work_with_speed_first() {
+    assert_eq!(screen_arrives(false, true).await, (PathMode::Direct, true));
 }
 
 /// Opção ligada e o contato sem pontos de introdução: o circuito de tela não abre e não usa o relay guardado dele (que
@@ -1363,22 +1369,24 @@ async fn file_travels_to_an_online_contact_and_never_from_a_stranger() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Medição (não roda no CI): vazão de um arquivo de 260 KB em loopback contra o teto de ~83 KB/s do ritmo da tela.
-#[tokio::test]
-#[ignore]
-async fn measure_file_throughput() {
-    use clam::transfer;
+/// Envia `size` bytes de `a` a `b` (com ou sem "Priorizar velocidade" em `a`), remonta o arquivo em quem recebe e
+/// devolve os segundos do envio. Confere o conteúdo byte a byte.
+async fn file_roundtrip(speed_first: bool, size: u64) -> f64 {
+    use clam::{media::update::FileFrame, transfer};
     let (sa, sb) = (key(), key());
     let (pa, pb) = (*PublicKey::from(&sa).as_bytes(), *PublicKey::from(&sb).as_bytes());
-    let a = Node::start(fixed(sa, free_port(), vec![pb])).await.unwrap();
+    let a = Node::start(NodeConfig { speed_first, ..fixed(sa, free_port(), vec![pb]) }).await.unwrap();
     let b = Node::start(fixed(sb, free_port(), vec![pa])).await.unwrap();
     a.add_hint(pb, b.relay_info().unwrap());
     b.add_hint(pa, a.relay_info().unwrap());
-    let dir = std::env::temp_dir().join(format!("clam-rate-{}", std::process::id()));
+    assert_eq!(a.dialer().speed_first(), speed_first);
+    let dir = std::env::temp_dir().join(format!("clam-rate-{}-{speed_first}-{size}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
+    let content: Vec<u8> = (0..size).map(|i| (i * 7 % 251) as u8).collect();
     let src = dir.join("o.bin");
-    let size = 260_000u64;
-    std::fs::write(&src, vec![7u8; size as usize]).unwrap();
+    std::fs::write(&src, &content).unwrap();
+    let mut inc = transfer::Incoming::create(&dir.join("recebidos"), 1, size, "o.bin").unwrap();
     let t = std::time::Instant::now();
     let dialer = a.dialer();
     let stream = transfer::stream(&dialer, pb, 1, &src, size, |_| {}, || false);
@@ -1387,13 +1395,59 @@ async fn measure_file_throughput() {
     let r = loop {
         tokio::select! {
             r = &mut stream => break r,
-            () = tokio::time::sleep(Duration::from_millis(20)) => { let _ = b.take_files(); }
+            () = tokio::time::sleep(Duration::from_millis(20)) => {
+                for (_, f) in b.take_files() {
+                    if let FileFrame::Chunk { index, data, .. } = f { inc.put(index, &data).unwrap(); }
+                }
+            }
         }
     };
+    let secs = t.elapsed().as_secs_f64();
     r.unwrap();
-    let s = t.elapsed().as_secs_f64();
-    eprintln!("VAZAO {:.1} KB/s em {s:.1} s (teto ~83)", size as f64 / 1000.0 / s);
+    until("os pedaços que faltam chegam", || {
+        for (_, f) in b.take_files() {
+            if let FileFrame::Chunk { index, data, .. } = f {
+                inc.put(index, &data).unwrap();
+            }
+        }
+        inc.complete().then_some(())
+    })
+    .await;
+    assert_eq!(std::fs::read(inc.finish().unwrap()).unwrap(), content);
     let _ = std::fs::remove_dir_all(&dir);
+    secs
+}
+
+/// Com "Priorizar velocidade" o arquivo chega inteiro e igual, como no ritmo constante.
+#[tokio::test]
+async fn file_arrives_intact_with_speed_first_on_and_off() {
+    file_roundtrip(false, 30_000).await;
+    file_roundtrip(true, 30_000).await;
+}
+
+/// Com "2 relays" ligada a velocidade é ignorada: a privacidade não se perde em silêncio.
+#[tokio::test]
+async fn speed_first_is_ignored_when_two_relays_is_on() {
+    let sa = key();
+    let a = Node::start(NodeConfig { speed_first: true, two_relays: true, ..fixed(sa, free_port(), vec![]) }).await.unwrap();
+    assert!(!a.dialer().speed_first());
+    assert_eq!(a.dialer().screen_slot(), clam::phone::SCREEN_SLOT);
+    let sb = key();
+    let b = Node::start(NodeConfig { speed_first: true, ..fixed(sb, free_port(), vec![]) }).await.unwrap();
+    assert!(b.dialer().speed_first());
+    assert_eq!(b.dialer().screen_slot(), clam::phone::OPEN_SCREEN_SLOT);
+}
+
+/// Medição (não roda no CI): vazão de um arquivo de 260 KB em loopback, no ritmo constante (teto ~83 KB/s) e com
+/// "Priorizar velocidade".
+#[tokio::test]
+#[ignore]
+async fn measure_file_throughput() {
+    let size = 260_000u64;
+    for speed_first in [false, true] {
+        let s = file_roundtrip(speed_first, size).await;
+        eprintln!("VAZAO {} {:.1} KB/s em {s:.1} s", if speed_first { "rápido" } else { "constante" }, size as f64 / 1000.0 / s);
+    }
 }
 
 /// O cancelamento do envio vale no meio de uma janela (que leva segundos), não só entre elas.

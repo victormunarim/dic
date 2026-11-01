@@ -186,6 +186,13 @@ impl App {
                     if !self.form.two_relays {
                         note(ui, "Desligado: o contato e quem observa a rede veem o seu IP.");
                     }
+                    lock(ui, offline, locked, |ui| {
+                        ui.add_enabled_ui(!self.form.two_relays, |ui| ui.check(&mut self.form.speed_first, "Priorizar velocidade")
+                            .on_hover_text("Tira o tráfego constante de voz, bate-papo, arquivos e tela: arquivos chegam cerca de 3,5 vezes mais rápido, a tela ganha banda e a voz perde a espera do ritmo fixo. Em troca, quem observa a rede vê quando e quanto você envia (início e fim de chamada, fala e silêncio, tamanho de arquivo, movimento da tela), mas nunca o conteúdo. Só vale com “2 relays” desligada: com ela ligada a opção é ignorada e o ritmo constante continua. Vale ao reiniciar a conexão."));
+                    });
+                    if self.form.speed_first && !self.form.two_relays {
+                        note(ui, "Velocidade priorizada: quem observa a rede vê quando e quanto você envia.");
+                    }
                 });
                 card(ui, "Encontrar contatos", "Como reencontrar um contato que mudou de endereço.", |ui| {
                     details(ui, "Como funciona", "Quando um contato muda de endereço (IP novo, outra rede), o programa avisa direto. Se vocês dois mudarem enquanto estavam separados, o aviso não chega, e o reencontro usa a DHT, as âncoras ou as duas. Não existe servidor: o que é guardado vai cifrado e só o contato lê.");
