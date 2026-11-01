@@ -106,8 +106,6 @@ pub(crate) struct Form {
     pub(crate) public_addr: String,
     /// Guarda o endereço na DHT do BitTorrent e a consulta ao ligar (veja `NodeConfig::dht`).
     pub(crate) use_dht: bool,
-    /// Fala com a DHT por circuito de dois relays de contatos (veja `DhtOptions::circuit`).
-    pub(crate) dht_circuit: bool,
     /// Como esta pessoa se apresenta a quem ela adiciona (veja `NodeConfig::name`).
     pub(crate) my_name: String,
     /// Aceita quem adiciona esta pessoa e vira contato sozinho (veja `NodeConfig::introductions`).
@@ -547,13 +545,13 @@ impl Form {
             // Ligadas de início: o arquivo antigo, sem a chave, também aceita.
             // As chaves guardam o "não": o `dht=0` e o `anchor=0` do tempo em que desligadas era o padrão são ignorados.
             use_dht: get("no_dht") != "1",
-            dht_circuit: get("dht_circuit") == "1",
             my_name: get("name"),
             // Ligado de início: o arquivo antigo, sem a chave, também aceita.
             intros: get("intros") != "0",
             anchor: get("no_anchor") != "1",
             // Ligada de início: a chave guarda o "não", então o arquivo antigo, sem ela, também aceita.
-            two_relays: get("two_relays") == "1",
+            // `dht_circuit` era a caixa própria da DHT; agora a opção é uma só, e quem a tinha ligada fica com "2 relays" ligada.
+            two_relays: get("two_relays") == "1" || get("dht_circuit") == "1",
             blocked: get("blocked"),
             light: match get("light").as_str() {
                 "1" => Some(true),
@@ -592,14 +590,13 @@ impl Form {
         let secret = self.secret_to_write(vault_set);
         let secret = secret.as_str();
         let text = format!(
-            "audio={}\nsecret={}\ncontacts={}\npeer={}\npublic_addr={}\nno_dht={}\ndht_circuit={}\nname={}\nintros={}\nno_anchor={}\ntwo_relays={}\nscreen_sharp={}\nscreen_hardware={}\nno_screen_audio={}\nno_screen_hear={}\nanchors={}\ninput_dev={}\noutput_dev={}\nno_opus={}\nno_auto_online={}\nblocked={}\nlight={}\nmute_key={}\ndeafen_key={}\nauto_files={}\n{}",
+            "audio={}\nsecret={}\ncontacts={}\npeer={}\npublic_addr={}\nno_dht={}\nname={}\nintros={}\nno_anchor={}\ntwo_relays={}\nscreen_sharp={}\nscreen_hardware={}\nno_screen_audio={}\nno_screen_hear={}\nanchors={}\ninput_dev={}\noutput_dev={}\nno_opus={}\nno_auto_online={}\nblocked={}\nlight={}\nmute_key={}\ndeafen_key={}\nauto_files={}\n{}",
             u8::from(self.use_audio),
             secret,
             self.contacts.trim().replace('\n', ";"),
             self.peer.trim(),
             self.public_addr.trim(),
             u8::from(!self.use_dht),
-            u8::from(self.dht_circuit),
             self.my_name.trim().replace(['\n', ';'], " "),
             u8::from(self.intros),
             u8::from(!self.anchor),

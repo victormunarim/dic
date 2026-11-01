@@ -36,9 +36,9 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
     cfg.two_relays = form.two_relays;
     out.line(if form.two_relays { "2 relays ligado: as ligações passam pelo relay de outro contato, que não vê o conteúdo" } else { "2 relays desligado: as ligações são diretas e o contato vê o seu IP" });
     if form.use_dht {
-        cfg.dht = Some(clam::rendezvous::DhtOptions { circuit: form.dht_circuit, ..Default::default() });
-        if form.dht_circuit {
-            out.line("DHT ligada por circuito: o endereço é guardado e lido pelos relays de dois contatos, sem expor o seu IP à DHT (sem dois relays de contatos a DHT fica parada)");
+        cfg.dht = Some(clam::rendezvous::DhtOptions { circuit: form.two_relays, ..Default::default() });
+        if form.two_relays {
+            out.line("DHT ligada pela opção 2 relays: o endereço é guardado e lido pelos relays de dois contatos, sem expor o seu IP à DHT (sem dois relays de contatos a DHT fica parada)");
         } else {
             out.line("DHT ligada: o endereço é guardado, cifrado para cada contato, na DHT do BitTorrent (quem opera nós da DHT vê o seu IP)");
         }

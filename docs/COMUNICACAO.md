@@ -111,7 +111,7 @@ O endereço de um relay muda (IP novo, outra porta). Para o código antigo não 
 - Todas carregam o mesmo **registro de endereço** (endereço, chave de circuito e de link, `seq`), cifrado para o contato. Ninguém de fora o abre nem o forja.
 - A **fila de saída** tenta com espera que dobra (30 s, 1 min, ... 2 h) e desiste em 3 dias ou quando o contato sai da lista. O nó confere o IP externo a cada 40 s (UPnP) e avisa sozinho quando muda.
 - A DHT guarda o item por cerca de 2 h; o dono o renova a cada hora, então ele só dura enquanto o dono está online. O alvo muda por dia, e o leitor consulta os três dias de uma vez.
-- Quem opera nós da DHT vê o IP de quem escreve e de quem lê. Com a opção "Falar com a DHT pelos relays dos contatos", a gravação e a leitura vão por um circuito de dois relays de contatos (`dht:9`) e a DHT só vê o IP da saída. Sem dois relays utilizáveis ela fica parada: **nunca cai para o acesso direto**.
+- Quem opera nós da DHT vê o IP de quem escreve e de quem lê. Com a opção "2 relays" ligada (a DHT segue a mesma opção), a gravação e a leitura vão por um circuito de dois relays de contatos (`dht:9`) e a DHT só vê o IP da saída. Sem dois relays utilizáveis ela fica parada: **nunca cai para o acesso direto**.
 - **Contato de duas vias.** Ao adicionar alguém, o programa manda uma **apresentação** (quadro de tag 7: nome, chave e relay, cifrados para o par) e insiste até a confirmação. Do outro lado, a pessoa passa a aparecer na lista sozinha. Remover um contato também avisa o outro lado (quadro de tag 10, mesma fila), que o tira da lista dele; só vale de quem já é contato. Quem não quer isso desliga "Aceitar adições e remoções de contatos".
 
 ## O que cada parte vê

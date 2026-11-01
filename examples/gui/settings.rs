@@ -192,11 +192,7 @@ impl App {
                     lock(ui, offline, locked, |ui| {
                         // Ligada por padrão; desligar perde só o reencontro pela DHT.
                         ui.check(&mut self.form.use_dht, "Usar a DHT (BitTorrent) para reencontrar contatos")
-                            .on_hover_text("A DHT do BitTorrent é uma rede pública e descentralizada de milhões de computadores. Seu nó guarda nela o endereço atual dele, cifrado para cada contato, e consulta o dos contatos ao ligar. Serve quando você e um contato mudam de endereço ao mesmo tempo. Só o contato lê o conteúdo, mas quem opera nós da DHT vê o seu IP (a opção abaixo esconde). Ligada, seu nó também atende a DHT para circuitos de outros nós. Desligada, sobram o aviso direto e as âncoras.");
-                        ui.add_enabled_ui(self.form.use_dht, |ui| {
-                            ui.check(&mut self.form.dht_circuit, "Falar com a DHT pelos relays dos contatos (esconde o seu IP)")
-                                .on_hover_text("Em vez de falar com a DHT do seu IP, o pedido vai por um circuito de dois relays de contatos: o primeiro vê o seu IP mas não o pedido, o segundo vê o pedido mas não o seu IP, e a DHT só vê o IP do segundo. Precisa de ao menos dois contatos com endereço guardado; sem eles a DHT fica parada, e nunca cai para o acesso direto. Um pouco mais lento.");
-                        });
+                            .on_hover_text("A DHT do BitTorrent é uma rede pública e descentralizada de milhões de computadores. Seu nó guarda nela o endereço atual dele, cifrado para cada contato, e consulta o dos contatos ao ligar. Serve quando você e um contato mudam de endereço ao mesmo tempo. Só o contato lê o conteúdo, mas, com a opção “2 relays” desligada, quem opera nós da DHT vê o seu IP; ligada, o pedido vai por relays de contatos e a DHT só vê o IP do último. Ligada, seu nó também atende a DHT para circuitos de outros nós. Desligada, sobram o aviso direto e as âncoras.");
                     });
                 });
                 card(ui, "Âncoras", "Computadores de pessoas de confiança que guardam o seu endereço.", |ui| {

@@ -144,7 +144,7 @@ Quem adiciona um contato pelo código só tem o código do outro; o outro lado n
 - **Conteúdo:** protegido pela cifra (acima).
 - **Quem fala com quem:** os nós da DHT que guardam um item veem o IP de quem escreve e o de quem lê. Quem controla vários nós próximos do alvo pode ligar os dois IPs e concluir que são contatos. A chave de busca muda por dia, o que limita a janela, mas não impede.
 - **Âncoras (fase 4):** quem opera uma vê o IP de quem pergunta quando o primeiro salto é o relay do próprio usuário (veja a camada 3). A âncora que o usuário escolhe é uma confiança que ele dá.
-- **Mitigação (fase 3, opcional):** as consultas e gravações da DHT saem por um circuito de 2 saltos (`DhtOptions::circuit`, na GUI "Falar com a DHT pelos relays dos contatos"). Sem essa opção, a camada 2 expõe o IP a quem opera nós da DHT. Veja "Consultas pelo circuito" abaixo.
+- **Mitigação (fase 3, opcional):** as consultas e gravações da DHT saem por um circuito de 2 saltos (`DhtOptions::circuit`, na GUI ligado pela opção "2 relays", sem caixa própria). Sem essa opção, a camada 2 expõe o IP a quem opera nós da DHT. Veja "Consultas pelo circuito" abaixo.
 - **Disponibilidade:** nós maliciosos perto do alvo podem esconder ou descartar o item (ataque de eclipse). Eles não leem nem forjam. Mitigação: replicação da própria DHT, período anterior e seguinte, e as outras camadas como alternativa.
 - **Sem sigilo futuro:** vazar a chave secreta de uma identidade revela registros antigos que alguém tenha gravado. O dano é limitado a endereços antigos.
 - **Relógio:** a hora vem do relógio local, que pode errar. A tolerância de um período para cada lado cobre desvio de até algumas horas; além disso a camada 2 falha e a camada 1 (que usa `seq`, não relógio) continua valendo.
