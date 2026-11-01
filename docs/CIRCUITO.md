@@ -427,6 +427,20 @@ c.set_profile(CoverProfile::Strong).await;              // Wi-Fi
 - **Perfil por relay.** O relay tem o seu próprio perfil, independente do cliente: `ServerConfig { profile: Some(CoverProfile::Economy), .. }` na partida (substitui `ServerConfig::cover`, padrão 10 ms) e `RelayServer::set_profile(..)` para trocar com o relay no ar, inclusive nos links abertos. Vale para o que o relay escreve, nos links que ele abre e nos de entrada cujo par usa padding. Um relay em banda cara usa `Economy`; os outros ficam em `Standard`. O cliente continua ditando o ritmo do circuito (1 célula a cada 20 ms), então o perfil do relay só muda o padding de link e o atraso por salto. O teto `max_cover_links` segue valendo.
 - No `measure`: `probe ... --profile economy`.
 
+### Custo do encontro às cegas ("2 relays")
+
+Medido em loopback, 5 relays, cover ligado e voz nos dois sentidos (`cargo test --features net --test meet measure_the_meeting_setup_and_voice_latency -- --ignored --nocapture`, duas execuções):
+
+| O quê | Medido (loopback) |
+|---|---|
+| Introdução + encontro (`meet`) | 220 a 240 ms |
+| Até a chamada pronta (`call_linked` + aceite) | 320 a 340 ms |
+| Primeiro quadro de voz, de ponta a ponta | 90 a 120 ms |
+| Quadros entregues de 150 | 150 |
+| Jitter em torno do ritmo de 20 ms | p50 0,1 a 0,4 ms, p95 ≈ 1 ms |
+
+Como ler: em loopback não há rede, então isto é o custo do protocolo (um Diffie-Hellman por salto, os dois circuitos, o `Noise` do link) mais a quantização do cover (5 ms por link e sentido, em média). **A rede real soma por cima**: o encontro usa **dois circuitos de 2 saltos** (o de C e o de D) unidos no relay de encontro, então o caminho passa por mais relays do que o circuito direto. Estimativa (não medida): montagem ≈ 6 a 8 idas e voltas de rede, e latência de voz de ida ≈ o dobro de saltos do circuito de 2 saltos (some ~5 ms de cover por link). Banda: cada circuito continua com uma célula de 256 B a cada 20 ms por sentido (≈ 100 kbps, como em "Custo"), então nenhum link carrega mais do que antes, mas a chamada gasta **o dobro de banda no total da rede** (dois circuitos em vez de um), e a introdução é um custo único de poucas células. **Falta** medir entre máquinas distintas com o roteiro de "Medir entre máquinas reais" (o `measure` ainda não tem o modo de encontro).
+
 ### Fuzzing guiado por cobertura (`fuzz/`, `cargo-fuzz`)
 
 Além dos testes determinísticos de `tests/fuzz.rs`, o diretório `fuzz/` tem alvos libFuzzer que usam cobertura de código para chegar a caminhos que o gerador aleatório não alcança. É um crate à parte (`[workspace]` próprio), então não afeta `cargo build` nem `cargo test`.

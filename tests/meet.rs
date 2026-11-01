@@ -180,3 +180,54 @@ async fn a_contact_finds_the_intro_points_in_the_presence_record_and_calls() {
     assert!(talk(&a, &mut b, 20).await >= 12);
     a.hangup();
 }
+
+/// Medição em loopback do encontro (não roda junto dos outros: `--ignored --nocapture`). Imprime o tempo de montagem
+/// (introdução + encontro + `call_linked`) e a latência do primeiro quadro de voz e o jitter dos seguintes. Sem rede real, isto é o
+/// custo do protocolo e do cover; os números entre máquinas distintas somam a rede por cima (veja `docs/CIRCUITO.md`).
+#[tokio::test]
+#[ignore = "medição: imprime números, não afirma limites"]
+async fn measure_the_meeting_setup_and_voice_latency() {
+    let mut w = world(|c| vec![*PublicKey::from(c).as_bytes()]).await;
+    let via = w.service.points()[0].clone();
+    let callee_pub = PublicKey::from(&w.callee);
+
+    let t0 = Instant::now();
+    let client = timeout(WAIT, meet(&w.caller, &callee_pub, &via, &w.cands[1], &w.cands)).await.expect("encontro demorou").expect("encontro falhou");
+    let t_meet = t0.elapsed();
+    let caller = w.caller.clone();
+    let call = tokio::spawn(async move { call_linked(client, &caller, &callee_pub, Mulaw::new(), WAIT, None).await });
+    let incoming = timeout(WAIT, w.phone.next_incoming()).await.expect("D não recebeu a chamada").unwrap();
+    let mut b = incoming.accept(Mulaw::new()).await.unwrap();
+    let mut a = call.await.unwrap().unwrap();
+    let t_call = t0.elapsed();
+
+    // Voz contínua de `a` para `b`, um quadro com tom a cada 20 ms. Quadros com energia chegam em ordem; o primeiro dá
+    // a latência de ida (mesmo relógio, mesmo processo) e a variação dos seguintes em torno do ritmo de 20 ms dá o jitter.
+    const FRAMES: usize = 150;
+    let start = Instant::now();
+    let mut tick = tokio::time::interval(Duration::from_millis(20));
+    let (mut sent, mut arrivals) = (0, Vec::new());
+    let end = start + Duration::from_millis(20 * FRAMES as u64 + 1000);
+    while Instant::now() < end && arrivals.len() < FRAMES {
+        tokio::select! {
+            _ = tick.tick() => {
+                if sent < FRAMES { a.send(tone(sent)).await.unwrap(); sent += 1; }
+                // O lado de lá também fala (silêncio), como a GUI.
+                b.send(vec![0; 160]).await.unwrap();
+            }
+            _ = a.next_pcm() => {}
+            f = b.next_pcm() => match f {
+                Some(pcm) if pcm.iter().any(|s| s.unsigned_abs() > 2000) => arrivals.push(start.elapsed()),
+                Some(_) => {}
+                None => break,
+            },
+            () = tokio::time::sleep_until(end) => break,
+        }
+    }
+    let first = arrivals.first().copied().unwrap_or_default();
+    let mut jitter: Vec<Duration> = arrivals.iter().enumerate().map(|(k, t)| t.abs_diff(first + Duration::from_millis(20 * k as u64))).collect();
+    jitter.sort();
+    let at = |p: usize| jitter.get(jitter.len().saturating_sub(1) * p / 100).copied().unwrap_or_default();
+    println!("encontro: {t_meet:?}; até a chamada pronta: {t_call:?}; quadros {}/{FRAMES}; 1º quadro {first:?}; jitter p50 {:?} p95 {:?} máx {:?}", arrivals.len(), at(50), at(95), at(100));
+    a.hangup();
+}
