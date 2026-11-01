@@ -24,6 +24,7 @@
 //! | `scroll` | Mensagem de rolagem da tela: desloca a imagem em vez de recodificá-la (feature `video`) |
 //! | `sysaudio` | Áudio do computador para a tela, sem o que o programa toca (feature `audio`, Linux e Windows) |
 //! | `hwenc` | Codificador por hardware opcional, via `gst-launch` (feature `video`, Linux) |
+//! | `mfenc` | Codificador por hardware opcional, MFT H.264 do Media Foundation (feature `video`, Windows) |
 //! | `capture`, `portal` | Captura da tela: X11 e GDI; portal do desktop no Wayland (features `capture`, `portal`) |
 //! | `phone` | Chamado (`Phone`) e chamador (`call`) sobre o circuito (feature `net`) |
 //! | [`path`] | Modos de caminho: direto (1 salto, padrão do app), 2 saltos |
@@ -96,6 +97,8 @@ pub mod timer;
 pub mod hotkey;
 #[cfg(feature = "video")]
 pub mod hwenc;
+#[cfg(all(feature = "video", windows))]
+pub mod mfenc;
 #[cfg(feature = "video")]
 pub mod prefetch;
 #[cfg(feature = "video")]

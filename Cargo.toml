@@ -40,7 +40,7 @@ rustix = { version = "1", default-features = false, features = ["std"], optional
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse"], optional = true }
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11"], optional = true }
+windows = { version = "0.62", features = ["Win32_Media_MediaFoundation", "Win32_System_Com", "Win32_System_Variant", "Win32_System_Ole", "Win32_Foundation", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11"], optional = true }
 
 # `unsafe` só onde o sistema pede (FFI do Windows e a API crua do openh264): cada ponto leva
 # `#[allow(unsafe_code)]` e um `// SAFETY:` dizendo por que vale.
@@ -55,7 +55,7 @@ undocumented_unsafe_blocks = "warn"
 gui = ["net", "capture", "portal", "hotkey", "dep:eframe", "dep:rfd", "dep:image", "dep:keyring", "dep:nnnoiseless"]
 audio = ["dep:cpal", "dep:sonora"]
 net = ["dep:igd-next", "dep:libp2p", "dep:tokio", "dep:futures", "dep:snow", "dep:mainline"]
-video = ["net", "dep:openh264", "dep:openh264-sys2"]
+video = ["net", "dep:openh264", "dep:openh264-sys2", "dep:windows"]
 capture = ["video", "dep:x11rb", "dep:windows-sys", "dep:windows"]
 hotkey = ["portal", "capture", "net"]
 portal = ["video", "dep:ashpd", "dep:rustix"]

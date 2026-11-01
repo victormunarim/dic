@@ -14,7 +14,12 @@
 //! Um quadro que passa de [`FRAME_LIMIT`] é descartado e o próximo sai como quadro-chave.
 //! A captura fica atrás de [`ScreenSource`]; o X11 está em [`crate::capture`].
 
+// No Windows o hardware é um MFT do Media Foundation; nos outros sistemas, o filho do GStreamer. Os dois
+// têm a mesma superfície (`new`, `name`, `encode`) e entregam `hwenc::Au`.
+#[cfg(not(windows))]
 use crate::hwenc::HwEncoder;
+#[cfg(windows)]
+use crate::mfenc::MfEncoder as HwEncoder;
 use crate::media::screen::{ScreenStream, FRAGMENT_PAYLOAD, MAX_FRAME, MAX_QUEUE};
 use crate::phone::{ScreenShare, SCREEN_SLOT};
 use crate::scroll;
@@ -461,9 +466,21 @@ impl H264Encoder {
         true
     }
 
-    /// Elemento do GStreamer que está codificando, se for hardware.
-    pub fn hardware(&self) -> Option<&'static str> {
+    /// Elemento do GStreamer (Linux) ou MFT (Windows) que está codificando, se for hardware.
+    pub fn hardware(&self) -> Option<&str> {
         self.hw.as_ref().map(HwEncoder::name)
+    }
+
+    /// Propriedades que o MFT recusou (ele segue com o padrão dele), para o diagnóstico. Vazio fora do Windows.
+    pub fn hardware_notes(&self) -> Vec<String> {
+        #[cfg(windows)]
+        {
+            self.hw.as_ref().map(|h| h.notes().to_vec()).unwrap_or_default()
+        }
+        #[cfg(not(windows))]
+        {
+            Vec::new()
+        }
     }
 
     /// Taxa de vídeo atual, em bits/s: a do circuito, menos o que a perda medida por quem assiste mandou cortar.

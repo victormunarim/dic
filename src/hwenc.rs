@@ -59,15 +59,21 @@ const ELEMENTS: &[Element] = &[
 ];
 
 /// Primeiro codificador por hardware que este computador tem (`gst-inspect-1.0 --exists`), se algum.
-/// Chama processos: não use no executor assíncrono sem `spawn_blocking`. No Windows não há (o filho lê
-/// os quadros por um descritor de arquivo).
-pub fn detect() -> Option<&'static str> {
-    if cfg!(windows) {
-        return None;
+/// Chama processos: não use no executor assíncrono sem `spawn_blocking`. No Windows o filho do GStreamer
+/// não serve (ele lê os quadros por um descritor de arquivo): o codificador é um MFT de hardware do
+/// Media Foundation ([`crate::mfenc`]) e o nome devolvido é o dele.
+pub fn detect() -> Option<String> {
+    #[cfg(windows)]
+    {
+        crate::mfenc::detect()
     }
-    ELEMENTS.iter().filter(|e| e.name != "x264enc").find(|e| exists(e.name)).map(|e| e.name)
+    #[cfg(not(windows))]
+    {
+        ELEMENTS.iter().filter(|e| e.name != "x264enc").find(|e| exists(e.name)).map(|e| e.name.to_string())
+    }
 }
 
+#[cfg_attr(windows, allow(dead_code))]
 pub(crate) fn exists(element: &str) -> bool {
     Command::new("gst-inspect-1.0").args(["--exists", element]).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success())
 }

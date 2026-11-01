@@ -283,7 +283,8 @@ async fn start_capture(shared: &Arc<Shared>, out: &Sink, slot: Duration) -> Resu
     if st.hardware.load(Ordering::Relaxed) {
         // `detect` roda processos: fora do executor.
         match tokio::task::spawn_blocking(clam::hwenc::detect).await.ok().flatten() {
-            Some(name) if enc.set_hardware(Some(name)) => out.line(format!("tela: codificando por hardware ({name})")),
+            Some(name) if enc.set_hardware(Some(&name)) => out.line(format!("tela: codificando por hardware ({name})")),
+            _ if cfg!(windows) => out.line("tela: sem codificador H.264 por hardware no Media Foundation (precisa do driver da GPU), usando o openh264"),
             _ => out.line("tela: sem codificador por hardware neste computador (precisa de gstreamer1.0-tools e gstreamer1.0-plugins-bad com o driver da GPU), usando o openh264"),
         }
     }
@@ -362,7 +363,10 @@ pub(crate) async fn share_task(dialer: Dialer, peer: [u8; 32], keys: clam::media
                 "{}, enviados {pushed}, pulados {skipped} ({} pelo codificador, {} adiados com o circuito cheio), descartados na fila {}, saindo {rate:.0} pacotes/s, taxa {} kbps, QP {}, imagem 1/{}, codificar leva {:.0} ms, captura leva {:.0} ms, {fps:.0} quadros/s (meta {:.0}), a captura entrega {source_fps:.0} imagens/s, sem imagem nova {}, imagem igual {}, codificador {}",
                 pipe_line(slot, rate, kbps_useful, share.queued(), &t), enc.skipped, enc.held, t.frames_dropped, enc.bitrate() / 1000, enc.qp(), enc.scale(), enc.encode_ms, enc.grab_ms, enc.fps(), enc.no_frame, enc.same,
                 match (enc.hardware(), &enc.hw_note) {
-                    (Some(name), _) => format!("hardware ({name})"),
+                    (Some(name), _) => match enc.hardware_notes() {
+                        notes if notes.is_empty() => format!("hardware ({name})"),
+                        notes => format!("hardware ({name}; o driver recusou: {})", notes.join("; ")),
+                    },
                     (None, Some(why)) => format!("openh264 (o hardware parou: {why})"),
                     (None, None) => "openh264".to_string(),
                 }
