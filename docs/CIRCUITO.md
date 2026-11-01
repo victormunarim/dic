@@ -450,6 +450,7 @@ Além dos testes determinísticos de `tests/fuzz.rs`, o diretório `fuzz/` tem a
 | `hidden_frames` | `IntroRequest`, `IntroReply`, `RvRequest`, `RvReply` (`parse`) e `Messages::push` com cortes variados | sem pânico; mensagem aceita reproduz a entrada |
 | `hidden_point` | `IntroPoint` e `RvPoint` com pedidos arbitrários e relógio irregular | sem pânico; tabelas ≤ 256 entradas; `cookie` de uso único |
 | `meet_blob` | `open_meeting` com bytes arbitrários e com blob de introdução válido adulterado | sem pânico; blob adulterado nunca é aceito |
+| `presence_v2` | `decode_points_v2` com bytes arbitrários e com texto claro de marca `0xA2` | sem pânico; o que decodifica reencoda idêntico |
 
 ```sh
 cargo install cargo-fuzz

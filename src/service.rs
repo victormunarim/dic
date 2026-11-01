@@ -8,7 +8,7 @@ use crate::{
     DEFAULT_EPOCH_SECS, epoch_of,
     circle::{CircleSecret, TopicKind},
     pairing::PresenceKeys,
-    presence::{self, PresenceError},
+    presence::{self, IntroPointV2, PresenceError},
     store::RecordStore,
 };
 
@@ -50,6 +50,47 @@ pub fn lookup(
     owner: &VerifyingKey,
     now: u64,
 ) -> Option<Vec<Vec<u8>>> {
+    lookup_with(store, cfg, keys, now, |id, rec| presence::open(keys, owner, id, rec).ok())
+}
+
+/// Como [`publish`], com o registro versão 2: pontos de introdução tipados (relay, chaves e `auth_key`), sem IP de
+/// quem publica. Mesmo endereço, mesmo tamanho e mesmo envelope.
+///
+/// # Errors
+///
+/// Como [`presence::seal_v2`].
+pub fn publish_v2(
+    store: &dyn RecordStore,
+    cfg: &PresenceConfig,
+    keys: &PresenceKeys,
+    signer: &SigningKey,
+    now: u64,
+    points: &[IntroPointV2],
+) -> Result<(), PresenceError> {
+    let id = keys.lookup_id(epoch_of(now, cfg.epoch_secs));
+    store.put(id, presence::seal_v2(keys, signer, &id, points)?.to_vec());
+    Ok(())
+}
+
+/// Como [`lookup`], para o registro versão 2. Um registro v1 no mesmo endereço não vale: devolve `None`.
+pub fn lookup_v2(
+    store: &dyn RecordStore,
+    cfg: &PresenceConfig,
+    keys: &PresenceKeys,
+    owner: &VerifyingKey,
+    now: u64,
+) -> Option<Vec<IntroPointV2>> {
+    lookup_with(store, cfg, keys, now, |id, rec| presence::open_v2(keys, owner, id, rec).ok())
+}
+
+/// A busca com iscas, para qualquer versão do registro: `open` abre o que o armazenamento devolver.
+fn lookup_with<T>(
+    store: &dyn RecordStore,
+    cfg: &PresenceConfig,
+    keys: &PresenceKeys,
+    now: u64,
+    open: impl Fn(&[u8; 32], &[u8]) -> Option<T>,
+) -> Option<T> {
     let epoch = epoch_of(now, cfg.epoch_secs);
     let mut candidates: Vec<Option<[u8; 32]>> = [Some(epoch), epoch.checked_sub(1), epoch.checked_add(1)]
         .into_iter()
@@ -67,7 +108,7 @@ pub fn lookup(
                     continue;
                 }
                 if let Some(rec) = store.get(&id) {
-                    found = presence::open(keys, owner, &id, &rec).ok();
+                    found = open(&id, &rec);
                 }
             }
             None => {
@@ -173,5 +214,15 @@ mod tests {
         assert!(t.contains(&c.topic(TopicKind::Presence, 11)));
         // Na troca de período, a assinatura anterior continua válida.
         assert!(circle_topics(&c, &cfg, T0 + DEFAULT_EPOCH_SECS).contains(&t[1]));
+    }
+
+    #[test]
+    fn v2_is_published_and_found_by_the_contact() {
+        let (ka, kb, sk) = setup();
+        let (store, cfg) = (MemoryStore::new(), PresenceConfig::default());
+        let points = vec![IntroPointV2 { addr: "203.0.113.9:4001".into(), public: [1; 32], link_public: [2; 32], auth_key: [3; 32] }];
+        publish_v2(&store, &cfg, &ka, &sk, T0, &points).unwrap();
+        assert_eq!(lookup_v2(&store, &cfg, &kb, &sk.verifying_key(), T0), Some(points));
+        assert_eq!(lookup(&store, &cfg, &kb, &sk.verifying_key(), T0), None, "a busca v1 não abre registro v2");
     }
 }

@@ -37,7 +37,7 @@ Valem para os módulos `pairing`, `presence`, `service`, `circle`, `intro` e `re
 | [docs/GUI.md](docs/GUI.md) | A janela: abas, contatos, áudio, tela, opções |
 | [docs/ENCONTRO.md](docs/ENCONTRO.md) | Reencontrar contatos sem servidor: aviso de endereço novo e ponto de encontro na DHT, âncoras e contato de duas vias |
 | [docs/SERVIDORES.md](docs/SERVIDORES.md) | Servidores e salas de voz com presença, tela na sala e reencontro por servidor, tudo P2P |
-| [docs/DOIS-RELAYS.md](docs/DOIS-RELAYS.md) | Opção "2 relays": etapas 1 a 3 prontas (primeiro salto num relay de outro contato; serviços `intro:9` e `rv:9` no relay; introdução e encontro na biblioteca, ainda fora do `Node`; desligada, conexão direta); o resto (nenhum lado sabe o IP do outro) é desenho |
+| [docs/DOIS-RELAYS.md](docs/DOIS-RELAYS.md) | Opção "2 relays": etapas 1 a 4 prontas (primeiro salto num relay de outro contato; serviços `intro:9` e `rv:9` no relay; introdução e encontro e presença v2 na biblioteca, ainda fora do `Node`; desligada, conexão direta); o resto (nenhum lado sabe o IP do outro) é desenho |
 | [docs/SEGURANCA.md](docs/SEGURANCA.md) | Garantias, limites, chaveiro |
 | [docs/LINUX.md](docs/LINUX.md) / [docs/WINDOWS.md](docs/WINDOWS.md) | Instalação por sistema |
 
@@ -48,8 +48,8 @@ Para ligar a alguém: rode o `examples/gui` (veja [docs/GUI.md](docs/GUI.md)) ou
 | Arquivo | Conteúdo |
 | --- | --- |
 | `src/pairing.rs` | `PresenceKeys::derive`, `lookup_id(epoch)` |
-| `src/presence.rs` | `seal`, `open`, `decoy_*`, `RECORD_LEN` |
-| `src/service.rs` | `publish`, `lookup`, `circle_topics`, `PresenceConfig` |
+| `src/presence.rs` | `seal`, `open`, `seal_v2`, `open_v2` (pontos de introdução tipados), `decoy_*`, `RECORD_LEN` |
+| `src/service.rs` | `publish`, `lookup`, `publish_v2`, `lookup_v2`, `circle_topics`, `PresenceConfig` |
 | `src/store.rs` | `RecordStore`, `MemoryStore` |
 | `src/runner.rs` | `PresenceRunner`, `RunnerConfig`, `Clock` (feature `net`) |
 | `src/descriptor.rs` | `RelayDescriptor`, `RelayDirectory`, `DirectoryConfig` |

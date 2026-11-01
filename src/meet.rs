@@ -58,6 +58,7 @@ use crate::{
     circuit::manager::{Candidate, CircuitManager, Event, ManagerConfig},
     hidden::{self, CHUNK, INTRO_DEST, IntroReply, IntroRequest, Messages, RV_DEST, RvReply, RvRequest},
     phone::Contacts,
+    presence::IntroPointV2,
     sync::LockExt,
     transport::{CircuitClient, ClientOptions},
 };
@@ -342,6 +343,20 @@ impl Talk {
 pub struct IntroTarget {
     pub relay: Candidate,
     pub auth_key: [u8; 32],
+}
+
+/// O que D publica na presença v2 ([`crate::presence::seal_v2`]) é este ponto, sem a pontuação (que é de quem escolhe).
+impl From<&IntroTarget> for IntroPointV2 {
+    fn from(t: &IntroTarget) -> Self {
+        Self { addr: t.relay.addr.clone(), public: t.relay.public, link_public: t.relay.link_public, auth_key: t.auth_key }
+    }
+}
+
+/// O ponto que C lê da presença de D. A pontuação inicial é neutra: quem liga não tem reputação do relay de D.
+impl From<&IntroPointV2> for IntroTarget {
+    fn from(p: &IntroPointV2) -> Self {
+        Self { relay: Candidate { addr: p.addr.clone(), public: p.public, link_public: p.link_public, score: 1.0 }, auth_key: p.auth_key }
+    }
 }
 
 /// C chega a D: espera em `rv`, avisa D por `via` e devolve o circuito já no encontro, pronto para `call_linked`.
@@ -681,6 +696,14 @@ mod tests {
             seen.first_time(cookie);
         }
         assert!(seen.set.len() <= SEEN_COOKIES && seen.order.len() == seen.set.len());
+    }
+
+    #[test]
+    fn an_intro_target_survives_the_presence_record() {
+        let target = IntroTarget { relay: relay(), auth_key: [5; 32] };
+        let point = IntroPointV2::from(&target);
+        assert_eq!((point.addr.as_str(), point.auth_key), ("203.0.113.7:4001", [5; 32]));
+        assert_eq!(IntroTarget::from(&point), target);
     }
 
     #[tokio::test]

@@ -138,3 +138,10 @@ path = "fuzz_targets/meet_blob.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "presence_v2"
+path = "fuzz_targets/presence_v2.rs"
+test = false
+doc = false
+bench = false

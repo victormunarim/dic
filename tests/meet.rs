@@ -16,8 +16,13 @@ use clam::{
     },
     hidden::{self, INTRO_DEST, RV_DEST},
     media::codec::Mulaw,
-    meet::{HiddenService, MeetError, ServiceConfig, meet},
+    meet::{HiddenService, IntroTarget, MeetError, ServiceConfig, meet},
+    pairing::PresenceKeys,
     phone::{ActiveCall, Phone, call_linked},
+    presence::IntroPointV2,
+    service::{self, PresenceConfig},
+    store::MemoryStore,
+    ed25519_dalek::SigningKey,
     rand_core::OsRng,
     transport::{RelayServer, ServerConfig, allow_list},
     x25519_dalek::{PublicKey, StaticSecret},
@@ -148,4 +153,30 @@ async fn without_third_party_relays_the_service_does_not_start() {
     let phone = Phone::bind("127.0.0.1:0".parse().unwrap(), callee.clone(), vec![]).await.unwrap();
     let result = HiddenService::start(ServiceConfig { secret: callee, phone: phone.local_addr(), contacts: phone.contacts(), pool: vec![], intros: vec![cands[0].clone()] }).await;
     assert!(matches!(result, Err(MeetError::NoPool)));
+}
+
+/// O caminho inteiro sem endereço: D publica os pontos na presença v2 (cifrada só para C), C os busca no
+/// armazenamento, encontra D e liga. C nunca recebe um endereço de D; só os pontos de introdução.
+#[tokio::test]
+async fn a_contact_finds_the_intro_points_in_the_presence_record_and_calls() {
+    let mut w = world(|c| vec![*PublicKey::from(c).as_bytes()]).await;
+    let (caller_pub, callee_pub) = (PublicKey::from(&w.caller), PublicKey::from(&w.callee));
+    let (d_keys, c_keys) = (PresenceKeys::derive(&w.callee, &caller_pub), PresenceKeys::derive(&w.caller, &callee_pub));
+    let (signer, store, cfg, now) = (SigningKey::generate(&mut OsRng), MemoryStore::new(), PresenceConfig::default(), 1_800_000_000);
+
+    let points: Vec<IntroPointV2> = w.service.points().iter().map(IntroPointV2::from).collect();
+    service::publish_v2(&store, &cfg, &d_keys, &signer, now, &points).unwrap();
+
+    let found = service::lookup_v2(&store, &cfg, &c_keys, &signer.verifying_key(), now).expect("C não achou a presença de D");
+    let via = IntroTarget::from(found.first().expect("sem ponto de introdução"));
+    assert_eq!(via, w.service.points()[0], "o ponto lido é o que D publicou");
+
+    let client = timeout(WAIT, meet(&w.caller, &callee_pub, &via, &w.cands[1], &w.cands)).await.unwrap().unwrap();
+    let caller = w.caller.clone();
+    let call = tokio::spawn(async move { call_linked(client, &caller, &callee_pub, Mulaw::new(), WAIT, None).await });
+    let incoming = timeout(WAIT, w.phone.next_incoming()).await.expect("D não recebeu a chamada").unwrap();
+    let mut b = incoming.accept(Mulaw::new()).await.unwrap();
+    let a = call.await.unwrap().unwrap();
+    assert!(talk(&a, &mut b, 20).await >= 12);
+    a.hangup();
 }
