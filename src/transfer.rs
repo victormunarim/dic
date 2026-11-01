@@ -4,7 +4,7 @@
 //!
 //! - **Só contato, só online, só se a pessoa aceita.** A oferta não escreve nada no disco; o arquivo parcial só nasce
 //!   depois do "aceitar" ([`Incoming::create`]).
-//! - **Memória limitada.** Quem recebe guarda uma tabela de bits (até ~34 KB) e grava cada pedaço no lugar dele;
+//! - **Memória limitada.** Quem recebe guarda uma tabela de bits (até ~80 KB) e grava cada pedaço no lugar dele;
 //!   quem envia lê uma janela por vez.
 //! - **Nome seguro.** O nome que o contato manda nunca vira caminho: [`safe_name`] tira separadores, controles e pontos
 //!   do começo, e [`Incoming::finish`] nunca sobrescreve um arquivo que já existe.
@@ -19,7 +19,7 @@ use std::{
 
 use crate::media::update::{FILE_CHUNK, FileFrame, MAX_FILE, MAX_FILE_NAME};
 
-/// Pedaços em voo ao mesmo tempo (~126 KB, uns 2 s no ritmo do circuito de tela): limita a memória e quanto se
+/// Pedaços em voo ao mesmo tempo (~170 KB, uns 2 s no ritmo do circuito de tela): limita a memória e quanto se
 /// reenvia se o circuito cair.
 pub const WINDOW: usize = 1024;
 /// Circuitos novos seguidos, sem nenhum ack, antes de desistir do contato.
@@ -91,7 +91,7 @@ pub async fn stream(dialer: &crate::node::Dialer, peer: [u8; 32], id: u64, path:
             }
             reopened += 1;
             // Abrir o circuito leva segundos: o cancelamento vale durante.
-            let open = dialer.open_file_pipe(peer);
+            let open = dialer.open_file_pipe(peer, id);
             tokio::pin!(open);
             pipe = loop {
                 tokio::select! {

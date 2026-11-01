@@ -1025,6 +1025,8 @@ async fn run_actor(
     let mut chat_window: (Instant, usize) = (Instant::now(), 0);
     let mut chat_seen = SeenChats::default();
     let mut file_window: (Instant, usize) = (Instant::now(), 0);
+    // Circuitos de arquivo já ligados a (contato, transferência) por um `Bind`: o pedaço compacto não diz de quem é.
+    let mut file_streams: HashMap<u64, update::FileStream> = HashMap::new();
     let mut intro_window: (Instant, usize) = (Instant::now(), 0);
     let mut server_window: (Instant, usize) = (Instant::now(), 0);
     let mut writers: HashMap<u64, mpsc::Sender<Vec<u8>>> = HashMap::new();
@@ -1039,6 +1041,7 @@ async fn run_actor(
             Msg::Closed(c) => {
                 writers.remove(&c);
                 binds.remove(&c);
+                file_streams.remove(&c);
             }
             Msg::Register { call, conn, tx } => {
                 calls.insert(call, tx);
@@ -1150,14 +1153,26 @@ async fn run_actor(
                         }
                         continue;
                     }
-                    // Arquivo de um contato: só de quem já é contato, no limite de taxa. O ack sai depois de o quadro entrar
-                    // na fila do app; fila cheia = sem ack, e o remetente reenvia (é o controle de fluxo).
-                    if let Some((peer, frame)) = update::open_file(&secret, &data, unix_millis()) {
+                    // Arquivo de um contato: só de quem já é contato, no limite de taxa. O pedaço compacto vale só no circuito
+                    // que um `Bind` ligou; o `Bind` (quadro completo) é consumido aqui e não chega ao app. O ack sai depois de
+                    // o quadro entrar na fila do app; fila cheia = sem ack, e o remetente reenvia (é o controle de fluxo).
+                    let file = if data.first() == Some(&update::TAG_FILE_DATA) {
+                        file_streams.get(&conn).and_then(|s| s.open(&data).map(|f| (s.peer(), f)))
+                    } else {
+                        update::open_file(&secret, &data, unix_millis())
+                    };
+                    if let Some((peer, frame)) = file {
                         if file_window.0.elapsed() >= Duration::from_secs(60) {
                             file_window = (Instant::now(), 0);
                         }
                         file_window.1 += 1;
                         if file_window.1 <= FILE_PER_MINUTE && contacts.lock_unpoisoned().contains(&peer) {
+                            if let update::FileFrame::Bind { id } = frame {
+                                if let Some(stream) = update::FileStream::receiving(&secret, &PublicKey::from(peer), id) {
+                                    file_streams.insert(conn, stream);
+                                }
+                                continue;
+                            }
                             let seq = frame.ack_seq();
                             if files.try_send((peer, frame)).is_ok()
                                 && let Ok(ack) = update::seal_ack(&secret, &PublicKey::from(peer), seq)

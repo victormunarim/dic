@@ -91,10 +91,12 @@ impl Dialer {
 
     /// Abre o circuito de tela que leva um arquivo a `peer`: um só para a transferência inteira, para não pagar a montagem
     /// nem a espera pelos últimos acks a cada janela. `None` se o contato não foi alcançado.
-    pub async fn open_file_pipe(&self, peer: [u8; 32]) -> Option<FilePipe> {
+    pub async fn open_file_pipe(&self, peer: [u8; 32], id: u64) -> Option<FilePipe> {
+        let pk = PublicKey::from(peer);
+        let stream = update::FileStream::sending(&self.secret, &pk, id)?;
         let (found, _) = self.reachable_client(&peer, crate::phone::screen_client_options).await;
         let (client, used) = found?;
-        Some(FilePipe { client, used, secret: self.secret.clone(), pk: PublicKey::from(peer), next_slot: tokio::time::Instant::now() })
+        Some(FilePipe { client, used, secret: self.secret.clone(), pk, stream, bound: false, next_slot: tokio::time::Instant::now() })
     }
 
     /// Guarda `used` como o endereço que funcionou para `peer` (o arquivo chegou).
@@ -198,6 +200,10 @@ pub struct FilePipe {
     used: Option<RelayInfo>,
     secret: x25519_dalek::StaticSecret,
     pk: PublicKey,
+    /// Cifra dos pedaços compactos desta transferência.
+    stream: update::FileStream,
+    /// O primeiro ack chegou: o telefone já ligou o circuito à transferência, e o `Bind` não precisa mais sair.
+    bound: bool,
     /// Quando o próximo lote pode sair. Conta por prazo, não por espera fixa: o tempo gasto lendo o disco ou tratando
     /// acks não pode atrasar o ritmo (nem deixar a fila do cover esvaziar).
     next_slot: tokio::time::Instant,
@@ -207,11 +213,21 @@ impl FilePipe {
     /// Manda `chunks` (no máximo [`PACE_BURST`] por vez, a fila do cover guarda 16 células) e espera até o próximo
     /// espaço do ritmo, recolhendo os acks que chegam. `Err`: o circuito caiu.
     pub async fn push(&mut self, chunks: &[update::FileFrame]) -> Result<Vec<u64>, PipeClosed> {
-        for c in chunks {
-            let frame = update::seal_file(&self.secret, &self.pk, c).map_err(|_| PipeClosed)?;
-            self.client.send(&frame).await.map_err(|_| PipeClosed)?;
+        // Enquanto nenhum ack voltou, o `Bind` vai na frente de cada lote: o cover descarta ~1% das células e o pedaço
+        // compacto sem vínculo é ignorado pelo telefone. Depois do primeiro ack o vínculo vale até o circuito fechar.
+        let mut cells = 0;
+        if !self.bound {
+            let bind = update::seal_file(&self.secret, &self.pk, &update::FileFrame::Bind { id: self.stream.id() }).map_err(|_| PipeClosed)?;
+            self.client.send(&bind).await.map_err(|_| PipeClosed)?;
+            cells += 1;
         }
-        let step = crate::phone::SCREEN_SLOT * chunks.len().clamp(1, PACE_BURST) as u32;
+        for c in chunks {
+            let update::FileFrame::Chunk { index, data, .. } = c else { continue };
+            let frame = self.stream.seal(*index, data).map_err(|_| PipeClosed)?;
+            self.client.send(&frame).await.map_err(|_| PipeClosed)?;
+            cells += 1;
+        }
+        let step = crate::phone::SCREEN_SLOT * cells.clamp(1, PACE_BURST + 1) as u32;
         let now = tokio::time::Instant::now();
         // Atrasado mais que um lote: recomeça do agora em vez de despachar uma rajada para "compensar".
         self.next_slot = if self.next_slot + step < now { now + step } else { self.next_slot + step };
@@ -223,7 +239,12 @@ impl FilePipe {
         let mut acks = Vec::new();
         loop {
             match tokio::time::timeout_at(until, self.client.next_event()).await {
-                Ok(Some(Event::Data(d))) => acks.extend(update::ack_seq_of(&self.secret, &self.pk, &d)),
+                Ok(Some(Event::Data(d))) => {
+                    if let Some(seq) = update::ack_seq_of(&self.secret, &self.pk, &d) {
+                        self.bound = true;
+                        acks.push(seq);
+                    }
+                }
                 Ok(Some(_)) => {}
                 Ok(None) => return Err(PipeClosed),
                 Err(_) => return Ok(acks),

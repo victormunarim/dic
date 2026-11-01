@@ -876,7 +876,7 @@ async fn the_screen_with_two_relays_on_never_uses_the_stored_relay() {
     let known = vec![(pb, b.relay_info().unwrap()), (pc, c.relay_info().unwrap()), (pd, d.relay_info().unwrap())];
     let a = Node::start(NodeConfig { two_relays: true, known, ..fixed(sa, free_port(), vec![pb, pc, pd]) }).await.unwrap();
     // O circuito de tela (o mesmo que leva o arquivo) não abre: B está no `known` de A, mas o endereço não é usado.
-    assert!(a.dialer().open_file_pipe(pb).await.is_none());
+    assert!(a.dialer().open_file_pipe(pb, 1).await.is_none());
 }
 
 /// Opção ligada e nenhum relay de terceiro: falha com o motivo, em vez de cair para um caminho que mostra o IP.
@@ -1361,7 +1361,7 @@ async fn file_travels_to_an_online_contact_and_never_from_a_stranger() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Medição (não roda no CI): vazão de um arquivo de 260 KB em loopback contra o teto de ~61 KB/s do ritmo da tela.
+/// Medição (não roda no CI): vazão de um arquivo de 260 KB em loopback contra o teto de ~83 KB/s do ritmo da tela.
 #[tokio::test]
 #[ignore]
 async fn measure_file_throughput() {
@@ -1390,7 +1390,7 @@ async fn measure_file_throughput() {
     };
     r.unwrap();
     let s = t.elapsed().as_secs_f64();
-    eprintln!("VAZAO {:.1} KB/s em {s:.1} s (teto ~61)", size as f64 / 1000.0 / s);
+    eprintln!("VAZAO {:.1} KB/s em {s:.1} s (teto ~83)", size as f64 / 1000.0 / s);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

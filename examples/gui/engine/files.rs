@@ -187,6 +187,8 @@ pub(crate) fn on_frames(shared: &std::sync::Arc<Shared>, rx: &mut Receiving, fra
                     shared.transfers.lock_unpoisoned().phase(&peer, id, false, phase);
                 }
             }
+            // Só o telefone consome o vínculo; não chega aqui.
+            FileFrame::Bind { .. } => {}
             FileFrame::Cancel { .. } => {
                 if let Some(inc) = rx.open.remove(&(peer, id)) {
                     inc.abort();

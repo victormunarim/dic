@@ -90,8 +90,12 @@ const CHAT_PLAIN_LEN: usize = 1 + 8 + 1 + MAX_CHAT;
 /// Maior arquivo que o bate-papo transfere (100 MiB): no ritmo da tela são ~30 minutos no melhor caso, e o receptor guarda só
 /// uma tabela de pedaços (~100 KB) na memória.
 pub const MAX_FILE: u64 = 100 << 20;
-/// Bytes de arquivo em cada quadro `Chunk`: o corpo de 128 menos índice (4) e tamanho (1).
-pub const FILE_CHUNK: usize = MAX_CHAT - 5;
+/// Tag do pedaço de arquivo compacto ([`FileStream`]).
+pub const TAG_FILE_DATA: u8 = 15;
+/// Bytes de arquivo em cada pedaço: o que sobra do quadro de [`PACKET_LEN`] depois de tag (1), nonce, AEAD (16), índice
+/// (4) e tamanho (1). O pedaço não leva a chave do remetente nem o `id`: o telefone já os guardou no vínculo do circuito
+/// ([`FileFrame::Bind`]), e é isso que o deixa 35% maior que o antigo (123 bytes).
+pub const FILE_CHUNK: usize = PACKET_LEN - 1 - NONCE_LEN - 16 - 4 - 1;
 /// Maior nome de arquivo na oferta (bytes UTF-8): o corpo de 128 menos tamanho (8) e comprimento (1), com folga.
 pub const MAX_FILE_NAME: usize = 100;
 /// Só separa o domínio da cifra do registro guardado na DHT (entra como dado associado, não vai a nenhum quadro).
@@ -501,21 +505,27 @@ pub fn open_chat(my_static: &StaticSecret, frame: &[u8], now_ms: u64) -> Option<
 /// remetente                          destinatário
 ///   Offer(nome, tamanho)  ─────────────>   a pessoa decide
 ///                         <─────────────   Answer(aceita?)
+///   Bind(id)              ─────────────>   o telefone liga o circuito a (contato, id)
 ///   Chunk(0), Chunk(1) …  ─────────────>   cada um confirmado (ack)
 ///   Cancel                <────────────>   qualquer lado desiste
 /// ```
+///
+/// `Offer`, `Answer`, `Bind` e `Cancel` vão no quadro completo (tag 14, com a chave do remetente em claro). `Chunk` vai
+/// no quadro compacto ([`FileStream`], tag 15), que só vale num circuito já ligado por um `Bind`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FileFrame {
     Offer { id: u64, size: u64, name: String },
     Answer { id: u64, accept: bool },
     Chunk { id: u64, index: u32, data: Vec<u8> },
     Cancel { id: u64 },
+    /// Liga o circuito em que chega à transferência `id` do remetente. Quem consome é o telefone; não chega ao app.
+    Bind { id: u64 },
 }
 
 impl FileFrame {
     pub fn id(&self) -> u64 {
         match self {
-            Self::Offer { id, .. } | Self::Answer { id, .. } | Self::Chunk { id, .. } | Self::Cancel { id } => *id,
+            Self::Offer { id, .. } | Self::Answer { id, .. } | Self::Chunk { id, .. } | Self::Cancel { id } | Self::Bind { id } => *id,
         }
     }
 
@@ -544,13 +554,10 @@ pub fn seal_file(my_static: &StaticSecret, peer: &PublicKey, frame: &FileFrame) 
             (0, *id, [&size.to_be_bytes()[..], &[name.len() as u8], name.as_bytes()].concat())
         }
         FileFrame::Answer { id, accept } => (1, *id, vec![u8::from(*accept)]),
-        FileFrame::Chunk { id, index, data } => {
-            if data.is_empty() || data.len() > FILE_CHUNK {
-                return Err(MediaError::Malformed);
-            }
-            (2, *id, [&index.to_be_bytes()[..], &[data.len() as u8], data].concat())
-        }
+        // O pedaço tem quadro próprio ([`FileStream::seal`]).
+        FileFrame::Chunk { .. } => return Err(MediaError::Malformed),
         FileFrame::Cancel { id } => (3, *id, Vec::new()),
+        FileFrame::Bind { id } => (4, *id, Vec::new()),
     };
     let me = PublicKey::from(my_static);
     let cipher = cipher(my_static, peer, &me).ok_or(MediaError::BadKey)?;
@@ -591,19 +598,85 @@ pub fn open_file(my_static: &StaticSecret, frame: &[u8], now_ms: u64) -> Option<
             FileFrame::Offer { id, size, name }
         }
         1 => FileFrame::Answer { id, accept: match r.u8()? { 0 => false, 1 => true, _ => return None } },
-        2 => {
-            let index = r.u32()?;
-            let len = usize::from(r.u8()?);
-            if len == 0 || len > FILE_CHUNK {
-                return None;
-            }
-            FileFrame::Chunk { id, index, data: r.take(len)?.to_vec() }
-        }
         3 => FileFrame::Cancel { id },
+        4 => FileFrame::Bind { id },
         _ => return None,
     };
     Some((author, parsed))
 }
+
+/// Pedaços de uma transferência de arquivo num circuito já ligado. O quadro compacto é `tag ‖ nonce ‖ AEAD(índice ‖
+/// tamanho ‖ dados)`: não leva a chave do remetente nem o `id`. A chave da cifra é a mesma do quadro completo (o
+/// sentido de quem envia), calculada uma vez no vínculo; o `id` entra como dado associado, então um pedaço não passa
+/// por outra transferência. Nonce aleatório, como os demais quadros.
+pub struct FileStream {
+    peer: [u8; 32],
+    id: u64,
+    cipher: ChaCha20Poly1305,
+}
+
+impl FileStream {
+    /// Lado de quem envia o arquivo `id` a `peer`. `None` se a chave de `peer` é um ponto fraco.
+    pub fn sending(my_static: &StaticSecret, peer: &PublicKey, id: u64) -> Option<Self> {
+        let me = PublicKey::from(my_static);
+        Some(Self { peer: peer.to_bytes(), id, cipher: cipher(my_static, peer, &me)? })
+    }
+
+    /// Lado de quem recebe o arquivo `id` de `peer`.
+    pub fn receiving(my_static: &StaticSecret, peer: &PublicKey, id: u64) -> Option<Self> {
+        Some(Self { peer: peer.to_bytes(), id, cipher: cipher(my_static, peer, peer)? })
+    }
+
+    /// O contato do outro lado.
+    pub fn peer(&self) -> [u8; 32] {
+        self.peer
+    }
+
+    /// A transferência a que este fluxo pertence.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    fn aad(&self) -> [u8; 9] {
+        let [a, b, c, d, e, f, g, h] = self.id.to_be_bytes();
+        [TAG_FILE_DATA, a, b, c, d, e, f, g, h]
+    }
+
+    /// Quadro do pedaço `index`. Falha se `data` é vazio ou passa de [`FILE_CHUNK`].
+    pub fn seal(&self, index: u32, data: &[u8]) -> Result<Frame, MediaError> {
+        if data.is_empty() || data.len() > FILE_CHUNK {
+            return Err(MediaError::Malformed);
+        }
+        let plain: [u8; FILE_DATA_PLAIN] = padded(&[&index.to_be_bytes(), &[data.len() as u8], data]);
+        let mut nonce = [0u8; NONCE_LEN];
+        OsRng.fill_bytes(&mut nonce);
+        let sealed = self.cipher.encrypt(Nonce::from_slice(&nonce), Payload { msg: &plain, aad: &self.aad() }).map_err(|_| MediaError::Malformed)?;
+        let frame = [&[TAG_FILE_DATA][..], &nonce, &sealed].concat();
+        frame.try_into().map_err(|_| MediaError::Malformed)
+    }
+
+    /// Abre `frame` como pedaço desta transferência. `None`: não é pedaço compacto, é de outra transferência ou outro
+    /// remetente, foi alterado ou tem tamanho fora de `1..=FILE_CHUNK`.
+    pub fn open(&self, frame: &[u8]) -> Option<FileFrame> {
+        let mut r = Reader::new(frame);
+        if frame.len() != PACKET_LEN || r.u8()? != TAG_FILE_DATA {
+            return None;
+        }
+        let nonce = r.take(NONCE_LEN)?;
+        let sealed = r.take(FILE_DATA_PLAIN + 16)?;
+        let plain = self.cipher.decrypt(Nonce::from_slice(nonce), Payload { msg: sealed, aad: &self.aad() }).ok()?;
+        let mut p = Reader::new(&plain);
+        let index = p.u32()?;
+        let len = usize::from(p.u8()?);
+        if len == 0 || len > FILE_CHUNK {
+            return None;
+        }
+        Some(FileFrame::Chunk { id: self.id, index, data: p.take(len)?.to_vec() })
+    }
+}
+
+/// Conteúdo cifrado do pedaço compacto: índice, tamanho e os dados completados com zeros.
+const FILE_DATA_PLAIN: usize = 4 + 1 + FILE_CHUNK;
 
 /// Um pedaço da custódia: o `id` (o `seq` da apresentação) liga os pedaços do mesmo depósito.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -885,9 +958,8 @@ mod tests {
             FileFrame::Offer { id: 1_000_000, size: 4_000_000, name: "relatório ção.pdf".into() },
             FileFrame::Answer { id: 7, accept: true },
             FileFrame::Answer { id: 7, accept: false },
-            FileFrame::Chunk { id: 7, index: 272_000, data: vec![0xAB; FILE_CHUNK] },
-            FileFrame::Chunk { id: 7, index: 0, data: vec![1] },
             FileFrame::Cancel { id: 7 },
+            FileFrame::Bind { id: 7 },
         ];
         for f in frames {
             let sealed = seal_file(&a, &pb, &f).unwrap();
@@ -902,6 +974,31 @@ mod tests {
     }
 
     #[test]
+    fn file_chunks_round_trip_only_on_their_own_stream() {
+        let (a, b) = ids();
+        let (pa, pb) = (PublicKey::from(&a), PublicKey::from(&b));
+        let (tx, rx) = (FileStream::sending(&a, &pb, 7).unwrap(), FileStream::receiving(&b, &pa, 7).unwrap());
+        assert_eq!((rx.peer(), rx.id()), (*pa.as_bytes(), 7));
+        for (index, data) in [(272_000u32, vec![0xAB; FILE_CHUNK]), (0, vec![1]), (u32::MAX, vec![9; 77])] {
+            let frame = tx.seal(index, &data).unwrap();
+            assert_eq!(frame.len(), PACKET_LEN);
+            assert_eq!(frame[0], TAG_FILE_DATA);
+            assert_eq!(rx.open(&frame), Some(FileFrame::Chunk { id: 7, index, data: data.clone() }));
+            assert_eq!(open_file(&b, &frame, 1), None, "não se confunde com o quadro completo");
+            assert_eq!(open_chat(&b, &frame, 1), None);
+            // Outra transferência, outro contato, o próprio remetente e quadro adulterado não abrem.
+            assert_eq!(FileStream::receiving(&b, &pa, 8).unwrap().open(&frame), None, "outro id");
+            assert_eq!(FileStream::receiving(&b, &PublicKey::from([9u8; 32]), 7).unwrap().open(&frame), None, "outro remetente");
+            assert_eq!(FileStream::receiving(&a, &pb, 7).unwrap().open(&frame), None, "o remetente não abre o próprio quadro");
+            let mut bad = frame;
+            bad[PACKET_LEN - 1] ^= 1;
+            assert_eq!(rx.open(&bad), None);
+            assert_eq!(rx.open(&frame[1..]), None);
+        }
+        assert_ne!(tx.seal(0, b"x").unwrap(), tx.seal(0, b"x").unwrap(), "nonce novo a cada quadro");
+    }
+
+    #[test]
     fn file_frames_refuse_what_does_not_fit() {
         let (a, b) = ids();
         let pb = PublicKey::from(&b);
@@ -911,8 +1008,10 @@ mod tests {
         for bad in [offer(0, "a"), offer(MAX_FILE + 1, "a"), offer(1, ""), offer(1, "a\nb"), offer(1, &"n".repeat(MAX_FILE_NAME + 1))] {
             assert!(seal_file(&a, &pb, &bad).is_err(), "{bad:?}");
         }
+        assert!(seal_file(&a, &pb, &FileFrame::Chunk { id: 1, index: 0, data: vec![1] }).is_err(), "pedaço tem quadro próprio");
+        let stream = FileStream::sending(&a, &pb, 1).unwrap();
         for data in [vec![], vec![0; FILE_CHUNK + 1]] {
-            assert!(seal_file(&a, &pb, &FileFrame::Chunk { id: 1, index: 0, data }).is_err());
+            assert!(stream.seal(0, &data).is_err());
         }
         // Cada pedaço da mesma transferência tem o seu ack.
         assert_ne!(file_chunk_ack(5, 0), file_chunk_ack(5, 1));
