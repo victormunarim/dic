@@ -57,6 +57,31 @@ pub fn chunk_count(size: u64) -> u64 {
     size.div_ceil(FILE_CHUNK as u64)
 }
 
+/// Tempos e contagens de um envio, para o diagnóstico: mostram onde o tempo foi (abrir circuito, esperar ack, ritmo).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SendStats {
+    /// Pedaços do arquivo.
+    pub chunks: u64,
+    /// Pedaços reenviados por falta de ack no prazo.
+    pub resent: u64,
+    /// Vezes que o circuito foi (re)aberto.
+    pub opens: u32,
+    /// Tempo somado abrindo circuitos.
+    pub opening: Duration,
+    /// Do início do envio até o primeiro ack (abertura + ida e volta + ritmo).
+    pub first_ack: Option<Duration>,
+    /// Duração total do envio.
+    pub total: Duration,
+}
+
+impl SendStats {
+    /// Vazão média em KB/s (1 KB = 1000 B) para `size` bytes; 0 sem tempo medido.
+    #[must_use]
+    pub fn kb_per_s(&self, size: u64) -> u64 {
+        size.checked_div(self.total.as_millis() as u64).unwrap_or(0)
+    }
+}
+
 /// Manda o arquivo `path` (de `size` bytes, já combinado com o contato) em pedaços, na transferência `id`. `progress`
 /// recebe os bytes já confirmados; `cancelled` é consultado a cada lote (alguns milissegundos).
 ///
@@ -64,7 +89,7 @@ pub fn chunk_count(size: u64) -> u64 {
 /// uma tela sendo transmitida. Os pedaços ficam "em voo" até o ack voltar (no máximo [`WINDOW`], o que também limita a
 /// memória); o que não voltou em [`RESEND`] sai de novo no meio do fluxo, sem parar para esperar uma janela acabar.
 #[cfg(feature = "net")]
-pub async fn stream(dialer: &crate::node::Dialer, peer: [u8; 32], id: u64, path: &Path, size: u64, progress: impl Fn(u64), cancelled: impl Fn() -> bool) -> Result<(), TransferError> {
+pub async fn stream(dialer: &crate::node::Dialer, peer: [u8; 32], id: u64, path: &Path, size: u64, progress: impl Fn(u64), cancelled: impl Fn() -> bool) -> Result<SendStats, TransferError> {
     use std::{collections::BTreeMap, time::Instant};
 
     use crate::{media::update::file_chunk_ack, node::FilePipe};
@@ -81,6 +106,8 @@ pub async fn stream(dialer: &crate::node::Dialer, peer: [u8; 32], id: u64, path:
     let mut pipe: Option<FilePipe> = None;
     let mut last_ack = Instant::now();
     let mut reopened = 0usize;
+    let started = Instant::now();
+    let mut stats = SendStats { chunks: total, ..SendStats::default() };
     while done < total {
         if cancelled() {
             return Err(TransferError::Cancelled);
@@ -90,6 +117,8 @@ pub async fn stream(dialer: &crate::node::Dialer, peer: [u8; 32], id: u64, path:
                 return Err(TransferError::Unreachable);
             }
             reopened += 1;
+            stats.opens += 1;
+            let opening_from = Instant::now();
             // Abrir o circuito leva segundos: o cancelamento vale durante.
             let open = dialer.open_file_pipe(peer, id);
             tokio::pin!(open);
@@ -101,6 +130,7 @@ pub async fn stream(dialer: &crate::node::Dialer, peer: [u8; 32], id: u64, path:
                     },
                 }
             };
+            stats.opening += opening_from.elapsed();
             last_ack = Instant::now();
             // O que estava em voo foi com o circuito antigo: vale reenviar já.
             let past = Instant::now().checked_sub(RESEND).unwrap_or_else(Instant::now);
@@ -113,6 +143,7 @@ pub async fn stream(dialer: &crate::node::Dialer, peer: [u8; 32], id: u64, path:
         for (frame, at) in flying.values_mut().filter(|(_, at)| now.duration_since(*at) >= RESEND).take(BURST) {
             *at = now;
             batch.push(frame.clone());
+            stats.resent += 1;
         }
         while batch.len() < BURST && next < total && flying.len() + batch.len() < WINDOW {
             let want = (size - next * FILE_CHUNK as u64).min(FILE_CHUNK as u64) as usize;
@@ -136,6 +167,7 @@ pub async fn stream(dialer: &crate::node::Dialer, peer: [u8; 32], id: u64, path:
                 }
                 if done != before {
                     last_ack = Instant::now();
+                    stats.first_ack.get_or_insert_with(|| started.elapsed());
                     reopened = 0;
                     progress((done * FILE_CHUNK as u64).min(size));
                 }
@@ -155,7 +187,8 @@ pub async fn stream(dialer: &crate::node::Dialer, peer: [u8; 32], id: u64, path:
     if let Some(p) = pipe {
         dialer.remember_file_route(&peer, p);
     }
-    Ok(())
+    stats.total = started.elapsed();
+    Ok(stats)
 }
 
 /// Nome que cabe como nome de arquivo em qualquer sistema: sem separadores, controles nem pontos ou espaços nas pontas, e com

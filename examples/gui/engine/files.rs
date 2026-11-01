@@ -54,6 +54,7 @@ pub(crate) fn start_send(shared: &std::sync::Arc<Shared>, dialer: &Dialer, out: 
             sh.transfers.lock_unpoisoned().phase(&peer, id, true, phase);
             (o.repaint)();
         };
+        let asked = tokio::time::Instant::now();
         let offer = FileFrame::Offer { id, size, name: name.clone() };
         if !d.send_file_frame(peer, &offer, CONTROL_WAIT).await {
             return end(Phase::Failed("contato fora do ar".into()));
@@ -82,6 +83,7 @@ pub(crate) fn start_send(shared: &std::sync::Arc<Shared>, dialer: &Dialer, out: 
             return end(Phase::Declined);
         }
         end(Phase::Active);
+        let accepted_after = asked.elapsed();
         let (sh2, sh3) = (sh.clone(), sh.clone());
         let result = transfer::stream(
             &d,
@@ -96,7 +98,8 @@ pub(crate) fn start_send(shared: &std::sync::Arc<Shared>, dialer: &Dialer, out: 
         )
         .await;
         match result {
-            Ok(()) => {
+            Ok(stats) => {
+                o.line(send_report(&name, size, accepted_after, &stats));
                 end(Phase::Done(None));
             }
             Err(transfer::TransferError::Cancelled) => {
@@ -106,6 +109,23 @@ pub(crate) fn start_send(shared: &std::sync::Arc<Shared>, dialer: &Dialer, out: 
             Err(e) => end(Phase::Failed(e.to_string())),
         }
     });
+}
+
+/// Linha de diagnóstico de um envio concluído, para a aba Atividade: onde o tempo foi.
+fn send_report(name: &str, size: u64, accepted_after: Duration, s: &transfer::SendStats) -> String {
+    let secs = |d: Duration| format!("{:.1} s", d.as_secs_f32());
+    format!(
+        "envio de {name} ({} KB): aceito em {}, circuito aberto {}x ({}), primeiro ack em {}, {} pedaços ({} reenviados), total {}, {} KB/s",
+        size / 1000,
+        secs(accepted_after),
+        s.opens,
+        secs(s.opening),
+        s.first_ack.map_or_else(|| "—".into(), secs),
+        s.chunks,
+        s.resent,
+        secs(s.total),
+        s.kb_per_s(size),
+    )
 }
 
 /// Arquivo anexado no bate-papo da sala: confere o arquivo uma vez, avisa a sala com uma linha `📎 nome` e manda o

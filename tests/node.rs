@@ -1335,7 +1335,9 @@ async fn file_travels_to_an_online_contact_and_never_from_a_stranger() {
     assert_eq!(offers[0], (pa, offer.clone()));
 
     let mut inc = transfer::Incoming::create(&dir.join("recebidos"), id, size, "origem.bin").unwrap();
-    transfer::stream(&dialer, pb, id, &src, size, |_| {}, || false).await.unwrap();
+    let stats = transfer::stream(&dialer, pb, id, &src, size, |_| {}, || false).await.unwrap();
+    assert_eq!(stats.chunks, transfer::chunk_count(size));
+    assert!(stats.opens >= 1 && stats.first_ack.is_some_and(|d| d <= stats.total), "contadores do envio incoerentes: {stats:?}");
     let mut chunks = 0u64;
     until("todos os pedaços chegam", || {
         for (from, f) in b.take_files() {
