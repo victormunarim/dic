@@ -1,12 +1,13 @@
 # Opção "2 relays": nenhum lado sabe o IP do outro (desenho)
 
-**Estado: etapa 1 implementada; o resto é desenho.** A opção existe em Configurações (`two_relays`, desligada de início) e decide o caminho de **todo** fluxo (chamada, tela, bate-papo, arquivos, convites). Decisões já em código, que valem acima do texto abaixo quando divergem:
+**Estado: etapas 1 e 2 implementadas; o resto é desenho.** A opção existe em Configurações (`two_relays`, desligada de início) e decide o caminho de **todo** fluxo (chamada, tela, bate-papo, arquivos, convites). Decisões já em código, que valem acima do texto abaixo quando divergem:
 
 - **Qualquer contato pode ser relay.** Não existe marca de contato de confiança (`Dialer::set_trusted`, `PathRequest` e `PathError` foram removidos). O pool é `Dialer::known` sem o par, sem a saída e sem o seu relay (`Dialer::third_party_relays`).
 - **Não existe tela "sem privacidade".** A tela usa o mesmo circuito dos outros fluxos, com cover.
 - **Desligada = conexão direta, sem relay falso.** `ClientOptions::direct`: um salto ao relay do contato, sem o relay local em loopback que antes fazia as vezes de primeiro salto. O contato e quem observa a rede veem o seu IP, e a interface e `SEGURANCA.md` dizem isso.
 - **Ligada, etapa 1: o primeiro salto é o relay de outro contato.** O destino vê o IP desse relay, não o seu. Sem relay de terceiro a ligação falha com `DialError::NoRelays`, nunca cai para o caminho direto. **O IP de quem recebe continua conhecido de quem liga**, porque a saída do circuito ainda é o relay do próprio contato.
-- **Ainda não feito** (camadas B e C, etapas 2 a 5 abaixo): `intro:9` e `rv:9`, ponto de encontro, registro de presença v2, código de contato sem IP e convites com pontos de introdução. Nenhuma tela ou doc deve dizer que o IP fica escondido dos dois lados até elas estarem prontas e testadas.
+- **Etapa 2: os serviços `intro:9` e `rv:9` existem em todo relay** (`src/hidden.rs`, [formato abaixo](#os-serviços-introduçãomd-formato-da-etapa-2)), mas **nada os usa ainda**: o cliente da introdução e do encontro é a etapa 3.
+- **Ainda não feito** (camadas B e C, etapas 3 a 5 abaixo): introdução e encontro ponta a ponta, registro de presença v2, código de contato sem IP e convites com pontos de introdução. Nenhuma tela ou doc deve dizer que o IP fica escondido dos dois lados até elas estarem prontas e testadas.
 
 [← Voltar ao README](../README.md) · veja também [COMUNICACAO.md](COMUNICACAO.md), [CIRCUITO.md](CIRCUITO.md), [ENCONTRO.md](ENCONTRO.md) e [SEGURANCA.md](SEGURANCA.md).
 
@@ -89,6 +90,39 @@ Dois destinos novos, `intro:9` e `rv:9`. Pedido e resposta no mesmo formato do g
 
 Cada lado usa os seus 2 relays, e os dois circuitos se encontram em `M`. Nenhum lado fala direto com o outro.
 
+#### Os serviços `intro:9` e `rv:9` (formato da etapa 2)
+
+Implementados em `src/hidden.rs`. Todo relay liga os dois em loopback ao subir (`Node::start`), independente da opção "2 relays" de quem o opera: sem isso, quem liga a opção não acharia pontos na rede. A política de saída continua uma lista fechada (`allow_list`); `intro:9` e `rv:9` só chegam a esses dois serviços, nunca a um endereço qualquer.
+
+Enquadramento igual ao do gateway: o relay de saída põe `[u16 tamanho][pedaço de até 200 B]` no TCP local, e a mensagem é `u16 tamanho ‖ corpo`, com corpo de 1 a 400 B. Pedaço ou mensagem fora do limite fecha a conexão.
+
+**`intro:9`** (cada conexão é um circuito):
+
+| Mensagem | Corpo | Resposta |
+|---|---|---|
+| `Establish` | `0x10 ‖ auth_key[32]` | `Challenge`: `0x80 ‖ nonce[32]` |
+| `Prove` | `0x11 ‖ assinatura[64]` | `Established` (`0x81`) ou `Refused` (`0x8f`) |
+| `Introduce` | `0x12 ‖ auth_key[32] ‖ u16 tamanho ‖ blob` | `Delivered` (`0x82`) ou `Refused` |
+| aviso a D | `0x90 ‖ u16 tamanho ‖ blob` | (empurrado no circuito de espera) |
+
+- A `auth_key` é uma chave ed25519 **de serviço**, nova por período e sem relação com a chave de contato nem com o relay. D prova que a tem assinando `"clam-intro-establish-v1" ‖ nonce ‖ auth_key` (`verify_strict`). O desafio é novo por pedido e vale uma vez: errar a prova obriga a recomeçar; a assinatura não vale em outro circuito nem em outro ponto.
+- Quem prova a posse substitui o registro anterior da mesma chave (D refez o circuito de espera). Quando o circuito de espera cai, o registro sai, mas só se ainda for o dele.
+- O `blob` (1 a 365 B) é opaco: cifrado só para D, o ponto não o lê e o entrega intacto. O ponto **não** verifica contato; quem decide se uma introdução vale é D, que descarta a de quem não é contato.
+- Limites: 256 serviços por ponto, 20 introduções por minuto por `auth_key`, 600 pedidos por minuto no ponto, 8 avisos na fila de um circuito de espera lento (cheia, a introdução é recusada, não segura quem introduz).
+
+**`rv:9`** (uma conexão faz um único pedido):
+
+| Mensagem | Corpo | Resposta |
+|---|---|---|
+| `Establish` | `0x20 ‖ cookie[32]` | `Waiting` (`0xa0`) ou `Refused` (`0xaf`) |
+| `Join` | `0x21 ‖ cookie[32]` | `Joined` (`0xa1`) ou `Refused` |
+
+- C guarda o `cookie` e espera. Quando D chega com o mesmo `cookie`, o ponto responde `Joined` a D e a C e passa a copiar os bytes de um circuito ao outro (`copy_bidirectional`), sem ler nada.
+- O `cookie` é de **uso único** (sai da tabela no `Join`), vence em 60 s e um `Establish` repetido não toma o lugar do primeiro. Capacidade: 256 `cookie`s; 600 pedidos por minuto.
+- Depois do `Joined`, o que passa é o tráfego cifrado de ponta a ponta de C e D; o ponto de encontro não tem as chaves.
+
+Alvos de fuzz: `hidden_frames` (os quatro parsers e o acumulador de pedaços) e `hidden_point` (sequências de pedidos contra as duas tabelas, tempo variável). Testes: sans-IO e loopback em `src/hidden.rs`; por circuito real de 2 saltos em `tests/hidden.rs`.
+
 ### Camada C: endereçamento sem IP
 
 Sem esta camada, o IP volta pelo texto. Ela toca todo lugar da tabela "Onde o IP aparece hoje":
@@ -153,7 +187,7 @@ Sem esta camada, o IP volta pelo texto. Ela toca todo lugar da tabela "Onde o IP
 Cada etapa é um commit com testes e docs; a frase "nenhum lado sabe o IP do outro" só entra na interface depois da etapa 5.
 
 1. **Relays de terceiros no caminho (camada A).** `PathMode::Hidden`, pool de contatos de confiança, seleção sem o próprio nó e sem o par, falha sem queda silenciosa. Testes: gerente com relays simulados (sans-IO); integração em loopback com 4 nós (você, 2 terceiros, destino) verificando que o destino não vê o IP de quem liga. A opção em Configurações nasce aqui, mas a dica diz só o que esta etapa cumpre.
-2. **Destinos `intro:9` e `rv:9` no relay** (formato, limites, exigência de contato, cookie de uso único). Alvos de fuzz novos, 60 s cada ao mudar. Testes sans-IO do serviço.
+2. **Destinos `intro:9` e `rv:9` no relay** (formato, limites, cookie de uso único). **Feito** (`src/hidden.rs`, alvos `hidden_frames` e `hidden_point`, testes sans-IO, de loopback e por circuito real). A exigência de contato não fica no ponto: ele não conhece a lista de contatos, então D descarta introdução de quem não é contato (etapa 3).
 3. **Introdução e encontro ponta a ponta.** O destinatário mantém os pontos de espera; quem liga encontra D por introdução e encontro. Testes de integração: a chamada completa sem que nenhum lado tenha o IP do outro em memória, em arquivo ou em log.
 4. **Registro de presença versão 2 e código de contato sem endereço.** Tamanho fixo preservado. Compatibilidade com a opção desligada.
 5. **Convites, apresentação, caixa de correio, servidores, bate-papo, arquivos e tela sem IP.** Cada fluxo que hoje usa `reachable_client` passa pelo mesmo ponto de decisão; sem queda silenciosa. Medir latência e banda reais e atualizar este doc e os orçamentos de [COMUNICACAO.md](COMUNICACAO.md) e [CIRCUITO.md](CIRCUITO.md).

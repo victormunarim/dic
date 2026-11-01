@@ -37,7 +37,7 @@ Valem para os módulos `pairing`, `presence`, `service`, `circle`, `intro` e `re
 | [docs/GUI.md](docs/GUI.md) | A janela: abas, contatos, áudio, tela, opções |
 | [docs/ENCONTRO.md](docs/ENCONTRO.md) | Reencontrar contatos sem servidor: aviso de endereço novo e ponto de encontro na DHT, âncoras e contato de duas vias |
 | [docs/SERVIDORES.md](docs/SERVIDORES.md) | Servidores e salas de voz com presença, tela na sala e reencontro por servidor, tudo P2P |
-| [docs/DOIS-RELAYS.md](docs/DOIS-RELAYS.md) | Opção "2 relays": etapa 1 pronta (primeiro salto num relay de outro contato; desligada, conexão direta); o resto (nenhum lado sabe o IP do outro) é desenho |
+| [docs/DOIS-RELAYS.md](docs/DOIS-RELAYS.md) | Opção "2 relays": etapas 1 e 2 prontas (primeiro salto num relay de outro contato; serviços `intro:9` e `rv:9` no relay; desligada, conexão direta); o resto (nenhum lado sabe o IP do outro) é desenho |
 | [docs/SEGURANCA.md](docs/SEGURANCA.md) | Garantias, limites, chaveiro |
 | [docs/LINUX.md](docs/LINUX.md) / [docs/WINDOWS.md](docs/WINDOWS.md) | Instalação por sistema |
 
@@ -76,4 +76,5 @@ Para ligar a alguém: rode o `examples/gui` (veja [docs/GUI.md](docs/GUI.md)) ou
 | `src/phone.rs` | `Phone`, `IncomingCall`, `call`, `ActiveCall` (feature `net`) |
 | `src/transfer.rs` | Arquivo entre contatos: envio em pedaços, recepção com arquivo parcial, nome seguro (feature `net`) |
 | `src/media/` | `VoiceCall`, `keys` (handshake), `packet` (200 B + AEAD), `jitter`, `signal` (convite/aceite), `update` (aviso de endereço novo, apresentação, custódia e caixa de correio), `screen` (pacotes, NACK e taxa da tela), `codec` (µ-law, G.722, Opus; trait `Codec`) |
+| `src/hidden.rs` | pontos de introdução (`intro:9`) e de encontro (`rv:9`) do relay: formato, tabelas sans-IO, cookie de uso único (feature `net`) |
 | `src/path.rs` | `PathMode`, `PathMode::from_two_relays` (a opção "2 relays" decide o caminho) |

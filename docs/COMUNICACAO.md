@@ -43,7 +43,7 @@ você ── loopback ──> seu relay ──(link Noise)──> relay do conta
 ```
 
 - O **primeiro salto é o seu próprio relay** (por loopback). Os relays de outros contatos não entram como primeiro salto; é um limite conhecido (veja "O que cada parte vê").
-- O **segundo salto é o relay do contato**, que faz o papel de saída. A **política de saída** do relay só deixa passar destinos conhecidos: `<hex da chave>:9` leva ao telefone local daquela pessoa, `dht:9` ao gateway da DHT e `anchor:9` à âncora. O nome real do destino (a chave do contato) só aparece dentro da camada do segundo salto.
+- O **segundo salto é o relay do contato**, que faz o papel de saída. A **política de saída** do relay só deixa passar destinos conhecidos: `<hex da chave>:9` leva ao telefone local daquela pessoa, `dht:9` ao gateway da DHT, `anchor:9` à âncora e `intro:9` / `rv:9` aos pontos de introdução e de encontro ([DOIS-RELAYS.md](DOIS-RELAYS.md); ainda sem cliente). O nome real do destino (a chave do contato) só aparece dentro da camada do segundo salto.
 - **Cover de circuito:** o cliente manda **uma célula a cada 20 ms**, seja voz, ping ou `Drop`; o relay de saída responde uma a uma, com o que vem do contato ou com outro `Drop`. Silêncio e conversa têm a mesma taxa nos dois sentidos, em todos os saltos. Custo: ≈ 100 kbps por sentido.
 - **Failover:** o gerente mantém um circuito **ativo** e um **reserva** (com o mesmo cover). O ativo recebe ping a cada 100 ms e é dado como morto após 350 ms sem sinal; a voz passa ao reserva em menos de 500 ms, sem novo convite. O telefone aceita o pacote em qualquer conexão e responde por aquela que o autenticou.
 - Os limites do relay (`RelayConfig`: 256 circuitos, 800 kB/s por circuito, 2 MB/s no relay, 20 criações/s) protegem quem presta o serviço.

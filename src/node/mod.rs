@@ -50,6 +50,7 @@ use crate::{
     },
     phone::{ActiveCall, IncomingCall, Introduction, Phone, ScreenShare},
     server::net::{ServerHub, restore},
+    hidden::{self, INTRO_DEST, RV_DEST},
     rendezvous::{self, ANCHOR_DEST, Anchor, GATEWAY_DEST, Rendezvous},
     transport::{RelayServer, ServerConfig, allow_list},
 };
@@ -214,6 +215,19 @@ impl Node {
                     dht.servers.push(tokio::spawn(rendezvous::serve_anchor(listener, Arc::new(Anchor::new()))));
                 }
                 Err(e) => push_note(&mut dht.note, format!("sem âncora: {e}")),
+            }
+        }
+        // Todo relay serve de ponto de introdução e de encontro (veja `hidden`): sem isso, quem ativa "2 relays" não
+        // acharia pontos na rede. Os dois só guardam tabelas pequenas e copiam bytes cifrados.
+        for (dest, serve) in [(INTRO_DEST, 0), (RV_DEST, 1)] {
+            match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+                Ok(listener) => {
+                    exit.push((dest.to_string(), listener.local_addr()?.to_string()));
+                    dht.servers.push(tokio::spawn(async move {
+                        if serve == 0 { hidden::serve_intro(listener).await } else { hidden::serve_rendezvous(listener).await }
+                    }));
+                }
+                Err(e) => push_note(&mut dht.note, format!("sem {dest}: {e}")),
             }
         }
         scfg.exit = allow_list(exit);

@@ -447,6 +447,8 @@ Além dos testes determinísticos de `tests/fuzz.rs`, o diretório `fuzz/` tem a
 | `media_signal` | `Incoming::parse`, `Caller::answer` com bytes quaisquer e convite verdadeiro com um byte trocado | sem pânico; o convite verdadeiro abre |
 | `media_update` | `open_update`, `open_intro`, `open_ack`, `open_record`, `open_server_record` com bytes quaisquer, com a etiqueta certa e com registros selados de campos arbitrários | sem pânico; registro dentro do formato abre igual, só para o contato; confirmação de outro `seq` é recusada |
 | `media_screen` | `ScreenStream` com pacotes autênticos de carga arbitrária (fragmentos fora de ordem, duplicados, pedidos de reenvio), lixo e passos de envio | sem pânico; todo pacote que sai tem 200 B |
+| `hidden_frames` | `IntroRequest`, `IntroReply`, `RvRequest`, `RvReply` (`parse`) e `Messages::push` com cortes variados | sem pânico; mensagem aceita reproduz a entrada |
+| `hidden_point` | `IntroPoint` e `RvPoint` com pedidos arbitrários e relógio irregular | sem pânico; tabelas ≤ 256 entradas; `cookie` de uso único |
 
 ```sh
 cargo install cargo-fuzz

@@ -117,3 +117,17 @@ path = "fuzz_targets/scroll_message.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "hidden_frames"
+path = "fuzz_targets/hidden_frames.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "hidden_point"
+path = "fuzz_targets/hidden_point.rs"
+test = false
+doc = false
+bench = false
