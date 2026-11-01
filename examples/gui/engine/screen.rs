@@ -238,6 +238,19 @@ async fn open_source(fps: f32) -> Result<Box<dyn ScreenSource + Send>, String> {
     }
 }
 
+/// Estado do circuito de vídeo numa linha: o slot, quanto dele está ocupado, quanto do pacote é vídeo e a fila.
+/// Com o circuito cheio (ocupação perto de 100%) o gargalo é o slot; com folga e a fila vazia, é o codificador.
+fn pipe_line(slot: Duration, packets_per_s: f64, kbps_useful: f64, queued: usize, t: &clam::media::screen::ScreenStats) -> String {
+    let capacity = 1.0 / slot.as_secs_f64().max(1e-6);
+    let full = clam::media::screen::FRAGMENT_PAYLOAD as f64 * t.packets_sent as f64;
+    let waste = if full > 0.0 { 100.0 * (1.0 - t.payload_bytes as f64 / full) } else { 0.0 };
+    format!(
+        "slot {} ms (cabem {capacity:.0} pacotes/s), ocupação {:.0}%, vídeo útil {kbps_useful:.0} kbps, {waste:.0}% do pacote vazio, fila {queued}",
+        slot.as_secs_f64() * 1000.0,
+        100.0 * packets_per_s / capacity
+    )
+}
+
 /// Abre a captura e o codificador conforme as escolhas da janela.
 async fn start_capture(shared: &Arc<Shared>, out: &Sink, slot: Duration) -> Result<(Box<dyn ScreenSource + Send>, H264Encoder), String> {
     let st = &shared.screen;
@@ -311,6 +324,7 @@ pub(crate) async fn share_task(dialer: Dialer, peer: [u8; 32], keys: clam::media
     };
     st.sharing.store(true, Ordering::Relaxed);
     out.line(if dialer.two_relays() { "tela: transmitindo (por um relay de outro contato)" } else { "tela: transmitindo (direto ao contato, que vê o seu IP)" });
+    let slot = dialer.screen_slot();
     let flag = shared.clone();
     let mut audio = AudioTx::open(&shared, &out);
     let mut audio_gave_up = audio.is_none() && shared.screen.audio.load(Ordering::Relaxed);
@@ -320,7 +334,7 @@ pub(crate) async fn share_task(dialer: Dialer, peer: [u8; 32], keys: clam::media
         let every = Duration::from_secs_f32(1.0 / enc.fps());
         let mut next = std::time::Instant::now();
         let (mut pushed, mut skipped) = (0u64, 0u64);
-        let (mut mark, mut mark_packets, mut rate) = (std::time::Instant::now(), 0u64, 0.0f64);
+        let (mut mark, mut mark_packets, mut mark_bytes, mut rate, mut kbps_useful) = (std::time::Instant::now(), 0u64, 0u64, 0.0f64, 0.0f64);
         let (mut pushed_in_span, mut fps) = (0u64, 0.0f64);
         while flag.screen.want_share.load(Ordering::Relaxed) && !flag.hangup.load(Ordering::Relaxed) {
             match pump(src.as_mut(), &mut enc, &share) {
@@ -335,13 +349,14 @@ pub(crate) async fn share_task(dialer: Dialer, peer: [u8; 32], keys: clam::media
             let span = mark.elapsed().as_secs_f64();
             if span >= 1.0 {
                 rate = (t.packets_sent - mark_packets) as f64 / span;
+                kbps_useful = (t.payload_bytes - mark_bytes) as f64 * 8.0 / 1000.0 / span;
                 fps = pushed_in_span as f64 / span;
                 pushed_in_span = 0;
-                (mark, mark_packets) = (std::time::Instant::now(), t.packets_sent);
+                (mark, mark_packets, mark_bytes) = (std::time::Instant::now(), t.packets_sent, t.payload_bytes);
             }
             *flag.screen.tx_info.lock_unpoisoned() = format!(
-                "enviados {pushed}, pulados {skipped} ({} pelo codificador, {} adiados com o circuito cheio), descartados na fila {}, saindo {rate:.0} pacotes/s, taxa {} kbps, QP {}, imagem 1/{}, codificar leva {:.0} ms, captura leva {:.0} ms, {fps:.0} quadros/s, sem imagem nova {}, imagem igual {}, codificador {}",
-                enc.skipped, enc.held, t.frames_dropped, enc.bitrate() / 1000, enc.qp(), enc.scale(), enc.encode_ms, enc.grab_ms, enc.no_frame, enc.same,
+                "{}, enviados {pushed}, pulados {skipped} ({} pelo codificador, {} adiados com o circuito cheio), descartados na fila {}, saindo {rate:.0} pacotes/s, taxa {} kbps, QP {}, imagem 1/{}, codificar leva {:.0} ms, captura leva {:.0} ms, {fps:.0} quadros/s, sem imagem nova {}, imagem igual {}, codificador {}",
+                pipe_line(slot, rate, kbps_useful, share.queued(), &t), enc.skipped, enc.held, t.frames_dropped, enc.bitrate() / 1000, enc.qp(), enc.scale(), enc.encode_ms, enc.grab_ms, enc.no_frame, enc.same,
                 match (enc.hardware(), &enc.hw_note) {
                     (Some(name), _) => format!("hardware ({name})"),
                     (None, Some(why)) => format!("openh264 (o hardware parou: {why})"),

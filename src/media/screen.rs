@@ -127,6 +127,9 @@ pub struct ScreenStats {
     pub rejected: u64,
     /// Pacotes com vídeo que saíram (sem contar preenchimento; os reenvios entram).
     pub packets_sent: u64,
+    /// Bytes de vídeo nesses pacotes (sem cabeçalho nem preenchimento). Contra `packets_sent *
+    /// FRAGMENT_PAYLOAD` mostra quanto do pacote o último fragmento de cada quadro deixa vazio.
+    pub payload_bytes: u64,
     /// Fragmentos reenviados a pedido de quem assiste.
     pub retransmitted: u64,
     /// Quadros de áudio enviados e recebidos.
@@ -561,6 +564,7 @@ impl ScreenStream {
         };
         let len = if let Some((flags, id, idx, total, data)) = next {
             self.stats.packets_sent += 1;
+            self.stats.payload_bytes += data.len() as u64;
             put(&mut buf, 0, &[flags | want]);
             put(&mut buf, 1, &id.to_be_bytes());
             put(&mut buf, 3, &idx.to_be_bytes());
@@ -1195,6 +1199,19 @@ mod tests {
             a.next_packet().unwrap();
         }
         assert_eq!(a.report_age().map(|(_, n)| n), Some(3));
+    }
+
+    #[test]
+    fn payload_bytes_count_the_video_without_padding() {
+        let (mut a, _b) = pair();
+        // Dois fragmentos: um cheio e um com 10 bytes; o resto do pacote é preenchimento.
+        a.push_frame(&frame(FRAGMENT_PAYLOAD + 10, 1), true).unwrap();
+        for _ in 0..4 {
+            a.next_packet().unwrap();
+        }
+        let st = a.stats();
+        assert_eq!(st.packets_sent, 2);
+        assert_eq!(st.payload_bytes, FRAGMENT_PAYLOAD as u64 + 10);
     }
 
     #[test]
