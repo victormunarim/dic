@@ -79,7 +79,7 @@ A tela anda num **circuito só dela**, aberto por quem transmite até o telefone
 |---|---|
 | Caminho | opção "2 relays" ligada: o relay de outro contato e o do contato; desligada (padrão): direto ao relay do contato, 1 salto |
 | Cover | link e circuito no ritmo do slot |
-| Slot (`phone::SCREEN_SLOT`) | 2 ms (500 pacotes/s, capacidade 684 kbps) |
+| Slot (`phone::SCREEN_SLOT`) | 2 ms (500 pacotes/s, capacidade 684 kbps). Com "Tela em alta qualidade", `HQ_SCREEN_SLOT`: 1 ms (1000 pacotes/s, 1,37 Mbps), ainda com cover |
 | Orçamento do codec (90 %) | ≈ 615 kbps |
 | Quadros por segundo (fluidez) | 15 |
 | O que um observador vê | taxa constante, a tela parada ou mexendo; desligada a opção, também o seu IP falando com o relay do contato (o conteúdo segue cifrado) |

@@ -31,6 +31,13 @@ impl App {
                     }
                 });
                 if ui
+                    .check(&mut self.form.hq_screen, "Tela em alta qualidade")
+                    .on_hover_text("Dobra a banda de vídeo da tela (de ~0,6 para ~1,2 Mbps), com o mesmo tráfego constante: quem observa a rede continua sem ver quando a imagem se mexe. Em troca, a transmissão ocupa 256 kB/s (~2 Mbps) de upload o tempo todo, mesmo com a tela parada; com menos upload que isso, prejudica a voz. Vale ao reiniciar a conexão. Com “Priorizar velocidade” ligada (sem “2 relays”) ela já é superada por um slot ainda menor.")
+                    .changed()
+                {
+                    self.form.save();
+                }
+                if ui
                     .check(&mut self.form.screen_hardware, "Codificar a tela pela placa de vídeo (experimental)")
                     .on_hover_text("Usa a GPU (VA-API, NVENC ou Quick Sync, via GStreamer) em vez do processador. Precisa de gstreamer1.0-tools e gstreamer1.0-plugins-bad com o driver da GPU; sem isso, ou se ela parar, o programa volta sozinho ao openh264. Menos CPU, mas sem o controle fino de nitidez por quadro, e a imagem pode demorar um pouco mais a reagir. Não funciona no Windows. Vale na próxima transmissão.")
                     .changed()

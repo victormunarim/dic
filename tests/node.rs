@@ -817,14 +817,14 @@ async fn an_anchor_lets_two_moved_contacts_find_each_other() {
 
 /// Liga B a A, A transmite a tela e B tem de receber o quadro (opção "2 relays" desligada; ligada, a tela só vai por
 /// encontro, testada à parte). Devolve o caminho tomado e se o quadro chegou igual.
-async fn screen_arrives(two_relays: bool, speed_first: bool) -> (PathMode, bool) {
+async fn screen_arrives(two_relays: bool, speed_first: bool, hq_screen: bool) -> (PathMode, bool) {
     use clam::phone::ScreenEvent;
     let (sa, sb, sc) = (key(), key(), key());
     let (pa, pb, pc) = (*PublicKey::from(&sa).as_bytes(), *PublicKey::from(&sb).as_bytes(), *PublicKey::from(&sc).as_bytes());
     let c = Node::start(fixed(sc, free_port(), vec![pa, pb])).await.unwrap();
     // O relay de C só entra como primeiro salto se A já o conhece (`known`).
-    let a = Node::start(NodeConfig { two_relays, speed_first, known: vec![(pc, c.relay_info().unwrap())], ..fixed(sa, free_port(), vec![pb, pc]) }).await.unwrap();
-    let b = Node::start(NodeConfig { speed_first, ..fixed(sb, free_port(), vec![pa, pc]) }).await.unwrap();
+    let a = Node::start(NodeConfig { two_relays, speed_first, hq_screen, known: vec![(pc, c.relay_info().unwrap())], ..fixed(sa, free_port(), vec![pb, pc]) }).await.unwrap();
+    let b = Node::start(NodeConfig { speed_first, hq_screen, ..fixed(sb, free_port(), vec![pa, pc]) }).await.unwrap();
     // Quem liga é B (opção desligada): com "2 relays" ligada em A a chamada dele seria sempre por encontro, e este teste
     // é do caminho da tela, que segue o relay guardado de B.
     b.add_hint(pa, a.relay_info().unwrap());
@@ -857,16 +857,36 @@ async fn screen_arrives(two_relays: bool, speed_first: bool) -> (PathMode, bool)
     (path, got.as_deref() == Some(frame.as_slice()))
 }
 
+/// "Tela em alta qualidade": o quadro chega, com ou sem "2 relays", no slot de 1 ms e com cover.
+#[tokio::test]
+async fn the_screen_arrives_with_hq_screen_on_and_off() {
+    assert_eq!(screen_arrives(false, false, true).await, (PathMode::Direct, true));
+}
+
+/// Cada opção escolhe o slot certo: alta qualidade só mexe na tela, velocidade vence e mexe no arquivo.
+#[tokio::test]
+async fn slots_follow_the_options() {
+    use clam::phone::{HQ_SCREEN_SLOT, OPEN_SCREEN_SLOT, SCREEN_SLOT};
+    let slots = |speed_first, hq_screen| async move {
+        let n = Node::start(NodeConfig { speed_first, hq_screen, ..fixed(key(), free_port(), vec![]) }).await.unwrap();
+        (n.dialer().screen_slot(), n.dialer().file_slot())
+    };
+    assert_eq!(slots(false, false).await, (SCREEN_SLOT, SCREEN_SLOT));
+    assert_eq!(slots(false, true).await, (HQ_SCREEN_SLOT, SCREEN_SLOT), "alta qualidade não toca o arquivo");
+    assert_eq!(slots(true, false).await, (OPEN_SCREEN_SLOT, OPEN_SCREEN_SLOT));
+    assert_eq!(slots(true, true).await, (OPEN_SCREEN_SLOT, OPEN_SCREEN_SLOT), "velocidade vence");
+}
+
 /// Opção desligada: a tela vai direto ao relay do contato, sem relay no meio.
 #[tokio::test]
 async fn the_screen_goes_straight_to_the_contact_when_two_relays_is_off() {
-    assert_eq!(screen_arrives(false, false).await, (PathMode::Direct, true));
+    assert_eq!(screen_arrives(false, false, false).await, (PathMode::Direct, true));
 }
 
 /// "Priorizar velocidade" (chamada e tela sem cover, slot rápido): a chamada abre e o quadro de tela chega igual.
 #[tokio::test]
 async fn the_call_and_the_screen_work_with_speed_first() {
-    assert_eq!(screen_arrives(false, true).await, (PathMode::Direct, true));
+    assert_eq!(screen_arrives(false, true, false).await, (PathMode::Direct, true));
 }
 
 /// Opção ligada e o contato sem pontos de introdução: o circuito de tela não abre e não usa o relay guardado dele (que
@@ -951,6 +971,10 @@ struct Blind {
 }
 
 async fn blind_pair() -> Blind {
+    blind_pair_hq(false).await
+}
+
+async fn blind_pair_hq(hq_screen: bool) -> Blind {
     use clam::rendezvous::DhtOptions;
     let testnet = Box::leak(Box::new(mainline::Testnet::new(5).unwrap()));
     let dht = || Some(DhtOptions { bootstrap: testnet.bootstrap.clone(), bind: Some(std::net::Ipv4Addr::LOCALHOST), circuit: false });
@@ -964,7 +988,7 @@ async fn blind_pair() -> Blind {
         relays.push((p, n.relay_info().unwrap()));
         others.push(n);
     }
-    let cfg = |s, contacts| NodeConfig { updates: false, two_relays: true, dht: dht(), known: relays.clone(), ..fixed(s, free_port(), contacts) };
+    let cfg = |s, contacts| NodeConfig { updates: false, two_relays: true, hq_screen, dht: dht(), known: relays.clone(), ..fixed(s, free_port(), contacts) };
     let a = Node::start(cfg(sa, vec![pb, pc, pd, pe])).await.unwrap();
     let b = Node::start(cfg(sb, vec![pa, pc, pd, pe])).await.unwrap();
     // Cada um sobe o serviço e grava a presença em segundo plano: espera os dois acharem os pontos um do outro.
@@ -1007,8 +1031,19 @@ async fn chat_and_files_with_two_relays_on_arrive_without_knowing_the_address() 
 /// Com "2 relays" ligada, a tela de A chega a B por encontro (um circuito só dela, com o cover no ritmo dos slots).
 #[tokio::test]
 async fn the_screen_with_two_relays_on_arrives_without_knowing_the_address() {
+    screen_over_two_relays(false).await;
+}
+
+/// "Tela em alta qualidade" também vale com "2 relays" ligada: o quadro chega por encontro, com cover.
+#[tokio::test]
+async fn the_hq_screen_arrives_with_two_relays_on() {
+    screen_over_two_relays(true).await;
+}
+
+async fn screen_over_two_relays(hq_screen: bool) {
     use clam::phone::ScreenEvent;
-    let Blind { a, mut b, pb, _others, .. } = blind_pair().await;
+    let Blind { a, mut b, pb, _others, .. } = blind_pair_hq(hq_screen).await;
+    assert_eq!(a.dialer().hq_screen(), hq_screen);
     let answer = tokio::spawn(async move {
         let inc = timeout(Duration::from_secs(60), b.next_incoming()).await.unwrap().unwrap();
         (inc.accept(Mulaw::new()).await.unwrap(), b)

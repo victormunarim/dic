@@ -15,7 +15,7 @@ use crate::{
         codec::Codec,
         keys::CallKeys,
     },
-    phone::{ActiveCall, AddressUpdate, CallError, PhoneLink, ScreenShare, call_linked, screen_client_options, share_screen_slot, OPEN_SCREEN_SLOT, SCREEN_SLOT},
+    phone::{ActiveCall, AddressUpdate, CallError, PhoneLink, ScreenShare, call_linked, screen_client_options, screen_client_options_hq, share_screen_slot, HQ_SCREEN_SLOT, OPEN_SCREEN_SLOT, SCREEN_SLOT},
     rendezvous::Rendezvous,
     transport::{CircuitClient, ClientOptions},
 };
@@ -61,6 +61,8 @@ pub struct Dialer {
     pub(super) two_relays: bool,
     /// "Priorizar velocidade" já efetiva (veja [`NodeConfig::speed_first`]): só vale com "2 relays" desligada.
     pub(super) speed_first: bool,
+    /// "Tela em alta qualidade" (veja [`NodeConfig::hq_screen`]): vale com ou sem "2 relays".
+    pub(super) hq_screen: bool,
     /// Último carimbo de bate-papo usado (veja [`Dialer::next_chat_id`]).
     pub(super) chat_stamp: Arc<std::sync::atomic::AtomicU64>,
 }
@@ -263,7 +265,8 @@ impl Dialer {
     ///
     /// Como [`Self::share_screen`].
     pub async fn share_screen_keys(&self, peer: [u8; 32], keys: &CallKeys, wait: Duration) -> Result<ScreenShare, DialError> {
-        let (client, used) = self.open_circuit(&peer, screen_client_options).await?;
+        let options = if self.hq_screen() { screen_client_options_hq } else { screen_client_options };
+        let (client, used) = self.open_circuit(&peer, options).await?;
         let share = share_screen_slot(client, keys, wait, self.screen_slot()).await?;
         self.remember_used(&peer, used);
         Ok(share)
@@ -275,10 +278,29 @@ impl Dialer {
         self.speed_first
     }
 
-    /// Intervalo entre pacotes da tela e do arquivo: [`SCREEN_SLOT`] no ritmo constante, [`OPEN_SCREEN_SLOT`] com
-    /// "Priorizar velocidade". Quem codifica vídeo usa o mesmo valor em [`H264Encoder::bitrate_for`](crate::video::H264Encoder::bitrate_for).
+    /// Se "Tela em alta qualidade" está valendo: ligada e sem "Priorizar velocidade" efetiva (que já usa um slot menor).
+    #[must_use]
+    pub fn hq_screen(&self) -> bool {
+        self.hq_screen && !self.speed_first
+    }
+
+    /// Intervalo entre pacotes da tela: [`SCREEN_SLOT`] no ritmo constante, [`HQ_SCREEN_SLOT`] com "Tela em alta
+    /// qualidade" (ainda com cover) e [`OPEN_SCREEN_SLOT`] com "Priorizar velocidade". Quem codifica vídeo usa o mesmo
+    /// valor em [`H264Encoder::bitrate_for`](crate::video::H264Encoder::bitrate_for).
     #[must_use]
     pub fn screen_slot(&self) -> Duration {
+        if self.speed_first {
+            OPEN_SCREEN_SLOT
+        } else if self.hq_screen {
+            HQ_SCREEN_SLOT
+        } else {
+            SCREEN_SLOT
+        }
+    }
+
+    /// Intervalo entre pedaços de arquivo: só "Priorizar velocidade" o muda; a alta qualidade da tela não toca o arquivo.
+    #[must_use]
+    pub fn file_slot(&self) -> Duration {
         if self.speed_first { OPEN_SCREEN_SLOT } else { SCREEN_SLOT }
     }
 

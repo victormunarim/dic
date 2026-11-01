@@ -250,7 +250,7 @@ impl Node {
     }
 
     async fn finish(cfg: NodeConfig, mut phone: Phone, relay: RelayServer, onion: [u8; 32], dht: Services) -> io::Result<Self> {
-        let NodeConfig { secret, public_addr, upnp, known, hints, history, updates, update_retry, dht: dht_options, name, introductions, anchors, servers: saved_servers, custody: saved_custody, mail_poll, tombstones, blocked, two_relays, speed_first, .. } = cfg;
+        let NodeConfig { secret, public_addr, upnp, known, hints, history, updates, update_retry, dht: dht_options, name, introductions, anchors, servers: saved_servers, custody: saved_custody, mail_poll, tombstones, blocked, two_relays, speed_first, hq_screen, .. } = cfg;
         let known: Known = Arc::new(Mutex::new(known.into_iter().collect()));
         let hints: Known = Arc::new(Mutex::new(hints.into_iter().collect()));
         // A lista guarda do mais novo ao mais velho de cada contato; ao reler, a ordem se mantém.
@@ -286,7 +286,7 @@ impl Node {
         if let Some(n) = dht_note {
             push_note(&mut note, n);
         }
-        let dialer = Dialer { secret: secret.clone(), mine: mine.clone(), relay_port: port, known: known.clone(), hints: hints.clone(), history: history.clone(), seen_seq: Arc::default(), link: phone.link(), dht: dht_client.clone(), dht_circuit: dht_options.as_ref().is_some_and(|o| o.circuit), anchors, two_relays, speed_first: speed_first && !two_relays, chat_stamp: Arc::default() };
+        let dialer = Dialer { secret: secret.clone(), mine: mine.clone(), relay_port: port, known: known.clone(), hints: hints.clone(), history: history.clone(), seen_seq: Arc::default(), link: phone.link(), dht: dht_client.clone(), dht_circuit: dht_options.as_ref().is_some_and(|o| o.circuit), anchors, two_relays, speed_first: speed_first && !two_relays, hq_screen, chat_stamp: Arc::default() };
         // Os convites levam este relay, para o outro lado ligar de volta.
         let link_to_phone = phone.link();
         let own = Arc::new(Mutex::new(own_relay(&mine, published)));

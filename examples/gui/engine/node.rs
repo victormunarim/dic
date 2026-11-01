@@ -35,6 +35,10 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
     cfg.blocked = form.blocked_keys();
     cfg.two_relays = form.two_relays;
     cfg.speed_first = form.speed_first && !form.two_relays;
+    cfg.hq_screen = form.hq_screen;
+    if cfg.hq_screen && !cfg.speed_first {
+        out.line("tela em alta qualidade: pacotes a cada 1 ms, com cover (256 kB/s de upload fixos ao transmitir)");
+    }
     if cfg.speed_first {
         out.line("velocidade priorizada: sem ritmo constante; quem observa a rede vê quando e quanto você envia");
     }

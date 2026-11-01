@@ -79,6 +79,11 @@ pub struct NodeConfig {
     /// chamada, voz, arquivo e tela, e o tamanho da rajada (veja `docs/SEGURANCA.md`). Com "2 relays" ligada é
     /// ignorada: a privacidade não se perde em silêncio. Padrão: desligada.
     pub speed_first: bool,
+    /// Opção "Tela em alta qualidade": a tela anda no slot de [`HQ_SCREEN_SLOT`](crate::phone::HQ_SCREEN_SLOT) (1 ms
+    /// em vez de 2 ms), com o dobro da banda de vídeo, **mantendo** cover e ritmo constante: o observador não vê o
+    /// movimento. O custo é 256 kB/s de upload fixos enquanto a tela é transmitida. Vale com ou sem "2 relays";
+    /// com "Priorizar velocidade" efetiva, esta fica sem efeito (o slot rápido já é maior). Padrão: desligada.
+    pub hq_screen: bool,
 }
 
 /// Segredos do relay do nó: o do circuito (`onion`) e o do link (Noise NK).
@@ -98,6 +103,6 @@ impl RelayKeys {
 impl NodeConfig {
     #[must_use]
     pub fn new(secret: StaticSecret, contacts: Vec<[u8; 32]>) -> Self {
-        Self { secret, contacts, relay_port: DEFAULT_RELAY_PORT, public_addr: None, upnp: true, known: Vec::new(), hints: Vec::new(), relay_keys: None, history: Vec::new(), updates: true, update_retry: UPDATE_RETRY, dht: None, name: String::new(), introductions: true, anchor: false, anchors: Vec::new(), servers: None, custody: Vec::new(), tombstones: Vec::new(), blocked: Vec::new(), mail_poll: MAIL_POLL, two_relays: false, speed_first: false }
+        Self { secret, contacts, relay_port: DEFAULT_RELAY_PORT, public_addr: None, upnp: true, known: Vec::new(), hints: Vec::new(), relay_keys: None, history: Vec::new(), updates: true, update_retry: UPDATE_RETRY, dht: None, name: String::new(), introductions: true, anchor: false, anchors: Vec::new(), servers: None, custody: Vec::new(), tombstones: Vec::new(), blocked: Vec::new(), mail_poll: MAIL_POLL, two_relays: false, speed_first: false, hq_screen: false }
     }
 }

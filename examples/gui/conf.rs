@@ -118,6 +118,8 @@ pub(crate) struct Form {
     /// Opção "Priorizar velocidade" (veja `NodeConfig::speed_first`): tira o ritmo constante de todos os fluxos. Só vale com
     /// "2 relays" desligada; desligada (padrão) mantém o tráfego constante.
     pub(crate) speed_first: bool,
+    /// Opção "Tela em alta qualidade" (veja `NodeConfig::hq_screen`): slot de 1 ms com cover. Vale ao reiniciar a conexão.
+    pub(crate) hq_screen: bool,
     /// Chaves bloqueadas, em hex (com `=nome` opcional) separadas por `;`: não voltam como contato sozinhas, por apresentação ou convite
     /// (veja `Node::block`). Só adicionar a chave de novo, de propósito, desbloqueia.
     pub(crate) blocked: String,
@@ -557,6 +559,7 @@ impl Form {
             // `dht_circuit` era a caixa própria da DHT; agora a opção é uma só, e quem a tinha ligada fica com "2 relays" ligada.
             two_relays: get("two_relays") == "1" || get("dht_circuit") == "1",
             speed_first: get("speed_first") == "1",
+            hq_screen: get("hq_screen") == "1",
             blocked: get("blocked"),
             light: match get("light").as_str() {
                 "1" => Some(true),
@@ -595,7 +598,7 @@ impl Form {
         let secret = self.secret_to_write(vault_set);
         let secret = secret.as_str();
         let text = format!(
-            "audio={}\nsecret={}\ncontacts={}\npeer={}\npublic_addr={}\nno_dht={}\nname={}\nintros={}\nno_anchor={}\ntwo_relays={}\nspeed_first={}\nscreen_sharp={}\nscreen_hardware={}\nno_screen_audio={}\nno_screen_hear={}\nanchors={}\ninput_dev={}\noutput_dev={}\nno_opus={}\nno_auto_online={}\nblocked={}\nlight={}\nmute_key={}\ndeafen_key={}\nauto_files={}\n{}",
+            "audio={}\nsecret={}\ncontacts={}\npeer={}\npublic_addr={}\nno_dht={}\nname={}\nintros={}\nno_anchor={}\ntwo_relays={}\nspeed_first={}\nhq_screen={}\nscreen_sharp={}\nscreen_hardware={}\nno_screen_audio={}\nno_screen_hear={}\nanchors={}\ninput_dev={}\noutput_dev={}\nno_opus={}\nno_auto_online={}\nblocked={}\nlight={}\nmute_key={}\ndeafen_key={}\nauto_files={}\n{}",
             u8::from(self.use_audio),
             secret,
             self.contacts.trim().replace('\n', ";"),
@@ -607,6 +610,7 @@ impl Form {
             u8::from(!self.anchor),
             u8::from(self.two_relays),
             u8::from(self.speed_first),
+            u8::from(self.hq_screen),
             u8::from(self.screen_sharp),
             u8::from(self.screen_hardware),
             u8::from(!self.screen_audio),
@@ -927,6 +931,7 @@ mod tests {
     fn speed_first_starts_off() {
         assert!(!Form::default().speed_first);
         assert!(!Form::first_run().speed_first);
+        assert!(!Form::default().hq_screen && !Form::first_run().hq_screen, "tela em alta qualidade também abre desligada");
     }
 
     #[test]

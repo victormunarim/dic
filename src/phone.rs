@@ -65,6 +65,10 @@ pub const SCREEN_SLOT: Duration = Duration::from_millis(2);
 /// Intervalo entre pacotes da tela e do arquivo com "Priorizar velocidade" (sem cover): 2000 pacotes/s, 512 kB/s no
 /// fio, abaixo do teto de 800 kB/s por circuito do relay (`RelayConfig::circuit_bytes_per_sec`).
 pub const OPEN_SCREEN_SLOT: Duration = Duration::from_micros(500);
+/// Intervalo entre pacotes da tela com "Tela em alta qualidade": 1000 pacotes/s, ≈ 1,2 Mbps de vídeo, **com** cover e
+/// ritmo constante (o observador não vê o movimento). 1 ms é o menor intervalo do cover do circuito, que conta em
+/// milissegundos; custa 256 kB/s de upload fixos enquanto a tela é transmitida.
+pub const HQ_SCREEN_SLOT: Duration = Duration::from_millis(1);
 /// Pacotes seguidos que o slot rápido pode mandar de uma vez para recuperar atraso do relógio (o temporizador do
 /// sistema acorda a cada 1 ms, ou pior, e o intervalo é menor que isso).
 const OPEN_SCREEN_BURST: f64 = 8.0;
@@ -493,7 +497,16 @@ async fn forward_extra(linked: &Option<(u64, PhoneLink)>, out: WireOut) {
 /// Opções do cliente de circuito da tela: cover de circuito e de link no ritmo dos slots.
 #[must_use]
 pub fn screen_client_options() -> ClientOptions {
-    let every = SCREEN_SLOT;
+    screen_options_at(SCREEN_SLOT)
+}
+
+/// Como [`screen_client_options`], no slot de "Tela em alta qualidade" ([`HQ_SCREEN_SLOT`]): continua com cover.
+#[must_use]
+pub fn screen_client_options_hq() -> ClientOptions {
+    screen_options_at(HQ_SCREEN_SLOT)
+}
+
+fn screen_options_at(every: Duration) -> ClientOptions {
     ClientOptions { cover: Some(every), circuit_cover: Some(every), ..Default::default() }
 }
 
@@ -612,8 +625,9 @@ pub async fn share_screen_slot(mut client: CircuitClient, keys: &CallKeys, wait:
     .await
     .map_err(|_| CallError::NoCircuit)??;
 
-    // Com cover o circuito só aceita um pacote por intervalo; o slot rápido não tem cover e pode recuperar atraso.
-    let max_burst = if slot < SCREEN_SLOT { OPEN_SCREEN_BURST } else { 1.0 };
+    // Com cover o circuito só aceita um pacote por intervalo (inclusive o de alta qualidade); só o slot rápido, sem
+    // cover, pode recuperar atraso.
+    let max_burst = if slot <= OPEN_SCREEN_SLOT { OPEN_SCREEN_BURST } else { 1.0 };
     let stream = Arc::new(Mutex::new(ScreenStream::new(keys)));
     let stopping = Arc::new(AtomicBool::new(false));
     let hello = stream.lock_unpoisoned().next_packet()?;
