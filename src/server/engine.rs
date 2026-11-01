@@ -683,10 +683,17 @@ impl Servers {
             }
         }
         // Uma sala por vez, em qualquer servidor.
+        // Quem sai de uma sala não leva a conversa: ela some daqui, senão sobraria no computador de quem saiu primeiro
+        // depois que a sala esvaziasse. Se a sala segue ocupada, o histórico volta de quem ficou ao reentrar.
         for other in self.servers.values_mut().filter(|o| o.id != *server) {
-            other.room = None;
+            if let Some(old) = other.room.take() {
+                other.chat.remove(&old);
+            }
         }
         let s = self.servers.get_mut(server).expect("existe");
+        if let Some(old) = s.room.filter(|old| room != Some(*old)) {
+            s.chat.remove(&old);
+        }
         s.room = room;
         let mut out = Output::default();
         out.events.push(Event::Changed(*server));

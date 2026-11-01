@@ -636,6 +636,8 @@ fn whoever_enters_a_busy_room_later_gets_what_was_said_before_and_only_once() {
     // Quem sai e volta com a sala ocupada recompõe o que perdeu enquanto estava fora.
     let out = net.nodes[2].join_room(&server, None, net.now).unwrap();
     net.run(2, out);
+    assert!(lines(&net, 2).is_empty(), "quem sai leva a conversa embora do computador");
+    assert_eq!(lines(&net, 0).len(), 3, "quem ficou segue com ela");
     net.advance(1);
     let out = net.nodes[0].say(&server, "quarta", net.now).unwrap();
     net.run(0, out);
