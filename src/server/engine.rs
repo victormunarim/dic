@@ -128,6 +128,10 @@ impl Peer {
 /// Linhas que cada sala guarda; as mais antigas saem primeiro.
 const CHAT_KEEP: usize = 100;
 
+/// Duas cópias da mesma linha (uma ao vivo, outra do histórico que alguém mandou) distam menos que isto, em segundos:
+/// o atraso do histórico é só o da rede, e uma fala repetida pela mesma pessoa no mesmo texto fora dessa janela conta como outra.
+const BACKLOG_SLACK: u64 = 10;
+
 /// Uma linha do bate-papo da sala.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChatLine {
@@ -181,6 +185,41 @@ impl Server {
         while lines.len() > CHAT_KEEP {
             lines.pop_front();
         }
+    }
+
+    /// Põe uma linha do histórico no lugar certo do tempo, a menos que eu já a tenha (ao vivo, ou de outro que a mandou também).
+    fn merge_backlog(&mut self, room: RoomId, line: ChatLine) -> bool {
+        let lines = self.chat.entry(room).or_default();
+        if lines.iter().any(|l| l.from == line.from && l.text == line.text && l.at.abs_diff(line.at) <= BACKLOG_SLACK) {
+            return false;
+        }
+        let at = lines.partition_point(|l| l.at <= line.at);
+        lines.insert(at, line);
+        while lines.len() > CHAT_KEEP {
+            lines.pop_front();
+        }
+        true
+    }
+
+    /// O histórico da sala em `Backlog`, do mais antigo ao mais novo.
+    fn backlog(&self, room: &RoomId, now: u64) -> Vec<Msg> {
+        self.chat.get(room).into_iter().flatten().filter_map(|l| {
+            // Corta no limite do quadro sem partir um caractere ao meio.
+            let mut cut = l.text.len().min(wire::MAX_BACKLOG);
+            while !l.text.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            let text = l.text.get(..cut)?;
+            let room: [u8; 4] = room.get(..4)?.try_into().ok()?;
+            Some(Msg::Backlog { from: l.from, room, age: now.saturating_sub(l.at).min(u32::MAX as u64) as u32, text: text.to_string() })
+        }).collect()
+    }
+
+    /// Sou eu quem manda o histórico a quem entrou em `room`? Um só da sala manda (o de menor id, fora o recém-chegado),
+    /// para não repetir 100 quadros por membro; se as visões divergirem e dois mandarem, o receptor descarta a repetição.
+    fn sends_backlog(&self, me: MemberId, newcomer: &MemberId, room: &RoomId, now: u64) -> bool {
+        self.room.as_ref() == Some(room)
+            && self.peers.iter().filter(|(id, p)| *id != newcomer && self.has(&p.key) && p.online(now) && p.room.as_ref() == Some(room)).all(|(id, _)| me < *id)
     }
 
     fn hello(&self) -> Hello {
@@ -931,6 +970,7 @@ impl Servers {
                     return out;
                 }
                 let p = s.peer(key);
+                let arrived = h.room.is_some() && (p.room != h.room || !p.online(now));
                 let changed = !p.online(now) || p.room != h.room || p.sharing != h.sharing;
                 p.until = now + LEASE;
                 p.room = h.room;
@@ -940,6 +980,15 @@ impl Servers {
                 }
                 if reply {
                     out.send.extend(seal_to(me, s, &key, &Msg::HelloAck(s.hello())));
+                }
+                // Quem entrou na minha sala agora recebe o que foi dito antes (o bate-papo vale para todos da sala).
+                if arrived
+                    && let Some(room) = h.room
+                    && s.sends_backlog(me.id, &id, &room, now)
+                {
+                    for m in s.backlog(&room, now) {
+                        out.send.extend(seal_to(me, s, &key, &m));
+                    }
                 }
                 if h.fp != s.reg.fingerprint() && s.peer(key).last_vector.is_none_or(|t| now >= t + VECTOR_GAP) {
                     s.peer(key).last_vector = Some(now);
@@ -1047,6 +1096,16 @@ impl Servers {
                 let together = s.room.is_some() && s.peers.get(&id).is_some_and(|p| p.online(now) && p.room == s.room);
                 if let (true, true, Some(room)) = (is_member, together, s.room) {
                     s.keep_line(room, ChatLine { from: id, text, at: now });
+                    out.events.push(Event::Changed(sid));
+                }
+            }
+            Msg::Backlog { from, room, age, text } => {
+                // Vale de membro, para a sala em que estou agora, e só de autor que conheço.
+                if let (true, Some(mine)) = (is_member, s.room)
+                    && mine.get(..4) == Some(room.as_slice())
+                    && s.reg.state().members.contains_key(&from)
+                    && s.merge_backlog(mine, ChatLine { from, text, at: now.saturating_sub(age as u64) })
+                {
                     out.events.push(Event::Changed(sid));
                 }
             }

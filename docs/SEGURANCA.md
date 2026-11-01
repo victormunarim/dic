@@ -68,6 +68,8 @@ Tudo fica na pasta pessoal (`~` no Unix, `%USERPROFILE%` no Windows), gravado po
 
 **Baixar mídia.** O ícone de baixar só copia (`fs::copy`) o arquivo já guardado para o caminho que a pessoa escolheu no diálogo do sistema; nada vai à rede.
 
+**Histórico da sala.** Quem entra numa sala ocupada recebe as últimas linhas (até 100 quadros `Backlog`, de um só membro) pelo mesmo caminho cifrado par a par dos quadros de servidor; um observador vê a rajada de até 100 quadros de 200 B quando alguém entra. A autoria de cada linha do histórico é a afirmada por quem a manda (todo membro tem o segredo do servidor): um membro mal-intencionado pode forjar fala em nome de outro. Nada vai a disco e o histórico some quando a sala esvazia. Detalhes em [SERVIDORES.md](SERVIDORES.md#bate-papo-da-sala).
+
 **Anexo na sala.** Mandar um arquivo na sala abre uma transferência 1:1 por contato presente, em paralelo: um observador vê uma rajada por destinatário (e, pelo número delas, quantos contatos estavam na sala). A linha "📎 nome" vai a toda a sala, inclusive a quem não é contato, e revela o nome do arquivo a eles; o conteúdo só chega a contatos.
 
 Quem lê estes arquivos conhece com quem você fala e o seu relay; trate-os como dados pessoais.

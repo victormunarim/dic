@@ -606,6 +606,56 @@ fn room_chat_reaches_only_the_room_and_is_forgotten_when_it_empties() {
     }
 }
 
+#[test]
+fn whoever_enters_a_busy_room_later_gets_what_was_said_before_and_only_once() {
+    let (mut net, server) = Net::group(4);
+    net.advance(2);
+    let (room, out) = net.nodes[0].create_room(&server, "Voz", net.now).unwrap();
+    net.run(0, out);
+    for i in [0, 1] {
+        let out = net.nodes[i].join_room(&server, Some(room), net.now).unwrap();
+        net.run(i, out);
+    }
+    for (who, text) in [(0, "primeira"), (1, "segunda")] {
+        let out = net.nodes[who].say(&server, text, net.now).unwrap();
+        net.run(who, out);
+        net.advance(1);
+    }
+    let lines = |net: &Net, i: usize| net.view(i, &server).rooms[0].chat.iter().map(|l| (l.from, l.text.clone())).collect::<Vec<_>>();
+    let expected = vec![(net.id(0), "primeira".to_string()), (net.id(1), "segunda".to_string())];
+    // Entra depois: recebe o histórico com o autor original e na ordem, sem duplicar mesmo que mais de um mande.
+    let out = net.nodes[2].join_room(&server, Some(room), net.now).unwrap();
+    net.run(2, out);
+    assert_eq!(lines(&net, 2), expected);
+    assert!(lines(&net, 3).is_empty(), "quem está fora da sala não recebe");
+    assert_eq!(lines(&net, 0), expected, "quem já estava não duplica");
+    // Nova fala depois da entrada chega ao recém-chegado normalmente.
+    let out = net.nodes[2].say(&server, "terceira", net.now).unwrap();
+    net.run(2, out);
+    assert_eq!(lines(&net, 0).len(), 3);
+    // Quem sai e volta com a sala ocupada recompõe o que perdeu enquanto estava fora.
+    let out = net.nodes[2].join_room(&server, None, net.now).unwrap();
+    net.run(2, out);
+    net.advance(1);
+    let out = net.nodes[0].say(&server, "quarta", net.now).unwrap();
+    net.run(0, out);
+    let out = net.nodes[2].join_room(&server, Some(room), net.now).unwrap();
+    net.run(2, out);
+    let texts: Vec<String> = lines(&net, 2).into_iter().map(|l| l.1).collect();
+    assert_eq!(texts, ["primeira", "segunda", "terceira", "quarta"]);
+    // Sem ninguém, tudo some; uma sala nova começa vazia para o próximo que entrar.
+    for i in [0, 1, 2] {
+        let out = net.nodes[i].join_room(&server, None, net.now).unwrap();
+        net.run(i, out);
+    }
+    for i in 0..4 {
+        assert!(lines(&net, i).is_empty(), "nó {i} esqueceu");
+    }
+    let out = net.nodes[3].join_room(&server, Some(room), net.now).unwrap();
+    net.run(3, out);
+    assert!(lines(&net, 3).is_empty());
+}
+
 /// Opção "2 relays": ninguém tem relay, convite e `Join` saem sem endereço e o servidor se forma do mesmo jeito.
 #[test]
 fn with_two_relays_on_a_server_forms_without_any_address() {
