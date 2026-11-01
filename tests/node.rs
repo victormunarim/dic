@@ -824,14 +824,18 @@ async fn screen_arrives(two_relays: bool) -> (PathMode, bool) {
     let c = Node::start(fixed(sc, free_port(), vec![pa, pb])).await.unwrap();
     // O relay de C só entra como primeiro salto se A já o conhece (`known`).
     let a = Node::start(NodeConfig { two_relays, known: vec![(pc, c.relay_info().unwrap())], ..fixed(sa, free_port(), vec![pb, pc]) }).await.unwrap();
-    let mut b = Node::start(fixed(sb, free_port(), vec![pa, pc])).await.unwrap();
+    let b = Node::start(fixed(sb, free_port(), vec![pa, pc])).await.unwrap();
+    // Quem liga é B (opção desligada): com "2 relays" ligada em A a chamada dele seria sempre por encontro, e este teste
+    // é do caminho da tela, que segue o relay guardado de B.
+    b.add_hint(pa, a.relay_info().unwrap());
     a.add_hint(pb, b.relay_info().unwrap());
+    let mut a = a;
     let answer = tokio::spawn(async move {
-        let inc = timeout(Duration::from_secs(15), b.next_incoming()).await.unwrap().unwrap();
-        (inc.accept(Mulaw::new()).await.unwrap(), b)
+        let inc = timeout(Duration::from_secs(15), a.next_incoming()).await.unwrap().unwrap();
+        (inc.accept(Mulaw::new()).await.unwrap(), a)
     });
-    let ca = a.dial(pb, Mulaw::new(), Duration::from_secs(15)).await.unwrap();
-    let (mut cb, _b) = answer.await.unwrap();
+    let mut cb = b.dial(pa, Mulaw::new(), Duration::from_secs(15)).await.unwrap();
+    let (ca, a) = answer.await.unwrap();
 
     let dialer = a.dialer();
     let path = PathMode::from_two_relays(dialer.two_relays());
@@ -876,6 +880,81 @@ async fn two_relays_fails_instead_of_falling_back_to_a_direct_path() {
     a.add_hint(pb, b.relay_info().unwrap());
     let err = a.dial(pb, Mulaw::new(), Duration::from_secs(3)).await.err().expect("sem terceiro, não liga");
     assert!(matches!(err, DialError::NoRelays), "{err}");
+}
+
+/// Chamada sem IP, ponta a ponta: A e B têm "2 relays" ligada e só conhecem os relays de C, D e E. A nunca recebe
+/// o endereço de B (nem por código, nem por dica, nem pela DHT de endereços): acha onde B espera na presença v2 e liga
+/// por introdução e encontro. O áudio passa e, ao fim, nenhum dos dois guardou o relay do outro.
+#[tokio::test]
+async fn a_call_with_two_relays_on_reaches_the_contact_without_knowing_its_address() {
+    use clam::rendezvous::DhtOptions;
+    let testnet = mainline::Testnet::new(5).unwrap();
+    let dht = || Some(DhtOptions { bootstrap: testnet.bootstrap.clone(), bind: Some(std::net::Ipv4Addr::LOCALHOST), circuit: false });
+    let (sa, sb, sc, sd, se) = (key(), key(), key(), key(), key());
+    let pk = |s: &StaticSecret| *PublicKey::from(s).as_bytes();
+    let (pa, pb, pc, pd, pe) = (pk(&sa), pk(&sb), pk(&sc), pk(&sd), pk(&se));
+    let c = Node::start(NodeConfig { updates: false, ..fixed(sc, free_port(), vec![pa, pb]) }).await.unwrap();
+    let d = Node::start(NodeConfig { updates: false, ..fixed(sd, free_port(), vec![pa, pb]) }).await.unwrap();
+    let e = Node::start(NodeConfig { updates: false, ..fixed(se, free_port(), vec![pa, pb]) }).await.unwrap();
+    let relays: Vec<_> = vec![(pc, c.relay_info().unwrap()), (pd, d.relay_info().unwrap()), (pe, e.relay_info().unwrap())];
+    let cfg = |s, contacts| NodeConfig { updates: false, two_relays: true, dht: dht(), known: relays.clone(), ..fixed(s, free_port(), contacts) };
+    let a = Node::start(cfg(sa, vec![pb, pc, pd, pe])).await.unwrap();
+    let mut b = Node::start(cfg(sb, vec![pa, pc, pd, pe])).await.unwrap();
+
+    let answer = tokio::spawn(async move {
+        let inc = timeout(Duration::from_secs(90), b.next_incoming()).await.unwrap().unwrap();
+        (inc.accept(Mulaw::new()).await.unwrap(), b)
+    });
+    // B sobe o serviço e grava a presença em segundo plano; A tenta até ela aparecer.
+    let mut call = None;
+    for _ in 0..40 {
+        match a.dial(pb, Mulaw::new(), Duration::from_secs(15)).await {
+            Ok(c) => {
+                call = Some(c);
+                break;
+            }
+            Err(DialError::NoHiddenPoints) => tokio::time::sleep(Duration::from_secs(1)).await,
+            Err(other) => panic!("falha que não é a espera pela presença: {other}"),
+        }
+    }
+    let ca = call.expect("A achou os pontos de B e ligou");
+    let (cb, b) = answer.await.unwrap();
+    assert!(a.known().iter().all(|(k, _)| *k != pb) && a.hints().iter().all(|(k, _)| *k != pb), "A nunca aprende o relay de B");
+    assert!(b.known().iter().all(|(k, _)| *k != pa) && b.hints().iter().all(|(k, _)| *k != pa), "B nunca aprende o relay de A");
+    talk(ca, cb).await;
+}
+
+/// Opção ligada e o contato não deixou pontos de introdução: falha com o motivo, sem usar o relay que se tem dele.
+#[tokio::test]
+async fn two_relays_does_not_fall_back_to_the_stored_relay_when_the_contact_has_no_points() {
+    let (sa, sb, sc, sd) = (key(), key(), key(), key());
+    let pk = |s: &StaticSecret| *PublicKey::from(s).as_bytes();
+    let (pb, pc, pd) = (pk(&sb), pk(&sc), pk(&sd));
+    let b = Node::start(fixed(sb, free_port(), vec![])).await.unwrap();
+    let c = Node::start(fixed(sc, free_port(), vec![])).await.unwrap();
+    let d = Node::start(fixed(sd, free_port(), vec![])).await.unwrap();
+    let known = vec![(pb, b.relay_info().unwrap()), (pc, c.relay_info().unwrap()), (pd, d.relay_info().unwrap())];
+    let a = Node::start(NodeConfig { two_relays: true, known, ..fixed(sa, free_port(), vec![pb, pc, pd]) }).await.unwrap();
+    let err = a.dial(pb, Mulaw::new(), Duration::from_secs(3)).await.err().expect("sem pontos, não liga");
+    assert!(matches!(err, DialError::NoHiddenPoints), "{err}");
+}
+
+/// Opção ligada: o endereço do relay não vai para a DHT, então um contato com a opção desligada não acha este nó pelo
+/// endereço (ele só é alcançado pelos pontos de introdução).
+#[tokio::test]
+async fn two_relays_on_does_not_publish_the_relay_address() {
+    use clam::rendezvous::DhtOptions;
+    let testnet = mainline::Testnet::new(5).unwrap();
+    let dht = || Some(DhtOptions { bootstrap: testnet.bootstrap.clone(), bind: Some(std::net::Ipv4Addr::LOCALHOST), circuit: false });
+    let (sa, sb) = (key(), key());
+    let (pa, pb) = (*PublicKey::from(&sa).as_bytes(), *PublicKey::from(&sb).as_bytes());
+    let _a = Node::start(NodeConfig { two_relays: true, dht: dht(), ..fixed(sa, free_port(), vec![pb]) }).await.unwrap();
+    let b = Node::start(NodeConfig { dht: dht(), ..fixed(sb, free_port(), vec![pa]) }).await.unwrap();
+    for _ in 0..6 {
+        let err = b.dial(pa, Mulaw::new(), Duration::from_secs(3)).await.err().expect("sem endereço publicado, não liga");
+        assert!(matches!(err, DialError::NoAddress { .. }), "{err}");
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
 }
 
 /// A, C e B: A adiciona B, que nunca esteve no ar; C é contato de confiança de A. A deixa o convite com C e na caixa

@@ -11,6 +11,7 @@
 mod config;
 mod deliver;
 mod dialer;
+mod blind;
 mod lookup;
 mod mail;
 mod publish;
@@ -20,6 +21,7 @@ mod util;
 pub use config::{DEFAULT_RELAY_PORT, NodeConfig, RelayKeys, UPDATE_RETRY};
 pub use deliver::{FilePipe, PipeClosed};
 pub use dialer::{DialError, Dialer};
+use blind::{Points, hidden_publisher, hidden_service};
 use mail::{Inbox, Introducer, mail_keeper, mail_reader};
 use publish::{outbox, rendezvous_publisher, server_publisher};
 use reach::{Reachability, own_relay, relay_hint, track_address, watch_address};
@@ -287,9 +289,9 @@ impl Node {
         // Os convites levam este relay, para o outro lado ligar de volta.
         let link_to_phone = phone.link();
         let own = Arc::new(Mutex::new(own_relay(&mine, published)));
-        link_to_phone.set_relay_hint(relay_hint(&mine, published));
+        link_to_phone.set_relay_hint(if two_relays { None } else { relay_hint(&mine, published) });
         let update_notice: Arc<Mutex<Option<String>>> = Arc::default();
-        let reach = Reachability { onion, link, port, addr: addr_now.clone(), own: own.clone(), phone: link_to_phone, notice: update_notice.clone() };
+        let reach = Reachability { onion, link, port, addr: addr_now.clone(), own: own.clone(), phone: link_to_phone, notice: update_notice.clone(), hide_relay: two_relays };
         let renew = watched.then(|| tokio::spawn(watch_address(reach.clone(), mapping, upnp)));
         let mut background = Vec::new();
         if let Some(mut rx) = phone.take_updates() {
@@ -308,16 +310,24 @@ impl Node {
         if updates || publishes {
             background.push(tokio::spawn(track_address(own.clone(), current.clone())));
         }
-        if updates {
+        // "2 relays" ligada: o endereço deste nó não é entregue nem gravado para ninguém (os contatos acham os pontos de
+        // introdução, não o relay); contato com a opção desligada deixa de achar este nó pelo endereço.
+        if updates && !two_relays {
             background.push(tokio::spawn(outbox(dialer.clone(), phone.contacts(), current.clone(), update_retry)));
         }
-        if publishes {
+        if publishes && !two_relays {
             background.push(tokio::spawn(rendezvous_publisher(dialer.clone(), phone.contacts(), current.clone())));
+        }
+        if two_relays && publishes {
+            // Chamada sem IP: este nó espera em relays de terceiros e diz aos contatos onde (veja `blind.rs`).
+            let points: Points = Arc::default();
+            background.push(tokio::spawn(hidden_service(dialer.clone(), phone.local_addr(), phone.contacts(), points.clone())));
+            background.push(tokio::spawn(hidden_publisher(dialer.clone(), phone.contacts(), points)));
         }
         background.extend(servers);
         phone.accept_introductions(introductions);
         let server_hub = ServerHub::start(restore(secret.clone(), saved_servers.as_deref()), dialer.clone(), &phone, own.clone());
-        if publishes {
+        if publishes && !two_relays {
             background.push(tokio::spawn(server_publisher(dialer.clone(), server_hub.clone(), current)));
         }
         let inbox = Inbox::default();

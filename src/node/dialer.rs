@@ -28,6 +28,10 @@ pub enum DialError {
     NoAddress { tried_stored: bool },
     #[error("a opção 2 relays está ligada, mas não há relay de outro contato para servir de primeiro salto: nunca se cai para um caminho que mostre o seu IP")]
     NoRelays,
+    #[error("a opção 2 relays está ligada e esse contato não deixou pontos de introdução: ele precisa ter a opção ligada e uma DHT ou âncora; o endereço dele não é usado para não mostrar o IP")]
+    NoHiddenPoints,
+    #[error("{0}")]
+    Meet(#[from] crate::meet::MeetError),
     #[error("{0}")]
     Call(#[from] CallError),
 }
@@ -208,6 +212,11 @@ impl Dialer {
     ///
     /// [`DialError::NoAddress`] se nenhum relay do contato foi achado; [`DialError::Call`] se a chamada falhou (circuito, sem resposta, recusada).
     pub async fn dial<C: Codec + Send + 'static>(&self, peer: [u8; 32], codec: C, wait: Duration) -> Result<ActiveCall, DialError> {
+        if self.two_relays {
+            // Sem IP dos dois lados: só por introdução e encontro, nunca pelo relay guardado do contato.
+            let client = self.hidden_client(&peer).await?;
+            return Ok(call_linked(client, &self.secret, &PublicKey::from(peer), codec, wait, Some(&self.link)).await?);
+        }
         self.check_relays(&peer)?;
         let (found, tried_stored) = self.reachable_client(&peer, ClientOptions::default).await;
         let Some((client, k)) = found else { return Err(DialError::NoAddress { tried_stored }) };

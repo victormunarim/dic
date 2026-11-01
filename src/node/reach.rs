@@ -61,6 +61,8 @@ pub(super) struct Reachability {
     pub(super) own: Arc<Mutex<Option<RelayInfo>>>,
     pub(super) phone: PhoneLink,
     pub(super) notice: Arc<Mutex<Option<String>>>,
+    /// Opção "2 relays": o convite não leva o relay desta máquina, porque o outro lado ficaria com o IP de quem liga.
+    pub(super) hide_relay: bool,
 }
 
 impl Reachability {
@@ -77,7 +79,7 @@ impl Reachability {
         }
         *now = own;
         *self.addr.lock_unpoisoned() = addr;
-        self.phone.set_relay_hint(relay_hint(&mine, published));
+        self.phone.set_relay_hint(if self.hide_relay { None } else { relay_hint(&mine, published) });
         true
     }
 }
