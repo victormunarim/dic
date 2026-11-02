@@ -53,44 +53,17 @@ impl App {
 
         split(ui, |ui, side| {
             if side == 0 {
-                card(ui, "Dispositivos", "", |ui| {
+                // Uma tarefa por cartão: "o microfone funciona?" se responde num lugar só (dispositivo, mudo, ganho,
+                // medidor, sensibilidade e teste), e o alto-falante tem o dele.
+                card(ui, "Microfone", "", |ui| {
+                    ui.spacing_mut().slider_width = (ui.available_width() - 110.0).max(120.0);
                     ui.add_enabled_ui(offline, |ui| ui.check(&mut self.form.use_audio, "Usar microfone e alto-falante")).inner
                         .on_hover_text("Desmarcado, cada lado manda só um tom de teste. Vale ao ficar online.");
                     #[cfg(feature = "audio")]
-                    devices_ui(ui, &mut self.form, &mut self.devs);
-                });
-                let (global, why) = (self.global_keys.active(), self.global_keys.note());
-                let subtitle = if global { "Valem também com a janela em segundo plano." } else { "Valem com a janela em primeiro plano." };
-                card(ui, "Atalhos", subtitle, |ui| {
-                    if !global && !why.is_empty() {
-                        note(ui, format!("Em segundo plano não vale: {why}"));
-                    }
-                    let fixed = [crate::ui::INVITE_KEY, crate::ui::SEARCH_KEY, crate::ui::MEMBERS_KEY];
-                    let mute = crate::atalhos::resolve(&self.form.mute_key, crate::atalhos::MUTE_DEFAULT);
-                    let deaf = crate::atalhos::resolve(&self.form.deafen_key, crate::atalhos::DEAFEN_DEFAULT);
-                    ui.label("Silenciar o microfone");
-                    if let Some(k) = crate::atalhos::field(ui, "mute", &mute, &[&fixed[..], &[deaf]].concat()) {
-                        self.form.mute_key = crate::atalhos::to_text(&k);
-                        self.form.save();
-                    }
-                    ui.label("Fone de ouvido: microfone e som que você escuta");
-                    if let Some(k) = crate::atalhos::field(ui, "deafen", &deaf, &[&fixed[..], &[mute]].concat()) {
-                        self.form.deafen_key = crate::atalhos::to_text(&k);
-                        self.form.save();
-                    }
-                    if button(ui, true, "Restaurar atalhos", pal().bg).clicked() {
-                        self.form.mute_key.clear();
-                        self.form.deafen_key.clear();
-                        self.form.save();
-                    }
-                });
-                card(ui, "Volume e microfone", "", |ui| {
-                    ui.spacing_mut().slider_width = (ui.available_width() - 110.0).max(120.0);
+                    device_pick(ui, "Microfone", &mut self.form.input_dev, &self.devs.0.clone());
                     if ui.check(&mut muted, "Mudo (o outro lado não ouve você)").changed() {
                         a.set_muted(muted);
                     }
-                    ui.label("Volume do alto-falante");
-                    ui.slider(egui::Slider::new(&mut p.volume, AudioPrefs::VOLUME));
                     ui.label("Ganho do microfone");
                     ui.slider(egui::Slider::new(&mut p.mic_gain, AudioPrefs::MIC_GAIN));
                     ui.label("Nível do microfone");
@@ -123,6 +96,16 @@ impl App {
                     if offline {
                         note(ui, format!("Fique online {ONLINE_HINT} para testar o microfone."));
                     }
+                });
+                card(ui, "Alto-falante", "", |ui| {
+                    ui.spacing_mut().slider_width = (ui.available_width() - 110.0).max(120.0);
+                    #[cfg(feature = "audio")]
+                    {
+                        device_pick(ui, "Alto-falante", &mut self.form.output_dev, &self.devs.1.clone());
+                        devices_footer(ui, &mut self.devs);
+                    }
+                    ui.label("Volume do alto-falante");
+                    ui.slider(egui::Slider::new(&mut p.volume, AudioPrefs::VOLUME));
                 });
             } else {
                 // Três cartões por assunto (ruído, eco, nível): oito caixas no mesmo nível não se leem de uma vez.
@@ -167,6 +150,41 @@ impl App {
                     }
                 });
                 self.video_card(ui);
+                let (global, why) = (self.global_keys.active(), self.global_keys.note());
+                let subtitle = if global { "Valem também com a janela em segundo plano." } else { "Valem com a janela em primeiro plano." };
+                card(ui, "Atalhos de teclado", subtitle, |ui| {
+                    if !global && !why.is_empty() {
+                        note(ui, format!("Em segundo plano não vale: {why}"));
+                    }
+                    let fixed = [crate::ui::INVITE_KEY, crate::ui::SEARCH_KEY, crate::ui::MEMBERS_KEY];
+                    let mute = crate::atalhos::resolve(&self.form.mute_key, crate::atalhos::MUTE_DEFAULT);
+                    let deaf = crate::atalhos::resolve(&self.form.deafen_key, crate::atalhos::DEAFEN_DEFAULT);
+                    // Uma linha por atalho: o nome à esquerda e a tecla à direita (antes, rótulo de duas linhas
+                    // sobre um botão pequeno e meia largura vazia).
+                    ui.horizontal(|ui| {
+                        ui.label("Silenciar o microfone");
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if let Some(k) = crate::atalhos::field(ui, "mute", &mute, &[&fixed[..], &[deaf]].concat()) {
+                                self.form.mute_key = crate::atalhos::to_text(&k);
+                                self.form.save();
+                            }
+                        });
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Fone de ouvido").on_hover_text("Silencia o microfone e o som que você escuta.");
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if let Some(k) = crate::atalhos::field(ui, "deafen", &deaf, &[&fixed[..], &[mute]].concat()) {
+                                self.form.deafen_key = crate::atalhos::to_text(&k);
+                                self.form.save();
+                            }
+                        });
+                    });
+                    if button(ui, true, "Restaurar atalhos", pal().bg).clicked() {
+                        self.form.mute_key.clear();
+                        self.form.deafen_key.clear();
+                        self.form.save();
+                    }
+                });
             }
         });
 

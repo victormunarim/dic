@@ -62,17 +62,19 @@ impl App {
                     if !self.error.is_empty() {
                         ui.colored_label(pal().error, &self.error);
                     }
-                    ui.add_space(4.0);
-                    ui.label("Endereço público");
-                    lock(ui, offline, locked, |ui| {
-                        ui.add(field(&mut self.form.public_addr, "ip:porta"))
-                            .on_hover_text("Só se o IP que os outros enxergam não serve, como atrás de NAT. ip:porta; a porta precisa estar aberta no roteador, e o endereço pode ser um nome.");
+                    // Raro (quase ninguém precisa): recolhido, para não pesar tanto quanto "Ficar online".
+                    egui::CollapsingHeader::new(RichText::new("Avançado").size(14.0).color(pal().muted)).id_salt("conexao-avancado").icon(chevron).show(ui, |ui| {
+                        ui.label("Endereço público");
+                        lock(ui, offline, locked, |ui| {
+                            ui.add(field(&mut self.form.public_addr, "ip:porta"))
+                                .on_hover_text("Só se o IP que os outros enxergam não serve, como atrás de NAT. ip:porta; a porta precisa estar aberta no roteador, e o endereço pode ser um nome.");
+                        });
+                        details(
+                            ui,
+                            "Onde fica a configuração",
+                            &format!("{} ({})", conf_path().display(), if self.form.loaded { "lida ao abrir" } else { "não encontrada ao abrir; será criada" }),
+                        );
                     });
-                    details(
-                        ui,
-                        "Onde fica a configuração",
-                        &format!("{} ({})", conf_path().display(), if self.form.loaded { "lida ao abrir" } else { "não encontrada ao abrir; será criada" }),
-                    );
                 });
                 card(ui, "Seu nome", "Como os outros veem você na lista deles.", |ui| {
                     lock(ui, offline, locked, |ui| {
@@ -169,6 +171,9 @@ impl App {
                         });
                     });
                 }
+                card(ui, "Arquivos", "Onde ficam os arquivos que você baixa.", |ui| {
+                    self.save_folder_picker(ui);
+                });
             } else {
                 card(ui, "Privacidade", "O que quem observa a rede e os seus contatos veem de você.", |ui| {
                     details(ui, "Como funciona", "Desligado (padrão), a ligação é direta: o contato e quem observa a rede perto dele ou de você veem o seu IP. O conteúdo segue cifrado de ponta a ponta. Ligado, a ligação passa pelo relay de outro contato (qualquer um serve): ele vê o seu IP e o destino, mas não o conteúdo, e o contato com quem você fala só vê o IP desse relay. Com a opção ligada nos dois lados, nenhum dos dois aprende o IP do outro. Vale para voz, tela, bate-papo e arquivos. Sem relay de outro contato disponível, a ligação falha com o motivo, e nunca cai para o caminho direto. Voz, tela, bate-papo e arquivos: se o contato também usa a opção, vão por pontos de introdução e nenhum dos dois aprende o relay do outro; ligada, seu endereço deixa de ser entregue e gravado, um contato com a opção desligada deixa de achar você e um contato offline não recebe bate-papo. Apresentação e caixa de correio vão sem o seu endereço, e o seu código de contato leva só a chave. Servidores criam, convidam e entram sem endereço, mas só alcançam membros que são seus contatos (veja docs/DOIS-RELAYS.md).");
@@ -212,9 +217,6 @@ impl App {
                         ui.add(egui::TextEdit::multiline(&mut self.form.anchors).hint_text("ip:porta#chave-do-circuito#chave-do-link, uma por linha").desired_rows(3).desired_width(f32::INFINITY).margin(Margin::symmetric(12, 10)))
                             .on_hover_text("Uma por linha, no código que o dono da âncora te passa: ip:porta#chave-do-circuito#chave-do-link");
                     });
-                });
-                card(ui, "Arquivos", "Onde ficam os arquivos que você baixa.", |ui| {
-                    self.save_folder_picker(ui);
                 });
             }
         });
@@ -443,6 +445,21 @@ mod layout_tests {
         let mut app = app();
         let rects = cards(egui::vec2(1300.0, 1800.0), |ui| app.audio_tab(ui, true, false, false));
         assert!(rects.iter().any(|(t, _)| t == "Transmissão de tela"));
+    }
+
+    /// Áudio se agrupa por tarefa (microfone, alto-falante, atalhos): não sobra um cartão
+    /// "Dispositivos" quase vazio e os atalhos ficam no fim da página.
+    #[test]
+    fn audio_page_is_grouped_by_task() {
+        let mut app = app();
+        let rects = cards(egui::vec2(1300.0, 1800.0), |ui| app.audio_tab(ui, true, false, false));
+        let titles: Vec<&str> = rects.iter().map(|(t, _)| t.as_str()).collect();
+        for t in ["Microfone", "Alto-falante", "Atalhos de teclado"] {
+            assert!(titles.contains(&t), "falta o cartão '{t}': {titles:?}");
+        }
+        assert!(!titles.contains(&"Dispositivos"), "{titles:?}");
+        let y = |t: &str| rects.iter().find(|(n, _)| n == t).map(|(_, r)| r.top()).unwrap();
+        assert!(y("Atalhos de teclado") > y("Ruído"), "atalhos devem vir depois do tratamento");
     }
 
     /// O tratamento da voz vem em cartões por assunto, sem um sobre o outro, nas duas larguras.

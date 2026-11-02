@@ -187,8 +187,7 @@ pub(crate) fn apply(ctx: &egui::Context) {
         s.spacing.slider_width = 260.0;
         s.spacing.combo_width = 280.0;
         s.spacing.text_edit_width = 320.0;
-        // Barra mais fina e afastada do cartão: com 10 px colada nele (inner 4, outer 0) ela parecia parte da moldura. A
-        // cor da alça é a do texto (o egui não deixa trocar), então o contraste fica alto de propósito.
+        // Barra mais fina e afastada do cartão: com 10 px colada nele (inner 4, outer 0) ela parecia parte da moldura.
         s.spacing.scroll.bar_width = 8.0;
         s.spacing.scroll.bar_inner_margin = 8.0;
         s.spacing.scroll.bar_outer_margin = 4.0;

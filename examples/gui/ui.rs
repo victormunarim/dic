@@ -79,22 +79,22 @@ pub(crate) fn split(ui: &mut egui::Ui, mut f: impl FnMut(&mut egui::Ui, usize)) 
     }
 }
 
-/// Escolha de microfone e alto-falante (vazio = padrão do sistema); vale na próxima chamada.
+/// Lista de escolha de um dispositivo de áudio (vazio = padrão do sistema); vale na próxima chamada.
 #[cfg(feature = "audio")]
-pub(crate) fn devices_ui(ui: &mut egui::Ui, form: &mut Form, devs: &mut (Vec<String>, Vec<String>)) {
-    let pick = |ui: &mut egui::Ui, label: &str, cur: &mut String, list: &[String]| {
-        ui.label(label);
-        let shown = if cur.is_empty() { "padrão do sistema".to_string() } else { cur.clone() };
-        select_field(ui, label, &shown, |ui| {
-            ui.selectable_value(cur, String::new(), "padrão do sistema");
-            for d in list {
-                ui.selectable_value(cur, d.clone(), d);
-            }
-        });
-    };
-    let (ins, outs) = devs.clone();
-    pick(ui, "Microfone", &mut form.input_dev, &ins);
-    pick(ui, "Alto-falante", &mut form.output_dev, &outs);
+pub(crate) fn device_pick(ui: &mut egui::Ui, label: &str, cur: &mut String, list: &[String]) {
+    ui.label(label);
+    let shown = if cur.is_empty() { "padrão do sistema".to_string() } else { cur.clone() };
+    select_field(ui, label, &shown, |ui| {
+        ui.selectable_value(cur, String::new(), "padrão do sistema");
+        for d in list {
+            ui.selectable_value(cur, d.clone(), d);
+        }
+    });
+}
+
+/// Rodapé das listas de dispositivos: o sistema de áudio em uso e a releitura da lista (vale para as duas).
+#[cfg(feature = "audio")]
+pub(crate) fn devices_footer(ui: &mut egui::Ui, devs: &mut (Vec<String>, Vec<String>)) {
     note(ui, format!("Sistema de áudio: {}", clam::audio::host_name()));
     if button(ui, true, "Atualizar a lista de dispositivos", pal().bg).clicked() {
         *devs = clam::audio::devices();
@@ -496,19 +496,28 @@ impl eframe::App for App {
                 self.call_tab(ui, offline, calling, calling && !in_room);
                 return;
             }
-            egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-                // A sombra dos cartões passa da borda deles: sem isso a janela de rolagem cortava o relevo dos cantos
-                // e dos lados. Só na horizontal, para o que rolou para cima não pintar sobre o cabeçalho.
-                ui.set_clip_rect(ui.clip_rect().expand2(egui::vec2(20.0, 0.0)));
-                ui.add_space(12.0);
-                ui.set_max_width(ui.available_width().min(1500.0));
-                match self.tab {
-                    Tab::Contacts | Tab::Call => {}
-                    Tab::Servers => self.servers_tab(ui, offline),
-                    Tab::Audio => self.audio_tab(ui, offline, calling, testing),
-                    Tab::Settings => self.settings_tab(ctx, ui, offline, calling, &status),
-                    Tab::Log => {}
-                }
+            // O egui pinta o puxador com a tinta do texto (um bastão preto no tema claro); aqui ele usa o tom
+            // apagado do tema, só neste escopo, para não tocar nos outros controles.
+            ui.scope(|ui| {
+                ui.spacing_mut().scroll.foreground_color = false;
+                let w = &mut ui.visuals_mut().widgets;
+                w.inactive.bg_fill = theme::pal().muted;
+                w.hovered.bg_fill = theme::pal().text;
+                w.active.bg_fill = theme::pal().text;
+                egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+                    // A sombra dos cartões passa da borda deles: sem isso a janela de rolagem cortava o relevo dos cantos
+                    // e dos lados. Só na horizontal, para o que rolou para cima não pintar sobre o cabeçalho.
+                    ui.set_clip_rect(ui.clip_rect().expand2(egui::vec2(20.0, 0.0)));
+                    ui.add_space(12.0);
+                    ui.set_max_width(ui.available_width().min(1500.0));
+                    match self.tab {
+                        Tab::Contacts | Tab::Call => {}
+                        Tab::Servers => self.servers_tab(ui, offline),
+                        Tab::Audio => self.audio_tab(ui, offline, calling, testing),
+                        Tab::Settings => self.settings_tab(ctx, ui, offline, calling, &status),
+                        Tab::Log => {}
+                    }
+                });
             });
         });
         // Com tela chegando a janela repinta a cada ~16 ms; a 300 ms o vídeo parecia ter 3 quadros/s.
