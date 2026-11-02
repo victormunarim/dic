@@ -238,9 +238,11 @@ pub(crate) fn conf_path() -> PathBuf {
     home.join(".clam-gui.conf")
 }
 
-/// Onde os arquivos recebidos pelo bate-papo ficam: `~/Downloads/clam`.
-pub(crate) fn downloads_dir() -> PathBuf {
-    conf_path().with_file_name("Downloads").join("clam")
+/// Onde os arquivos recebidos pelo bate-papo ficam até a pessoa baixá-los: `~/.clam-gui.recebidos`. A pasta inteira é
+/// a marca de "apagar": tudo o que está nela some ao abrir e ao fechar o programa (`arquivos::sweep`), e baixar é tirar
+/// o arquivo daqui (`arquivos::keep`). Por isso nada que a pessoa quer guardar pode morar nela.
+pub(crate) fn received_dir() -> PathBuf {
+    conf_path().with_file_name(".clam-gui.recebidos")
 }
 
 /// Servidores e salas (veja `clam::server`), num arquivo à parte. Leva o segredo de cada servidor: só o dono lê.

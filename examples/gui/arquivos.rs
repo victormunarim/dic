@@ -15,6 +15,35 @@ pub(crate) fn auto_accept(name: &str, size: u64, all: bool) -> bool {
     (crate::midia::kind(name).is_some() && size <= AUTO_MEDIA_MAX) || (all && size <= AUTO_ALL_MAX)
 }
 
+/// O arquivo está na pasta dos recebidos, a que se apaga ao fechar? Compara caminhos já resolvidos: o nome que o contato
+/// manda nunca tem separador (`transfer::safe_name`), então um arquivo recebido não sai da pasta por `..`.
+pub(crate) fn is_temporary(dir: &Path, path: &Path) -> bool {
+    path.starts_with(dir)
+}
+
+/// Apaga tudo o que a pasta dos recebidos tem: arquivos inteiros, parciais de um fechamento brusco e qualquer outra
+/// coisa. Roda ao abrir (um fim brusco não deixa o arquivo para trás) e ao fechar. Não segue link: apaga o link, não
+/// o alvo. O que não der para apagar (no Windows, arquivo aberto por outro programa) fica para a próxima abertura.
+pub(crate) fn sweep(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for e in entries.flatten() {
+        let path = e.path();
+        let is_dir = e.file_type().is_ok_and(|t| t.is_dir());
+        let _ = if is_dir { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) };
+    }
+}
+
+/// Baixar: leva o arquivo recebido para `dest`, que é onde a pessoa escolheu guardá-lo; sair da pasta dos recebidos é o
+/// que tira a marca de "apagar". Renomeia e, se `dest` está noutro disco, copia e apaga o original, de modo que nunca
+/// sobram duas cópias nem se perde a única.
+pub(crate) fn keep(path: &Path, dest: &Path) -> std::io::Result<()> {
+    if std::fs::rename(path, dest).is_ok() {
+        return Ok(());
+    }
+    std::fs::copy(path, dest)?;
+    std::fs::remove_file(path)
+}
+
 /// Quantas transferências já encerradas se guardam para a tela.
 const KEEP_DONE: usize = 20;
 
@@ -296,6 +325,51 @@ mod tests {
         assert_eq!(id(4), None, "sem transferência");
         assert_eq!(pair_room_files(&[(Some(a), "📎 x.png")], &all[..1]), vec![Some(0)]);
         assert_eq!(pair_room_files(&[(Some(a), "📎 x.png"), (Some(a), "📎 x.png"), (Some(a), "📎 x.png")], &all[..2]), vec![None, Some(0), Some(1)], "linha antiga sem transferência guardada");
+    }
+
+    fn scratch(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("clam-recebidos-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn sweep_empties_the_received_folder_including_leftovers_of_a_hard_close() {
+        let d = scratch("varre");
+        std::fs::write(d.join("foto.png"), b"1").unwrap();
+        std::fs::write(d.join(".clam-7.parcial"), b"2").unwrap();
+        std::fs::create_dir_all(d.join("sobra")).unwrap();
+        std::fs::write(d.join("sobra").join("x"), b"3").unwrap();
+        sweep(&d);
+        assert_eq!(std::fs::read_dir(&d).unwrap().count(), 0, "nada fica");
+        assert!(d.exists(), "a pasta em si fica");
+        sweep(&d.join("nao-existe"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn sweep_never_touches_what_was_kept_outside_the_folder() {
+        let d = scratch("fora");
+        let (recebidos, guardados) = (d.join("recebidos"), d.join("guardados"));
+        std::fs::create_dir_all(&recebidos).unwrap();
+        std::fs::create_dir_all(&guardados).unwrap();
+        std::fs::write(recebidos.join("a.pdf"), b"a").unwrap();
+        std::fs::write(recebidos.join("b.pdf"), b"b").unwrap();
+        keep(&recebidos.join("a.pdf"), &guardados.join("a.pdf")).unwrap();
+        assert!(!recebidos.join("a.pdf").exists(), "baixar tira o arquivo da pasta dos recebidos");
+        sweep(&recebidos);
+        assert_eq!(std::fs::read(guardados.join("a.pdf")).unwrap(), b"a", "o baixado permanece");
+        assert!(!recebidos.join("b.pdf").exists(), "o não baixado some");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn only_files_inside_the_received_folder_count_as_temporary() {
+        let dir = Path::new("/h/.clam-gui.recebidos");
+        assert!(is_temporary(dir, &dir.join("foto.png")));
+        assert!(!is_temporary(dir, Path::new("/h/Documentos/foto.png")), "o que eu enviei é o original da pessoa");
+        assert!(!is_temporary(dir, Path::new("/h/.clam-gui.recebidos-velho/foto.png")), "compara por componente, não por prefixo de texto");
     }
 
     #[test]

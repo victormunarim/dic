@@ -224,19 +224,19 @@ pub(crate) fn on_frames(shared: &std::sync::Arc<Shared>, rx: &mut Receiving, fra
     fresh
 }
 
-/// Resposta a um pedido de arquivo: o laço responde sozinho quando a política deixa, senão é a pessoa (baixar ou recusar). Aceitar cria o arquivo parcial em `~/Downloads/clam`.
+/// Resposta a um pedido de arquivo: o laço responde sozinho quando a política deixa, senão é a pessoa (baixar ou recusar). Aceitar cria o arquivo parcial em `~/.clam-gui.recebidos`, a pasta que se apaga ao fechar (só "baixar" o tira de lá).
 pub(crate) fn answer(shared: &std::sync::Arc<Shared>, dialer: &Dialer, out: &Sink, rx: &mut Receiving, peer: [u8; 32], id: u64, accept: bool) {
     let Some((name, size)) = shared.transfers.lock_unpoisoned().asked(&peer, id) else { return };
     let phase = if !accept {
         Phase::Declined
     } else {
-        match Incoming::create(&crate::conf::downloads_dir(), id, size, &name) {
+        match Incoming::create(&crate::conf::received_dir(), id, size, &name) {
             Ok(inc) => {
                 rx.open.insert((peer, id), inc);
                 Phase::Active
             }
             Err(e) => {
-                out.line(format!("não consegui criar o arquivo em {}: {e}", crate::conf::downloads_dir().display()));
+                out.line(format!("não consegui criar o arquivo em {}: {e}", crate::conf::received_dir().display()));
                 Phase::Failed(e.to_string())
             }
         }

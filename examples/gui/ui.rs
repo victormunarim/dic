@@ -397,13 +397,17 @@ impl eframe::App for App {
 
     /// Fechar a janela estando online: manda o aviso de saída aos membros dos servidores (`Msg::Bye`) antes de
     /// o processo morrer; sem isso eles me veem online até o prazo da presença vencer.
+    /// Os arquivos recebidos que a pessoa não baixou saem do disco por último, com o laço do nó já parado (nenhum
+    /// parcial aberto); se o processo morrer antes, a próxima abertura os apaga (`main`).
     fn on_exit(&mut self, _: Option<&eframe::glow::Context>) {
-        let Some(r) = &self.running else { return };
-        r.stop.store(true, Ordering::Relaxed);
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while !self.done.load(Ordering::Relaxed) && std::time::Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(20));
+        if let Some(r) = &self.running {
+            r.stop.store(true, Ordering::Relaxed);
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while !self.done.load(Ordering::Relaxed) && std::time::Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(20));
+            }
         }
+        crate::arquivos::sweep(&crate::conf::received_dir());
     }
 
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {

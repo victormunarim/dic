@@ -144,7 +144,7 @@ impl App {
 pub(crate) fn file_progress(ui: &mut egui::Ui, x: &crate::arquivos::Xfer, cmds: &mut Vec<Cmd>) {
     if x.phase == Phase::Asking {
         ui.label(RichText::new(format!("pedido de arquivo · {}", size_text(x.size))).size(12.0).color(pal().muted));
-        if download_button(ui, "Baixar: o arquivo só vem para este computador depois do clique").clicked() {
+        if download_button(ui, "Baixar: o arquivo só vem para este computador depois do clique, e some quando o programa fecha se você não o guardar").clicked() {
             cmds.push(Cmd::FileAnswer(x.peer, x.id, true));
         }
         if close_button(ui, "Recusar o pedido").clicked() {

@@ -40,6 +40,9 @@ use conf::Form;
 use ui::{App, Tab};
 
 fn main() -> eframe::Result {
+    // Fechamento brusco (queda de energia, kill, pane) não deixa arquivo recebido para trás: o que não foi baixado
+    // some na abertura seguinte, antes de qualquer transferência nova.
+    arquivos::sweep(&conf::received_dir());
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("runtime");
     let opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 800.0]).with_min_inner_size([820.0, 560.0]).with_title("Clam"),
