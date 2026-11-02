@@ -172,7 +172,7 @@ impl App {
     }
 
     /// Apaga tudo da conversa com `key` neste computador: o texto, os arquivos que ainda estavam na pasta temporária e o
-    /// registro dos baixados (o arquivo baixado fica no disco, é da pessoa). Não fecha o bate-papo.
+    /// os baixados dele com a pasta da conversa. Não fecha o bate-papo.
     pub(crate) fn erase_chat(&mut self, key: [u8; 32]) {
         let text = {
             let mut book = self.shared.chats.lock_unpoisoned();

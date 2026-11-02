@@ -170,10 +170,12 @@ impl App {
         if keys.is_empty() {
             return;
         }
+        let contacts = crate::conf::parse_contacts(&self.form.contacts);
         let (shared, log, ctx, dir) = (self.shared.clone(), self.log.clone(), ctx.clone(), crate::conf::save_dir(&self.form.save_dir));
         std::thread::spawn(move || {
             for (peer, id) in keys {
-                if let Err(e) = crate::arquivos::keep(&shared.transfers, &crate::conf::received_dir(), &dir, peer, id) {
+                let name = contacts.iter().find(|(_, k)| *k == peer).map_or("contato", |(n, _)| n.as_str());
+                if let Err(e) = crate::arquivos::keep(&shared.transfers, &crate::conf::received_dir(), &dir, &crate::arquivos::chat_folder(name, &peer), peer, id) {
                     log.lock_unpoisoned().push(format!("baixar: {e}"));
                 }
             }

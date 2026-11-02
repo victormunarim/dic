@@ -43,10 +43,18 @@ fn move_file(path: &Path, dest: &Path) -> std::io::Result<()> {
     std::fs::remove_file(path)
 }
 
-/// Baixar: leva o arquivo recebido de `id` para dentro de `dest_dir` (a pasta de baixados, sem perguntar) e o registra
-/// como baixado. Sair da pasta dos recebidos é o que tira a marca de "apagar". Devolve o novo caminho (quem chama grava o
+/// Nome da pasta de um contato dentro da pasta de baixados: o nome dele (saneado) mais um pedaço da chave, para dois
+/// contatos de mesmo nome nunca dividirem pasta.
+pub(crate) fn chat_folder(name: &str, peer: &[u8; 32]) -> String {
+    let short: String = crate::conf::hex(peer).chars().take(6).collect();
+    format!("{} ({short})", clam::transfer::safe_name(name))
+}
+
+/// Baixar: leva o arquivo recebido de `id` para a pasta da conversa (`folder`) dentro de `base` (a pasta de baixados,
+/// sem perguntar) e o registra como baixado. Se o contato já tem baixados em `base`, segue na mesma pasta mesmo que o
+/// nome dele tenha mudado. Sair da pasta dos recebidos é o que tira a marca de "apagar". Devolve o novo caminho (quem chama grava o
 /// registro com `save_kept`). Erro, e o arquivo continua onde estava: nada se perde.
-pub(crate) fn keep(t: &std::sync::Mutex<Transfers>, received: &Path, dest_dir: &Path, peer: [u8; 32], id: u64) -> Result<PathBuf, String> {
+pub(crate) fn keep(t: &std::sync::Mutex<Transfers>, received: &Path, base: &Path, folder: &str, peer: [u8; 32], id: u64) -> Result<PathBuf, String> {
     use clam::sync::LockExt;
     let from = {
         let mut t = t.lock_unpoisoned();
@@ -55,6 +63,7 @@ pub(crate) fn keep(t: &std::sync::Mutex<Transfers>, received: &Path, dest_dir: &
             _ => return Err("o arquivo não está mais entre os recebidos".into()),
         }
     };
+    let dest_dir = &t.lock_unpoisoned().kept_dir(&peer, base).unwrap_or_else(|| base.join(folder));
     if is_temporary(received, dest_dir) {
         return Err(format!("a pasta de baixados não pode ser {}: o que está lá é apagado ao fechar", received.display()));
     }
@@ -189,6 +198,11 @@ impl Transfers {
         out
     }
 
+    /// A pasta da conversa de `peer` dentro de `base`, se ele já tem algum baixado lá.
+    fn kept_dir(&self, peer: &[u8; 32], base: &Path) -> Option<PathBuf> {
+        self.kept.range((*peer, 0)..=(*peer, u64::MAX)).find_map(|(_, p)| p.parent().filter(|d| d.parent() == Some(base)).map(Path::to_path_buf))
+    }
+
     /// O arquivo recebido foi baixado para `path`: a transferência passa a apontar para lá e o registro guarda isso.
     fn mark_kept(&mut self, peer: [u8; 32], id: u64, path: PathBuf) {
         if let Some(x) = self.find(&peer, id, false) {
@@ -215,9 +229,10 @@ impl Transfers {
         }
     }
 
-    /// Apagar a conversa com `peer`: tira da tela as transferências encerradas dele e apaga os recebidos que ainda
-    /// estavam na pasta temporária (o histórico que os mostrava sumiu). Os baixados **continuam no disco**: são da
-    /// pessoa, só deixam de aparecer na conversa. Devolve `true` se o registro dos baixados mudou. O que ainda anda fica.
+    /// Apagar a conversa com `peer`: tira da tela as transferências encerradas dele, apaga os recebidos que ainda
+    /// estavam na pasta temporária e os baixados dele, e a pasta da conversa quando esvazia (`remove_dir`: se a pessoa
+    /// pôs outro arquivo lá dentro, a pasta e esse arquivo ficam). Devolve `true` se o registro dos baixados mudou. O
+    /// que ainda anda fica.
     pub(crate) fn forget_peer(&mut self, peer: &[u8; 32], received: &Path) -> bool {
         self.list.retain(|x| {
             let gone = x.peer == *peer && !x.phase.live();
@@ -227,7 +242,20 @@ impl Transfers {
             !gone
         });
         let before = self.kept.len();
-        self.kept.retain(|(k, _), _| k != peer);
+        let mut dirs = Vec::new();
+        self.kept.retain(|(k, _), p| {
+            if k != peer {
+                return true;
+            }
+            let _ = std::fs::remove_file(&*p);
+            if let Some(d) = p.parent() && !dirs.iter().any(|x: &PathBuf| x == d) {
+                dirs.push(d.to_path_buf());
+            }
+            false
+        });
+        for d in dirs {
+            let _ = std::fs::remove_dir(d);
+        }
         self.kept.len() != before
     }
 
@@ -464,9 +492,9 @@ mod tests {
         std::fs::write(recebidos.join("a.pdf"), b"conteudo").unwrap();
         let (peer, t) = ([3u8; 32], std::sync::Mutex::new(Transfers::default()));
         done_in(&mut t.lock().unwrap(), peer, 9, recebidos.join("a.pdf"));
-        let to = keep(&t, &recebidos, &destino, peer, 9).unwrap();
+        let to = keep(&t, &recebidos, &destino, "Ana", peer, 9).unwrap();
         let text = t.lock().unwrap().render_kept();
-        assert_eq!(to, destino.join("a.pdf"));
+        assert_eq!(to, destino.join("Ana").join("a.pdf"));
         assert!(!recebidos.join("a.pdf").exists());
         assert_eq!(t.lock().unwrap().of(&peer).first().and_then(|x| x.media_path().map(Path::to_path_buf)), Some(to.clone()), "a conversa passa a apontar para o novo lugar");
         // Fechou e abriu: a pasta dos recebidos é varrida, o baixado fica e reaparece no mesmo lugar.
@@ -479,8 +507,8 @@ mod tests {
         // Segundo arquivo com o mesmo nome não sobrescreve o primeiro.
         std::fs::write(recebidos.join("a.pdf"), b"outro").unwrap();
         done_in(&mut t.lock().unwrap(), peer, 10, recebidos.join("a.pdf"));
-        let to2 = keep(&t, &recebidos, &destino, peer, 10).unwrap();
-        assert_eq!(to2, destino.join("a (2).pdf"));
+        let to2 = keep(&t, &recebidos, &destino, "Ana", peer, 10).unwrap();
+        assert_eq!(to2, destino.join("Ana").join("a (2).pdf"), "mesma pasta, sem sobrescrever");
         assert_eq!(std::fs::read(&to).unwrap(), b"conteudo");
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -492,13 +520,13 @@ mod tests {
         std::fs::create_dir_all(&recebidos).unwrap();
         std::fs::write(recebidos.join("a.pdf"), b"x").unwrap();
         let (peer, t) = ([3u8; 32], std::sync::Mutex::new(Transfers::default()));
-        assert!(keep(&t, &recebidos, &destino, peer, 1).is_err(), "sem transferência");
+        assert!(keep(&t, &recebidos, &destino, "Ana", peer, 1).is_err(), "sem transferência");
         done_in(&mut t.lock().unwrap(), peer, 1, recebidos.join("a.pdf"));
-        assert!(keep(&t, &recebidos, &recebidos.join("sub"), peer, 1).is_err(), "baixar para dentro da pasta que se apaga");
+        assert!(keep(&t, &recebidos, &recebidos.join("sub"), "Ana", peer, 1).is_err(), "baixar para dentro da pasta que se apaga");
         assert!(recebidos.join("a.pdf").exists());
         // Destino que não dá para criar (um arquivo no lugar da pasta): o arquivo fica onde estava.
         std::fs::write(d.join("arquivo"), b"").unwrap();
-        assert!(keep(&t, &recebidos, &d.join("arquivo").join("x"), peer, 1).is_err());
+        assert!(keep(&t, &recebidos, &d.join("arquivo").join("x"), "Ana", peer, 1).is_err());
         assert!(recebidos.join("a.pdf").exists());
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -513,14 +541,15 @@ mod tests {
         let (ana, bia, t) = ([1u8; 32], [2u8; 32], std::sync::Mutex::new(Transfers::default()));
         done_in(&mut t.lock().unwrap(), ana, 1, recebidos.join("a.pdf"));
         done_in(&mut t.lock().unwrap(), ana, 2, recebidos.join("b.pdf"));
-        let baixado = keep(&t, &recebidos, &destino, ana, 1).unwrap();
+        let baixado = keep(&t, &recebidos, &destino, "Ana", ana, 1).unwrap();
         std::fs::write(recebidos.join("c.pdf"), b"c").unwrap();
         done_in(&mut t.lock().unwrap(), bia, 3, recebidos.join("c.pdf"));
         let mudou = t.lock().unwrap().forget_peer(&ana, &recebidos);
         assert!(mudou);
         assert!(t.lock().unwrap().of(&ana).is_empty(), "a conversa não mostra mais nada");
         assert!(!recebidos.join("b.pdf").exists(), "o não baixado some");
-        assert!(baixado.exists(), "o baixado é da pessoa e fica no disco");
+        assert!(!baixado.exists(), "o baixado daquela conversa sai com ela");
+        assert!(!destino.join("Ana").exists(), "e a pasta da conversa também");
         assert!(recebidos.join("c.pdf").exists(), "o de outro contato não é tocado");
         assert_eq!(t.lock().unwrap().of(&bia).len(), 1);
         let _ = std::fs::remove_dir_all(&d);

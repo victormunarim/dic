@@ -268,7 +268,7 @@ impl App {
                         }
                     });
                 }
-            }).response.on_hover_text(format!("Onde ficam os arquivos que você baixa de uma conversa, sem perguntar a cada vez: {}. Dentro da conversa, o ícone de pasta abre o arquivo no gerenciador de arquivos.", current.display()));
+            }).response.on_hover_text(format!("Onde ficam os arquivos que você baixa, sem perguntar a cada vez, numa subpasta por conversa: {}. Dentro da conversa, o ícone de pasta abre o arquivo no gerenciador de arquivos.", current.display()));
         });
     }
 

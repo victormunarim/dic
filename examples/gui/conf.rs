@@ -247,7 +247,7 @@ pub(crate) fn received_dir() -> PathBuf {
     conf_path().with_file_name(".clam-gui.recebidos")
 }
 
-/// A pasta de arquivos baixados quando a pessoa não escolheu outra: `~/Downloads/clam`.
+/// A pasta de arquivos baixados quando a pessoa não escolheu outra: `~/Documents/clam`.
 pub(crate) fn default_save_dir() -> PathBuf {
     save_choices().remove(0).1
 }
@@ -257,7 +257,7 @@ pub(crate) fn default_save_dir() -> PathBuf {
 pub(crate) fn save_choices() -> Vec<(&'static str, PathBuf)> {
     let home = conf_path().with_file_name("");
     let under = |d: &str| home.join(d).join("clam");
-    vec![("Downloads/clam", under("Downloads")), ("Documents/clam", under("Documents")), ("Desktop/clam", under("Desktop"))]
+    vec![("Documents/clam", under("Documents")), ("Downloads/clam", under("Downloads")), ("Desktop/clam", under("Desktop"))]
 }
 
 /// Onde baixar: a pasta escolhida em Configurações, ou a padrão.

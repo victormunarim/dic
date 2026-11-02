@@ -40,7 +40,7 @@ impl App {
                     let ask = egui::Id::new(("apagar-conversa", peer));
                     // Fecha só ao clicar fora: o primeiro clique troca o item pela pergunta com o efeito escrito.
                     let open = menu(&dots).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
-                        let effect = "Somem as mensagens e os arquivos desta conversa só neste computador; o contato mantém a cópia dele. Arquivos que você baixou continuam na pasta de baixados.";
+                        let effect = "Somem as mensagens e os arquivos desta conversa só neste computador, inclusive os que você baixou e a pasta deles; o contato mantém a cópia dele.";
                         if confirm_item(ui, ask, "Apagar a conversa", "Pede confirmação antes de apagar", "Apagar toda a conversa?", effect, "Apagar", trash_icon) {
                             erase = true;
                             ui.close();
