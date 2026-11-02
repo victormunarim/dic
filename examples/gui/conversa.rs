@@ -6,6 +6,22 @@ use eframe::egui::{self, RichText, vec2};
 
 use crate::{arquivos::{Phase, size_text}, chats::State, engine::*, theme::*, ui::*};
 
+/// Largura máxima do balão (pt), perto de 70 caracteres: linha mais longa cansa a leitura.
+const BUBBLE_MAX: f32 = 520.0;
+/// Espaço entre mensagens seguidas do mesmo autor e entre autores (pt).
+const MSG_GAP: f32 = 6.0;
+const RUN_GAP: f32 = 16.0;
+
+/// Balão da mensagem. Minha fala fica à direita e afundada; a do contato, à esquerda e em relevo. O lado e a forma
+/// dizem quem falou sem depender de cor.
+fn bubble(ui: &mut egui::Ui, mine: bool, add: impl FnOnce(&mut egui::Ui)) {
+    let side = if mine { egui::Align::Max } else { egui::Align::Min };
+    ui.with_layout(egui::Layout::top_down(side), |ui| {
+        ui.set_max_width(ui.available_width().min(BUBBLE_MAX));
+        if mine { sunken_frame(ui, 14, 10, add) } else { raised_frame(ui, 14, 10, add) };
+    });
+}
+
 impl App {
     /// A conversa com `peer`. `online`: o contato está de pé agora (ou em chamada comigo), então dá para enviar.
     pub(crate) fn chat_panel(&mut self, ui: &mut egui::Ui, peer: [u8; 32], online: bool) {
@@ -24,6 +40,7 @@ impl App {
         }
         let xfers = self.shared.transfers.lock_unpoisoned().of(&peer);
         let mut file_cmds: Vec<Cmd> = Vec::new();
+        let mut retry: Option<(Vec<u64>, String)> = None;
         // Sem cartão, como o bate-papo da sala: título, mensagens até o pé da janela e a linha de envio embaixo.
         ui.add_space(4.0);
         ui.scope(|ui| {
@@ -58,9 +75,12 @@ impl App {
                 if msgs.is_empty() {
                     note(ui, "Sem mensagens ainda.");
                 }
+                // Cada autor fala em seu lado; mensagens seguidas do mesmo autor formam uma sequência com o nome uma vez só.
+                let mut prev: Option<bool> = None;
                 for g in crate::chats::groups(&msgs) {
                     let parts = msgs.get(g).unwrap_or_default();
                     let Some(m) = parts.first() else { continue };
+                    let mine = m.mine();
                     // Pedaços de um texto longo aparecem como uma mensagem só; o estado é o pior entre eles.
                     let text: String = parts.iter().map(|p| p.text.as_str()).collect();
                     let state = if parts.iter().any(|p| p.state == State::Failed) {
@@ -70,31 +90,54 @@ impl App {
                     } else {
                         m.state
                     };
-                    ui.horizontal_wrapped(|ui| {
-                        ui.spacing_mut().item_spacing.x = 4.0;
-                        let (who, color) = if m.mine() { ("Você", pal().green) } else { (name.as_str(), pal().strong) };
-                        ui.label(RichText::new(format!("{who}:")).strong().color(color));
-                        ui.label(RichText::new(text).color(pal().text));
-                        if let Some(x) = xfers.iter().find(|x| x.id == m.id && x.mine == m.mine() && x.phase.live()) {
-                            file_progress(ui, x, &mut file_cmds);
-                            return;
-                        }
-                        match state {
-                            State::Sending => ui.label(RichText::new("enviando…").size(12.0).color(pal().muted)),
-                            State::Failed => {
-                                // Discreto: um triângulo pequeno no tom do erro, sem texto; o motivo fica no hover.
-                                let (rect, r) = ui.allocate_exact_size(vec2(14.0, 14.0), egui::Sense::hover());
-                                r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, "Não entregue"));
-                                alert_icon(ui.painter(), rect.center(), 13.0, pal().error.gamma_multiply(0.8));
-                                r.on_hover_text("Não entregue: o contato não confirmou, estava offline ou sem rota. Não há caixa de correio; envie de novo quando ele voltar.")
-                            }
-                            State::Sent | State::Received => ui.label(""),
-                        };
-                    });
+                    let side = if mine { egui::Align::Max } else { egui::Align::Min };
+                    let new_run = prev != Some(mine);
+                    if prev.is_some() {
+                        ui.add_space(if new_run { RUN_GAP } else { MSG_GAP });
+                    }
+                    prev = Some(mine);
+                    if new_run && !mine {
+                        ui.label(RichText::new(name.as_str()).size(13.0).strong().color(pal().strong));
+                        ui.add_space(2.0);
+                    }
+                    let live = xfers.iter().find(|x| x.id == m.id && x.mine == mine && x.phase.live());
                     // Imagem à vista, vídeo com play e cartão com baixar, quando o arquivo já está no disco.
-                    if let Some(x) = xfers.iter().find(|x| x.id == m.id && x.mine == m.mine() && x.media_path().is_some())
-                    {
-                        crate::midia::show(ui, x);
+                    let media = xfers.iter().find(|x| x.id == m.id && x.mine == mine && x.media_path().is_some());
+                    // A linha "📎 nome" do histórico é só o rastro do anexo: com o cartão ou a imagem à vista, repeti-la é ruído.
+                    let trace = text.starts_with("📎 ") && media.is_some();
+                    if !trace {
+                        bubble(ui, mine, |ui| {
+                            ui.label(RichText::new(text.as_str()).color(pal().text));
+                            if let Some(x) = live {
+                                ui.horizontal(|ui| file_progress(ui, x, &mut file_cmds));
+                            }
+                        });
+                    }
+                    if let Some(x) = media {
+                        ui.add_space(if trace { 0.0 } else { MSG_GAP });
+                        ui.with_layout(egui::Layout::top_down(side), |ui| crate::midia::show(ui, x));
+                    }
+                    if live.is_none() && mine && matches!(state, State::Sending | State::Failed) {
+                        ui.allocate_ui_with_layout(vec2(ui.available_width(), 30.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if state == State::Sending {
+                                ui.label(RichText::new("enviando…").size(13.0).color(pal().muted));
+                                let (rect, _) = ui.allocate_exact_size(vec2(14.0, 14.0), egui::Sense::hover());
+                                clock_icon(ui.painter(), rect.center(), 14.0, pal().muted);
+                            } else {
+                                // Falha à vista e com saída: o motivo escrito, o aviso desenhado e o botão de tentar de novo.
+                                let again = ui.add_enabled_ui(sendable, |ui| {
+                                    glyph_button(ui, "Enviar de novo", "Enviar de novo: tira esta mensagem e manda o texto outra vez. Só com o contato online", Some(pal().error), retry_icon)
+                                });
+                                if again.inner.clicked() {
+                                    retry = Some((parts.iter().map(|p| p.id).collect(), text.clone()));
+                                }
+                                let why = "Não entregue: o contato não confirmou, estava offline ou sem rota. Não há caixa de correio; envie de novo quando ele voltar.";
+                                ui.add(egui::Label::new(RichText::new("Não entregue").size(13.0).color(pal().error)).selectable(false).sense(egui::Sense::hover())).on_hover_text(why);
+                                let (rect, r) = ui.allocate_exact_size(vec2(18.0, 18.0), egui::Sense::hover());
+                                r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, "Não entregue"));
+                                alert_icon(ui.painter(), rect.center(), 18.0, pal().error);
+                            }
+                        });
                     }
                 }
             });
@@ -137,6 +180,11 @@ impl App {
             for c in file_cmds {
                 let _ = r.cmds.send(c);
             }
+        }
+        // Reenviar tira a mensagem que falhou e manda o texto de novo: a conversa não fica com duas cópias.
+        if let (Some((ids, text)), Some(r)) = (retry, &self.running) {
+            self.shared.chats.lock_unpoisoned().discard(&peer, &ids);
+            let _ = r.cmds.send(Cmd::Chat(peer, text));
         }
         if erase {
             self.erase_chat(peer);

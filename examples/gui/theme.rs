@@ -939,6 +939,23 @@ pub(crate) fn alert_icon(painter: &egui::Painter, center: Pos2, size: f32, color
     painter.circle_filled(u(0.0, 0.22), size * 0.05, color);
 }
 
+/// Seta circular (tentar de novo), desenhada: arco aberto no alto à direita com a ponta da seta.
+pub(crate) fn retry_icon(painter: &egui::Painter, center: Pos2, size: f32, color: Color32) {
+    let r = size * 0.34;
+    let ink = Stroke::new((size * 0.1).max(1.5), color);
+    // Do ângulo -60° (alto à direita) dando a volta por 280°, no sentido horário da tela.
+    let (start, sweep) = (-60.0_f32.to_radians(), 280.0_f32.to_radians());
+    let pts: Vec<Pos2> = (0..=24).map(|i| { let a = start + sweep * i as f32 / 24.0; center + vec2(a.cos(), a.sin()) * r }).collect();
+    let tip = pts.last().copied().unwrap_or(center);
+    painter.add(Shape::line(pts, ink));
+    // A ponta fecha o arco: dois traços saindo do fim.
+    let a = start + sweep;
+    let dir = vec2(-a.sin(), a.cos());
+    let side = vec2(a.cos(), a.sin());
+    painter.line_segment([tip, tip - dir * size * 0.2 + side * size * 0.16], ink);
+    painter.line_segment([tip, tip - dir * size * 0.2 - side * size * 0.16], ink);
+}
+
 /// Botão só com um ícone desenhado, sem moldura (lista de contatos, painel do usuário). `draw` pinta o ícone;
 /// `name` é o que o leitor de tela diz e `tip`, o hover; `color` fixa a tinta (sem ela: texto, e forte ao passar o mouse). Num
 /// `Ui` desligado o ícone apaga e não clica.

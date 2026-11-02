@@ -85,6 +85,15 @@ impl ChatBook {
         }
     }
 
+    /// Tira as mensagens minhas `ids` da conversa (reenvio de uma que falhou).
+    pub(crate) fn discard(&mut self, peer: &[u8; 32], ids: &[u64]) {
+        if let Some(v) = self.chats.get_mut(peer) {
+            let before = v.len();
+            v.retain(|m| !(m.mine() && ids.contains(&m.id)));
+            self.dirty |= v.len() != before;
+        }
+    }
+
     /// Mensagem minha, a caminho.
     pub(crate) fn push_mine(&mut self, peer: [u8; 32], id: u64, text: String) {
         self.push(peer, Msg { id, text, state: State::Sending });
@@ -220,6 +229,22 @@ mod tests {
         assert!(!saved.contains(&hex(&a)) && saved.contains(&hex(&b)));
         book.forget(&a);
         assert!(book.take_dirty().is_none(), "sem conversa, nada a gravar");
+    }
+
+    #[test]
+    fn discarding_removes_only_my_messages_with_those_ids() {
+        let a = [1u8; 32];
+        let mut book = ChatBook::default();
+        book.push_mine(a, 5, "falhou".into());
+        book.push_received(a, 5, "do contato, mesmo id".into());
+        book.push_mine(a, 9, "fica".into());
+        book.take_dirty();
+        book.discard(&a, &[5]);
+        let left: Vec<_> = book.with(&a).iter().map(|m| m.text.as_str()).collect();
+        assert_eq!(left, ["do contato, mesmo id", "fica"]);
+        assert!(book.take_dirty().is_some(), "a remoção precisa chegar ao arquivo");
+        book.discard(&a, &[5]);
+        assert!(book.take_dirty().is_none(), "nada mudou, nada a gravar");
     }
 
     #[test]

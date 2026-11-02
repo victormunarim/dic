@@ -215,7 +215,10 @@ fn image_block(ui: &mut egui::Ui, name: &str, path: &Path, key: Key) {
             }
         }
         Slot::Loading => {
-            ui.add(egui::Spinner::new().size(18.0).color(BLURPLE));
+            // Reserva o espaço da miniatura (4:3, a proporção mais comum) para a conversa não pular ao carregar.
+            let (rect, _) = ui.allocate_exact_size(vec2(SHOWN, SHOWN * 0.75), Sense::hover());
+            sunken(ui.painter(), rect, 12, pal().deep);
+            ui.put(egui::Rect::from_center_size(rect.center(), vec2(18.0, 18.0)), egui::Spinner::new().size(18.0).color(BLURPLE));
         }
         Slot::Failed => file_card(ui, name, 0, path, key),
     }
