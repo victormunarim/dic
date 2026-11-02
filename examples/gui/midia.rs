@@ -245,14 +245,32 @@ fn video_block(ui: &mut egui::Ui, name: &str, path: &Path, key: Key) {
     }
 }
 
+const EXEC_WARNING: &str = "Este arquivo é um programa ou script: abri-lo roda código neste computador. Só baixe e abra se você confia em quem enviou e esperava por ele. Sem baixar, ele é apagado quando o programa fecha.";
+
 /// Arquivo que não é mídia (ou imagem que não abriu): nome, tamanho e o ícone de baixar ou de mostrar na pasta.
 fn file_card(ui: &mut egui::Ui, name: &str, size: u64, path: &Path, key: Key) {
     let ctx = ui.ctx().clone();
+    // Programa ou script: aviso à vista e, para baixar, um segundo clique ("Baixar mesmo assim?"). Já baixado ou
+    // enviado por mim, o ícone só mostra a pasta e não pede nada.
+    let exec = crate::arquivos::is_executable(name);
+    let temp = crate::arquivos::is_temporary(&crate::conf::received_dir(), path);
+    let armed_id = egui::Id::new(("clam-exec-ok", key));
+    let armed = exec && temp && ctx.data(|d| d.get_temp::<bool>(armed_id)).unwrap_or(false);
     sunken_frame(ui, 12, 10, |ui| {
         ui.horizontal(|ui| {
+            if exec {
+                let (rect, r) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::hover());
+                alert_icon(ui.painter(), rect.center(), 18.0, pal().error);
+                r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, "Programa executável"));
+                r.on_hover_text(EXEC_WARNING);
+            }
             ui.label(egui::RichText::new(name).color(pal().text));
             if size > 0 {
                 ui.label(egui::RichText::new(size_text(size)).size(12.0).color(pal().muted));
+            }
+            if exec {
+                let text = if armed { "Baixar mesmo assim?" } else { "Programa: não abra se não confia" };
+                ui.add(egui::Label::new(egui::RichText::new(text).size(12.0).color(pal().error)).selectable(false).sense(Sense::hover())).on_hover_text(EXEC_WARNING);
             }
             let (rect, reply) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::click());
             let ink = if reply.hovered() { pal().strong } else { pal().text };
@@ -260,7 +278,11 @@ fn file_card(ui: &mut egui::Ui, name: &str, size: u64, path: &Path, key: Key) {
             icon(ui.painter(), rect.center(), 18.0, ink);
             reply.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tip));
             if reply.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-                act(&ctx, key, path);
+                if exec && temp && !armed {
+                    ctx.data_mut(|d| d.insert_temp(armed_id, true));
+                } else {
+                    act(&ctx, key, path);
+                }
             }
         });
     });

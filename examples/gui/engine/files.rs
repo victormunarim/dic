@@ -158,10 +158,9 @@ pub(crate) fn announcement(name: &str) -> String {
 }
 
 /// Trata os quadros de arquivo que chegaram de contatos.
-/// Devolve as ofertas novas (contato, número) que a política aceita sozinha (`arquivos::auto_accept`); as outras ficam
-/// como pedido, esperando o clique em baixar.
+/// Devolve as ofertas novas (contato, número) que a política aceita sozinha (`arquivos::auto_accept`, tudo até o
+/// teto); as maiores ficam como pedido, esperando o clique em baixar.
 pub(crate) fn on_frames(shared: &std::sync::Arc<Shared>, rx: &mut Receiving, frames: Vec<([u8; 32], FileFrame)>) -> Vec<([u8; 32], u64)> {
-    let all = shared.auto_files.load(std::sync::atomic::Ordering::Relaxed);
     let mut fresh = Vec::new();
     for (peer, frame) in frames {
         let id = frame.id();
@@ -175,7 +174,7 @@ pub(crate) fn on_frames(shared: &std::sync::Arc<Shared>, rx: &mut Receiving, fra
                     drop(t);
                     // Conta como mensagem nova: aparece na bolinha do contato.
                     shared.chats.lock_unpoisoned().push_received(peer, id, format!("📎 {name}"));
-                    if crate::arquivos::auto_accept(&name, size, all) {
+                    if crate::arquivos::auto_accept(size) {
                         fresh.push((peer, id));
                     }
                 }
@@ -279,7 +278,7 @@ pub(crate) fn cancel(shared: &std::sync::Arc<Shared>, dialer: &Dialer, out: &Sin
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, atomic::Ordering};
+    use std::sync::Arc;
 
     use super::*;
 
@@ -288,19 +287,15 @@ mod tests {
     }
 
     #[test]
-    fn requests_wait_for_a_click_unless_the_policy_accepts_them() {
+    fn every_offer_up_to_the_limit_is_accepted_alone() {
         let shared = Arc::new(Shared::default());
         let mut rx = Receiving::default();
         let mb = 1 << 20;
-        let fresh = on_frames(&shared, &mut rx, vec![offer(1, "foto.png", 3 * mb), offer(2, "ficha.pdf", mb), offer(3, "grande.mp4", 60 * mb)]);
-        assert_eq!(fresh, vec![([9; 32], 1)], "só a imagem pequena desce sozinha");
-        assert!(rx.open.is_empty(), "nada é criado no disco antes do aceite");
+        let fresh = on_frames(&shared, &mut rx, vec![offer(1, "foto.png", 3 * mb), offer(2, "ficha.pdf", mb), offer(3, "setup.exe", 60 * mb), offer(4, "enorme.zip", 101 * mb)]);
+        assert_eq!(fresh, vec![([9; 32], 1), ([9; 32], 2), ([9; 32], 3)], "tudo até 100 MB desce sozinho, programa também");
+        assert!(rx.open.is_empty(), "o disco só é tocado depois, pelo laço que abre a recepção");
         let t = shared.transfers.lock_unpoisoned();
-        assert_eq!(t.asking(&[9; 32]), 3, "os três são pedidos até alguém responder");
-        drop(t);
-        shared.auto_files.store(true, Ordering::Relaxed);
-        let fresh = on_frames(&shared, &mut rx, vec![offer(4, "ficha.pdf", 90 * mb), offer(5, "enorme.zip", 101 * mb)]);
-        assert_eq!(fresh, vec![([9; 32], 4)], "com a opção, tudo até 100 MB desce sozinho");
+        assert_eq!(t.asking(&[9; 32]), 4, "ficam como pedido até o laço aceitar; só o acima do teto continua pedindo");
     }
 
     #[test]

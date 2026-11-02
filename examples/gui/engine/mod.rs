@@ -124,8 +124,6 @@ pub(crate) struct Shared {
     pub(crate) audio: Controls,
     /// Codec das próximas ligações que esta pessoa fizer: Opus em vez de G.722 (`Form::voice_opus`).
     pub(crate) opus: AtomicBool,
-    /// Baixar sozinho todo arquivo recebido de até 100 MB (`Form::auto_files`); a janela o atualiza a cada quadro.
-    pub(crate) auto_files: AtomicBool,
     /// Teste do microfone em andamento (a pessoa se ouve); desligar este sinalizador encerra o teste.
     pub(crate) mic_test: AtomicBool,
     /// Texto de estado do nó ("online em ...").

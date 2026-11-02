@@ -4,15 +4,23 @@
 
 use std::path::{Path, PathBuf};
 
-/// Imagem ou vídeo até este tamanho desce sozinho.
-pub(crate) const AUTO_MEDIA_MAX: u64 = 50 << 20;
-/// Teto do "baixar todo arquivo recebido" (a opção da configuração).
-pub(crate) const AUTO_ALL_MAX: u64 = 100 << 20;
+/// Todo arquivo de contato até este tamanho desce sozinho (é também o limite do envio).
+pub(crate) const AUTO_MAX: u64 = 100 << 20;
 
-/// Um pedido de arquivo de contato vira download sem a pessoa clicar? Imagem e vídeo de até 50 MB, sempre; qualquer
-/// outro arquivo só com a opção `all` ligada, até 100 MB. Antes do aceite nada é gravado neste computador.
-pub(crate) fn auto_accept(name: &str, size: u64, all: bool) -> bool {
-    (crate::midia::kind(name).is_some() && size <= AUTO_MEDIA_MAX) || (all && size <= AUTO_ALL_MAX)
+/// Um pedido de arquivo de contato vira download sem a pessoa clicar? Sim, até 100 MB: o arquivo cai na pasta
+/// temporária e é apagado ao fechar o programa se a pessoa não o baixar, então não há o que verificar antes. Só contato
+/// chega aqui. O que passa do teto fica como pedido, esperando o clique.
+pub(crate) fn auto_accept(size: u64) -> bool {
+    size <= AUTO_MAX
+}
+
+/// O nome tem extensão de programa ou script que o sistema executa ao abrir? Lista conservadora e pela extensão final
+/// (sem diferenciar maiúsculas); a interface avisa, nunca bloqueia.
+pub(crate) fn is_executable(name: &str) -> bool {
+    const EXT: &[&str] = &[
+        "exe", "msi", "bat", "cmd", "com", "scr", "pif", "lnk", "ps1", "vbs", "vbe", "js", "jse", "wsf", "hta", "reg", "jar", "sh", "bash", "run", "bin", "appimage", "desktop", "app", "command", "dmg", "pkg", "apk", "deb", "rpm",
+    ];
+    Path::new(name).extension().is_some_and(|e| EXT.iter().any(|x| e.eq_ignore_ascii_case(x)))
 }
 
 /// O arquivo está na pasta dos recebidos, a que se apaga ao fechar? Compara caminhos já resolvidos: o nome que o contato
@@ -371,16 +379,20 @@ mod tests {
     }
 
     #[test]
-    fn only_small_media_downloads_alone_unless_the_option_is_on() {
+    fn every_file_up_to_the_limit_downloads_alone() {
         let mb = 1 << 20;
-        assert!(auto_accept("foto.JPG", 50 * mb, false));
-        assert!(auto_accept("filme.mp4", 10 * mb, false));
-        assert!(!auto_accept("foto.png", 50 * mb + 1, false), "mídia grande espera o clique");
-        assert!(!auto_accept("relatorio.pdf", mb, false), "outro tipo espera o clique");
-        assert!(!auto_accept("sem-extensao", 1, false));
-        assert!(auto_accept("relatorio.pdf", 100 * mb, true));
-        assert!(!auto_accept("relatorio.pdf", 100 * mb + 1, true));
-        assert!(auto_accept("filme.mp4", 80 * mb, true), "com a opção, mídia grande até 100 MB também");
+        assert!(auto_accept(1) && auto_accept(60 * mb) && auto_accept(100 * mb));
+        assert!(!auto_accept(100 * mb + 1), "acima do teto espera o clique");
+    }
+
+    #[test]
+    fn programs_and_scripts_are_flagged_by_their_last_extension() {
+        for n in ["setup.EXE", "a.b.sh", "foto.png.scr", "x.AppImage", "run.bat", "app.jar"] {
+            assert!(is_executable(n), "{n}");
+        }
+        for n in ["foto.png", "relatorio.pdf", "exe", "sem-extensao", "notas.txt", "filme.mp4", "exe.png"] {
+            assert!(!is_executable(n), "{n}");
+        }
     }
 
     #[test]
