@@ -233,6 +233,30 @@ pub(crate) fn card(ui: &mut Ui, title: &str, subtitle: &str, add: impl FnOnce(&m
     ui.add_space(18.0);
 }
 
+/// Seção de página sem fundo nem relevo: título, subtítulo opcional e o corpo direto sobre a base, separada da
+/// seguinte por um fio. É o que Configurações e Áudio e vídeo usam, numa coluna só; `card` fica para o resto.
+pub(crate) fn section(ui: &mut Ui, title: &str, subtitle: &str, add: impl FnOnce(&mut Ui)) {
+    ui.add_space(8.0);
+    let out = ui.scope(|ui| {
+        ui.set_width(ui.available_width());
+        ui.label(RichText::new(title).strong().size(18.0).color(pal().strong));
+        if !subtitle.is_empty() {
+            ui.label(RichText::new(subtitle).color(pal().muted));
+        }
+        ui.add_space(6.0);
+        add(ui);
+    });
+    #[cfg(test)]
+    CARD_RECTS.with(|r| r.borrow_mut().push((title.to_string(), out.response.rect)));
+    ui.add_space(16.0);
+    let rect = out.response.rect;
+    let y = ui.cursor().top();
+    ui.painter().hline(rect.x_range(), y, Stroke::new(1.0_f32, pal().divider));
+    ui.add_space(8.0);
+    #[cfg(not(test))]
+    let _ = out;
+}
+
 // Retângulo de cada cartão desenhado, para os testes de layout conferirem que nenhum passa por cima de outro.
 #[cfg(test)]
 thread_local! {

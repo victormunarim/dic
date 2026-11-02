@@ -37,11 +37,11 @@ impl App {
         if !offline {
             note(ui, locked);
         }
-        // Esquerda: a pessoa (conexão, nome, código, chave, arquivos). Direita: o que a rede e os contatos veem
-        // (privacidade, reencontro, âncoras). As duas terminam na mesma altura, sem cartão de largura cheia.
-        split(ui, |ui, side| {
+        // Uma coluna só: primeiro a pessoa (conexão, nome, código, chave, arquivos), depois o que a rede e os
+        // contatos veem (privacidade, reencontro, âncoras).
+        stack(ui, |ui, side| {
             if side == 0 {
-                card(ui, "Conexão", "Ficar online sobe o seu relay e o telefone; é daí que as chamadas chegam e saem.", |ui| {
+                section(ui, "Conexão", "Ficar online sobe o seu relay e o telefone; é daí que as chamadas chegam e saem.", |ui| {
                     status_dot(ui, color, text);
                     if !status.is_empty() {
                         note(ui, status);
@@ -76,7 +76,7 @@ impl App {
                         );
                     });
                 });
-                card(ui, "Seu nome", "Como os outros veem você na lista deles.", |ui| {
+                section(ui, "Seu nome", "Como os outros veem você na lista deles.", |ui| {
                     lock(ui, offline, locked, |ui| {
                         ui.horizontal(|ui| {
                             ui.add(field(&mut self.form.my_name, "seu nome").char_limit(clam::media::update::MAX_NAME).desired_width(field_beside(ui, 24.0)))
@@ -85,7 +85,7 @@ impl App {
                         });
                     });
                 });
-                card(ui, "Meu código de contato", "Envie este código a quem vai ligar para você.", |ui| {
+                section(ui, "Meu código de contato", "Envie este código a quem vai ligar para você.", |ui| {
                     let relay = self.shared.relay.lock_unpoisoned().clone();
                     match self.form.my_code(relay.as_ref()) {
                         Some(code) => {
@@ -102,7 +102,7 @@ impl App {
                         }
                     }
                 });
-                card(ui, "Identidade", "A chave secreta (64 hex) é você. Não compartilhe com ninguém.", |ui| {
+                section(ui, "Identidade", "A chave secreta (64 hex) é você. Não compartilhe com ninguém.", |ui| {
                     if self.form.keyring_lost && self.form.secret.trim().is_empty() {
                         note(ui, "A identidade está no chaveiro do sistema e ele não respondeu. Destrave-o e reabra o programa: a configuração segue apontando para ela. Gerar outra ou colar uma chave aqui a substitui.");
                     }
@@ -153,7 +153,7 @@ impl App {
                 });
                 let blocked = self.form.blocked_keys();
                 if !blocked.is_empty() {
-                    card(ui, "Bloqueados", "Não voltam à sua lista sozinhos, por apresentação ou convite. Adicionar o código de novo também desbloqueia.", |ui| {
+                    section(ui, "Bloqueados", "Não voltam à sua lista sozinhos, por apresentação ou convite. Adicionar o código de novo também desbloqueia.", |ui| {
                         lock(ui, offline, locked, |ui| {
                             for key in blocked {
                                 ui.horizontal(|ui| {
@@ -171,11 +171,11 @@ impl App {
                         });
                     });
                 }
-                card(ui, "Arquivos", "Onde ficam os arquivos que você baixa.", |ui| {
+                section(ui, "Arquivos", "Onde ficam os arquivos que você baixa.", |ui| {
                     self.save_folder_picker(ui);
                 });
             } else {
-                card(ui, "Privacidade", "O que quem observa a rede e os seus contatos veem de você.", |ui| {
+                section(ui, "Privacidade", "O que quem observa a rede e os seus contatos veem de você.", |ui| {
                     details(ui, "Como funciona", "Desligado (padrão), a ligação é direta: o contato e quem observa a rede perto dele ou de você veem o seu IP. O conteúdo segue cifrado de ponta a ponta. Ligado, a ligação passa pelo relay de outro contato (qualquer um serve): ele vê o seu IP e o destino, mas não o conteúdo, e o contato com quem você fala só vê o IP desse relay. Com a opção ligada nos dois lados, nenhum dos dois aprende o IP do outro. Vale para voz, tela, bate-papo e arquivos. Sem relay de outro contato disponível, a ligação falha com o motivo, e nunca cai para o caminho direto. Voz, tela, bate-papo e arquivos: se o contato também usa a opção, vão por pontos de introdução e nenhum dos dois aprende o relay do outro; ligada, seu endereço deixa de ser entregue e gravado, um contato com a opção desligada deixa de achar você e um contato offline não recebe bate-papo. Apresentação e caixa de correio vão sem o seu endereço, e o seu código de contato leva só a chave. Servidores criam, convidam e entram sem endereço, mas só alcançam membros que são seus contatos (veja docs/DOIS-RELAYS.md).");
                     lock(ui, offline, locked, |ui| {
                         ui.check(&mut self.form.two_relays, "Passar as ligações por relays de outros contatos")
@@ -196,7 +196,7 @@ impl App {
                             .on_hover_text("Quando alguém adiciona o seu código, ele manda uma apresentação cifrada e passa a aparecer na sua lista, para os dois se ligarem. Quando alguém te remove, ele avisa e sai da sua lista também (só vale de quem já é seu contato). Desligado, só entra na lista quem você adicionar e ninguém te tira da lista. Só aceita de quem já tem o seu endereço; no máximo 20 por minuto.");
                     });
                 });
-                card(ui, "Encontrar contatos", "Como reencontrar um contato que mudou de endereço.", |ui| {
+                section(ui, "Encontrar contatos", "Como reencontrar um contato que mudou de endereço.", |ui| {
                     details(ui, "Como funciona", "Quando um contato muda de endereço (IP novo, outra rede), o programa avisa direto. Se vocês dois mudarem enquanto estavam separados, o aviso não chega, e o reencontro usa a DHT, as âncoras ou as duas. Não existe servidor: o que é guardado vai cifrado e só o contato lê.");
                     lock(ui, offline, locked, |ui| {
                         // Ligada por padrão; desligar perde só o reencontro pela DHT.
@@ -204,7 +204,7 @@ impl App {
                             .on_hover_text("A DHT do BitTorrent é uma rede pública e descentralizada de milhões de computadores. Seu nó guarda nela o endereço atual dele, cifrado para cada contato, e consulta o dos contatos ao ligar. Serve quando você e um contato mudam de endereço ao mesmo tempo. Só o contato lê o conteúdo, mas, com a opção “2 relays” desligada, quem opera nós da DHT vê o seu IP; ligada, o pedido vai por relays de contatos e a DHT só vê o IP do último. Ligada, seu nó também atende a DHT para circuitos de outros nós. Desligada, sobram o aviso direto e as âncoras.");
                     });
                 });
-                card(ui, "Âncoras", "Computadores de pessoas de confiança que guardam o seu endereço.", |ui| {
+                section(ui, "Âncoras", "Computadores de pessoas de confiança que guardam o seu endereço.", |ui| {
                     details(ui, "Como funciona", "Uma âncora é um computador com endereço fixo que guarda o seu endereço atual, cifrado para cada contato, para eles o acharem quando a DHT está bloqueada ou não basta. Escolha âncoras de pessoas em quem você confia: elas veem o IP de quem as usa, mas não o conteúdo.");
                     lock(ui, offline, locked, |ui| {
                         // Servir de âncora vem ligado; desligar só tira o seu computador da rede de âncoras dos outros.
@@ -223,7 +223,7 @@ impl App {
         if self.form.anchor
             && let Some(r) = self.shared.relay.lock_unpoisoned().clone()
         {
-            card(ui, "Código da sua âncora", "", |ui| {
+            section(ui, "Código da sua âncora", "", |ui| {
                 ui.horizontal(|ui| {
                     ui.monospace(format!("{}...", &anchor_code(&r)[..24]));
                     if button(ui, true, "Copiar", BLURPLE).clicked() {
@@ -421,21 +421,20 @@ mod layout_tests {
         assert!(rect.height() < 160.0, "o cartão vazio tem {} px", rect.height());
     }
 
-    /// Em duas colunas os cartões de Configurações terminam quase na mesma altura (sem o vazio embaixo de uma
-    /// delas) e nenhum ocupa a largura toda para carregar pouco conteúdo.
+    /// Configurações é uma coluna só: seções empilhadas no mesmo x, sem se sobrepor e sem passar da largura de leitura.
     #[test]
-    fn settings_columns_are_balanced_and_no_card_spans_both() {
+    fn settings_is_a_single_column_of_sections() {
         let mut app = app();
-        let rects = cards(egui::vec2(1280.0, 1800.0), |ui| app.settings_tab(&egui::Context::default(), ui, true, false, ""));
-        let mid = 640.0;
-        let (mut left, mut right) = (0.0_f32, 0.0_f32);
-        for (title, r) in &rects {
-            assert!(r.width() < 700.0, "'{title}' tem {} px: ocupa as duas colunas", r.width());
-            if r.center().x < mid { left = left.max(r.bottom()) } else { right = right.max(r.bottom()) }
+        let rects = cards(egui::vec2(1280.0, 2400.0), |ui| app.settings_tab(&egui::Context::default(), ui, true, false, ""));
+        let x0 = rects[0].1.left();
+        for (i, (title, r)) in rects.iter().enumerate() {
+            assert!((r.left() - x0).abs() < 1.0, "'{title}' começa em {} e não em {x0}: há outra coluna", r.left());
+            for (other, o) in &rects[i + 1..] {
+                assert!(r.bottom() <= o.top() + 0.5, "'{title}' {r:?} não termina antes de '{other}' {o:?}");
+            }
         }
-        assert!((left - right).abs() < 280.0, "colunas desiguais: esquerda termina em {left}, direita em {right}");
         for title in ["Conexão", "Seu nome", "Meu código de contato", "Identidade", "Arquivos", "Privacidade", "Encontrar contatos", "Âncoras"] {
-            assert!(rects.iter().any(|(t, _)| t == title), "falta o cartão '{title}'");
+            assert!(rects.iter().any(|(t, _)| t == title), "falta a seção '{title}'");
         }
     }
 

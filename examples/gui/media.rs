@@ -8,11 +8,11 @@ use crate::{conf::*, engine::*, theme::*, ui::*};
 
 impl App {
     /// Cartão das preferências da transmissão de tela: valem da próxima transmissão em diante, na chamada e nas
-    /// salas. Mora no fim da coluna direita de Áudio e vídeo (sozinho, era uma página de dois controles).
+    /// salas. Mora perto do fim de Áudio e vídeo (sozinho, era uma página de dois controles).
     fn video_card(&mut self, ui: &mut egui::Ui) {
         let st = &self.shared.screen;
         let busy = st.want_share.load(Ordering::Relaxed) || st.sharing.load(Ordering::Relaxed);
-        card(ui, "Transmissão de tela", "Valem a partir da próxima transmissão e ficam salvas.", |ui| {
+        section(ui, "Transmissão de tela", "Valem a partir da próxima transmissão e ficam salvas.", |ui| {
             if busy {
                 note(ui, "Há uma transmissão em andamento: pare de compartilhar para mudar.");
             }
@@ -51,11 +51,11 @@ impl App {
         let level = a.level();
         let speaking = a.speaking() && !muted;
 
-        split(ui, |ui, side| {
+        stack(ui, |ui, side| {
             if side == 0 {
                 // Uma tarefa por cartão: "o microfone funciona?" se responde num lugar só (dispositivo, mudo, ganho,
                 // medidor, sensibilidade e teste), e o alto-falante tem o dele.
-                card(ui, "Microfone", "", |ui| {
+                section(ui, "Microfone", "", |ui| {
                     ui.spacing_mut().slider_width = (ui.available_width() - 110.0).max(120.0);
                     ui.add_enabled_ui(offline, |ui| ui.check(&mut self.form.use_audio, "Usar microfone e alto-falante")).inner
                         .on_hover_text("Desmarcado, cada lado manda só um tom de teste. Vale ao ficar online.");
@@ -97,7 +97,7 @@ impl App {
                         note(ui, format!("Fique online {ONLINE_HINT} para testar o microfone."));
                     }
                 });
-                card(ui, "Alto-falante", "", |ui| {
+                section(ui, "Alto-falante", "", |ui| {
                     ui.spacing_mut().slider_width = (ui.available_width() - 110.0).max(120.0);
                     #[cfg(feature = "audio")]
                     {
@@ -109,7 +109,7 @@ impl App {
                 });
             } else {
                 // Três cartões por assunto (ruído, eco, nível): oito caixas no mesmo nível não se leem de uma vez.
-                card(ui, "Ruído", "O que o programa faz com o som antes de mandá-lo.", |ui| {
+                section(ui, "Ruído", "O que o programa faz com o som antes de mandá-lo.", |ui| {
                     ui.check(&mut p.denoise, "Remover ruído (rede neural)")
                         .on_hover_text("Tira teclado, ventilador, estática e vozes ao fundo (RNNoise). Com ela ligada, a porta e o indicador \"voz\" só contam o que a rede reconhece como fala. Adiciona ~10 ms de atraso.");
                     ui.check(&mut p.gate, "Silenciar o que não é voz")
@@ -121,7 +121,7 @@ impl App {
                     });
                     ui.check(&mut p.high_pass, "Cortar graves (ventilador, mesa, sopro)");
                 });
-                card(ui, "Eco", "", |ui| {
+                section(ui, "Eco", "", |ui| {
                     ui.check(&mut p.echo_cancel, "Cancelar eco do alto-falante")
                         .on_hover_text("Tira do microfone o que saiu pelo alto-falante, para o outro lado não se ouvir de volta. Leva alguns segundos de conversa para aprender o ambiente. Com fones não é preciso.");
                     ui.check(&mut p.echo_suppress, "Abaixar o microfone enquanto só há eco")
@@ -130,7 +130,7 @@ impl App {
                         note(ui, format!("Eco cancelado: {erle:.0} dB"));
                     }
                 });
-                card(ui, "Nível e formato", "", |ui| {
+                section(ui, "Nível e formato", "", |ui| {
                     ui.check(&mut p.agc, "Volume automático (nivela voz baixa e alta)")
                         .on_hover_text("Reforça quem fala baixo e contém quem fala alto. Não reforça o ruído de fundo.");
                     ui.add_enabled_ui(!in_call, |ui| {
@@ -152,7 +152,7 @@ impl App {
                 self.video_card(ui);
                 let (global, why) = (self.global_keys.active(), self.global_keys.note());
                 let subtitle = if global { "Valem também com a janela em segundo plano." } else { "Valem com a janela em primeiro plano." };
-                card(ui, "Atalhos de teclado", subtitle, |ui| {
+                section(ui, "Atalhos de teclado", subtitle, |ui| {
                     if !global && !why.is_empty() {
                         note(ui, format!("Em segundo plano não vale: {why}"));
                     }

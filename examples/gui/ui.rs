@@ -58,25 +58,16 @@ pub(crate) fn gear_marks(tab: Tab) -> bool {
     matches!(tab, Tab::Audio | Tab::Settings | Tab::Log)
 }
 
-/// Larguras a partir das quais o conteúdo se divide em duas colunas.
-const TWO_COLUMNS: f32 = 780.0;
 /// Quanto a pessoa espera o primeiro quadro depois de clicar em assistir antes de ver um aviso na Atividade.
 const OPEN_SCREEN_WAIT: Duration = Duration::from_secs(10);
 
-/// Chama `f` para a coluna da esquerda (0) e a da direita (1): lado a lado se couber, uma sobre a outra se não.
-pub(crate) fn split(ui: &mut egui::Ui, mut f: impl FnMut(&mut egui::Ui, usize)) {
-    if ui.available_width() >= TWO_COLUMNS {
-        // `columns` usa um layout justificado, que também justifica o texto (espaço largo entre as palavras de uma
-        // linha quebrada); cada coluna volta ao alinhamento à esquerda.
-        ui.columns(2, |c| {
-            for (side, col) in c.iter_mut().enumerate() {
-                col.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| f(ui, side));
-            }
-        });
-    } else {
-        f(ui, 0);
-        f(ui, 1);
-    }
+/// Largura máxima das páginas de uma coluna (Configurações, Áudio e vídeo): linhas mais longas cansam a leitura.
+const READING_WIDTH: f32 = 760.0;
+
+/// Chama `f` para as duas metades da página, uma sob a outra: Configurações e Áudio e vídeo são uma coluna só.
+pub(crate) fn stack(ui: &mut egui::Ui, mut f: impl FnMut(&mut egui::Ui, usize)) {
+    f(ui, 0);
+    f(ui, 1);
 }
 
 /// Lista de escolha de um dispositivo de áudio (vazio = padrão do sistema); vale na próxima chamada.
@@ -509,7 +500,9 @@ impl eframe::App for App {
                     // e dos lados. Só na horizontal, para o que rolou para cima não pintar sobre o cabeçalho.
                     ui.set_clip_rect(ui.clip_rect().expand2(egui::vec2(20.0, 0.0)));
                     ui.add_space(12.0);
-                    ui.set_max_width(ui.available_width().min(1500.0));
+                    // Configurações e Áudio e vídeo são uma coluna só, com largura de leitura; as outras páginas usam a tela.
+                    let wide = if matches!(self.tab, Tab::Settings | Tab::Audio) { READING_WIDTH } else { 1500.0 };
+                    ui.set_max_width(ui.available_width().min(wide));
                     match self.tab {
                         Tab::Contacts | Tab::Call => {}
                         Tab::Servers => self.servers_tab(ui, offline),
