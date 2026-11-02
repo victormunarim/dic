@@ -482,6 +482,25 @@ pub(crate) fn field_beside(ui: &Ui, taken: f32) -> f32 {
     (ui.available_width() - taken - ui.spacing().item_spacing.x - 24.0).max(120.0)
 }
 
+/// Lista de escolha com cara de campo: caixa afundada, sem moldura própria do egui e com o valor à esquerda. A seta
+/// padrão ficava solta à direita de uma caixa sem relevo, destoando dos campos de texto.
+pub(crate) fn select_field<R>(ui: &mut Ui, id: impl std::hash::Hash, shown: &str, add: impl FnOnce(&mut Ui) -> R) -> egui::Response {
+    sunken_frame(ui, 12, 4, |ui| {
+        ui.set_width(ui.available_width());
+        ui.scope(|ui| {
+            let w = &mut ui.visuals_mut().widgets;
+            for s in [&mut w.inactive, &mut w.hovered, &mut w.active, &mut w.open] {
+                s.weak_bg_fill = Color32::TRANSPARENT;
+                s.bg_fill = Color32::TRANSPARENT;
+                s.bg_stroke = Stroke::NONE;
+            }
+            egui::ComboBox::from_id_salt(id).selected_text(shown).width(ui.available_width() - 8.0).show_ui(ui, add).response
+        })
+        .inner
+    })
+    .inner
+}
+
 /// Sinal de mais desenhado (duas barras), porque a fonte pode não ter o glifo e mostrar um quadrado.
 pub(crate) fn draw_plus(painter: &egui::Painter, center: Pos2, half: f32, color: Color32) {
     let stroke = Stroke::new(half * 0.28, color);

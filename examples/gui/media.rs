@@ -1,4 +1,4 @@
-//! Abas Vídeo e Áudio: preferências da transmissão de tela, dispositivos e tratamento da voz.
+//! Aba Áudio e vídeo: dispositivos, tratamento da voz e preferências da transmissão de tela.
 
 use std::sync::atomic::Ordering;
 
@@ -7,8 +7,9 @@ use eframe::egui::{self, CornerRadius};
 use crate::{conf::*, engine::*, theme::*, ui::*};
 
 impl App {
-    /// Preferências da transmissão de tela: valem da próxima transmissão em diante, na chamada e nas salas.
-    pub(crate) fn video_tab(&mut self, ui: &mut egui::Ui) {
+    /// Cartão das preferências da transmissão de tela: valem da próxima transmissão em diante, na chamada e nas
+    /// salas. Mora no fim da coluna direita de Áudio e vídeo (sozinho, era uma página de dois controles).
+    fn video_card(&mut self, ui: &mut egui::Ui) {
         let st = &self.shared.screen;
         let busy = st.want_share.load(Ordering::Relaxed) || st.sharing.load(Ordering::Relaxed);
         card(ui, "Transmissão de tela", "Valem a partir da próxima transmissão e ficam salvas.", |ui| {
@@ -165,6 +166,7 @@ impl App {
                         p = AudioPrefs::default();
                     }
                 });
+                self.video_card(ui);
             }
         });
 

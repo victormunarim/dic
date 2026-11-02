@@ -325,7 +325,7 @@ mod tests {
     /// A captura parte dos padrões reais: a opção "2 relays" vem desligada.
     #[test]
     fn sample_app_starts_from_the_real_defaults() {
-        let app = sample_app(Tab::Video);
+        let app = sample_app(Tab::Settings);
         assert!(!app.form.two_relays, "a opção 2 relays começa desligada");
         assert!(app.form.use_dht && app.form.auto_online);
     }
@@ -345,7 +345,7 @@ mod tests {
     fn telas_em_png() {
         let dir = std::path::PathBuf::from(std::env::var("CLAM_TELAS").unwrap_or_else(|_| "docs/telas".into()));
         std::fs::create_dir_all(&dir).expect("criar a pasta");
-        let tabs = [(Tab::Contacts, "chamada"), (Tab::Servers, "servidores"), (Tab::Video, "video"), (Tab::Audio, "audio"), (Tab::Settings, "configuracoes"), (Tab::Log, "atividade")];
+        let tabs = [(Tab::Contacts, "chamada"), (Tab::Servers, "servidores"), (Tab::Audio, "audio"), (Tab::Settings, "configuracoes"), (Tab::Log, "atividade")];
         for light in [false, true] {
             theme::set_light(light);
             let theme_name = if light { "claro" } else { "escuro" };

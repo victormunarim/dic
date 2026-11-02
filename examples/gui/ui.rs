@@ -17,7 +17,6 @@ pub(crate) enum Tab {
     Contacts,
     Call,
     Servers,
-    Video,
     Audio,
     Settings,
     Log,
@@ -56,7 +55,7 @@ pub(crate) struct App {
 /// A engrenagem fica marcada nas telas que só se abrem por ela: sem isso a pessoa em Áudio ou Configurações não vê
 /// onde está (o trilho marca a coluna de contatos, não a tela do centro).
 pub(crate) fn gear_marks(tab: Tab) -> bool {
-    matches!(tab, Tab::Video | Tab::Audio | Tab::Settings | Tab::Log)
+    matches!(tab, Tab::Audio | Tab::Settings | Tab::Log)
 }
 
 /// Larguras a partir das quais o conteúdo se divide em duas colunas.
@@ -67,9 +66,12 @@ const OPEN_SCREEN_WAIT: Duration = Duration::from_secs(10);
 /// Chama `f` para a coluna da esquerda (0) e a da direita (1): lado a lado se couber, uma sobre a outra se não.
 pub(crate) fn split(ui: &mut egui::Ui, mut f: impl FnMut(&mut egui::Ui, usize)) {
     if ui.available_width() >= TWO_COLUMNS {
+        // `columns` usa um layout justificado, que também justifica o texto (espaço largo entre as palavras de uma
+        // linha quebrada); cada coluna volta ao alinhamento à esquerda.
         ui.columns(2, |c| {
-            f(&mut c[0], 0);
-            f(&mut c[1], 1);
+            for (side, col) in c.iter_mut().enumerate() {
+                col.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| f(ui, side));
+            }
         });
     } else {
         f(ui, 0);
@@ -83,7 +85,7 @@ pub(crate) fn devices_ui(ui: &mut egui::Ui, form: &mut Form, devs: &mut (Vec<Str
     let pick = |ui: &mut egui::Ui, label: &str, cur: &mut String, list: &[String]| {
         ui.label(label);
         let shown = if cur.is_empty() { "padrão do sistema".to_string() } else { cur.clone() };
-        egui::ComboBox::from_id_salt(label).selected_text(shown).width(ui.available_width()).show_ui(ui, |ui| {
+        select_field(ui, label, &shown, |ui| {
             ui.selectable_value(cur, String::new(), "padrão do sistema");
             for d in list {
                 ui.selectable_value(cur, d.clone(), d);
@@ -251,7 +253,7 @@ impl App {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // A engrenagem marca a tela aberta quando ela mora no menu (o trilho ao lado só diz qual coluna está à esquerda).
                 let here = gear_marks(self.tab);
-                let gear_tip = if here { format!("{} (aberta). Chamada, vídeo, áudio, configurações e atividade", self.title().0) } else { "Chamada, vídeo, áudio, configurações e atividade".to_string() };
+                let gear_tip = if here { format!("{} (aberta). Chamada, áudio e vídeo, configurações e atividade", self.title().0) } else { "Chamada, áudio e vídeo, configurações e atividade".to_string() };
                 let gear = glyph_button_active(ui, "Menu", &gear_tip, here, gear_icon);
                 let calling_1to1 = in_call && !in_room;
                 let menu = theme::menu(&gear).show(|ui| {
@@ -260,8 +262,7 @@ impl App {
                     let mic: Icon = |p, c, s, k| mic_icon(p, c, s, k, false);
                     for (tab, icon, label) in [
                         (Tab::Call, phone_icon as Icon, if calling_1to1 { "Chamada em curso" } else { "Chamada" }),
-                        (Tab::Video, monitor_icon as Icon, "Vídeo"),
-                        (Tab::Audio, mic, "Áudio"),
+                        (Tab::Audio, mic, "Áudio e vídeo"),
                         (Tab::Settings, gear_icon as Icon, "Configurações"),
                         (Tab::Log, log_icon as Icon, "Atividade"),
                     ] {
@@ -402,8 +403,7 @@ impl App {
         match self.tab {
             Tab::Contacts | Tab::Call => ("Chamada", "A conversa e a tela compartilhada.".into()),
             Tab::Servers => ("Servidores", "Grupos de pessoas com salas de voz.".into()),
-            Tab::Video => ("Vídeo", "Como a sua tela é transmitida.".into()),
-            Tab::Audio => ("Áudio", "Dispositivos, volume e tratamento da voz.".into()),
+            Tab::Audio => ("Áudio e vídeo", "Dispositivos, volume, tratamento da voz e transmissão da tela.".into()),
             Tab::Settings => ("Configurações", "Conexão, identidade, rede e privacidade.".into()),
             Tab::Log => ("Atividade", "O que o programa está fazendo agora.".into()),
         }
@@ -497,11 +497,14 @@ impl eframe::App for App {
                 return;
             }
             egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+                // A sombra dos cartões passa da borda deles: sem isso a janela de rolagem cortava o relevo dos cantos
+                // e dos lados. Só na horizontal, para o que rolou para cima não pintar sobre o cabeçalho.
+                ui.set_clip_rect(ui.clip_rect().expand2(egui::vec2(20.0, 0.0)));
+                ui.add_space(12.0);
                 ui.set_max_width(ui.available_width().min(1500.0));
                 match self.tab {
                     Tab::Contacts | Tab::Call => {}
                     Tab::Servers => self.servers_tab(ui, offline),
-                    Tab::Video => self.video_tab(ui),
                     Tab::Audio => self.audio_tab(ui, offline, calling, testing),
                     Tab::Settings => self.settings_tab(ctx, ui, offline, calling, &status),
                     Tab::Log => {}
@@ -525,7 +528,7 @@ mod tests {
     /// A engrenagem marca só as telas que moram no menu dela; a inicial, a chamada e os servidores ficam de fora.
     #[test]
     fn the_gear_marks_only_the_screens_it_opens() {
-        for tab in [Tab::Video, Tab::Audio, Tab::Settings, Tab::Log] {
+        for tab in [Tab::Audio, Tab::Settings, Tab::Log] {
             assert!(gear_marks(tab));
         }
         for tab in [Tab::Contacts, Tab::Call, Tab::Servers] {

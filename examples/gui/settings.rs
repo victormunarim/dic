@@ -32,58 +32,74 @@ fn fresh_secret() -> String {
 impl App {
     pub(crate) fn settings_tab(&mut self, ctx: &egui::Context, ui: &mut egui::Ui, offline: bool, in_call: bool, status: &str) {
         let (color, text) = self.connection(offline, status);
-        card(ui, "Conexão", "Ficar online sobe o seu relay e o telefone; é daí que as chamadas chegam e saem.", |ui| {
-            status_dot(ui, color, text);
-            if !status.is_empty() {
-                note(ui, status);
-            }
-            ui.add_space(4.0);
-            if offline {
-                if big_button(ui, "Ficar online", BLURPLE).clicked() {
-                    self.go_online(ctx);
-                }
-            } else if why_off(button(ui, !in_call, "Ficar offline", pal().bg), !in_call, "Desligue a chamada antes de ficar offline").clicked()
-                && let Some(r) = &self.running
-            {
-                r.stop.store(true, Ordering::Relaxed);
-            }
-            if ui.check(&mut self.form.auto_online, "Tentar ficar online ao abrir o programa").changed() {
-                self.form.save();
-            }
-            self.save_folder_picker(ui);
-            if !self.error.is_empty() {
-                ui.colored_label(pal().error, &self.error);
-            }
-            details(
-                ui,
-                "Onde fica a configuração",
-                &format!("{} ({})", conf_path().display(), if self.form.loaded { "lida ao abrir" } else { "não encontrada ao abrir; será criada" }),
-            );
-        });
         let locked = "Fique offline para mudar estes ajustes.";
-        card(ui, "Meu código de contato", "Envie este código a quem vai ligar para você.", |ui| {
-            let relay = self.shared.relay.lock_unpoisoned().clone();
-            match self.form.my_code(relay.as_ref()) {
-                Some(code) => {
-                    sunken_frame(ui, 12, 12, |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.add(egui::Label::new(RichText::new(if code.len() > 72 { format!("{}...", &code[..72]) } else { code.clone() }).monospace()).wrap());
-                    });
-                    if button(ui, true, "Copiar o código", BLURPLE).clicked() {
-                        ui.ctx().copy_text(code);
-                    }
-                }
-                None => {
-                    note(ui, "(identidade inválida: veja Configurações)");
-                }
-            }
-        });
-        // O aviso fica colado nos cartões que ele trava; o código de contato acima segue valendo online.
+        // O aviso vale para os cartões que ele trava; o código de contato segue valendo online.
         if !offline {
             note(ui, locked);
         }
+        // Esquerda: a pessoa (conexão, nome, código, chave, arquivos). Direita: o que a rede e os contatos veem
+        // (privacidade, reencontro, âncoras). As duas terminam na mesma altura, sem cartão de largura cheia.
         split(ui, |ui, side| {
             if side == 0 {
+                card(ui, "Conexão", "Ficar online sobe o seu relay e o telefone; é daí que as chamadas chegam e saem.", |ui| {
+                    status_dot(ui, color, text);
+                    if !status.is_empty() {
+                        note(ui, status);
+                    }
+                    ui.add_space(4.0);
+                    if offline {
+                        if big_button(ui, "Ficar online", BLURPLE).clicked() {
+                            self.go_online(ctx);
+                        }
+                    } else if why_off(button(ui, !in_call, "Ficar offline", pal().bg), !in_call, "Desligue a chamada antes de ficar offline").clicked()
+                        && let Some(r) = &self.running
+                    {
+                        r.stop.store(true, Ordering::Relaxed);
+                    }
+                    if ui.check(&mut self.form.auto_online, "Tentar ficar online ao abrir o programa").changed() {
+                        self.form.save();
+                    }
+                    if !self.error.is_empty() {
+                        ui.colored_label(pal().error, &self.error);
+                    }
+                    ui.add_space(4.0);
+                    ui.label("Endereço público");
+                    lock(ui, offline, locked, |ui| {
+                        ui.add(field(&mut self.form.public_addr, "ip:porta"))
+                            .on_hover_text("Só se o IP que os outros enxergam não serve, como atrás de NAT. ip:porta; a porta precisa estar aberta no roteador, e o endereço pode ser um nome.");
+                    });
+                    details(
+                        ui,
+                        "Onde fica a configuração",
+                        &format!("{} ({})", conf_path().display(), if self.form.loaded { "lida ao abrir" } else { "não encontrada ao abrir; será criada" }),
+                    );
+                });
+                card(ui, "Seu nome", "Como os outros veem você na lista deles.", |ui| {
+                    lock(ui, offline, locked, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.add(field(&mut self.form.my_name, "seu nome").char_limit(clam::media::update::MAX_NAME).desired_width(field_beside(ui, 24.0)))
+                                .on_hover_text("Vazio, os outros veem só o código.");
+                            reopen_mark(ui);
+                        });
+                    });
+                });
+                card(ui, "Meu código de contato", "Envie este código a quem vai ligar para você.", |ui| {
+                    let relay = self.shared.relay.lock_unpoisoned().clone();
+                    match self.form.my_code(relay.as_ref()) {
+                        Some(code) => {
+                            sunken_frame(ui, 12, 12, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.add(egui::Label::new(RichText::new(if code.len() > 72 { format!("{}...", &code[..72]) } else { code.clone() }).monospace()).wrap());
+                            });
+                            if button(ui, true, "Copiar o código", BLURPLE).clicked() {
+                                ui.ctx().copy_text(code);
+                            }
+                        }
+                        None => {
+                            note(ui, "(identidade inválida: veja Configurações)");
+                        }
+                    }
+                });
                 card(ui, "Identidade", "A chave secreta (64 hex) é você. Não compartilhe com ninguém.", |ui| {
                     if self.form.keyring_lost && self.form.secret.trim().is_empty() {
                         note(ui, "A identidade está no chaveiro do sistema e ele não respondeu. Destrave-o e reabra o programa: a configuração segue apontando para ela. Gerar outra ou colar uma chave aqui a substitui.");
@@ -133,17 +149,6 @@ impl App {
                         menu_focus_back(ui, &dots, menu.is_some());
                     });
                 });
-                card(ui, "Seu nome", "Como os outros veem você na lista deles.", |ui| {
-                    lock(ui, offline, locked, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.add(field(&mut self.form.my_name, "seu nome").char_limit(clam::media::update::MAX_NAME).desired_width(field_beside(ui, 24.0)))
-                                .on_hover_text("Vazio, os outros veem só o código.");
-                            reopen_mark(ui);
-                        });
-                        ui.check(&mut self.form.intros, "Aceitar adições e remoções de contatos")
-                            .on_hover_text("Quando alguém adiciona o seu código, ele manda uma apresentação cifrada e passa a aparecer na sua lista, para os dois se ligarem. Quando alguém te remove, ele avisa e sai da sua lista também (só vale de quem já é seu contato). Desligado, só entra na lista quem você adicionar e ninguém te tira da lista. Só aceita de quem já tem o seu endereço; no máximo 20 por minuto.");
-                    });
-                });
                 let blocked = self.form.blocked_keys();
                 if !blocked.is_empty() {
                     card(ui, "Bloqueados", "Não voltam à sua lista sozinhos, por apresentação ou convite. Adicionar o código de novo também desbloqueia.", |ui| {
@@ -164,14 +169,8 @@ impl App {
                         });
                     });
                 }
-                card(ui, "Endereço", "Só se o IP que os outros enxergam não serve, como atrás de NAT.", |ui| {
-                    lock(ui, offline, locked, |ui| {
-                        ui.add(field(&mut self.form.public_addr, "ip:porta"))
-                            .on_hover_text("ip:porta; a porta precisa estar aberta no roteador, e o endereço pode ser um nome.");
-                    });
-                });
             } else {
-                card(ui, "2 relays", "Esconde o seu IP de quem você liga.", |ui| {
+                card(ui, "Privacidade", "O que quem observa a rede e os seus contatos veem de você.", |ui| {
                     details(ui, "Como funciona", "Desligado (padrão), a ligação é direta: o contato e quem observa a rede perto dele ou de você veem o seu IP. O conteúdo segue cifrado de ponta a ponta. Ligado, a ligação passa pelo relay de outro contato (qualquer um serve): ele vê o seu IP e o destino, mas não o conteúdo, e o contato com quem você fala só vê o IP desse relay. Com a opção ligada nos dois lados, nenhum dos dois aprende o IP do outro. Vale para voz, tela, bate-papo e arquivos. Sem relay de outro contato disponível, a ligação falha com o motivo, e nunca cai para o caminho direto. Voz, tela, bate-papo e arquivos: se o contato também usa a opção, vão por pontos de introdução e nenhum dos dois aprende o relay do outro; ligada, seu endereço deixa de ser entregue e gravado, um contato com a opção desligada deixa de achar você e um contato offline não recebe bate-papo. Apresentação e caixa de correio vão sem o seu endereço, e o seu código de contato leva só a chave. Servidores criam, convidam e entram sem endereço, mas só alcançam membros que são seus contatos (veja docs/DOIS-RELAYS.md).");
                     lock(ui, offline, locked, |ui| {
                         ui.check(&mut self.form.two_relays, "Passar as ligações por relays de outros contatos")
@@ -187,6 +186,10 @@ impl App {
                     if self.form.speed_first && !self.form.two_relays {
                         note(ui, "Velocidade priorizada: quem observa a rede vê quando e quanto você envia.");
                     }
+                    lock(ui, offline, locked, |ui| {
+                        ui.check(&mut self.form.intros, "Aceitar adições e remoções de contatos")
+                            .on_hover_text("Quando alguém adiciona o seu código, ele manda uma apresentação cifrada e passa a aparecer na sua lista, para os dois se ligarem. Quando alguém te remove, ele avisa e sai da sua lista também (só vale de quem já é seu contato). Desligado, só entra na lista quem você adicionar e ninguém te tira da lista. Só aceita de quem já tem o seu endereço; no máximo 20 por minuto.");
+                    });
                 });
                 card(ui, "Encontrar contatos", "Como reencontrar um contato que mudou de endereço.", |ui| {
                     details(ui, "Como funciona", "Quando um contato muda de endereço (IP novo, outra rede), o programa avisa direto. Se vocês dois mudarem enquanto estavam separados, o aviso não chega, e o reencontro usa a DHT, as âncoras ou as duas. Não existe servidor: o que é guardado vai cifrado e só o contato lê.");
@@ -209,6 +212,9 @@ impl App {
                         ui.add(egui::TextEdit::multiline(&mut self.form.anchors).hint_text("ip:porta#chave-do-circuito#chave-do-link, uma por linha").desired_rows(3).desired_width(f32::INFINITY).margin(Margin::symmetric(12, 10)))
                             .on_hover_text("Uma por linha, no código que o dono da âncora te passa: ip:porta#chave-do-circuito#chave-do-link");
                     });
+                });
+                card(ui, "Arquivos", "Onde ficam os arquivos que você baixa.", |ui| {
+                    self.save_folder_picker(ui);
                 });
             }
         });
@@ -243,26 +249,25 @@ impl App {
         let current = save_dir(&self.form.save_dir);
         let choices = save_choices();
         let shown = choices.iter().find(|(_, p)| *p == current).map_or_else(|| current.display().to_string(), |(n, _)| (*n).to_string());
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Pasta de baixados").color(pal().text));
-            egui::ComboBox::from_id_salt("pasta-baixados").selected_text(shown).show_ui(ui, |ui| {
-                for (name, path) in &choices {
-                    if ui.selectable_label(*path == current, *name).clicked() {
-                        self.form.save_dir = if *path == choices[0].1 { String::new() } else { path.to_string_lossy().into_owned() };
-                        self.form.save();
+        ui.label(RichText::new("Pasta de baixados").color(pal().text));
+        select_field(ui, "pasta-baixados", &shown, |ui| {
+            for (name, path) in &choices {
+                if ui.selectable_label(*path == current, *name).clicked() {
+                    self.form.save_dir = if *path == choices[0].1 { String::new() } else { path.to_string_lossy().into_owned() };
+                    self.form.save();
+                }
+            }
+            if ui.selectable_label(false, "Outra pasta…").clicked() {
+                let ctx = ui.ctx().clone();
+                std::thread::spawn(move || {
+                    if let Some(dir) = rfd::FileDialog::new().set_title("Pasta de baixados").pick_folder() {
+                        ctx.data_mut(|d| d.insert_temp(picked, dir));
+                        ctx.request_repaint();
                     }
-                }
-                if ui.selectable_label(false, "Outra pasta…").clicked() {
-                    let ctx = ui.ctx().clone();
-                    std::thread::spawn(move || {
-                        if let Some(dir) = rfd::FileDialog::new().set_title("Pasta de baixados").pick_folder() {
-                            ctx.data_mut(|d| d.insert_temp(picked, dir));
-                            ctx.request_repaint();
-                        }
-                    });
-                }
-            }).response.on_hover_text(format!("Onde ficam os arquivos que você baixa, sem perguntar a cada vez, numa subpasta por conversa: {}. Dentro da conversa, o ícone de pasta abre o arquivo no gerenciador de arquivos.", current.display()));
-        });
+                });
+            }
+        })
+        .on_hover_text(format!("Onde ficam os arquivos que você baixa, sem perguntar a cada vez, numa subpasta por conversa: {}. Dentro da conversa, o ícone de pasta abre o arquivo no gerenciador de arquivos.", current.display()));
     }
 
     fn broadcast_card(&self, ui: &mut egui::Ui) {
@@ -412,6 +417,32 @@ mod layout_tests {
         let rects = cards(egui::vec2(1000.0, 800.0), |ui| app.log_tab(ui));
         let (_, rect) = rects.iter().find(|(t, _)| t == "Nada ainda").expect("cartão de log vazio");
         assert!(rect.height() < 160.0, "o cartão vazio tem {} px", rect.height());
+    }
+
+    /// Em duas colunas os cartões de Configurações terminam quase na mesma altura (sem o vazio embaixo de uma
+    /// delas) e nenhum ocupa a largura toda para carregar pouco conteúdo.
+    #[test]
+    fn settings_columns_are_balanced_and_no_card_spans_both() {
+        let mut app = app();
+        let rects = cards(egui::vec2(1280.0, 1800.0), |ui| app.settings_tab(&egui::Context::default(), ui, true, false, ""));
+        let mid = 640.0;
+        let (mut left, mut right) = (0.0_f32, 0.0_f32);
+        for (title, r) in &rects {
+            assert!(r.width() < 700.0, "'{title}' tem {} px: ocupa as duas colunas", r.width());
+            if r.center().x < mid { left = left.max(r.bottom()) } else { right = right.max(r.bottom()) }
+        }
+        assert!((left - right).abs() < 280.0, "colunas desiguais: esquerda termina em {left}, direita em {right}");
+        for title in ["Conexão", "Seu nome", "Meu código de contato", "Identidade", "Arquivos", "Privacidade", "Encontrar contatos", "Âncoras"] {
+            assert!(rects.iter().any(|(t, _)| t == title), "falta o cartão '{title}'");
+        }
+    }
+
+    /// A transmissão de tela mora em Áudio e vídeo, não numa página de dois controles.
+    #[test]
+    fn screen_preferences_live_in_the_audio_page() {
+        let mut app = app();
+        let rects = cards(egui::vec2(1300.0, 1800.0), |ui| app.audio_tab(ui, true, false, false));
+        assert!(rects.iter().any(|(t, _)| t == "Transmissão de tela"));
     }
 
     /// O tratamento da voz vem em cartões por assunto, sem um sobre o outro, nas duas larguras.
