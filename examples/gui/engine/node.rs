@@ -28,7 +28,8 @@ pub(crate) async fn run_node(form: Form, mut rx: mpsc::UnboundedReceiver<Cmd>, s
     cfg.name = form.my_name.trim().to_string();
     cfg.introductions = form.intros;
     cfg.anchor = form.anchor;
-    cfg.anchors = parse_anchors(&form.anchors);
+    cfg.contact_anchors = !form.no_anchors;
+    cfg.anchors_off = parse_anchors_off(&form.anchors_off);
     cfg.servers = load_servers();
     cfg.custody = load_custody();
     cfg.tombstones = load_tombs();

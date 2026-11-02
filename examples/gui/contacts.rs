@@ -431,6 +431,8 @@ impl App {
         if !parse_contacts(&self.form.contacts).iter().any(|(_, k)| *k == key) {
             // A conversa some aqui e, pelo aviso abaixo, no outro lado.
             self.forget_chat(key);
+            // A dispensa de âncora vai junto: se a pessoa voltar, volta como âncora de novo.
+            self.form.anchors_off = parse_anchors_off(&self.form.anchors_off).into_iter().filter(|k| *k != key).map(|k| hex(&k)).collect::<Vec<_>>().join(";");
             // O outro lado é avisado e também tira esta pessoa da lista dele. Offline, o aviso fica na fila
             // (`.clam-gui.removed`) e o endereço dele continua guardado até a entrega no próximo início.
             match &self.running {

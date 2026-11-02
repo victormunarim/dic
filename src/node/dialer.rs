@@ -57,6 +57,14 @@ pub struct Dialer {
     pub(super) dht_circuit: bool,
     /// Âncoras do usuário (veja [`NodeConfig::anchors`]).
     pub(super) anchors: Vec<RelayInfo>,
+    /// Contatos de agora (a lista viva do telefone): é dela que saem as âncoras quando `contact_anchors` está ligado.
+    pub(super) contacts: crate::phone::Contacts,
+    /// Veja [`NodeConfig::contact_anchors`].
+    pub(super) contact_anchors: bool,
+    /// Contatos dispensados como âncora (veja [`NodeConfig::anchors_off`]).
+    pub(super) anchors_off: Arc<Mutex<std::collections::HashSet<[u8; 32]>>>,
+    /// Depósito de âncora deste nó, quando ele serve de âncora: lido direto, sem circuito, ao procurar um contato.
+    pub(super) own_anchor: Option<Arc<crate::rendezvous::Anchor>>,
     /// Opção "2 relays" (veja [`NodeConfig::two_relays`]): ligada, o primeiro salto é o relay de outro contato; desligada, a ligação é direta.
     pub(super) two_relays: bool,
     /// "Priorizar velocidade" já efetiva (veja [`NodeConfig::speed_first`]): só vale com "2 relays" desligada.
@@ -106,6 +114,29 @@ impl Dialer {
             }
         }
         v
+    }
+
+    /// Âncoras de agora: as da configuração e, com `contact_anchors`, o relay guardado de cada contato que ainda é
+    /// contato e não foi dispensado, sem repetir endereço e sem os de `exclude` (quem está sendo procurado não guarda o
+    /// próprio endereço novo). Contato removido sai daqui na hora, porque a lista de contatos é a do telefone.
+    pub(crate) fn anchor_list(&self, exclude: &[[u8; 32]]) -> Vec<RelayInfo> {
+        let mut list = self.anchors.clone();
+        if self.contact_anchors {
+            let contacts: Vec<[u8; 32]> = self.contacts.lock_unpoisoned().clone();
+            let off = self.anchors_off.lock_unpoisoned().clone();
+            for peer in contacts {
+                if off.contains(&peer) || exclude.contains(&peer) {
+                    continue;
+                }
+                if let Some(r) = self.stored_for(&peer).into_iter().next()
+                    && r.addr != self.mine.addr
+                    && !list.iter().any(|a| a.addr == r.addr)
+                {
+                    list.push(r);
+                }
+            }
+        }
+        list
     }
 
     /// Guarda o relay que `peer` informou (o código de contato direto) como dica: é o

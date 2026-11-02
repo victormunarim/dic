@@ -8,7 +8,7 @@ use x25519_dalek::PublicKey;
 use crate::{
     circuit::manager::{Candidate, CircuitManager, ManagerConfig},
     media::update::{self, AddressRecord},
-    rendezvous::{self, ANCHOR_DEST, GATEWAY_DEST, Remote, Signed},
+    rendezvous::{self, ANCHOR_DEST, GATEWAY_DEST, Remote, Signed, Store},
     transport::{CircuitClient, ClientOptions},
 };
 use super::dialer::{Dialer};
@@ -85,7 +85,16 @@ impl Dialer {
 
     /// Valores guardados nas âncoras para os alvos `(chave, sal)`: todos os que alguma âncora devolveu.
     async fn anchor_values(&self, targets: &[([u8; 32], [u8; 32])], exclude: &[[u8; 32]]) -> Vec<Vec<u8>> {
-        let sessions = futures::future::join_all(self.anchors.iter().map(|a| async move {
+        let anchors = self.anchor_list(exclude);
+        let mut local = Vec::new();
+        if let Some(own) = &self.own_anchor {
+            for (key, salt) in targets {
+                if let Some(value) = own.read(key, salt).await {
+                    local.push(value);
+                }
+            }
+        }
+        let sessions = futures::future::join_all(anchors.iter().map(|a| async move {
             let mut found = Vec::new();
             if let Some(mut remote) = self.anchor_remote(a, exclude).await {
                 for (key, salt) in targets {
@@ -100,12 +109,13 @@ impl Dialer {
             found
         }))
         .await;
-        sessions.into_iter().flatten().collect()
+        local.into_iter().chain(sessions.into_iter().flatten()).collect()
     }
 
     /// Grava os itens em cada âncora; um `bool` por item: `true` se alguma âncora guardou.
     async fn anchor_put(&self, items: &[Signed]) -> Vec<bool> {
-        let sessions = futures::future::join_all(self.anchors.iter().map(|a| async move {
+        let anchors = self.anchor_list(&[]);
+        let sessions = futures::future::join_all(anchors.iter().map(|a| async move {
             let mut done = vec![false; items.len()];
             if let Some(mut remote) = self.anchor_remote(a, &[]).await {
                 for (i, item) in items.iter().enumerate() {
@@ -182,10 +192,10 @@ impl Dialer {
 
     /// Valores guardados nos `targets` `(chave, sal)` da DHT e das âncoras, sem passar pelos relays de `excluded`.
     pub(super) async fn lookup_values(&self, targets: &[([u8; 32], [u8; 32])], excluded: &[u8; 32]) -> Vec<Vec<u8>> {
-        if self.dht.is_none() && self.anchors.is_empty() {
+        let exclude = [*excluded];
+        if self.dht.is_none() && self.own_anchor.is_none() && self.anchor_list(&exclude).is_empty() {
             return Vec::new();
         }
-        let exclude = [*excluded];
         let lookup = futures::future::join(self.dht_get(targets, &exclude), self.anchor_values(targets, &exclude));
         let Ok((dht, anchors)) = tokio::time::timeout(DHT_LOOKUP_LIMIT, lookup).await else { return Vec::new() };
         dht.into_iter().flatten().chain(anchors).collect()

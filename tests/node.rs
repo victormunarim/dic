@@ -815,6 +815,73 @@ async fn an_anchor_lets_two_moved_contacts_find_each_other() {
     cb.hangup();
 }
 
+/// Sem âncora combinada: R é contato de A e de B e serve de âncora, e é pelo relay dele que B acha A (a lista de âncoras é a
+/// dos contatos, não uma lista à parte).
+#[tokio::test]
+async fn contacts_are_the_anchors_and_two_moved_contacts_find_each_other() {
+    use clam::node::RelayInfo;
+    let (sa, sb, sr) = (key(), key(), key());
+    let (pa, pb, pr) = (*PublicKey::from(&sa).as_bytes(), *PublicKey::from(&sb).as_bytes(), *PublicKey::from(&sr).as_bytes());
+    let r = Node::start(NodeConfig { anchor: true, ..fixed(sr, free_port(), vec![pa, pb]) }).await.unwrap();
+    let r_info = r.relay_info().unwrap();
+    let stale = || RelayInfo { addr: format!("127.0.0.1:{}", free_port()), onion: [1; 32], link: [2; 32] };
+    let mut cfg_a = NodeConfig { updates: false, contact_anchors: true, ..fixed(sa, free_port(), vec![pb, pr]) };
+    cfg_a.known = vec![(pb, stale()), (pr, r_info.clone())];
+    let mut cfg_b = NodeConfig { updates: false, contact_anchors: true, ..fixed(sb, free_port(), vec![pa, pr]) };
+    cfg_b.known = vec![(pa, stale()), (pr, r_info)];
+    let mut a = Node::start(cfg_a).await.unwrap();
+    let b = Node::start(cfg_b).await.unwrap();
+    let fresh_a = a.relay_info().unwrap();
+
+    let answer = tokio::spawn(async move {
+        let inc = timeout(Duration::from_secs(60), a.next_incoming()).await.unwrap().unwrap();
+        (inc.accept(Mulaw::new()).await.unwrap(), a)
+    });
+    let mut call = None;
+    for _ in 0..15 {
+        if let Ok(c) = b.dial(pa, Mulaw::new(), Duration::from_secs(15)).await {
+            call = Some(c);
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    let cb = call.expect("B achou A pela âncora que é contato");
+    let (_ca, _a) = answer.await.unwrap();
+    assert!(b.known().iter().any(|(k, r)| *k == pa && *r == fresh_a));
+    cb.hangup();
+}
+
+/// A lista de âncoras segue os contatos: o dispensado não entra, "ninguém" a esvazia, e o contato removido sai na hora.
+#[tokio::test]
+async fn the_anchor_list_follows_the_contacts() {
+    use clam::node::RelayInfo;
+    let (sa, sb, sc) = (key(), key(), key());
+    let (pb, pc) = (*PublicKey::from(&sb).as_bytes(), *PublicKey::from(&sc).as_bytes());
+    let relay = |n: u8| RelayInfo { addr: format!("127.0.0.1:{}", free_port()), onion: [n; 32], link: [n; 32] };
+    let (rb, rc) = (relay(1), relay(2));
+    let cfg = |contact_anchors: bool, off: Vec<[u8; 32]>, port: u16| NodeConfig {
+        updates: false,
+        contact_anchors,
+        anchors_off: off,
+        known: vec![(pb, rb.clone()), (pc, rc.clone())],
+        ..fixed(sa.clone(), port, vec![pb, pc])
+    };
+    let a = Node::start(cfg(true, vec![], free_port())).await.unwrap();
+    let mut list = a.anchors();
+    list.sort_by_key(|r| r.onion);
+    assert_eq!(list, vec![rb.clone(), rc.clone()], "todo contato é âncora");
+    a.retire(pb);
+    assert_eq!(a.anchors(), vec![rc.clone()], "o contato removido deixa de ser âncora na hora");
+    a.stop();
+
+    let a = Node::start(cfg(true, vec![pb], free_port())).await.unwrap();
+    assert_eq!(a.anchors(), vec![rc.clone()], "o dispensado não entra");
+    a.stop();
+
+    let a = Node::start(cfg(false, vec![], free_port())).await.unwrap();
+    assert!(a.anchors().is_empty(), "ninguém como âncora");
+}
+
 /// Liga B a A, A transmite a tela e B tem de receber o quadro (opção "2 relays" desligada; ligada, a tela só vai por
 /// encontro, testada à parte). Devolve o caminho tomado e se o quadro chegou igual.
 async fn screen_arrives(two_relays: bool, speed_first: bool, hq_screen: bool) -> (PathMode, bool) {

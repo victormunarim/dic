@@ -142,8 +142,10 @@ pub(crate) struct Form {
     pub(crate) save_dir: String,
     /// Tenta ficar online ao abrir o programa. Ligado de início.
     pub(crate) auto_online: bool,
-    /// Âncoras que usa, uma por linha: `ip:porta#chave-do-circuito#chave-do-link`.
-    pub(crate) anchors: String,
+    /// Não usa ninguém como âncora (veja `NodeConfig::contact_anchors`). Desmarcado de início: todo contato é âncora.
+    pub(crate) no_anchors: bool,
+    /// Chaves (hex, separadas por `;`) dos contatos que a pessoa dispensou como âncora. Sai daqui ao remover o contato.
+    pub(crate) anchors_off: String,
     pub(crate) use_audio: bool,
     pub(crate) audio: AudioPrefs,
     /// Microfone e alto-falante escolhidos (vazio = padrão do sistema).
@@ -445,23 +447,9 @@ pub(crate) fn mark_pending(key: [u8; 32], pending: bool) -> std::io::Result<()> 
     save_pending(&keys)
 }
 
-/// Âncoras do campo de texto: `ip:porta#chave-do-circuito#chave-do-link` por linha (linhas tortas são ignoradas).
-pub(crate) fn parse_anchors(text: &str) -> Vec<clam::node::RelayInfo> {
-    text.split_whitespace()
-        .filter_map(|t| {
-            let mut p = t.split('#');
-            let (addr, onion, link) = (p.next()?, p.next()?, p.next()?);
-            if p.next().is_some() || addr.is_empty() || addr.len() > 60 || !addr.contains(':') {
-                return None;
-            }
-            Some(clam::node::RelayInfo { addr: addr.to_string(), onion: unhex(onion).ok()?, link: unhex(link).ok()? })
-        })
-        .collect()
-}
-
-/// O texto que outra pessoa cola em "Âncoras" para usar o relay `r` como âncora.
-pub(crate) fn anchor_code(r: &clam::node::RelayInfo) -> String {
-    format!("{}#{}#{}", r.addr, hex(&r.onion), hex(&r.link))
+/// Chaves dos contatos dispensados como âncora, do texto salvo (hex separado por `;`; item torto é ignorado).
+pub(crate) fn parse_anchors_off(text: &str) -> Vec<[u8; 32]> {
+    text.split(';').filter_map(|t| unhex(t.trim()).ok()).collect()
 }
 
 /// O nome que alguém deu a si mesmo, sem o que atrapalharia a linha de contato.
@@ -599,7 +587,8 @@ impl Form {
             deafen_key: get("deafen_key"),
             // Ligado de início: a chave guarda o "não", então o arquivo antigo, sem ela, também aceita.
             auto_online: get("no_auto_online") != "1",
-            anchors: get("anchors").replace(';', "\n"),
+            no_anchors: get("no_anchors") == "1",
+            anchors_off: get("anchors_off"),
             use_audio: get("audio") == "1",
             input_dev: get("input_dev"),
             output_dev: get("output_dev"),
@@ -620,7 +609,7 @@ impl Form {
         let secret = self.secret_to_write(vault_set);
         let secret = secret.as_str();
         let text = format!(
-            "audio={}\nsecret={}\ncontacts={}\npeer={}\npublic_addr={}\nno_dht={}\nname={}\nintros={}\nno_anchor={}\ntwo_relays={}\nspeed_first={}\nhq_screen={}\nscreen_hardware={}\nno_screen_audio={}\nno_screen_hear={}\nanchors={}\ninput_dev={}\noutput_dev={}\nno_opus={}\nno_auto_online={}\nblocked={}\nlight={}\nmute_key={}\ndeafen_key={}\nsave_dir={}\n{}",
+            "audio={}\nsecret={}\ncontacts={}\npeer={}\npublic_addr={}\nno_dht={}\nname={}\nintros={}\nno_anchor={}\ntwo_relays={}\nspeed_first={}\nhq_screen={}\nscreen_hardware={}\nno_screen_audio={}\nno_screen_hear={}\nno_anchors={}\nanchors_off={}\ninput_dev={}\noutput_dev={}\nno_opus={}\nno_auto_online={}\nblocked={}\nlight={}\nmute_key={}\ndeafen_key={}\nsave_dir={}\n{}",
             u8::from(self.use_audio),
             secret,
             self.contacts.trim().replace('\n', ";"),
@@ -636,7 +625,8 @@ impl Form {
             u8::from(self.screen_hardware),
             u8::from(!self.screen_audio),
             u8::from(!self.screen_hear),
-            self.anchors.trim().replace('\n', ";"),
+            u8::from(self.no_anchors),
+            self.anchors_off.trim(),
             self.input_dev.trim(),
             self.output_dev.trim(),
             u8::from(!self.voice_opus),
@@ -1004,9 +994,11 @@ mod tests {
     }
 
     #[test]
-    fn anchors_round_trip_and_skip_bad_lines() {
-        let r = clam::node::RelayInfo { addr: "198.51.100.2:4001".into(), onion: [3; 32], link: [4; 32] };
-        let text = format!("{}\nlixo\n198.51.100.3:4001#curto#curto\n", anchor_code(&r));
-        assert_eq!(parse_anchors(&text), vec![r]);
+    fn anchor_settings_round_trip_and_skip_bad_keys() {
+        let k = [7u8; 32];
+        let text = format!("{};lixo;{}", hex(&k), "ab");
+        assert_eq!(parse_anchors_off(&text), vec![k]);
+        assert!(parse_anchors_off("").is_empty());
+        assert!(!Form::default().no_anchors, "de início, todo contato é âncora");
     }
 }

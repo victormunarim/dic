@@ -58,6 +58,11 @@ pub struct NodeConfig {
     pub anchor: bool,
     /// Âncoras onde este nó grava o endereço e consulta o dos contatos, em ordem de preferência. Padrão: nenhuma.
     pub anchors: Vec<RelayInfo>,
+    /// Usa o relay de cada contato como âncora: grava neles o endereço deste nó e consulta o deles. A lista segue os
+    /// contatos de agora, então quem é removido deixa de ser âncora na hora. Padrão: não (a GUI liga).
+    pub contact_anchors: bool,
+    /// Contatos que a pessoa dispensou como âncora (só vale com [`NodeConfig::contact_anchors`]); sai da lista ao remover o contato.
+    pub anchors_off: Vec<[u8; 32]>,
     /// Estado dos servidores guardado por [`crate::server::Servers::export`]; `None`: nenhum servidor.
     pub servers: Option<String>,
     /// Apresentações que contatos deixaram aqui para entregar a quem estava offline, como [`Node::custody_export`](super::Node::custody_export) escreveu.
@@ -103,6 +108,6 @@ impl RelayKeys {
 impl NodeConfig {
     #[must_use]
     pub fn new(secret: StaticSecret, contacts: Vec<[u8; 32]>) -> Self {
-        Self { secret, contacts, relay_port: DEFAULT_RELAY_PORT, public_addr: None, upnp: true, known: Vec::new(), hints: Vec::new(), relay_keys: None, history: Vec::new(), updates: true, update_retry: UPDATE_RETRY, dht: None, name: String::new(), introductions: true, anchor: false, anchors: Vec::new(), servers: None, custody: Vec::new(), tombstones: Vec::new(), blocked: Vec::new(), mail_poll: MAIL_POLL, two_relays: false, speed_first: false, hq_screen: false }
+        Self { secret, contacts, relay_port: DEFAULT_RELAY_PORT, public_addr: None, upnp: true, known: Vec::new(), hints: Vec::new(), relay_keys: None, history: Vec::new(), updates: true, update_retry: UPDATE_RETRY, dht: None, name: String::new(), introductions: true, anchor: false, anchors: Vec::new(), contact_anchors: false, anchors_off: Vec::new(), servers: None, custody: Vec::new(), tombstones: Vec::new(), blocked: Vec::new(), mail_poll: MAIL_POLL, two_relays: false, speed_first: false, hq_screen: false }
     }
 }

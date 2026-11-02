@@ -3,7 +3,7 @@
 use clam::sync::LockExt;
 use std::sync::atomic::Ordering;
 
-use eframe::egui::{self, Margin, RichText};
+use eframe::egui::{self, RichText};
 use clam::{rand_core::OsRng, x25519_dalek::StaticSecret};
 
 use crate::{conf::*, theme::*, ui::*};
@@ -204,34 +204,54 @@ impl App {
                             .on_hover_text("A DHT do BitTorrent é uma rede pública e descentralizada de milhões de computadores. Seu nó guarda nela o endereço atual dele, cifrado para cada contato, e consulta o dos contatos ao ligar. Serve quando você e um contato mudam de endereço ao mesmo tempo. Só o contato lê o conteúdo, mas, com a opção “2 relays” desligada, quem opera nós da DHT vê o seu IP; ligada, o pedido vai por relays de contatos e a DHT só vê o IP do último. Ligada, seu nó também atende a DHT para circuitos de outros nós. Desligada, sobram o aviso direto e as âncoras.");
                     });
                 });
-                section(ui, "Âncoras", "Computadores de pessoas de confiança que guardam o seu endereço.", |ui| {
-                    details(ui, "Como funciona", "Uma âncora é um computador com endereço fixo que guarda o seu endereço atual, cifrado para cada contato, para eles o acharem quando a DHT está bloqueada ou não basta. Escolha âncoras de pessoas em quem você confia: elas veem o IP de quem as usa, mas não o conteúdo.");
+                section(ui, "Âncoras", "Seus contatos guardam o seu endereço para os outros acharem você, e você usa o deles.", |ui| {
+                    details(ui, "Como funciona", "Uma âncora é um computador com endereço fixo que guarda o seu endereço atual, cifrado para cada contato, para eles o acharem quando a DHT está bloqueada ou não basta. Todo contato é âncora: ao ligar, você pergunta ao relay dele pelo endereço de quem procura. Remover um contato tira a âncora dos dois lados. Quem é âncora não lê o conteúdo, mas vê o IP de quem pergunta quando o primeiro salto é o relay do próprio usuário e com que frequência o endereço é renovado.");
                     lock(ui, offline, locked, |ui| {
                         // Servir de âncora vem ligado; desligar só tira o seu computador da rede de âncoras dos outros.
                         ui.check(&mut self.form.anchor, "Servir de âncora para os registros de endereço dos outros")
-                            .on_hover_text("Seu computador guarda, só em memória, o endereço cifrado de quem o usa como âncora, para os contatos dessa pessoa a acharem. Não lê o conteúdo nem forja item. Precisa de um endereço que os outros alcancem. Quem usa a sua âncora vê o IP do seu relay; o código da sua âncora aparece abaixo, para você passar a quem quiser.");
+                            .on_hover_text("Seu computador guarda, só em memória, o endereço cifrado de quem o usa como âncora, para os contatos dessa pessoa a acharem. Não lê o conteúdo nem forja item. Precisa de um endereço que os outros alcancem. Quem usa a sua âncora vê o IP do seu relay.");
+                        // Desmarcado de início: todo contato é âncora. Marcado, ninguém é e só a DHT e o aviso direto restam.
                         ui.horizontal(|ui| {
-                            ui.label("Âncoras que você usa");
+                            ui.check(&mut self.form.no_anchors, "Não usar ninguém como âncora")
+                                .on_hover_text("Marcado, você não pergunta a nenhum contato pelo endereço de ninguém e não guarda o seu nos relays deles. Sobram a DHT e o aviso direto. Vale ao ficar online de novo.");
                             reopen_mark(ui);
                         });
-                        ui.add(egui::TextEdit::multiline(&mut self.form.anchors).hint_text("ip:porta#chave-do-circuito#chave-do-link, uma por linha").desired_rows(3).desired_width(f32::INFINITY).margin(Margin::symmetric(12, 10)))
-                            .on_hover_text("Uma por linha, no código que o dono da âncora te passa: ip:porta#chave-do-circuito#chave-do-link");
+                        let off = parse_anchors_off(&self.form.anchors_off);
+                        let contacts = parse_contacts(&self.form.contacts);
+                        ui.add_enabled_ui(!self.form.no_anchors, |ui| {
+                            if contacts.is_empty() {
+                                note(ui, "Sem contatos, sem âncoras. Quem você adicionar vira âncora.");
+                            }
+                            let mut toggle = None;
+                            for (name, key) in &contacts {
+                                let dismissed = off.contains(key);
+                                ui.horizontal(|ui| {
+                                    let label = if dismissed { RichText::new(name.as_str()).color(pal().muted).strikethrough() } else { RichText::new(name.as_str()) };
+                                    ui.label(label);
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        let tip = if dismissed { "Voltar a usar este contato como âncora." } else { "Não usar este contato como âncora. Ele continua na sua lista." };
+                                        if ui.small_button(if dismissed { "Usar" } else { "Dispensar" }).on_hover_text(tip).clicked() {
+                                            toggle = Some(*key);
+                                        }
+                                    });
+                                });
+                            }
+                            if let Some(key) = toggle {
+                                let mut keys = off.clone();
+                                match keys.iter().position(|k| *k == key) {
+                                    Some(i) => {
+                                        keys.remove(i);
+                                    }
+                                    None => keys.push(key),
+                                }
+                                self.form.anchors_off = keys.iter().map(|k| hex(k)).collect::<Vec<_>>().join(";");
+                                self.form.save();
+                            }
+                        });
                     });
                 });
             }
         });
-        if self.form.anchor
-            && let Some(r) = self.shared.relay.lock_unpoisoned().clone()
-        {
-            section(ui, "Código da sua âncora", "", |ui| {
-                ui.horizontal(|ui| {
-                    ui.monospace(format!("{}...", &anchor_code(&r)[..24]));
-                    if button(ui, true, "Copiar", BLURPLE).clicked() {
-                        ui.ctx().copy_text(anchor_code(&r));
-                    }
-                });
-            });
-        }
     }
 
     /// Estado e diagnóstico da transmissão de tela (taxa, QP, som...), que não ocupam mais a tela da chamada.

@@ -134,6 +134,7 @@ const INTRO_ACK_WAIT: Duration = Duration::from_secs(8);
 #[derive(Default)]
 struct Services {
     client: Option<Arc<Rendezvous>>,
+    anchor: Option<Arc<Anchor>>,
     servers: Vec<JoinHandle<()>>,
     note: Option<String>,
 }
@@ -215,7 +216,9 @@ impl Node {
             match tokio::net::TcpListener::bind("127.0.0.1:0").await {
                 Ok(listener) => {
                     exit.push((ANCHOR_DEST.to_string(), listener.local_addr()?.to_string()));
-                    dht.servers.push(tokio::spawn(rendezvous::serve_anchor(listener, Arc::new(Anchor::new()))));
+                    let store = Arc::new(Anchor::new());
+                    dht.anchor = Some(store.clone());
+                    dht.servers.push(tokio::spawn(rendezvous::serve_anchor(listener, store)));
                 }
                 Err(e) => push_note(&mut dht.note, format!("sem âncora: {e}")),
             }
@@ -250,7 +253,7 @@ impl Node {
     }
 
     async fn finish(cfg: NodeConfig, mut phone: Phone, relay: RelayServer, onion: [u8; 32], dht: Services) -> io::Result<Self> {
-        let NodeConfig { secret, public_addr, upnp, known, hints, history, updates, update_retry, dht: dht_options, name, introductions, anchors, servers: saved_servers, custody: saved_custody, mail_poll, tombstones, blocked, two_relays, speed_first, hq_screen, .. } = cfg;
+        let NodeConfig { secret, public_addr, upnp, known, hints, history, updates, update_retry, dht: dht_options, name, introductions, anchors, contact_anchors, anchors_off, servers: saved_servers, custody: saved_custody, mail_poll, tombstones, blocked, two_relays, speed_first, hq_screen, .. } = cfg;
         let known: Known = Arc::new(Mutex::new(known.into_iter().collect()));
         let hints: Known = Arc::new(Mutex::new(hints.into_iter().collect()));
         // A lista guarda do mais novo ao mais velho de cada contato; ao reler, a ordem se mantém.
@@ -282,11 +285,11 @@ impl Node {
         let addr = public_addr.unwrap_or_else(|| format!("127.0.0.1:{port}"));
         let addr_now = Arc::new(Mutex::new(addr.clone()));
         let mine = RelayInfo { addr, onion, link };
-        let Services { client: dht_client, servers, note: dht_note } = dht;
+        let Services { client: dht_client, anchor: own_anchor, servers, note: dht_note } = dht;
         if let Some(n) = dht_note {
             push_note(&mut note, n);
         }
-        let dialer = Dialer { secret: secret.clone(), mine: mine.clone(), relay_port: port, known: known.clone(), hints: hints.clone(), history: history.clone(), seen_seq: Arc::default(), link: phone.link(), dht: dht_client.clone(), dht_circuit: dht_options.as_ref().is_some_and(|o| o.circuit), anchors, two_relays, speed_first: speed_first && !two_relays, hq_screen, chat_stamp: Arc::default() };
+        let dialer = Dialer { secret: secret.clone(), mine: mine.clone(), relay_port: port, known: known.clone(), hints: hints.clone(), history: history.clone(), seen_seq: Arc::default(), link: phone.link(), dht: dht_client.clone(), dht_circuit: dht_options.as_ref().is_some_and(|o| o.circuit), anchors, contacts: phone.contacts(), contact_anchors, anchors_off: Arc::new(Mutex::new(anchors_off.into_iter().collect())), own_anchor, two_relays, speed_first: speed_first && !two_relays, hq_screen, chat_stamp: Arc::default() };
         // Os convites levam este relay, para o outro lado ligar de volta.
         let link_to_phone = phone.link();
         let own = Arc::new(Mutex::new(own_relay(&mine, published)));
@@ -307,7 +310,7 @@ impl Node {
             }));
         }
         let current: Current = Arc::default();
-        let publishes = dht_client.is_some() || !dialer.anchors.is_empty();
+        let publishes = dht_client.is_some() || !dialer.anchors.is_empty() || contact_anchors;
         if updates || publishes {
             background.push(tokio::spawn(track_address(own.clone(), current.clone())));
         }
@@ -501,6 +504,7 @@ impl Node {
         // Lápide: convite que já estava na caixa antes desta remoção não readiciona o contato.
         self.inbox.bury(peer, unix_millis() as u64);
         self.phone.contacts().lock_unpoisoned().retain(|k| *k != peer);
+        self.dialer.anchors_off.lock_unpoisoned().remove(&peer);
         self.phone.custody().lock_unpoisoned().drop_from(&peer);
         let mut tasks = self.retiring.lock_unpoisoned();
         if tasks.contains_key(&peer) {
@@ -554,10 +558,18 @@ impl Node {
             task.abort();
         }
         self.phone.contacts().lock_unpoisoned().retain(|k| k != peer);
+        self.dialer.anchors_off.lock_unpoisoned().remove(peer);
         self.phone.custody().lock_unpoisoned().drop_from(peer);
         self.known.lock_unpoisoned().remove(peer);
         self.hints.lock_unpoisoned().remove(peer);
         self.history.lock_unpoisoned().remove(peer);
+    }
+
+    /// Âncoras que este nó usa agora: as da configuração e, com [`NodeConfig::contact_anchors`], o relay de cada
+    /// contato que ainda é contato e não foi dispensado. Quem é removido some daqui na hora.
+    #[must_use]
+    pub fn anchors(&self) -> Vec<RelayInfo> {
+        self.dialer.anchor_list(&[])
     }
 
     #[must_use]

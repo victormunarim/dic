@@ -106,7 +106,7 @@ O endereço de um relay muda (IP novo, outra porta). Para o código antigo não 
 | 0 | Endereço guardado, dica e histórico | o IP não mudou ou mudou e ele avisou |
 | 1 | **Aviso de endereço novo** (quadro de tag 4, confirmação tag 5), por fila de saída | só um lado mudou |
 | 2 | **DHT** Mainline (BEP 44), um item por sentido, chave do dia | os dois mudaram |
-| 3 | **Âncoras** (`anchor:9`), o mesmo item em depósitos que a pessoa escolhe | a DHT está bloqueada |
+| 3 | **Âncoras** (`anchor:9`), o mesmo item nos relays dos contatos (todo contato é âncora; dá para dispensar) | a DHT está bloqueada |
 
 - Todas carregam o mesmo **registro de endereço** (endereço, chave de circuito e de link, `seq`), cifrado para o contato. Ninguém de fora o abre nem o forja.
 - A **fila de saída** tenta com espera que dobra (30 s, 1 min, ... 2 h) e desiste em 3 dias ou quando o contato sai da lista. O nó confere o IP externo a cada 40 s (UPnP) e avisa sozinho quando muda.
@@ -123,7 +123,7 @@ O endereço de um relay muda (IP novo, outra porta). Para o código antigo não 
 | Relay do contato (saída) | o seu IP, que há um convite, o destino `contato:9` | quem liga (a identidade vai cifrada), o conteúdo |
 | O contato | seu IP (o 1º salto é o seu relay) e quem você é | — |
 | Nó da DHT | IP de quem grava e de quem lê, um alvo que muda por dia | o conteúdo, a quem o item pertence |
-| Âncora | o IP de quem a usa quando o 1º salto é o próprio usuário; quantos itens existem | o conteúdo, a quem pertencem |
+| Âncora (cada contato) | o IP de quem a usa quando o 1º salto é o próprio usuário; quantos itens existem | o conteúdo, a quem pertencem |
 | Quem vê a rede toda | pode correlacionar entrada e saída | — (**não** há promessa de anonimato contra adversário global) |
 
 ## Limites conhecidos
