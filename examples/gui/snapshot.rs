@@ -261,6 +261,37 @@ fn shot_opened(tab: Tab, size: egui::Vec2, open: Option<&str>, prep: impl FnOnce
     render_opening(size, theme::pal().bg, open, |ctx| eframe::App::update(&mut app, ctx, &mut eframe::Frame::_new_kittest()))
 }
 
+/// Uma conversa com de tudo um pouco, para ver o bate-papo como a pessoa o vê: falas dos dois lados, uma mensagem ainda
+/// a caminho, uma não entregue, um texto longo, uma imagem e um arquivo comum já entregues.
+fn sample_conversation(app: &mut App, peer: [u8; 32]) {
+    use crate::{arquivos::Phase, chats::State};
+    let dir = std::env::temp_dir().join(format!("clam-tela-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let (foto, pdf) = (dir.join("praia.png"), dir.join("relatorio-final.pdf"));
+    let _ = image::RgbaImage::from_fn(320, 200, |x, y| image::Rgba([(40 + x / 2) as u8, (90 + y / 2) as u8, 180, 255])).save(&foto);
+    let _ = std::fs::write(&pdf, b"%PDF");
+    {
+        use clam::sync::LockExt;
+        let mut book = app.shared.chats.lock_unpoisoned();
+        book.push_received(peer, 20000, "Oi! Vai jogar hoje à noite?".into());
+        book.push_mine(peer, 40000, "Vou sim, depois das 21h. Entro na sala quando terminar o jantar.".into());
+        book.set_state(&peer, 40000, State::Sent);
+        book.push_received(peer, 60000, "Perfeito. Mandei a foto de ontem, olha só como ficou. Depois te passo também o relatório, que ficou grande: tem as anotações de todas as partidas e a lista do que combinamos de treinar.".into());
+        book.push_received(peer, 80000, "📎 praia.png".into());
+        book.push_received(peer, 100000, "📎 relatorio-final.pdf".into());
+        book.push_mine(peer, 120000, "Recebi, valeu!".into());
+        book.set_state(&peer, 120000, State::Sent);
+        book.push_mine(peer, 140000, "Te ligo daqui a pouco".into());
+        book.push_mine(peer, 160000, "Quando você voltar a ficar online eu mando o resto".into());
+        book.set_state(&peer, 160000, State::Failed);
+    }
+    let mut t = app.shared.transfers.lock_unpoisoned();
+    for (id, name, size, path) in [(80_000, "praia.png", 84_000, foto), (100_000, "relatorio-final.pdf", 2_400_000, pdf)] {
+        t.add_in(peer, id, name.into(), size);
+        t.phase(&peer, id, false, Phase::Done(Some(path)));
+    }
+}
+
 /// Todos os menus e janelas que só aparecem depois de um clique: o quadro em repouso não os mostra.
 fn save_overlays(dir: &Path, theme_name: &str) {
     let size = vec2(1280.0, 800.0);
@@ -268,7 +299,12 @@ fn save_overlays(dir: &Path, theme_name: &str) {
     let out = |name: &str| dir.join(format!("{name}-{theme_name}.png"));
     shot_opened(Tab::Contacts, size, Some("Menu"), |_| {}).save(&out("menu-engrenagem"));
     shot_opened(Tab::Contacts, size, Some("Mais ações de Bruno"), |_| {}).save(&out("menu-contato"));
-    shot_opened(Tab::Contacts, size, None, |a| a.chat_with = Some(bruno)).save(&out("bate-papo"));
+    shot_opened(Tab::Contacts, size, None, |a| a.chat_with = Some(bruno)).save(&out("bate-papo-vazio"));
+    shot_opened(Tab::Contacts, size, None, |a| {
+        a.chat_with = Some(bruno);
+        sample_conversation(a, bruno);
+    })
+    .save(&out("bate-papo"));
     // A pergunta de transmitir mora no contexto do egui, então é pedida no primeiro quadro.
     let mut app = sample_app(Tab::Contacts);
     let mut asked = false;
