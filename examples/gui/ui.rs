@@ -163,6 +163,27 @@ impl App {
 // ---------------------------------------------------------------------------------------------------
 
 impl App {
+    /// Baixar: leva os arquivos pedidos na conversa da pasta que se apaga ao fechar para a pasta de baixados, sem
+    /// perguntar nada. Roda em outra thread (mover entre discos copia) e conta falhas no registro.
+    fn keep_files(&mut self, ctx: &egui::Context) {
+        let keys = crate::midia::take_keeps(ctx);
+        if keys.is_empty() {
+            return;
+        }
+        let (shared, log, ctx, dir) = (self.shared.clone(), self.log.clone(), ctx.clone(), crate::conf::save_dir(&self.form.save_dir));
+        std::thread::spawn(move || {
+            for (peer, id) in keys {
+                if let Err(e) = crate::arquivos::keep(&shared.transfers, &crate::conf::received_dir(), &dir, peer, id) {
+                    log.lock_unpoisoned().push(format!("baixar: {e}"));
+                }
+            }
+            if let Err(e) = crate::arquivos::save_kept(&shared.transfers) {
+                log.lock_unpoisoned().push(format!("baixar: não consegui gravar {}: {e}", crate::conf::kept_path().display()));
+            }
+            ctx.request_repaint();
+        });
+    }
+
     /// Pé da coluna de salas: avatar com o estado (clicar liga e desliga), mudo, engrenagem (as demais telas) e desligar.
     pub(crate) fn user_panel(&mut self, ctx: &egui::Context, ui: &mut egui::Ui, offline: bool, in_call: bool, status: &str) {
         let (color, text) = self.connection(offline, status);
@@ -433,6 +454,7 @@ impl eframe::App for App {
         self.update_screen_textures(ctx);
         self.zoom_window(ctx);
         crate::midia::overlay(ctx);
+        self.keep_files(ctx);
         self.share_window(ctx);
         let offline = self.running.is_none();
         let in_call = self.shared.in_call.load(Ordering::Relaxed);

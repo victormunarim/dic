@@ -58,6 +58,10 @@ fn main() -> eframe::Result {
             let shared = Arc::<engine::Shared>::default();
             shared.audio.set_prefs(form.audio);
             *clam::sync::LockExt::lock_unpoisoned(&shared.chats) = chats::ChatBook::load();
+            // Os arquivos que a pessoa baixou antes voltam à conversa, no lugar onde ficaram.
+            if let Ok(text) = std::fs::read_to_string(conf::kept_path()) {
+                clam::sync::LockExt::lock_unpoisoned(&shared.transfers).load_kept(&text);
+            }
             let mut app = App {
                 rt,
                 form,

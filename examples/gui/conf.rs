@@ -140,6 +140,8 @@ pub(crate) struct Form {
     pub(crate) voice_opus: bool,
     /// Baixa sozinho todo arquivo recebido de até 100 MB. Desligado de início: só imagem e vídeo de até 50 MB descem sozinhos.
     pub(crate) auto_files: bool,
+    /// Pasta onde o arquivo baixado fica, sem perguntar; vazio = `Downloads/clam` (`save_dir`).
+    pub(crate) save_dir: String,
     /// Tenta ficar online ao abrir o programa. Ligado de início.
     pub(crate) auto_online: bool,
     /// Âncoras que usa, uma por linha: `ip:porta#chave-do-circuito#chave-do-link`.
@@ -243,6 +245,30 @@ pub(crate) fn conf_path() -> PathBuf {
 /// o arquivo daqui (`arquivos::keep`). Por isso nada que a pessoa quer guardar pode morar nela.
 pub(crate) fn received_dir() -> PathBuf {
     conf_path().with_file_name(".clam-gui.recebidos")
+}
+
+/// A pasta de arquivos baixados quando a pessoa não escolheu outra: `~/Downloads/clam`.
+pub(crate) fn default_save_dir() -> PathBuf {
+    save_choices().remove(0).1
+}
+
+/// As pastas oferecidas em Configurações para guardar o que a pessoa baixa, com o nome que a lista mostra. A primeira é
+/// o padrão. Os nomes são os do sistema em inglês (`Downloads`, `Documents`, `Desktop`), que existem em todo sistema.
+pub(crate) fn save_choices() -> Vec<(&'static str, PathBuf)> {
+    let home = conf_path().with_file_name("");
+    let under = |d: &str| home.join(d).join("clam");
+    vec![("Downloads/clam", under("Downloads")), ("Documents/clam", under("Documents")), ("Desktop/clam", under("Desktop"))]
+}
+
+/// Onde baixar: a pasta escolhida em Configurações, ou a padrão.
+pub(crate) fn save_dir(chosen: &str) -> PathBuf {
+    let chosen = chosen.trim();
+    if chosen.is_empty() { default_save_dir() } else { PathBuf::from(chosen) }
+}
+
+/// Arquivos recebidos que a pessoa baixou, para reaparecerem na conversa depois de reabrir o programa.
+pub(crate) fn kept_path() -> PathBuf {
+    conf_path().with_file_name(".clam-gui.baixados")
 }
 
 /// Servidores e salas (veja `clam::server`), num arquivo à parte. Leva o segredo de cada servidor: só o dono lê.
@@ -571,6 +597,7 @@ impl Form {
             // Ligado de início: a chave guarda o "não", então o arquivo antigo, sem ela, também aceita.
             voice_opus: get("no_opus") != "1",
             auto_files: get("auto_files") == "1",
+            save_dir: get("save_dir"),
             mute_key: get("mute_key"),
             deafen_key: get("deafen_key"),
             // Ligado de início: a chave guarda o "não", então o arquivo antigo, sem ela, também aceita.
@@ -596,7 +623,7 @@ impl Form {
         let secret = self.secret_to_write(vault_set);
         let secret = secret.as_str();
         let text = format!(
-            "audio={}\nsecret={}\ncontacts={}\npeer={}\npublic_addr={}\nno_dht={}\nname={}\nintros={}\nno_anchor={}\ntwo_relays={}\nspeed_first={}\nhq_screen={}\nscreen_hardware={}\nno_screen_audio={}\nno_screen_hear={}\nanchors={}\ninput_dev={}\noutput_dev={}\nno_opus={}\nno_auto_online={}\nblocked={}\nlight={}\nmute_key={}\ndeafen_key={}\nauto_files={}\n{}",
+            "audio={}\nsecret={}\ncontacts={}\npeer={}\npublic_addr={}\nno_dht={}\nname={}\nintros={}\nno_anchor={}\ntwo_relays={}\nspeed_first={}\nhq_screen={}\nscreen_hardware={}\nno_screen_audio={}\nno_screen_hear={}\nanchors={}\ninput_dev={}\noutput_dev={}\nno_opus={}\nno_auto_online={}\nblocked={}\nlight={}\nmute_key={}\ndeafen_key={}\nauto_files={}\nsave_dir={}\n{}",
             u8::from(self.use_audio),
             secret,
             self.contacts.trim().replace('\n', ";"),
@@ -622,6 +649,7 @@ impl Form {
             self.mute_key.trim(),
             self.deafen_key.trim(),
             u8::from(self.auto_files),
+            self.save_dir.trim().replace('\n', " "),
             self.audio.to_conf()
         );
         // Contém a chave secreta: só o dono lê.
@@ -771,6 +799,17 @@ mod tests {
         assert!(pasted.identity().is_ok());
         assert_eq!(pasted.secret_to_write(|_| true), KEYRING_MARK);
         assert_eq!(pasted.secret_to_write(|_| false), hex(&[7; 32]));
+    }
+
+    #[test]
+    fn the_download_folder_defaults_to_the_first_choice_and_never_to_the_temporary_one() {
+        assert_eq!(save_dir(""), save_choices()[0].1);
+        assert_eq!(save_dir("  "), default_save_dir());
+        assert_eq!(save_dir("/tmp/meus"), PathBuf::from("/tmp/meus"));
+        for (_, dir) in save_choices() {
+            assert!(!crate::arquivos::is_temporary(&received_dir(), &dir), "{} seria apagada ao fechar", dir.display());
+        }
+        assert_ne!(kept_path(), received_dir());
     }
 
     #[test]

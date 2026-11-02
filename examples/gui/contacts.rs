@@ -165,6 +165,15 @@ impl App {
     /// Apaga a conversa com `key` da memória e do arquivo na hora (sem esperar o nó, que pode nem estar ligado)
     /// e fecha o bate-papo se era o aberto. Vale dos dois lados: quem remove e quem é removido.
     fn forget_chat(&mut self, key: [u8; 32]) {
+        self.erase_chat(key);
+        if self.chat_with == Some(key) {
+            self.chat_with = None;
+        }
+    }
+
+    /// Apaga tudo da conversa com `key` neste computador: o texto, os arquivos que ainda estavam na pasta temporária e o
+    /// registro dos baixados (o arquivo baixado fica no disco, é da pessoa). Não fecha o bate-papo.
+    pub(crate) fn erase_chat(&mut self, key: [u8; 32]) {
         let text = {
             let mut book = self.shared.chats.lock_unpoisoned();
             book.forget(&key);
@@ -175,8 +184,10 @@ impl App {
         {
             self.error = format!("não deu para apagar a conversa em {}: {e}", crate::chats::chats_path().display());
         }
-        if self.chat_with == Some(key) {
-            self.chat_with = None;
+        if self.shared.transfers.lock_unpoisoned().forget_peer(&key, &crate::conf::received_dir())
+            && let Err(e) = crate::arquivos::save_kept(&self.shared.transfers)
+        {
+            self.error = format!("não deu para atualizar {}: {e}", crate::conf::kept_path().display());
         }
     }
 

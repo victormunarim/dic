@@ -33,15 +33,47 @@ pub(crate) fn sweep(dir: &Path) {
     }
 }
 
-/// Baixar: leva o arquivo recebido para `dest`, que é onde a pessoa escolheu guardá-lo; sair da pasta dos recebidos é o
-/// que tira a marca de "apagar". Renomeia e, se `dest` está noutro disco, copia e apaga o original, de modo que nunca
+/// Leva o arquivo para `dest`. Renomeia e, se `dest` está noutro disco, copia e apaga o original, de modo que nunca
 /// sobram duas cópias nem se perde a única.
-pub(crate) fn keep(path: &Path, dest: &Path) -> std::io::Result<()> {
+fn move_file(path: &Path, dest: &Path) -> std::io::Result<()> {
     if std::fs::rename(path, dest).is_ok() {
         return Ok(());
     }
     std::fs::copy(path, dest)?;
     std::fs::remove_file(path)
+}
+
+/// Baixar: leva o arquivo recebido de `id` para dentro de `dest_dir` (a pasta de baixados, sem perguntar) e o registra
+/// como baixado. Sair da pasta dos recebidos é o que tira a marca de "apagar". Devolve o novo caminho (quem chama grava o
+/// registro com `save_kept`). Erro, e o arquivo continua onde estava: nada se perde.
+pub(crate) fn keep(t: &std::sync::Mutex<Transfers>, received: &Path, dest_dir: &Path, peer: [u8; 32], id: u64) -> Result<PathBuf, String> {
+    use clam::sync::LockExt;
+    let from = {
+        let mut t = t.lock_unpoisoned();
+        match t.find(&peer, id, false).map(|x| &x.phase) {
+            Some(Phase::Done(Some(p))) if is_temporary(received, p) => p.clone(),
+            _ => return Err("o arquivo não está mais entre os recebidos".into()),
+        }
+    };
+    if is_temporary(received, dest_dir) {
+        return Err(format!("a pasta de baixados não pode ser {}: o que está lá é apagado ao fechar", received.display()));
+    }
+    std::fs::create_dir_all(dest_dir).map_err(|e| format!("não consegui criar {}: {e}", dest_dir.display()))?;
+    let name = from.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let to = clam::transfer::unique_path(dest_dir, &name);
+    move_file(&from, &to).map_err(|e| format!("não consegui guardar {}: {e}", to.display()))?;
+    t.lock_unpoisoned().mark_kept(peer, id, to.clone());
+    Ok(to)
+}
+
+/// Grava o registro dos baixados (`conf::kept_path`). Um de cada vez, e o texto é tirado já com a trava de gravação, para
+/// que duas gravações seguidas nunca deixem o estado mais velho por último.
+pub(crate) fn save_kept(t: &std::sync::Mutex<Transfers>) -> std::io::Result<()> {
+    use clam::sync::LockExt;
+    static WRITING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _one_at_a_time = WRITING.lock_unpoisoned();
+    let text = t.lock_unpoisoned().render_kept();
+    crate::conf::write_private(&crate::conf::kept_path(), &text)
 }
 
 /// Quantas transferências já encerradas se guardam para a tela.
@@ -99,6 +131,9 @@ impl Xfer {
 #[derive(Default)]
 pub(crate) struct Transfers {
     list: Vec<Xfer>,
+    /// Arquivos recebidos que a pessoa baixou, por (contato, número da oferta). Sobrevivem às 20 transferências
+    /// guardadas e ao fechamento do programa (`render_kept`/`load_kept`), para a conversa seguir mostrando o arquivo.
+    kept: std::collections::BTreeMap<([u8; 32], u64), PathBuf>,
 }
 
 impl Transfers {
@@ -141,7 +176,59 @@ impl Transfers {
     }
 
     pub(crate) fn of(&self, peer: &[u8; 32]) -> Vec<Xfer> {
-        self.list.iter().filter(|x| x.peer == *peer).cloned().collect()
+        let mut out: Vec<Xfer> = self.list.iter().filter(|x| x.peer == *peer).cloned().collect();
+        // Baixados de outra sessão (ou já fora das 20 guardadas) voltam como recebidos prontos.
+        for ((_, id), path) in self.kept.range((*peer, 0)..=(*peer, u64::MAX)) {
+            if out.iter().any(|x| x.id == *id && !x.mine) {
+                continue;
+            }
+            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let size = std::fs::metadata(path).map_or(0, |m| m.len());
+            out.push(Xfer { id: *id, peer: *peer, name, size, mine: false, phase: Phase::Done(Some(path.clone())), bytes: size, answer: None, cancel: false, source: None });
+        }
+        out
+    }
+
+    /// O arquivo recebido foi baixado para `path`: a transferência passa a apontar para lá e o registro guarda isso.
+    fn mark_kept(&mut self, peer: [u8; 32], id: u64, path: PathBuf) {
+        if let Some(x) = self.find(&peer, id, false) {
+            x.phase = Phase::Done(Some(path.clone()));
+        }
+        self.kept.insert((peer, id), path);
+    }
+
+    /// O registro dos baixados em texto, uma linha por arquivo: `chave número caminho`. Caminho com quebra de linha
+    /// não se registra (o arquivo fica baixado, mas não reaparece depois de reabrir).
+    pub(crate) fn render_kept(&self) -> String {
+        self.kept.iter().filter(|(_, p)| !p.to_string_lossy().contains(['\n', '\r'])).map(|((k, id), p)| format!("{} {id} {}\n", crate::conf::hex(k), p.display())).collect()
+    }
+
+    /// Lê o registro de `render_kept`; o que não existe mais no disco fica de fora.
+    pub(crate) fn load_kept(&mut self, text: &str) {
+        for l in text.lines() {
+            let mut p = l.splitn(3, ' ');
+            let (Some(k), Some(id), Some(path)) = (p.next(), p.next(), p.next()) else { continue };
+            let (Ok(k), Ok(id)) = (crate::conf::unhex(k), id.parse()) else { continue };
+            if Path::new(path).is_file() {
+                self.kept.insert((k, id), PathBuf::from(path));
+            }
+        }
+    }
+
+    /// Apagar a conversa com `peer`: tira da tela as transferências encerradas dele e apaga os recebidos que ainda
+    /// estavam na pasta temporária (o histórico que os mostrava sumiu). Os baixados **continuam no disco**: são da
+    /// pessoa, só deixam de aparecer na conversa. Devolve `true` se o registro dos baixados mudou. O que ainda anda fica.
+    pub(crate) fn forget_peer(&mut self, peer: &[u8; 32], received: &Path) -> bool {
+        self.list.retain(|x| {
+            let gone = x.peer == *peer && !x.phase.live();
+            if gone && let (false, Phase::Done(Some(p))) = (x.mine, &x.phase) && is_temporary(received, p) {
+                let _ = std::fs::remove_file(p);
+            }
+            !gone
+        });
+        let before = self.kept.len();
+        self.kept.retain(|(k, _), _| k != peer);
+        self.kept.len() != before
     }
 
     /// Transferências à espera de resposta da pessoa, de qualquer contato.
@@ -356,11 +443,96 @@ mod tests {
         std::fs::create_dir_all(&guardados).unwrap();
         std::fs::write(recebidos.join("a.pdf"), b"a").unwrap();
         std::fs::write(recebidos.join("b.pdf"), b"b").unwrap();
-        keep(&recebidos.join("a.pdf"), &guardados.join("a.pdf")).unwrap();
+        move_file(&recebidos.join("a.pdf"), &guardados.join("a.pdf")).unwrap();
         assert!(!recebidos.join("a.pdf").exists(), "baixar tira o arquivo da pasta dos recebidos");
         sweep(&recebidos);
         assert_eq!(std::fs::read(guardados.join("a.pdf")).unwrap(), b"a", "o baixado permanece");
         assert!(!recebidos.join("b.pdf").exists(), "o não baixado some");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    fn done_in(t: &mut Transfers, peer: [u8; 32], id: u64, at: PathBuf) {
+        t.add_in(peer, id, "a.pdf".into(), 1);
+        t.phase(&peer, id, false, Phase::Done(Some(at)));
+    }
+
+    #[test]
+    fn keeping_moves_the_file_out_registers_it_and_survives_a_restart() {
+        let d = scratch("baixar");
+        let (recebidos, destino) = (d.join("recebidos"), d.join("baixados"));
+        std::fs::create_dir_all(&recebidos).unwrap();
+        std::fs::write(recebidos.join("a.pdf"), b"conteudo").unwrap();
+        let (peer, t) = ([3u8; 32], std::sync::Mutex::new(Transfers::default()));
+        done_in(&mut t.lock().unwrap(), peer, 9, recebidos.join("a.pdf"));
+        let to = keep(&t, &recebidos, &destino, peer, 9).unwrap();
+        let text = t.lock().unwrap().render_kept();
+        assert_eq!(to, destino.join("a.pdf"));
+        assert!(!recebidos.join("a.pdf").exists());
+        assert_eq!(t.lock().unwrap().of(&peer).first().and_then(|x| x.media_path().map(Path::to_path_buf)), Some(to.clone()), "a conversa passa a apontar para o novo lugar");
+        // Fechou e abriu: a pasta dos recebidos é varrida, o baixado fica e reaparece no mesmo lugar.
+        sweep(&recebidos);
+        let mut novo = Transfers::default();
+        novo.load_kept(&text);
+        let x = novo.of(&peer).into_iter().next().unwrap();
+        assert_eq!((x.id, x.mine, x.media_path()), (9, false, Some(to.as_path())));
+        assert_eq!(x.size, 8);
+        // Segundo arquivo com o mesmo nome não sobrescreve o primeiro.
+        std::fs::write(recebidos.join("a.pdf"), b"outro").unwrap();
+        done_in(&mut t.lock().unwrap(), peer, 10, recebidos.join("a.pdf"));
+        let to2 = keep(&t, &recebidos, &destino, peer, 10).unwrap();
+        assert_eq!(to2, destino.join("a (2).pdf"));
+        assert_eq!(std::fs::read(&to).unwrap(), b"conteudo");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn keeping_refuses_what_it_should_and_loses_nothing() {
+        let d = scratch("recusa");
+        let (recebidos, destino) = (d.join("recebidos"), d.join("baixados"));
+        std::fs::create_dir_all(&recebidos).unwrap();
+        std::fs::write(recebidos.join("a.pdf"), b"x").unwrap();
+        let (peer, t) = ([3u8; 32], std::sync::Mutex::new(Transfers::default()));
+        assert!(keep(&t, &recebidos, &destino, peer, 1).is_err(), "sem transferência");
+        done_in(&mut t.lock().unwrap(), peer, 1, recebidos.join("a.pdf"));
+        assert!(keep(&t, &recebidos, &recebidos.join("sub"), peer, 1).is_err(), "baixar para dentro da pasta que se apaga");
+        assert!(recebidos.join("a.pdf").exists());
+        // Destino que não dá para criar (um arquivo no lugar da pasta): o arquivo fica onde estava.
+        std::fs::write(d.join("arquivo"), b"").unwrap();
+        assert!(keep(&t, &recebidos, &d.join("arquivo").join("x"), peer, 1).is_err());
+        assert!(recebidos.join("a.pdf").exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn forgetting_a_peer_drops_his_files_that_were_not_downloaded_and_keeps_the_downloaded_ones() {
+        let d = scratch("esquece");
+        let (recebidos, destino) = (d.join("recebidos"), d.join("baixados"));
+        std::fs::create_dir_all(&recebidos).unwrap();
+        std::fs::write(recebidos.join("a.pdf"), b"a").unwrap();
+        std::fs::write(recebidos.join("b.pdf"), b"b").unwrap();
+        let (ana, bia, t) = ([1u8; 32], [2u8; 32], std::sync::Mutex::new(Transfers::default()));
+        done_in(&mut t.lock().unwrap(), ana, 1, recebidos.join("a.pdf"));
+        done_in(&mut t.lock().unwrap(), ana, 2, recebidos.join("b.pdf"));
+        let baixado = keep(&t, &recebidos, &destino, ana, 1).unwrap();
+        std::fs::write(recebidos.join("c.pdf"), b"c").unwrap();
+        done_in(&mut t.lock().unwrap(), bia, 3, recebidos.join("c.pdf"));
+        let mudou = t.lock().unwrap().forget_peer(&ana, &recebidos);
+        assert!(mudou);
+        assert!(t.lock().unwrap().of(&ana).is_empty(), "a conversa não mostra mais nada");
+        assert!(!recebidos.join("b.pdf").exists(), "o não baixado some");
+        assert!(baixado.exists(), "o baixado é da pessoa e fica no disco");
+        assert!(recebidos.join("c.pdf").exists(), "o de outro contato não é tocado");
+        assert_eq!(t.lock().unwrap().of(&bia).len(), 1);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn the_kept_record_ignores_missing_files_and_garbage() {
+        let d = scratch("registro");
+        std::fs::write(d.join("x.png"), b"1").unwrap();
+        let mut t = Transfers::default();
+        t.load_kept(&format!("{} 5 {}\n{} 6 {}\nlixo\nzz 1 /x\n", crate::conf::hex(&[4; 32]), d.join("x.png").display(), crate::conf::hex(&[4; 32]), d.join("sumiu.png").display()));
+        assert_eq!(t.of(&[4; 32]).len(), 1, "só o que existe volta");
         let _ = std::fs::remove_dir_all(&d);
     }
 

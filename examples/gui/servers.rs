@@ -787,10 +787,8 @@ impl App {
                         crate::conversa::file_progress(ui, x, &mut file_cmds);
                     }
                 });
-                if let Some(x) = files.get(n).copied().flatten().and_then(|j| xfers.get(j))
-                    && let Some(path) = x.media_path()
-                {
-                    crate::midia::show(ui, &x.name, x.size, path);
+                if let Some(x) = files.get(n).copied().flatten().and_then(|j| xfers.get(j)) {
+                    crate::midia::show(ui, x);
                 }
             }
         });

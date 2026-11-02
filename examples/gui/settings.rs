@@ -52,11 +52,12 @@ impl App {
             }
             if ui
                 .check(&mut self.form.auto_files, "Baixar todo arquivo recebido até 100 MB")
-                .on_hover_text("Desligado, o contato só envia um pedido: imagens e vídeos de até 50 MB descem sozinhos, e qualquer outro arquivo (ou maior) só vem para este computador quando você clica em baixar. Ligado, tudo de até 100 MB desce sozinho, de contatos. O que desce fica numa pasta temporária e é apagado quando o programa fecha, a menos que você clique em baixar no arquivo.")
+                .on_hover_text("Desligado, o contato só envia um pedido: imagens e vídeos de até 50 MB descem sozinhos, e qualquer outro arquivo (ou maior) só vem para este computador quando você clica em baixar. Ligado, tudo de até 100 MB desce sozinho, de contatos. O que desce fica numa pasta temporária e é apagado quando o programa fecha, a menos que você clique em baixar no arquivo, que o leva para a pasta de baixados.")
                 .changed()
             {
                 self.form.save();
             }
+            self.save_folder_picker(ui);
             if !self.error.is_empty() {
                 ui.colored_label(pal().error, &self.error);
             }
@@ -233,6 +234,44 @@ impl App {
     }
 
     /// Estado e diagnóstico da transmissão de tela (taxa, QP, som...), que não ocupam mais a tela da chamada.
+    /// Onde ficam os arquivos que a pessoa baixa (as pastas de `save_choices` ou outra à escolha). Baixar não pergunta
+    /// nada: leva o arquivo para esta pasta. O diálogo de "outra pasta" bloqueia, então roda fora da janela e deixa a
+    /// resposta num dado temporário que este método recolhe no quadro seguinte.
+    fn save_folder_picker(&mut self, ui: &mut egui::Ui) {
+        let picked = egui::Id::new("clam-pasta-baixados-escolhida");
+        if let Some(dir) = ui.data_mut(|d| d.remove_temp::<std::path::PathBuf>(picked)) {
+            if crate::arquivos::is_temporary(&received_dir(), &dir) {
+                self.error = format!("Escolha outra pasta: o que está em {} é apagado quando o programa fecha.", received_dir().display());
+            } else {
+                self.form.save_dir = dir.to_string_lossy().into_owned();
+                self.form.save();
+            }
+        }
+        let current = save_dir(&self.form.save_dir);
+        let choices = save_choices();
+        let shown = choices.iter().find(|(_, p)| *p == current).map_or_else(|| current.display().to_string(), |(n, _)| (*n).to_string());
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Pasta de baixados").color(pal().text));
+            egui::ComboBox::from_id_salt("pasta-baixados").selected_text(shown).show_ui(ui, |ui| {
+                for (name, path) in &choices {
+                    if ui.selectable_label(*path == current, *name).clicked() {
+                        self.form.save_dir = if *path == choices[0].1 { String::new() } else { path.to_string_lossy().into_owned() };
+                        self.form.save();
+                    }
+                }
+                if ui.selectable_label(false, "Outra pasta…").clicked() {
+                    let ctx = ui.ctx().clone();
+                    std::thread::spawn(move || {
+                        if let Some(dir) = rfd::FileDialog::new().set_title("Pasta de baixados").pick_folder() {
+                            ctx.data_mut(|d| d.insert_temp(picked, dir));
+                            ctx.request_repaint();
+                        }
+                    });
+                }
+            }).response.on_hover_text(format!("Onde ficam os arquivos que você baixa de uma conversa, sem perguntar a cada vez: {}. Dentro da conversa, o ícone de pasta abre o arquivo no gerenciador de arquivos.", current.display()));
+        });
+    }
+
     fn broadcast_card(&self, ui: &mut egui::Ui) {
         let st = &self.shared.screen;
         let diag = st.diagnostics();

@@ -1,6 +1,7 @@
 //! Mídia do bate-papo: a imagem aparece em miniatura e abre em tela cheia, o vídeo vira um quadro com play que abre o
-//! player do sistema, e todo arquivo entregue tem o ícone de baixar (salvar uma cópia onde a pessoa escolher). A
-//! decodificação roda fora da janela e só guarda uma miniatura.
+//! player do sistema, e todo arquivo entregue tem um ícone: baixar (o recebido vai para a pasta de baixados, sem
+//! perguntar) ou, já baixado ou enviado por mim, mostrar na pasta. A decodificação roda fora da janela e só guarda uma
+//! miniatura.
 
 use std::{
     collections::HashMap,
@@ -107,59 +108,72 @@ fn open_external(path: &Path) {
     }
 }
 
-/// Baixar: pergunta onde salvar (o diálogo do sistema bloqueia, então roda fora da janela). Arquivo recebido mora na
-/// pasta que se apaga ao fechar (`conf::received_dir`): baixar o **leva** para o lugar escolhido, e é isso que o livra
-/// do apagamento; a janela passa a mostrá-lo de lá (`moved`). Arquivo que eu enviei é o original da pessoa, que nunca se
-/// move nem se apaga: baixar faz uma cópia, como sempre.
-pub(crate) fn save_as(ctx: &egui::Context, name: &str, path: &Path) {
-    let (name, path, ctx) = (name.to_string(), path.to_path_buf(), ctx.clone());
-    std::thread::spawn(move || {
-        let temp = crate::arquivos::is_temporary(&crate::conf::received_dir(), &path);
-        let title = if temp { "Guardar o arquivo" } else { "Salvar uma cópia" };
-        if let Some(dest) = rfd::FileDialog::new().set_title(title).set_file_name(&name).save_file()
-            && dest != path
-        {
-            if crate::arquivos::is_temporary(&crate::conf::received_dir(), &dest) {
-                eprintln!("escolha um lugar fora de {}: o que está lá é apagado ao fechar", crate::conf::received_dir().display());
-            } else if temp {
-                match crate::arquivos::keep(&path, &dest) {
-                    Ok(()) => ctx.data_mut(|d| d.get_temp_mut_or_default::<Moved>(moved_id()).push((path, dest))),
-                    Err(e) => eprintln!("não consegui guardar {}: {e}", dest.display()),
-                }
-            } else if let Err(e) = std::fs::copy(&path, &dest) {
-                eprintln!("não consegui salvar {}: {e}", dest.display());
-            }
-        }
-        ctx.request_repaint();
-    });
-}
-
-/// Arquivos recebidos que a pessoa já baixou nesta sessão: (onde estavam, onde ficaram). A transferência guarda o
-/// caminho antigo; a janela troca pelo novo ao desenhar.
-type Moved = Vec<(PathBuf, PathBuf)>;
-
-fn moved_id() -> egui::Id {
-    egui::Id::new("clam-midia-baixados")
-}
-
-/// Onde o arquivo está agora, se a pessoa o baixou (e talvez o moveu outra vez: segue a cadeia).
-fn current(ctx: &egui::Context, path: &Path) -> PathBuf {
-    let moved = ctx.data(|d| d.get_temp::<Moved>(moved_id())).unwrap_or_default();
-    let mut at = path.to_path_buf();
-    for (from, to) in &moved {
-        if *from == at {
-            at = to.clone();
-        }
+/// Mostra o arquivo no gerenciador de arquivos do sistema (selecionado, onde o sistema sabe fazê-lo; senão, a pasta
+/// dele). Só por clique.
+pub(crate) fn reveal(path: &Path) {
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("explorer");
+        c.arg(format!("/select,{}", path.display()));
+        c
+    };
+    #[cfg(target_os = "macos")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("open");
+        c.arg("-R").arg(path);
+        c
+    };
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let mut cmd = {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(path.parent().unwrap_or(path));
+        c
+    };
+    if let Ok(mut child) = cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn() {
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
     }
-    at
 }
 
-/// A dica do ícone de baixar: avisa no lugar que o arquivo recebido some ao fechar se não for baixado.
-fn download_tip(path: &Path) -> &'static str {
+/// Quem manda na transferência: (contato, número da oferta). É a chave do arquivo recebido.
+pub(crate) type Key = ([u8; 32], u64);
+
+fn keep_id() -> egui::Id {
+    egui::Id::new("clam-midia-baixar")
+}
+
+/// Pede para baixar o arquivo recebido `key`: a janela (`take_keeps`) leva o arquivo da pasta que se apaga para a
+/// pasta de baixados, sem perguntar nada.
+fn request_keep(ctx: &egui::Context, key: Key) {
+    ctx.data_mut(|d| d.get_temp_mut_or_default::<Vec<Key>>(keep_id()).push(key));
+    ctx.request_repaint();
+}
+
+/// Os pedidos de baixar feitos desde o último quadro.
+pub(crate) fn take_keeps(ctx: &egui::Context) -> Vec<Key> {
+    ctx.data_mut(|d| std::mem::take(d.get_temp_mut_or_default::<Vec<Key>>(keep_id())))
+}
+
+/// O que o ícone do arquivo faz: recebido e ainda temporário, baixa; qualquer outro (baixado, ou enviado por mim) abre
+/// a pasta dele no gerenciador de arquivos.
+fn act(ctx: &egui::Context, key: Key, path: &Path) {
     if crate::arquivos::is_temporary(&crate::conf::received_dir(), path) {
-        "Baixar: guardar o arquivo onde você escolher. Sem baixar, ele é apagado quando o programa fecha"
+        request_keep(ctx, key);
     } else {
-        "Baixar: salvar uma cópia onde você escolher"
+        reveal(path);
+    }
+}
+
+/// Função que desenha um ícone (`theme`).
+type Icon = fn(&egui::Painter, Pos2, f32, egui::Color32);
+
+/// Dica e ícone do botão do arquivo (ver `act`). A dica avisa no lugar que o recebido some ao fechar se não for baixado.
+fn action_look(path: &Path) -> (&'static str, Icon) {
+    if crate::arquivos::is_temporary(&crate::conf::received_dir(), path) {
+        ("Baixar: guardar o arquivo na pasta de baixados. Sem baixar, ele é apagado quando o programa fecha", download_icon)
+    } else {
+        ("Mostrar no gerenciador de arquivos", folder_icon)
     }
 }
 
@@ -168,22 +182,23 @@ fn full_id() -> egui::Id {
 }
 
 /// Abre a imagem em tela cheia (`overlay` a desenha).
-fn open_full(ctx: &egui::Context, name: &str, path: &Path) {
-    ctx.data_mut(|d| d.insert_temp(full_id(), Some((name.to_string(), path.to_path_buf()))));
+fn open_full(ctx: &egui::Context, name: &str, path: &Path, key: Key) {
+    ctx.data_mut(|d| d.insert_temp(full_id(), Some((name.to_string(), path.to_path_buf(), key))));
 }
 
 /// Mostra o que o arquivo entregue pede: imagem à vista, vídeo com play ou, para os demais, um cartão com o nome. Todos
-/// têm o ícone de baixar no canto.
-pub(crate) fn show(ui: &mut egui::Ui, name: &str, size: u64, path: &Path) {
-    let path = &current(ui.ctx(), path);
-    match kind(name) {
-        Some(Kind::Image) => image_block(ui, name, path),
-        Some(Kind::Video) => video_block(ui, name, path),
-        None => file_card(ui, name, size, path),
+/// têm o ícone de baixar ou de mostrar na pasta (`act`). Nada se desenha enquanto o arquivo não está no disco.
+pub(crate) fn show(ui: &mut egui::Ui, x: &crate::arquivos::Xfer) {
+    let Some(path) = x.media_path() else { return };
+    let key = (x.peer, x.id);
+    match kind(&x.name) {
+        Some(Kind::Image) => image_block(ui, &x.name, path, key),
+        Some(Kind::Video) => video_block(ui, &x.name, path, key),
+        None => file_card(ui, &x.name, x.size, path, key),
     }
 }
 
-fn image_block(ui: &mut egui::Ui, name: &str, path: &Path) {
+fn image_block(ui: &mut egui::Ui, name: &str, path: &Path, key: Key) {
     match &*slot(ui.ctx(), path, THUMB_PX) {
         Slot::Ready(tex) => {
             let s = tex.size_vec2();
@@ -192,21 +207,22 @@ fn image_block(ui: &mut egui::Ui, name: &str, path: &Path) {
             reply.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("Ver {name} em tela cheia")));
             let (rect, ctx) = (reply.rect, ui.ctx().clone());
             if reply.on_hover_text("Ver em tela cheia").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-                open_full(&ctx, name, path);
+                open_full(&ctx, name, path, key);
             }
-            if media_corner_button(ui, rect, 0, download_tip(path), download_icon).clicked() {
-                save_as(&ctx, name, path);
+            let (tip, icon) = action_look(path);
+            if media_corner_button(ui, rect, 0, tip, icon).clicked() {
+                act(&ctx, key, path);
             }
         }
         Slot::Loading => {
             ui.add(egui::Spinner::new().size(18.0).color(BLURPLE));
         }
-        Slot::Failed => file_card(ui, name, 0, path),
+        Slot::Failed => file_card(ui, name, 0, path, key),
     }
 }
 
 /// Quadro afundado com o triângulo de play desenhado (a fonte pode não ter o glifo).
-fn video_block(ui: &mut egui::Ui, name: &str, path: &Path) {
+fn video_block(ui: &mut egui::Ui, name: &str, path: &Path, key: Key) {
     let (rect, reply) = ui.allocate_exact_size(vec2(SHOWN, SHOWN * 9.0 / 16.0), Sense::click());
     let p = ui.painter();
     sunken(p, rect, 12, pal().deep);
@@ -220,13 +236,14 @@ fn video_block(ui: &mut egui::Ui, name: &str, path: &Path) {
     if reply.on_hover_text("Reproduzir em tela cheia no player do sistema").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
         open_external(path);
     }
-    if media_corner_button(ui, rect, 0, download_tip(path), download_icon).clicked() {
-        save_as(&ctx, name, path);
+    let (tip, icon) = action_look(path);
+    if media_corner_button(ui, rect, 0, tip, icon).clicked() {
+        act(&ctx, key, path);
     }
 }
 
-/// Arquivo que não é mídia (ou imagem que não abriu): nome, tamanho e o ícone de baixar.
-fn file_card(ui: &mut egui::Ui, name: &str, size: u64, path: &Path) {
+/// Arquivo que não é mídia (ou imagem que não abriu): nome, tamanho e o ícone de baixar ou de mostrar na pasta.
+fn file_card(ui: &mut egui::Ui, name: &str, size: u64, path: &Path, key: Key) {
     let ctx = ui.ctx().clone();
     sunken_frame(ui, 12, 10, |ui| {
         ui.horizontal(|ui| {
@@ -236,10 +253,11 @@ fn file_card(ui: &mut egui::Ui, name: &str, size: u64, path: &Path) {
             }
             let (rect, reply) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::click());
             let ink = if reply.hovered() { pal().strong } else { pal().text };
-            download_icon(ui.painter(), rect.center(), 18.0, ink);
-            reply.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Baixar"));
-            if reply.on_hover_text(download_tip(path)).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-                save_as(&ctx, name, path);
+            let (tip, icon) = action_look(path);
+            icon(ui.painter(), rect.center(), 18.0, ink);
+            reply.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tip));
+            if reply.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                act(&ctx, key, path);
             }
         });
     });
@@ -247,8 +265,7 @@ fn file_card(ui: &mut egui::Ui, name: &str, size: u64, path: &Path) {
 
 /// A imagem em tela cheia, por cima de tudo: Esc ou um clique fora dos botões fecham. Chamada uma vez por quadro.
 pub(crate) fn overlay(ctx: &egui::Context) {
-    let Some((name, path)) = ctx.data(|d| d.get_temp::<Option<(String, PathBuf)>>(full_id())).flatten() else { return };
-    let path = current(ctx, &path);
+    let Some((_name, path, key)) = ctx.data(|d| d.get_temp::<Option<(String, PathBuf, Key)>>(full_id())).flatten() else { return };
     let screen = ctx.screen_rect();
     let mut close = ctx.input(|i| i.key_pressed(egui::Key::Escape));
     egui::Area::new(full_id().with("area")).order(egui::Order::Foreground).fixed_pos(screen.min).show(ctx, |ui| {
@@ -274,15 +291,18 @@ pub(crate) fn overlay(ctx: &egui::Context) {
         if media_corner_button(ui, screen, 0, "Fechar", close_icon).clicked() {
             close = true;
         }
-        if media_corner_button(ui, screen, 1, download_tip(&path), download_icon).clicked() {
-            save_as(ctx, &name, &path);
+        let (tip, icon) = action_look(&path);
+        if media_corner_button(ui, screen, 1, tip, icon).clicked() {
+            // Baixar muda o arquivo de lugar: fecha, e a conversa passa a mostrá-lo de onde ficou.
+            close = crate::arquivos::is_temporary(&crate::conf::received_dir(), &path) || close;
+            act(ctx, key, &path);
         }
         if back.clicked() {
             close = true;
         }
     });
     if close {
-        ctx.data_mut(|d| d.insert_temp(full_id(), None::<(String, PathBuf)>));
+        ctx.data_mut(|d| d.insert_temp(full_id(), None::<(String, PathBuf, Key)>));
     }
 }
 

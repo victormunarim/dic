@@ -14,6 +14,7 @@ impl App {
         self.shared.chats.lock_unpoisoned().read(&peer);
         let sendable = online && self.running.is_some();
         let mut close = false;
+        let mut erase = false;
         // Arquivo solto na janela fica em espera até o Enviar (só com o contato online).
         if sendable {
             let dropped = ui.ctx().input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect::<Vec<_>>());
@@ -31,13 +32,25 @@ impl App {
                 ui.label(RichText::new(format!("Bate-papo com {name}")).strong().size(18.0).color(pal().strong))
                     .on_hover_text("Só vai para quem está online. Cada um guarda a sua cópia nesta máquina.");
                 // Em chamada a conversa é a da linha: fechar não faz sentido.
-                if !self.shared.in_call.load(std::sync::atomic::Ordering::Relaxed) {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if close_button(ui, "Fechar a conversa").clicked() {
-                            close = true;
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if !self.shared.in_call.load(std::sync::atomic::Ordering::Relaxed) && close_button(ui, "Fechar a conversa").clicked() {
+                        close = true;
+                    }
+                    let dots = dots_button(ui, "Mais ações da conversa");
+                    let ask = egui::Id::new(("apagar-conversa", peer));
+                    // Fecha só ao clicar fora: o primeiro clique troca o item pela pergunta com o efeito escrito.
+                    let open = menu(&dots).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+                        let effect = "Somem as mensagens e os arquivos desta conversa só neste computador; o contato mantém a cópia dele. Arquivos que você baixou continuam na pasta de baixados.";
+                        if confirm_item(ui, ask, "Apagar a conversa", "Pede confirmação antes de apagar", "Apagar toda a conversa?", effect, "Apagar", trash_icon) {
+                            erase = true;
+                            ui.close();
                         }
                     });
-                }
+                    if open.is_none() {
+                        reset_confirm(ui, ask);
+                    }
+                    menu_focus_back(ui, &dots, open.is_some());
+                });
             });
             ui.add_space(6.0);
             let height = (ui.clip_rect().bottom() - ui.cursor().top() - 84.0 - crate::anexo::height(ui.ctx(), ("conversa", peer))).max(160.0);
@@ -80,9 +93,8 @@ impl App {
                     });
                     // Imagem à vista, vídeo com play e cartão com baixar, quando o arquivo já está no disco.
                     if let Some(x) = xfers.iter().find(|x| x.id == m.id && x.mine == m.mine() && x.media_path().is_some())
-                        && let Some(path) = x.media_path()
                     {
-                        crate::midia::show(ui, &x.name, x.size, path);
+                        crate::midia::show(ui, x);
                     }
                 }
             });
@@ -125,6 +137,9 @@ impl App {
             for c in file_cmds {
                 let _ = r.cmds.send(c);
             }
+        }
+        if erase {
+            self.erase_chat(peer);
         }
         if close {
             self.chat_with = None;

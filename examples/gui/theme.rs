@@ -590,6 +590,14 @@ pub(crate) fn download_icon(painter: &egui::Painter, c: Pos2, size: f32, color: 
     painter.add(Shape::line(vec![u(-0.36, 0.14), u(-0.36, 0.36), u(0.36, 0.36), u(0.36, 0.14)], ink));
 }
 
+/// Pasta (mostrar no gerenciador de arquivos), desenhada: corpo com a orelha à esquerda.
+pub(crate) fn folder_icon(painter: &egui::Painter, c: Pos2, size: f32, color: Color32) {
+    let u = |x: f32, y: f32| c + vec2(x * size, y * size);
+    let ink = Stroke::new((size * 0.1).max(1.5), color);
+    painter.add(Shape::closed_line(vec![u(-0.4, -0.3), u(-0.12, -0.3), u(0.0, -0.18), u(0.4, -0.18), u(0.4, 0.32), u(-0.4, 0.32)], ink));
+    painter.line_segment([u(-0.4, -0.06), u(0.4, -0.06)], ink);
+}
+
 /// Botão redondo sobre uma mídia (imagem, vídeo), no canto de cima à direita de `media`. O fundo escuro fixo garante o
 /// contraste do ícone claro sobre qualquer imagem, nos dois temas. `draw` pinta o ícone.
 pub(crate) fn media_corner_button(ui: &mut Ui, media: Rect, slot: usize, name: &str, draw: impl FnOnce(&egui::Painter, Pos2, f32, Color32)) -> egui::Response {
